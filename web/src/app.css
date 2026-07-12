@@ -1,0 +1,17 @@
+:root {
+  color: #17212b;
+  background: #f4f7f9;
+  font-family: system-ui, sans-serif;
+}
+
+body {
+  margin: 0;
+}
+
+.shell {
+  max-width: 40rem;
+  margin: 6rem auto;
+  padding: 2rem;
+  background: white;
+  border-radius: 0.75rem;
+}
