@@ -1,0 +1,16 @@
+[build-system]
+requires = ["hatchling==1.27.0"]
+build-backend = "hatchling.build"
+
+[project]
+name = "citybuddy-knowledge-indexer"
+version = "0.0.1"
+description = "CityBuddy knowledge indexer executable skeleton"
+requires-python = ">=3.11,<3.12"
+dependencies = []
+
+[project.scripts]
+citybuddy-indexer = "citybuddy_indexer.__main__:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/citybuddy_indexer"]
