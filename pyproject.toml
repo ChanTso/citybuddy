@@ -7,6 +7,7 @@ requires-python = ">=3.11,<3.12"
 dev = [
   "build==1.2.2.post1",
   "mypy==1.17.0",
+  "pre-commit==4.6.0",
   "pytest==8.4.1",
   "ruff==0.12.4",
 ]
