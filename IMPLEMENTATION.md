@@ -2,8 +2,8 @@
 
 **Document version:** v0.1  
 **Verification date:** 2026-07-12  
-**Repository phase:** Pre-implementation documentation baseline  
-**Current executable slice:** `CB-000 — Repository and toolchain baseline` (`READY`)
+**Repository phase:** Repository and toolchain baseline implementation  
+**Current executable slice:** `CB-000 — Repository and toolchain baseline` (`IN_PROGRESS`)
 
 ## 1. Document status and maintenance rules
 
@@ -459,7 +459,7 @@ At most one active slice exists. `READY` and `IN_PROGRESS` cannot coexist on dif
 
 | Slice | Priority | State | Depends on | Target outcome |
 |---|---:|---:|---|---|
-| `CB-000 — Repository and toolchain baseline` | P0 | `READY` | Documentation baseline | Real module skeletons, pinned build/package entry points, meaningful checks/tests, pre-commit hygiene and staged secret scanning, Gitleaks, a working root `make ci`, and CI without provider keys. No business behavior. |
+| `CB-000 — Repository and toolchain baseline` | P0 | `IN_PROGRESS` | Documentation baseline | Real module skeletons, pinned build/package entry points, meaningful checks/tests, pre-commit hygiene and staged secret scanning, Gitleaks, a working root `make ci`, and CI without provider keys. No business behavior. |
 | `CB-010 — Local runtime and data foundation` | P0 | `PLANNED` | `CB-000` | Healthy MySQL/two Redis/Elasticsearch/IK/RocketMQ Broker+Proxy, independent migration jobs, bootstrap and migration identities, runtime grants for `auth_app`/`commerce_app`/`agent_app`, and real readiness/permission denial checks. |
 | `CB-085 — Python RocketMQ consumer viability spike` | P0 | `PLANNED` | `CB-010` | Early reproducible decision on Python connection, subscription, consumption, acknowledgement, retry/redelivery, long-processing behavior, source ordering, tombstones, and rebuild/alias handoff. No fallback is pre-approved. |
 | `CB-020 — Identity, JWKS and JIT OBO vertical slice` | P0 | `PLANNED` | `CB-010` | Explicit direct-user versus OBO token chains, login/JWKS, `POST /api/sessions` server-generated support-session ownership foundation, authenticated exchange with verified session binding, exact scope, commerce authorization, cross-user/sandbox rejection, and auth-table least-privilege evidence. |
@@ -486,7 +486,7 @@ Only the active slice and the next two slices in the Complete route are expanded
 
 ### 9.1 `CB-000 — Repository and toolchain baseline`
 
-**State:** `READY`
+**State:** `IN_PROGRESS`
 
 #### Goal
 

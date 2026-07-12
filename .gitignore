@@ -1,0 +1,26 @@
+.DS_Store
+.env
+.idea/
+.vscode/
+
+# Java
+target/
+
+# Python
+.mypy_cache/
+.pytest_cache/
+.ruff_cache/
+.venv/
+__pycache__/
+*.egg-info/
+dist/
+
+# Web
+web/coverage/
+web/dist/
+web/node_modules/
+
+# Local tooling
+.pre-commit-cache/
+.tools/
+
