@@ -1,0 +1,19 @@
+[build-system]
+requires = ["hatchling==1.27.0"]
+build-backend = "hatchling.build"
+
+[project]
+name = "citybuddy-agent-service"
+version = "0.0.1"
+description = "CityBuddy agent service executable skeleton"
+requires-python = ">=3.11,<3.12"
+dependencies = [
+  "fastapi==0.116.1",
+  "pydantic==2.11.7",
+]
+
+[project.scripts]
+citybuddy-agent = "citybuddy_agent.__main__:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/citybuddy_agent"]

@@ -4,19 +4,40 @@ CityBuddy is a local-commerce transaction and AI customer-support project design
 
 ## Current status
 
-This repository is at its pre-implementation documentation baseline. It does not yet contain business code, runnable services, a Docker Compose environment, database migrations, build configuration, continuous integration, or completed tests.
+CB-000 is in progress. The repository now contains executable, non-business skeletons for:
 
-The repository currently contains only:
+- `auth-service` and `commerce-service` in one Java 21 Maven reactor;
+- `agent-service` and `knowledge-indexer` in one Python 3.11 `uv` workspace;
+- `web` as a React/TypeScript/Vite shell managed by npm.
 
-- `README.md` — current public repository status;
-- `AGENTS.md` — the sole repository development ruleset;
-- `CLAUDE.md` — a pointer to `AGENTS.md`;
-- `IMPLEMENTATION.md` — frozen contracts, preflight findings, the delivery route, and the rolling slice specification.
+The repository tooling includes committed Maven Wrapper, `uv.lock`, and `package-lock.json` entry points; Java, Python, and web formatting, linting, typing, unit tests, and builds; pre-commit text hygiene and staged secret detection; repository Gitleaks scanning; and GitHub Actions through the root `make ci` command.
+
+## Repository checks
+
+The checked baseline requires a JDK capable of compiling Java release 21, Python 3.11, `uv` 0.11.24, Node.js 22 with npm, GNU Make, `curl`, and `tar`.
+
+Install the locked dependencies and repository tools:
+
+```shell
+make setup
+```
+
+Run all formatting checks, linters, type/compile checks, unit tests, builds, pre-commit hooks, and Gitleaks:
+
+```shell
+make ci
+```
+
+Apply the configured source formatters:
+
+```shell
+make format
+```
 
 ## Current limitations
 
-No feature, service topology, command, endpoint implementation, performance result, or operational claim in the target design should be treated as implemented. No startup or test command is available yet, and no test or CI result has been produced.
+No business feature, service runtime topology, API contract, database schema, Docker Compose environment, RocketMQ topic, authentication flow, model-provider integration, performance result, deployment, or operational readiness claim is implemented by this baseline. The skeletons and their construction tests do not make the services production-runnable.
 
 Implementation must follow the single active slice in [IMPLEMENTATION.md](IMPLEMENTATION.md). Work starts only when that slice is `READY`; once a real feature branch and the first implementation change begin, work continues only on the same slice in `IN_PROGRESS` until it reaches a terminal state. Later slices must not be started early.
 
-Startup and test instructions will be added here only after the corresponding commands exist and have been run successfully against the repository.
+Runtime startup and integration-test instructions will be added only by the slices that implement and successfully execute them.
