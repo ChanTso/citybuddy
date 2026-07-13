@@ -1,15 +1,15 @@
 # CityBuddy Implementation Plan
 
 **Document version:** v0.1  
-**Verification date:** 2026-07-12  
-**Repository phase:** Repository and toolchain baseline implementation  
-**Current executable slice:** `CB-000 — Repository and toolchain baseline` (`IN_PROGRESS`)
+**Verification date:** 2026-07-13\
+**Repository phase:** Local runtime and data foundation ready\
+**Current executable slice:** `CB-010 — Local runtime and data foundation` (`READY`)
 
 ## 1. Document status and maintenance rules
 
 This document is the public engineering contract for implementing CityBuddy. It is intentionally complete enough for a coding agent to work from the repository alone, while leaving field-level schemas, generated API models, and exact dependency patches to the slice that owns them.
 
-The repository currently contains documentation only. No business code, runtime topology, build configuration, migration, test, CI result, or measured performance claim exists yet.
+The repository contains the verified CB-000 module skeletons, build configuration, lockfiles, checks, tests, and CI baseline. It does not yet contain business behavior, runtime topology, migrations, integration-test results, or measured performance claims.
 
 Maintenance rules:
 
@@ -453,14 +453,14 @@ sequenceDiagram
 | `BLOCKED` | Evidence shows the active slice cannot safely meet a frozen contract without a decision or prerequisite. |
 | `DEFERRED` | Deliberately outside or removed from the current route. |
 
-At most one active slice exists. `READY` and `IN_PROGRESS` cannot coexist on different slices. The next slice becomes `READY` only after the active slice reaches `VERIFIED`, `BLOCKED`, or `DEFERRED`. When multiple non-`DEFERRED` slices have all dependencies `VERIFIED`, the slice appearing earliest in the Complete route is selected; only an explicit Level 3 route change may alter that order. There is no `IN_PROGRESS` or `VERIFIED` slice at v0.1.
+At most one active slice exists. `READY` and `IN_PROGRESS` cannot coexist on different slices. The next slice becomes `READY` only after the active slice reaches `VERIFIED`, `BLOCKED`, or `DEFERRED`. When multiple non-`DEFERRED` slices have all dependencies `VERIFIED`, the slice appearing earliest in the Complete route is selected; only an explicit Level 3 route change may alter that order. `CB-000` is `VERIFIED`, and `CB-010` is the only `READY` slice.
 
 ### 8.2 Complete route
 
 | Slice | Priority | State | Depends on | Target outcome |
 |---|---:|---:|---|---|
-| `CB-000 — Repository and toolchain baseline` | P0 | `IN_PROGRESS` | Documentation baseline | Real module skeletons, pinned build/package entry points, meaningful checks/tests, pre-commit hygiene and staged secret scanning, Gitleaks, a working root `make ci`, and CI without provider keys. No business behavior. |
-| `CB-010 — Local runtime and data foundation` | P0 | `PLANNED` | `CB-000` | Healthy MySQL/two Redis/Elasticsearch/IK/RocketMQ Broker+Proxy, independent migration jobs, bootstrap and migration identities, runtime grants for `auth_app`/`commerce_app`/`agent_app`, and real readiness/permission denial checks. |
+| `CB-000 — Repository and toolchain baseline` | P0 | `VERIFIED` | Documentation baseline | Real module skeletons, pinned build/package entry points, meaningful checks/tests, pre-commit hygiene and staged secret scanning, Gitleaks, a working root `make ci`, and CI without provider keys. No business behavior. |
+| `CB-010 — Local runtime and data foundation` | P0 | `READY` | `CB-000` | Healthy MySQL/two Redis/Elasticsearch/IK/RocketMQ Broker+Proxy, independent migration jobs, bootstrap and migration identities, runtime grants for `auth_app`/`commerce_app`/`agent_app`, and real readiness/permission denial checks. |
 | `CB-085 — Python RocketMQ consumer viability spike` | P0 | `PLANNED` | `CB-010` | Early reproducible decision on Python connection, subscription, consumption, acknowledgement, retry/redelivery, long-processing behavior, source ordering, tombstones, and rebuild/alias handoff. No fallback is pre-approved. |
 | `CB-020 — Identity, JWKS and JIT OBO vertical slice` | P0 | `PLANNED` | `CB-010` | Explicit direct-user versus OBO token chains, login/JWKS, `POST /api/sessions` server-generated support-session ownership foundation, authenticated exchange with verified session binding, exact scope, commerce authorization, cross-user/sandbox rejection, and auth-table least-privilege evidence. |
 | `CB-030 — Product catalog and cache invalidation` | P0 | `PLANNED` | `CB-020` | Product and CRM truth; null-cache plus Bloom penetration protection, mutex hot-key rebuild, jittered TTLs, transactional MySQL change plus Outbox, request-side best-effort delete, consumer idempotent delete/rebuild, no request-thread cache/Elasticsearch dual write, and evidence that `auth_app` cannot access commerce business tables. |
@@ -486,7 +486,7 @@ Only the active slice and the next two slices in the Complete route are expanded
 
 ### 9.1 `CB-000 — Repository and toolchain baseline`
 
-**State:** `IN_PROGRESS`
+**State:** `VERIFIED`
 
 #### Goal
 
@@ -555,16 +555,16 @@ Create a real, reproducible repository skeleton for the Java, Python, and web tr
 
 | Field | Value |
 |---|---|
-| Status | Not started |
-| Branch | Not started |
-| PR | Not started |
-| Commits | Not started |
-| Tests | Not started |
-| Notes | Not started |
+| Status | `VERIFIED` |
+| Branch | `feat/cb-000-repository-toolchain-baseline` |
+| PR | [#1 — CB-000: establish repository and toolchain baseline](https://github.com/ChanTso/citybuddy/pull/1) |
+| Commits | `b466b99`, `3a0d359`, `e9cb1e5`, `dd5dd03`, `8e9e9db`, `404feb2`, `4852d56`, `bb43350`; closeout state is recorded by the commit containing this record. |
+| Tests | Clean-checkout `make setup` and `make ci` exited 0; Java 2/2, Python 2/2, and web 1/1 tests passed with no skips; GitHub Actions run `29198431633` passed. |
+| Notes | Controlled Gitleaks, staged-secret, text-hygiene, missing-module, and full-`make ci` inner-test failures all propagated non-zero. The independent read-only reviewer found two P1 false-green risks; isolated Java test profiles and full-entry-point failure propagation closed both with no remaining blocker. No CB-010 or business behavior was implemented. Full evidence is in PR #1. |
 
 ### 9.2 `CB-010 — Local runtime and data foundation`
 
-**State:** `PLANNED`
+**State:** `READY`
 
 #### Goal
 
