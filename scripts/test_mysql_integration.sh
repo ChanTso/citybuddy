@@ -100,10 +100,12 @@ assert_fails "missing configuration blocks make up" 'Missing local configuration
 
 # Isolate the integration project from any developer runtime using a per-process
 # high port. The tests connect through the Docker network, not this host port.
-export MYSQL_PORT ELASTICSEARCH_PORT ELASTICSEARCH_IMAGE
+export MYSQL_PORT ELASTICSEARCH_PORT ELASTICSEARCH_IMAGE ROCKETMQ_PROXY_PORT ROCKETMQ_PROBE_IMAGE
 MYSQL_PORT="$((33060 + ($$ % 1000)))"
 ELASTICSEARCH_PORT="$((38000 + ($$ % 1000)))"
+ROCKETMQ_PROXY_PORT="$((42000 + ($$ % 1000)))"
 ELASTICSEARCH_IMAGE="citybuddy-elasticsearch-ik:${project}"
+ROCKETMQ_PROBE_IMAGE="citybuddy-rocketmq-probe:${project}"
 
 make ENV_FILE="$env_file" COMPOSE_PROJECT_NAME="$project" up
 

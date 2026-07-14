@@ -1,8 +1,8 @@
 # CityBuddy implementation index
 
-**Document version:** v0.4\
+**Document version:** v0.5\
 **Verification date:** 2026-07-15\
-**Repository phase:** MySQL, dual Redis, and Elasticsearch/IK foundations ready
+**Repository phase:** Local dependency foundations ready through RocketMQ Broker/Proxy
 
 ## How to use this index
 
@@ -17,16 +17,17 @@
 
 CityBuddy targets local-commerce transactions and text-only AI customer support with independent identity, side-effect, retrieval, and evaluation boundaries.
 
-The repository contains the verified CB-000 through CB-012 foundations:
+The repository contains the verified CB-000 through CB-013 foundations:
 
 - executable non-business skeletons for `auth-service`, `commerce-service`, `agent-service`, `knowledge-indexer`, and `web`;
 - one Maven reactor and wrapper, one locked `uv` workspace, and one npm lockfile;
 - one pinned, health-gated MySQL instance with isolated migration/runtime identities, separate migration histories, and non-default-role grant delegation;
 - two pinned, authenticated, health-gated Redis instances with distinct URLs, credentials, containers, and named volumes: Commerce uses AOF plus `noeviction`, while Support uses bounded `volatile-lfu` for TTL-bearing cache data;
 - one digest-pinned Elasticsearch 8.19.8 runtime with checksum-verified analysis-ik 8.19.8, analyzer-gated health, and disposable dense-vector, kNN, and atomic-alias evidence;
+- one digest-pinned RocketMQ 5.5.0 NameServer and combined Broker/Proxy runtime with behavior-gated readiness, a Java 5.x gRPC client route probe, and a disposable uniquely identified normal-message round trip;
 - format, lint, type/compile, unit-test, build, pre-commit, Gitleaks, and GitHub Actions paths through `make ci`.
 
-It does not yet contain business behavior, API/worker runtime packaging, production business schemas, production Elasticsearch indexes, RocketMQ, aggregate runtime closure, model-provider access, deployment, or measured performance claims.
+It does not yet contain business behavior, API/worker runtime packaging, production business schemas, production Elasticsearch indexes, production RocketMQ topics or event schemas, aggregate runtime closure, model-provider access, deployment, or measured performance claims.
 
 Cross-slice target architecture, preflight conclusions, service/data ownership, interface and security boundaries, sequence diagrams, route outcomes, risks, and change control live in [docs/CONTRACTS.md](docs/CONTRACTS.md).
 
@@ -62,10 +63,10 @@ The linked slice name is the canonical detailed specification. Target outcomes a
 | [CB-010 — MySQL migration and access foundation](docs/slices/CB-010.md) | P0 | `VERIFIED` | `CB-000` |
 | [CB-011 — Dual Redis runtime foundation](docs/slices/CB-011.md) | P0 | `VERIFIED` | `CB-010` |
 | [CB-012 — Elasticsearch and IK runtime foundation](docs/slices/CB-012.md) | P0 | `VERIFIED` | `CB-011` |
-| [CB-013 — RocketMQ Broker and Proxy foundation](docs/slices/CB-013.md) | P0 | `READY` | `CB-012` |
-| [CB-014 — Local runtime integration closure](docs/slices/CB-014.md) | P0 | `PLANNED` | `CB-013` |
+| [CB-013 — RocketMQ Broker and Proxy foundation](docs/slices/CB-013.md) | P0 | `VERIFIED` | `CB-012` |
+| [CB-014 — Local runtime integration closure](docs/slices/CB-014.md) | P0 | `READY` | `CB-013` |
 | [CB-085 — Python RocketMQ consumer viability spike](docs/slices/CB-085.md) | P0 | `PLANNED` | `CB-014` |
-| `CB-020 — Identity, JWKS and JIT OBO vertical slice` | P0 | `PLANNED` | `CB-014` |
+| [CB-020 — Identity, JWKS and JIT OBO vertical slice](docs/slices/CB-020.md) | P0 | `PLANNED` | `CB-014` |
 | `CB-030 — Product catalog and cache invalidation` | P0 | `PLANNED` | `CB-020` |
 | `CB-040 — Standard ordering and MySQL inventory` | P0 | `PLANNED` | `CB-030` |
 | `CB-050 — Seckill quota, reservation, and Lua admission` | P0 | `PLANNED` | `CB-040` |

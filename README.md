@@ -38,18 +38,18 @@ make format
 
 ## Current limitations
 
-The local runtime currently covers only the verified MySQL, dual Redis, and Elasticsearch/IK
-foundations. No business feature, API contract, production business schema, complete service
-runtime, RocketMQ topic, authentication flow, model-provider integration, performance result,
-deployment, or operational readiness claim is implemented. The service skeletons are not
-production-runnable.
+The local runtime currently covers only the verified MySQL, dual Redis, Elasticsearch/IK, and
+RocketMQ 5 Broker/Proxy foundations. No business feature, API contract, production business
+schema, complete service runtime, production RocketMQ topic or event schema, authentication flow,
+model-provider integration, performance result, deployment, or operational readiness claim is
+implemented. The service skeletons are not production-runnable.
 
 Implementation starts from the single active row in [IMPLEMENTATION.md](IMPLEMENTATION.md), follows its linked slice specification, and begins with the frozen-contract sections referenced by that slice. Other slice specifications may be consulted when a dependency or contract question requires them, but they must not be implemented early.
 
 ## Local data runtimes
 
-Generate private synthetic credentials, start the health-gated MySQL, dual Redis, and
-Elasticsearch/IK topology, and run the owning migration streams:
+Generate private synthetic credentials, start the health-gated MySQL, dual Redis,
+Elasticsearch/IK, and RocketMQ Broker/Proxy topology, and run the owning migration streams:
 
 ```shell
 make init-local
@@ -65,8 +65,13 @@ Elasticsearch is a single local node with the version-matched IK analyzer instal
 image. This runtime foundation does not create the later production knowledge index or make
 Elasticsearch authoritative storage.
 
-The normal shutdown path is non-destructive and preserves the MySQL, Redis, and Elasticsearch
-named volumes:
+RocketMQ runs a pinned 5.x NameServer and combined Broker/Proxy process. Later 5.x clients use the
+Proxy endpoint at `127.0.0.1:${ROCKETMQ_PROXY_PORT}` (8081 after `make init-local`); a dedicated
+gRPC Java probe gates `make up` on that exact route. The disposable readiness topic and integration
+probe do not define production topics, payloads, consumers, or delivery-semantics guarantees.
+
+The normal shutdown path is non-destructive and preserves the MySQL, Redis, Elasticsearch, and
+RocketMQ named volumes:
 
 ```shell
 make down

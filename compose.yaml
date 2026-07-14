@@ -3,6 +3,8 @@ name: citybuddy
 x-mysql-image: &mysql-image mysql:8.4.10@sha256:c831a0f11348d402b43d77453e17d770be2eef356615a2823fe0f5a0d6c8b9af
 x-redis-image: &redis-image redis:7.2.14-bookworm@sha256:3d550f0b980dbf676953180fd6463dde8a982a74947a09656c98051c0a618faa
 x-elasticsearch-image: &elasticsearch-image ${ELASTICSEARCH_IMAGE:-citybuddy-elasticsearch-ik:8.19.8}
+x-rocketmq-image: &rocketmq-image apache/rocketmq:5.5.0@sha256:7e8f6c9dbd9df742ed26ba69c00d4ad69e2f86a56f3ca7782ff8144dd0798132
+x-rocketmq-probe-image: &rocketmq-probe-image ${ROCKETMQ_PROBE_IMAGE:-citybuddy-rocketmq-probe:5.2.1}
 x-migration-service: &migration-service
   image: *mysql-image
   restart: "no"
@@ -197,8 +199,87 @@ services:
       retries: 5
       start_period: 20s
 
+  rocketmq-namesrv:
+    image: *rocketmq-image
+    restart: unless-stopped
+    command: ["sh", "mqnamesrv"]
+    environment:
+      HEAP_OPTS: -Xms256m -Xmx256m -Xmn128m
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - sh mqadmin getNamesrvConfig --namesrvAddr localhost:9876 | grep -q '='
+      interval: 3s
+      timeout: 10s
+      retries: 10
+      start_period: 10s
+
+  rocketmq-store-init:
+    image: *rocketmq-image
+    user: "0:0"
+    restart: "no"
+    entrypoint: ["/bin/sh", "-c"]
+    command: ["chown -R 3000:3000 /home/rocketmq/store"]
+    volumes:
+      - rocketmq-store:/home/rocketmq/store
+
+  rocketmq-broker-proxy:
+    image: *rocketmq-image
+    restart: unless-stopped
+    depends_on:
+      rocketmq-namesrv:
+        condition: service_healthy
+    command:
+      - /bin/sh
+      - -c
+      - exec sh mqbroker ${ROCKETMQ_PROXY_ARGS---enable-proxy} --namesrvAddr rocketmq-namesrv:9876 --configFile ../conf/citybuddy-broker.conf
+    environment:
+      HEAP_OPTS: -Xms512m -Xmx512m -Xmn256m -XX:MaxDirectMemorySize=256m
+    ports:
+      - "127.0.0.1:${ROCKETMQ_PROXY_PORT:-8081}:8081"
+    volumes:
+      - rocketmq-store:/home/rocketmq/store
+      - ./infra/rocketmq/broker.conf:/home/rocketmq/rocketmq-5.5.0/conf/citybuddy-broker.conf:ro
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - sh mqadmin clusterList --namesrvAddr rocketmq-namesrv:9876 --clusterName DefaultCluster | grep -Fq DefaultCluster
+      interval: 3s
+      timeout: 10s
+      retries: 20
+      start_period: 20s
+
+  rocketmq-admin:
+    image: *rocketmq-image
+    restart: "no"
+    entrypoint: ["sh", "mqadmin"]
+
+  rocketmq-probe:
+    build:
+      context: .
+      dockerfile: infra/rocketmq/probe/Dockerfile
+    image: *rocketmq-probe-image
+    restart: unless-stopped
+    depends_on:
+      rocketmq-broker-proxy:
+        condition: service_healthy
+    healthcheck:
+      test:
+        - CMD
+        - java
+        - -jar
+        - /opt/citybuddy/rocketmq-probe.jar
+        - route
+        - rocketmq-broker-proxy:8081
+        - cb013-readiness
+      interval: 5s
+      timeout: 15s
+      retries: 6
+      start_period: 5s
+
 volumes:
   mysql-data:
   redis-commerce-data:
   redis-support-data:
   elasticsearch-data:
+  rocketmq-store:
