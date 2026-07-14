@@ -98,10 +98,13 @@ echo "Verified init-local preserves existing credentials."
 assert_fails "missing configuration blocks make up" 'Missing local configuration' \
   make ENV_FILE="$missing_env" COMPOSE_PROJECT_NAME="$project-missing" up
 
-# Isolate the integration project from any developer runtime using a per-process
-# high port. The tests connect through the Docker network, not this host port.
-export MYSQL_PORT ELASTICSEARCH_PORT ELASTICSEARCH_IMAGE ROCKETMQ_PROXY_PORT ROCKETMQ_PROBE_IMAGE
+# Isolate every published integration port from any developer runtime. The
+# tests connect through the Docker network, not these per-process host ports.
+export MYSQL_PORT REDIS_COMMERCE_PORT REDIS_SUPPORT_PORT ELASTICSEARCH_PORT \
+  ELASTICSEARCH_IMAGE ROCKETMQ_PROXY_PORT ROCKETMQ_PROBE_IMAGE
 MYSQL_PORT="$((33060 + ($$ % 1000)))"
+REDIS_COMMERCE_PORT="$((35000 + ($$ % 700)))"
+REDIS_SUPPORT_PORT="$((36000 + ($$ % 700)))"
 ELASTICSEARCH_PORT="$((38000 + ($$ % 1000)))"
 ROCKETMQ_PROXY_PORT="$((42000 + ($$ % 1000)))"
 ELASTICSEARCH_IMAGE="citybuddy-elasticsearch-ik:${project}"

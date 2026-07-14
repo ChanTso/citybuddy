@@ -16,7 +16,7 @@ The current executable slice and its status are maintained only in [IMPLEMENTATI
 
 ## Repository checks
 
-The checked baseline requires a JDK capable of compiling Java release 21, Python 3.11, `uv` 0.11.24, Node.js 24 with npm, GNU Make, `curl`, and `tar`.
+The checked baseline requires a JDK capable of compiling Java release 21, Python 3.11, `uv` 0.11.24, Node.js 24 with npm, GNU Make, a running Docker daemon with Docker Compose v2, OpenSSL, GNU `sha256sum`, `curl`, and `tar`.
 
 Install the locked dependencies and repository tools:
 
@@ -24,7 +24,8 @@ Install the locked dependencies and repository tools:
 make setup
 ```
 
-Run all formatting checks, linters, type/compile checks, unit tests, builds, pre-commit hooks, and Gitleaks:
+Run all formatting checks, linters, type/compile checks, unit tests, builds, pre-commit hooks,
+Gitleaks, and the ordered local data-runtime integration checks:
 
 ```shell
 make ci
@@ -76,6 +77,17 @@ RocketMQ named volumes:
 ```shell
 make down
 ```
+
+Run the complete integration entry point in its fixed resource-safe order. It verifies a clean
+aggregate startup, migration and health gates, repeat-start idempotence, non-destructive shutdown,
+and the MySQL, Redis, Elasticsearch/IK, and RocketMQ component probes and rejection paths:
+
+```shell
+make test-integration
+```
+
+The GitHub Actions entry point invokes the same scripts through `make ci`; component failures
+remain non-zero instead of being reported as skipped passes.
 
 `make reset-local CONFIRM_RESET_LOCAL=1` is the explicit destructive path; it removes local named
 volumes and the generated credential file.
