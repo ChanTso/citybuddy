@@ -45,8 +45,16 @@
    - roll the detailed specifications forward as required.
 3. Commit and push the closeout changes, then rerun the required checks. These state changes become authoritative only after they land on `main`.
 4. Unless the user asks to stop before merge, merge the pull request after required checks pass and no blocker remains. Use a merge commit for a clean slice branch; squash only when the history is genuinely noisy or the user requests it.
-5. After merge, update local `main`, confirm the working tree is clean and the expected slice states are present, delete the merged branch when safe, and stop. Do not start the next slice unless the user explicitly asks.
+5. After merge, update local `main`, confirm the working tree is clean and the expected slice states are present, and delete the merged branch when safe. Then stop unless the user has explicitly activated a continuous-slice Goal under the rules below; an active continuous-slice Goal is standing authorization to start the next eligible slice without a new prompt.
 6. If checks, review, repository policy, or mergeability block completion, stop and report the blocker; do not bypass it.
+
+## Continuous-slice Goals
+
+1. Only an explicit user-started Goal may activate continuous-slice execution. A normal request to implement one slice does not activate it, and a scheduled heartbeat is not required.
+2. Continuous mode remains sequential: finish and merge one slice, update local `main`, confirm a clean working tree, delete the merged branch when safe, then re-read `AGENTS.md` and `IMPLEMENTATION.md` from updated `main` before considering another slice.
+3. Continue only when there is exactly one `READY` row, no `IN_PROGRESS` row, no unresolved active-slice pull request or branch, and the linked specification is complete. Start that slice through the normal branch, status, implementation, independent review, CI, closeout, and merge workflow.
+4. Standing authorization covers only repetition of the existing single-slice workflow. It does not authorize parallel writers, frozen-contract changes, route or scope changes, bypassing review or CI, destructive operations, new secrets, broader permissions, or other materially different actions.
+5. Stop continuous execution and report the reason when there are zero or multiple `READY` rows; a slice becomes `BLOCKED`; evidence conflicts with a frozen contract; `main`, branch, or pull-request state is ambiguous; a required check, review, merge, credential, or permission fails; or continuation requires new user authority.
 
 ## Repository boundaries
 
