@@ -15,6 +15,8 @@ CREDENTIAL_NAMES = (
     "MYSQL_AUTH_APP_PASSWORD",
     "MYSQL_COMMERCE_APP_PASSWORD",
     "MYSQL_AGENT_APP_PASSWORD",
+    "REDIS_COMMERCE_PASSWORD",
+    "REDIS_SUPPORT_PASSWORD",
 )
 
 
@@ -53,6 +55,13 @@ def test_init_local_creates_private_distinct_credentials_and_preserves_them(
     assert all(re.fullmatch(r"[0-9a-f]{48}", value) for value in credentials)
     assert len(set(credentials)) == len(credentials)
     assert stat.S_IMODE(env_file.stat().st_mode) == 0o600
+    assert values["COMMERCE_REDIS_URL"] == (
+        f"redis://:{values['REDIS_COMMERCE_PASSWORD']}@redis-commerce:6379/0"
+    )
+    assert values["SUPPORT_REDIS_URL"] == (
+        f"redis://:{values['REDIS_SUPPORT_PASSWORD']}@redis-support:6379/0"
+    )
+    assert values["COMMERCE_REDIS_URL"] != values["SUPPORT_REDIS_URL"]
 
     second = run_script("init_local.sh", env_file)
 
@@ -79,8 +88,37 @@ def test_example_and_compose_contain_no_credential_defaults() -> None:
 
     compose = (ROOT / "compose.yaml").read_text()
     assert "mysql:8.4.10@sha256:" in compose
+    assert "redis:7.2.14-bookworm@sha256:" in compose
     for name in CREDENTIAL_NAMES:
         assert f"${{{name}:?" in compose
+
+
+def test_compose_defines_distinct_authenticated_redis_policies_and_storage() -> None:
+    compose = (ROOT / "compose.yaml").read_text()
+
+    commerce = re.search(r"(?ms)^  redis-commerce:\n(.*?)(?=^  [a-z][^:\n]*:\n|^volumes:)", compose)
+    support = re.search(r"(?ms)^  redis-support:\n(.*?)(?=^  [a-z][^:\n]*:\n|^volumes:)", compose)
+    assert commerce is not None
+    assert support is not None
+
+    commerce_config = commerce.group(1)
+    support_config = support.group(1)
+    assert "REDIS_COMMERCE_PASSWORD" in commerce_config
+    assert "--maxmemory-policy\n      - noeviction" in commerce_config
+    assert '--appendonly\n      - "yes"' in commerce_config
+    assert "redis-commerce-data:/data" in commerce_config
+    assert "PING | grep -qx PONG" in commerce_config
+    assert "CONFIG GET maxmemory-policy" in commerce_config
+    assert "CONFIG GET appendonly" in commerce_config
+
+    assert "REDIS_SUPPORT_PASSWORD" in support_config
+    assert "--maxmemory-policy\n      - volatile-lfu" in support_config
+    assert '--appendonly\n      - "no"' in support_config
+    assert "--maxmemory\n      - 64mb" in support_config
+    assert "redis-support-data:/data" in support_config
+    assert "PING | grep -qx PONG" in support_config
+    assert "CONFIG GET maxmemory-policy" in support_config
+    assert "CONFIG GET maxmemory" in support_config
 
 
 def test_grant_job_uses_only_fixed_manifest_and_isolated_bootstrap_config() -> None:

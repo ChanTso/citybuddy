@@ -1,6 +1,7 @@
 name: citybuddy
 
 x-mysql-image: &mysql-image mysql:8.4.10@sha256:c831a0f11348d402b43d77453e17d770be2eef356615a2823fe0f5a0d6c8b9af
+x-redis-image: &redis-image redis:7.2.14-bookworm@sha256:3d550f0b980dbf676953180fd6463dde8a982a74947a09656c98051c0a618faa
 x-migration-service: &migration-service
   image: *mysql-image
   restart: "no"
@@ -101,5 +102,75 @@ services:
       MYSQL_DATABASE: cs_db
       MIGRATION_STREAM: agent
 
+  redis-commerce:
+    image: *redis-image
+    restart: unless-stopped
+    command:
+      - redis-server
+      - --requirepass
+      - ${REDIS_COMMERCE_PASSWORD:?Run make init-local first}
+      - --appendonly
+      - "yes"
+      - --appendfsync
+      - everysec
+      - --maxmemory-policy
+      - noeviction
+      - --dir
+      - /data
+    environment:
+      REDIS_PASSWORD: ${REDIS_COMMERCE_PASSWORD:?Run make init-local first}
+    ports:
+      - "127.0.0.1:${REDIS_COMMERCE_PORT:-6379}:6379"
+    volumes:
+      - redis-commerce-data:/data
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - >-
+          redis-cli --no-auth-warning --pass "$${REDIS_PASSWORD}" PING | grep -qx PONG &&
+          test "$$(redis-cli --no-auth-warning --pass "$${REDIS_PASSWORD}" CONFIG GET maxmemory-policy | tail -n 1)" = noeviction &&
+          test "$$(redis-cli --no-auth-warning --pass "$${REDIS_PASSWORD}" CONFIG GET appendonly | tail -n 1)" = yes
+      interval: 2s
+      timeout: 5s
+      retries: 10
+      start_period: 5s
+
+  redis-support:
+    image: *redis-image
+    restart: unless-stopped
+    command:
+      - redis-server
+      - --requirepass
+      - ${REDIS_SUPPORT_PASSWORD:?Run make init-local first}
+      - --save
+      - ""
+      - --appendonly
+      - "no"
+      - --maxmemory
+      - 64mb
+      - --maxmemory-policy
+      - volatile-lfu
+      - --dir
+      - /data
+    environment:
+      REDIS_PASSWORD: ${REDIS_SUPPORT_PASSWORD:?Run make init-local first}
+    ports:
+      - "127.0.0.1:${REDIS_SUPPORT_PORT:-6380}:6379"
+    volumes:
+      - redis-support-data:/data
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - >-
+          redis-cli --no-auth-warning --pass "$${REDIS_PASSWORD}" PING | grep -qx PONG &&
+          test "$$(redis-cli --no-auth-warning --pass "$${REDIS_PASSWORD}" CONFIG GET maxmemory-policy | tail -n 1)" = volatile-lfu &&
+          test "$$(redis-cli --no-auth-warning --pass "$${REDIS_PASSWORD}" CONFIG GET maxmemory | tail -n 1)" -gt 0
+      interval: 2s
+      timeout: 5s
+      retries: 10
+      start_period: 5s
+
 volumes:
   mysql-data:
+  redis-commerce-data:
+  redis-support-data:

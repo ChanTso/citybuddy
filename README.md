@@ -38,8 +38,33 @@ make format
 
 ## Current limitations
 
-No business feature, service runtime topology, API contract, database schema, Docker Compose environment, RocketMQ topic, authentication flow, model-provider integration, performance result, deployment, or operational readiness claim is implemented by this baseline. The skeletons and their construction tests do not make the services production-runnable.
+The local runtime currently covers only the verified MySQL foundation and health-gated dual Redis
+topology. No business feature, API contract, production business schema, complete service runtime,
+RocketMQ topic, authentication flow, model-provider integration, performance result, deployment,
+or operational readiness claim is implemented. The service skeletons are not production-runnable.
 
 Implementation starts from the single active row in [IMPLEMENTATION.md](IMPLEMENTATION.md), follows its linked slice specification, and begins with the frozen-contract sections referenced by that slice. Other slice specifications may be consulted when a dependency or contract question requires them, but they must not be implemented early.
 
-Runtime startup and integration-test instructions will be added only by the slices that implement and successfully execute them.
+## Local data runtimes
+
+Generate private synthetic credentials, start the health-gated MySQL and dual Redis topology,
+and run the owning migration streams:
+
+```shell
+make init-local
+make up
+```
+
+Commerce Redis and Support Redis have separate required URLs, credentials, host ports, containers,
+and named volumes. Commerce Redis uses AOF with `noeviction`; Support Redis uses a bounded
+`volatile-lfu` policy for TTL-bearing cache data. Neither Redis instance is authoritative business
+storage.
+
+The normal shutdown path is non-destructive and preserves the MySQL and Redis named volumes:
+
+```shell
+make down
+```
+
+`make reset-local CONFIRM_RESET_LOCAL=1` is the explicit destructive path; it removes local named
+volumes and the generated credential file.

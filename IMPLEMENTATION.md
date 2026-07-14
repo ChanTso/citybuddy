@@ -1,8 +1,8 @@
 # CityBuddy implementation index
 
-**Document version:** v0.2\
-**Verification date:** 2026-07-14\
-**Repository phase:** Local runtime and data foundation ready
+**Document version:** v0.3\
+**Verification date:** 2026-07-15\
+**Repository phase:** MySQL and dual Redis foundations ready
 
 ## How to use this index
 
@@ -17,13 +17,15 @@
 
 CityBuddy targets local-commerce transactions and text-only AI customer support with independent identity, side-effect, retrieval, and evaluation boundaries.
 
-The repository contains the verified CB-000 baseline:
+The repository contains the verified CB-000, CB-010, and CB-011 foundations:
 
 - executable non-business skeletons for `auth-service`, `commerce-service`, `agent-service`, `knowledge-indexer`, and `web`;
 - one Maven reactor and wrapper, one locked `uv` workspace, and one npm lockfile;
+- one pinned, health-gated MySQL instance with isolated migration/runtime identities, separate migration histories, and non-default-role grant delegation;
+- two pinned, authenticated, health-gated Redis instances with distinct URLs, credentials, containers, and named volumes: Commerce uses AOF plus `noeviction`, while Support uses bounded `volatile-lfu` for TTL-bearing cache data;
 - format, lint, type/compile, unit-test, build, pre-commit, Gitleaks, and GitHub Actions paths through `make ci`.
 
-It does not yet contain business behavior, runtime topology, migrations, integration-test results, model-provider access, deployment, or measured performance claims.
+It does not yet contain business behavior, API/worker runtime packaging, production business schemas, Elasticsearch/IK, RocketMQ, aggregate runtime closure, model-provider access, deployment, or measured performance claims.
 
 Cross-slice target architecture, preflight conclusions, service/data ownership, interface and security boundaries, sequence diagrams, route outcomes, risks, and change control live in [docs/CONTRACTS.md](docs/CONTRACTS.md).
 
@@ -57,8 +59,8 @@ The linked slice name is the canonical detailed specification. Target outcomes a
 |---|---:|---:|---|
 | [CB-000 — Repository and toolchain baseline](docs/slices/CB-000.md) | P0 | `VERIFIED` | Documentation baseline |
 | [CB-010 — MySQL migration and access foundation](docs/slices/CB-010.md) | P0 | `VERIFIED` | `CB-000` |
-| [CB-011 — Dual Redis runtime foundation](docs/slices/CB-011.md) | P0 | `READY` | `CB-010` |
-| [CB-012 — Elasticsearch and IK runtime foundation](docs/slices/CB-012.md) | P0 | `PLANNED` | `CB-011` |
+| [CB-011 — Dual Redis runtime foundation](docs/slices/CB-011.md) | P0 | `VERIFIED` | `CB-010` |
+| [CB-012 — Elasticsearch and IK runtime foundation](docs/slices/CB-012.md) | P0 | `READY` | `CB-011` |
 | [CB-013 — RocketMQ Broker and Proxy foundation](docs/slices/CB-013.md) | P0 | `PLANNED` | `CB-012` |
 | [CB-014 — Local runtime integration closure](docs/slices/CB-014.md) | P0 | `PLANNED` | `CB-013` |
 | [CB-085 — Python RocketMQ consumer viability spike](docs/slices/CB-085.md) | P0 | `PLANNED` | `CB-014` |
