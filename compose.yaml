@@ -1,0 +1,105 @@
+name: citybuddy
+
+x-mysql-image: &mysql-image mysql:8.4.10@sha256:c831a0f11348d402b43d77453e17d770be2eef356615a2823fe0f5a0d6c8b9af
+x-migration-service: &migration-service
+  image: *mysql-image
+  restart: "no"
+  depends_on:
+    mysql:
+      condition: service_healthy
+  entrypoint: ["/bin/bash", "/opt/citybuddy/run-migrations.sh"]
+  environment:
+    MYSQL_HOST: mysql
+    MYSQL_PORT: "3306"
+
+x-grant-service: &grant-service
+  image: *mysql-image
+  restart: "no"
+  depends_on:
+    mysql:
+      condition: service_healthy
+  entrypoint: ["/bin/bash", "/opt/citybuddy/apply-grants.sh"]
+  environment:
+    MYSQL_HOST: mysql
+    MYSQL_PORT: "3306"
+    MYSQL_USER: bootstrap_admin
+    MYSQL_PASSWORD: ${MYSQL_BOOTSTRAP_PASSWORD:?Run make init-local first}
+  volumes:
+    - ./scripts/apply_mysql_grants.sh:/opt/citybuddy/apply-grants.sh:ro
+    - ./infra/mysql/grants:/opt/citybuddy/grants:ro
+
+services:
+  mysql:
+    image: *mysql-image
+    restart: unless-stopped
+    environment:
+      MYSQL_ROOT_PASSWORD: ${MYSQL_BOOTSTRAP_PASSWORD:?Run make init-local first}
+      MYSQL_BOOTSTRAP_PASSWORD: ${MYSQL_BOOTSTRAP_PASSWORD:?Run make init-local first}
+      MYSQL_AUTH_MIGRATION_PASSWORD: ${MYSQL_AUTH_MIGRATION_PASSWORD:?Run make init-local first}
+      MYSQL_COMMERCE_MIGRATION_PASSWORD: ${MYSQL_COMMERCE_MIGRATION_PASSWORD:?Run make init-local first}
+      MYSQL_AGENT_MIGRATION_PASSWORD: ${MYSQL_AGENT_MIGRATION_PASSWORD:?Run make init-local first}
+      MYSQL_AUTH_APP_PASSWORD: ${MYSQL_AUTH_APP_PASSWORD:?Run make init-local first}
+      MYSQL_COMMERCE_APP_PASSWORD: ${MYSQL_COMMERCE_APP_PASSWORD:?Run make init-local first}
+      MYSQL_AGENT_APP_PASSWORD: ${MYSQL_AGENT_APP_PASSWORD:?Run make init-local first}
+    command:
+      - --character-set-server=utf8mb4
+      - --collation-server=utf8mb4_0900_ai_ci
+      - --activate-all-roles-on-login=OFF
+    ports:
+      - "127.0.0.1:${MYSQL_PORT:-3306}:3306"
+    volumes:
+      - mysql-data:/var/lib/mysql
+      - ./infra/mysql/init/010-accounts.sh:/docker-entrypoint-initdb.d/010-accounts.sh:ro
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - MYSQL_PWD="$${MYSQL_ROOT_PASSWORD}" mysql --protocol=socket --user=root --database=mysql --batch --skip-column-names --execute='SELECT 1' | grep -qx 1
+      interval: 2s
+      timeout: 5s
+      retries: 30
+      start_period: 20s
+
+  mysql-grants:
+    <<: *grant-service
+
+  auth-migrate:
+    <<: *migration-service
+    volumes:
+      - ./scripts/run_mysql_migrations.sh:/opt/citybuddy/run-migrations.sh:ro
+      - ./infra/mysql/migrations/auth:/opt/citybuddy/migrations:ro
+    environment:
+      MYSQL_HOST: mysql
+      MYSQL_PORT: "3306"
+      MYSQL_USER: auth_migration
+      MYSQL_PASSWORD: ${MYSQL_AUTH_MIGRATION_PASSWORD:?Run make init-local first}
+      MYSQL_DATABASE: commerce_db
+      MIGRATION_STREAM: auth
+
+  commerce-migrate:
+    <<: *migration-service
+    volumes:
+      - ./scripts/run_mysql_migrations.sh:/opt/citybuddy/run-migrations.sh:ro
+      - ./infra/mysql/migrations/commerce:/opt/citybuddy/migrations:ro
+    environment:
+      MYSQL_HOST: mysql
+      MYSQL_PORT: "3306"
+      MYSQL_USER: commerce_migration
+      MYSQL_PASSWORD: ${MYSQL_COMMERCE_MIGRATION_PASSWORD:?Run make init-local first}
+      MYSQL_DATABASE: commerce_db
+      MIGRATION_STREAM: commerce
+
+  agent-migrate:
+    <<: *migration-service
+    volumes:
+      - ./scripts/run_mysql_migrations.sh:/opt/citybuddy/run-migrations.sh:ro
+      - ./infra/mysql/migrations/agent:/opt/citybuddy/migrations:ro
+    environment:
+      MYSQL_HOST: mysql
+      MYSQL_PORT: "3306"
+      MYSQL_USER: agent_migration
+      MYSQL_PASSWORD: ${MYSQL_AGENT_MIGRATION_PASSWORD:?Run make init-local first}
+      MYSQL_DATABASE: cs_db
+      MIGRATION_STREAM: agent
+
+volumes:
+  mysql-data:
