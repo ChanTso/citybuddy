@@ -16,7 +16,7 @@ The current executable slice and its status are maintained only in [IMPLEMENTATI
 
 ## Repository checks
 
-The checked baseline requires a JDK capable of compiling Java release 21, Python 3.11, `uv` 0.11.24, Node.js 22 with npm, GNU Make, `curl`, and `tar`.
+The checked baseline requires a JDK capable of compiling Java release 21, Python 3.11, `uv` 0.11.24, Node.js 24 with npm, GNU Make, `curl`, and `tar`.
 
 Install the locked dependencies and repository tools:
 
