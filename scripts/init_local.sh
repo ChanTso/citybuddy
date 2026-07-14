@@ -43,6 +43,7 @@ redis_support_password="$(credential)"
   echo "REDIS_COMMERCE_PORT=6379"
   echo "REDIS_SUPPORT_PORT=6380"
   echo "ELASTICSEARCH_PORT=9200"
+  echo "ROCKETMQ_PROXY_PORT=8081"
 } >"$env_file"
 
 echo "Created fresh synthetic local configuration at $env_file."

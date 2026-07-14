@@ -12,6 +12,7 @@
   <modules>
     <module>auth-service</module>
     <module>commerce-service</module>
+    <module>infra/rocketmq/probe</module>
   </modules>
 
   <properties>

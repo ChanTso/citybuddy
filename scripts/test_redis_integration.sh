@@ -97,11 +97,14 @@ ENV_FILE="$env_file" ./scripts/init_local.sh
 
 # Isolate the integration project from any developer runtime using per-process host ports.
 export MYSQL_PORT REDIS_COMMERCE_PORT REDIS_SUPPORT_PORT ELASTICSEARCH_PORT ELASTICSEARCH_IMAGE
+export ROCKETMQ_PROXY_PORT ROCKETMQ_PROBE_IMAGE
 MYSQL_PORT="$((33060 + ($$ % 800)))"
 REDIS_COMMERCE_PORT="$((35000 + ($$ % 800)))"
 REDIS_SUPPORT_PORT="$((36000 + ($$ % 800)))"
 ELASTICSEARCH_PORT="$((39000 + ($$ % 800)))"
+ROCKETMQ_PROXY_PORT="$((42000 + ($$ % 800)))"
 ELASTICSEARCH_IMAGE="citybuddy-elasticsearch-ik:${project}"
+ROCKETMQ_PROBE_IMAGE="citybuddy-rocketmq-probe:${project}"
 
 make ENV_FILE="$env_file" COMPOSE_PROJECT_NAME="$project" up
 

@@ -10,7 +10,7 @@ COMPOSE_BUILD ?= --build
 COMPOSE := docker compose --project-name "$(COMPOSE_PROJECT_NAME)" --env-file "$(ENV_FILE)" --file compose.yaml
 
 .DEFAULT_GOAL := ci
-.PHONY: setup format lint typecheck test build docs-check secret-scan java-ci python-ci web-ci repo-ci ci guard-layout init-local up down reset-local grant-access migrate-auth migrate-commerce migrate-agent test-integration test-mysql-integration test-redis-integration test-elasticsearch-integration
+.PHONY: setup format lint typecheck test build docs-check secret-scan java-ci python-ci web-ci repo-ci ci guard-layout init-local up down reset-local grant-access migrate-auth migrate-commerce migrate-agent rocketmq-store-init rocketmq-init test-integration test-mysql-integration test-redis-integration test-elasticsearch-integration test-rocketmq-integration
 
 guard-layout:
 	test -x ./mvnw
@@ -34,8 +34,12 @@ guard-layout:
 	test -x scripts/test_mysql_integration.sh
 	test -x scripts/test_redis_integration.sh
 	test -x scripts/test_elasticsearch_integration.sh
+	test -x scripts/test_rocketmq_integration.sh
 	test -f infra/mysql/grants/V001__migration_access.sql
 	test -f infra/elasticsearch/Dockerfile
+	test -f infra/rocketmq/broker.conf
+	test -f infra/rocketmq/probe/Dockerfile
+	test -f infra/rocketmq/probe/pom.xml
 
 init-local:
 	ENV_FILE="$(ENV_FILE)" ./scripts/init_local.sh
@@ -56,9 +60,20 @@ migrate-agent:
 	ENV_FILE="$(ENV_FILE)" ./scripts/require_local_env.sh
 	$(COMPOSE) run --rm agent-migrate
 
+rocketmq-store-init:
+	ENV_FILE="$(ENV_FILE)" ./scripts/require_local_env.sh
+	$(COMPOSE) run --rm --no-deps rocketmq-store-init
+
+rocketmq-init:
+	ENV_FILE="$(ENV_FILE)" ./scripts/require_local_env.sh
+	$(COMPOSE) run --rm --no-deps rocketmq-admin updateTopic --namesrvAddr rocketmq-namesrv:9876 --clusterName DefaultCluster --topic cb013-readiness --readQueueNums 1 --writeQueueNums 1
+
 up:
 	ENV_FILE="$(ENV_FILE)" ./scripts/require_local_env.sh
-	$(COMPOSE) up $(COMPOSE_BUILD) --detach --wait --wait-timeout $(COMPOSE_WAIT_TIMEOUT) mysql redis-commerce redis-support elasticsearch
+	$(MAKE) ENV_FILE=$(ENV_FILE) COMPOSE_PROJECT_NAME=$(COMPOSE_PROJECT_NAME) rocketmq-store-init
+	$(COMPOSE) up $(COMPOSE_BUILD) --detach --wait --wait-timeout $(COMPOSE_WAIT_TIMEOUT) mysql redis-commerce redis-support elasticsearch rocketmq-namesrv rocketmq-broker-proxy
+	$(MAKE) ENV_FILE=$(ENV_FILE) COMPOSE_PROJECT_NAME=$(COMPOSE_PROJECT_NAME) rocketmq-init
+	$(COMPOSE) up $(COMPOSE_BUILD) --detach --wait --wait-timeout $(COMPOSE_WAIT_TIMEOUT) rocketmq-probe
 	$(MAKE) ENV_FILE=$(ENV_FILE) COMPOSE_PROJECT_NAME=$(COMPOSE_PROJECT_NAME) grant-access
 	$(MAKE) ENV_FILE=$(ENV_FILE) COMPOSE_PROJECT_NAME=$(COMPOSE_PROJECT_NAME) migrate-auth
 	$(MAKE) ENV_FILE=$(ENV_FILE) COMPOSE_PROJECT_NAME=$(COMPOSE_PROJECT_NAME) migrate-commerce
@@ -83,7 +98,10 @@ test-redis-integration:
 test-elasticsearch-integration:
 	./scripts/test_elasticsearch_integration.sh
 
-test-integration: test-mysql-integration test-redis-integration test-elasticsearch-integration
+test-rocketmq-integration:
+	./scripts/test_rocketmq_integration.sh
+
+test-integration: test-mysql-integration test-redis-integration test-elasticsearch-integration test-rocketmq-integration
 
 setup: guard-layout
 	./mvnw --version

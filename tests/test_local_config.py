@@ -62,6 +62,7 @@ def test_init_local_creates_private_distinct_credentials_and_preserves_them(
         f"redis://:{values['REDIS_SUPPORT_PASSWORD']}@redis-support:6379/0"
     )
     assert values["COMMERCE_REDIS_URL"] != values["SUPPORT_REDIS_URL"]
+    assert values["ROCKETMQ_PROXY_PORT"] == "8081"
 
     second = run_script("init_local.sh", env_file)
 
@@ -156,6 +157,48 @@ def test_elasticsearch_image_and_health_pin_the_matching_ik_analyzer() -> None:
     assert "fault_health" in integration
     assert "container .*elasticsearch.* is unhealthy" in integration
     assert "knowledge_docs_v" not in integration
+
+
+def test_rocketmq_runtime_uses_pinned_proxy_and_grpc_probe() -> None:
+    compose = (ROOT / "compose.yaml").read_text()
+    probe_pom = (ROOT / "infra" / "rocketmq" / "probe" / "pom.xml").read_text()
+    probe_java = (
+        ROOT
+        / "infra"
+        / "rocketmq"
+        / "probe"
+        / "src"
+        / "main"
+        / "java"
+        / "io"
+        / "citybuddy"
+        / "rocketmq"
+        / "RocketMqProbe.java"
+    ).read_text()
+    integration = (ROOT / "scripts" / "test_rocketmq_integration.sh").read_text()
+
+    assert (
+        "apache/rocketmq:5.5.0@sha256:"
+        "7e8f6c9dbd9df742ed26ba69c00d4ad69e2f86a56f3ca7782ff8144dd0798132"
+    ) in compose
+    assert "--enable-proxy" in compose
+    assert 'user: "0:0"' in compose
+    assert "chown -R 3000:3000 /home/rocketmq/store" in compose
+    assert '"127.0.0.1:${ROCKETMQ_PROXY_PORT:-8081}:8081"' in compose
+    assert "clusterList --namesrvAddr rocketmq-namesrv:9876" in compose
+    assert "rocketmq-probe.jar\n        - route" in compose
+    assert "<artifactId>rocketmq-client-java</artifactId>" in probe_pom
+    assert "<rocketmq-client-java.version>5.2.1</rocketmq-client-java.version>" in probe_pom
+    assert ".setEndpoints(endpoints)" in probe_java
+    assert ".setRequestTimeout(Duration.ofSeconds(10))" in probe_java
+    assert ".enableSsl(false)" in probe_java
+    assert "ROUND_TRIP_OK" in probe_java
+    assert "consumer.ack(consumed)" in probe_java
+    assert "consumer.receive(8, INVISIBLE_DURATION)" in probe_java
+    assert "deleteTopic" in integration
+    assert "deleteSubGroup" in integration
+    assert "ROCKETMQ_PROXY_ARGS=" in integration
+    assert "produced=1 consumed=1" in integration
 
 
 def test_grant_job_uses_only_fixed_manifest_and_isolated_bootstrap_config() -> None:
