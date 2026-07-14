@@ -51,7 +51,7 @@ if [[ -n "$port" && ! "$port" =~ ^[0-9]{1,5}$ ]]; then
   exit 1
 fi
 
-for name in REDIS_COMMERCE_PORT REDIS_SUPPORT_PORT; do
+for name in REDIS_COMMERCE_PORT REDIS_SUPPORT_PORT ELASTICSEARCH_PORT; do
   port="$(sed -n "s/^${name}=//p" "$env_file")"
   if [[ -n "$port" && ! "$port" =~ ^[0-9]{1,5}$ ]]; then
     echo "Invalid $name in $env_file." >&2

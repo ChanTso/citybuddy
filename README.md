@@ -38,17 +38,18 @@ make format
 
 ## Current limitations
 
-The local runtime currently covers only the verified MySQL foundation and health-gated dual Redis
-topology. No business feature, API contract, production business schema, complete service runtime,
-RocketMQ topic, authentication flow, model-provider integration, performance result, deployment,
-or operational readiness claim is implemented. The service skeletons are not production-runnable.
+The local runtime currently covers only the verified MySQL, dual Redis, and Elasticsearch/IK
+foundations. No business feature, API contract, production business schema, complete service
+runtime, RocketMQ topic, authentication flow, model-provider integration, performance result,
+deployment, or operational readiness claim is implemented. The service skeletons are not
+production-runnable.
 
 Implementation starts from the single active row in [IMPLEMENTATION.md](IMPLEMENTATION.md), follows its linked slice specification, and begins with the frozen-contract sections referenced by that slice. Other slice specifications may be consulted when a dependency or contract question requires them, but they must not be implemented early.
 
 ## Local data runtimes
 
-Generate private synthetic credentials, start the health-gated MySQL and dual Redis topology,
-and run the owning migration streams:
+Generate private synthetic credentials, start the health-gated MySQL, dual Redis, and
+Elasticsearch/IK topology, and run the owning migration streams:
 
 ```shell
 make init-local
@@ -60,7 +61,12 @@ and named volumes. Commerce Redis uses AOF with `noeviction`; Support Redis uses
 `volatile-lfu` policy for TTL-bearing cache data. Neither Redis instance is authoritative business
 storage.
 
-The normal shutdown path is non-destructive and preserves the MySQL and Redis named volumes:
+Elasticsearch is a single local node with the version-matched IK analyzer installed in its pinned
+image. This runtime foundation does not create the later production knowledge index or make
+Elasticsearch authoritative storage.
+
+The normal shutdown path is non-destructive and preserves the MySQL, Redis, and Elasticsearch
+named volumes:
 
 ```shell
 make down
