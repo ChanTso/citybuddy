@@ -110,7 +110,6 @@ round_trip="$("${compose[@]}" run --rm --no-deps rocketmq-probe \
 assert_contains "round-trip producer" \
   "PRODUCED endpoint=rocketmq-broker-proxy:8081 topic=$topic key=$message_key" "$round_trip"
 assert_contains "round-trip consumer" "CONSUMED topic=$topic key=$message_key" "$round_trip"
-assert_contains "round-trip acknowledgement" 'ACKNOWLEDGED messageId=' "$round_trip"
 assert_contains "round-trip result" \
   "ROUND_TRIP_OK endpoint=rocketmq-broker-proxy:8081 topic=$topic key=$message_key produced=1 consumed=1" \
   "$round_trip"

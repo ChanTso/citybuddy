@@ -195,6 +195,9 @@ def test_rocketmq_runtime_uses_pinned_proxy_and_grpc_probe() -> None:
     assert "ROUND_TRIP_OK" in probe_java
     assert "consumer.ack(consumed)" in probe_java
     assert "consumer.receive(8, INVISIBLE_DURATION)" in probe_java
+    assert "Expected one matching probe message in the receive batch" in probe_java
+    assert "ACKNOWLEDGED" not in probe_java
+    assert "secondDelivery" not in probe_java
     assert "deleteTopic" in integration
     assert "deleteSubGroup" in integration
     assert "ROCKETMQ_PROXY_ARGS=" in integration

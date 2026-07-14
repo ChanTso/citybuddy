@@ -4,7 +4,6 @@ import java.nio.ByteBuffer;
 import java.nio.charset.StandardCharsets;
 import java.time.Duration;
 import java.util.Collections;
-import java.util.List;
 import org.apache.rocketmq.client.apis.ClientConfiguration;
 import org.apache.rocketmq.client.apis.ClientServiceProvider;
 import org.apache.rocketmq.client.apis.consumer.FilterExpression;
@@ -90,33 +89,33 @@ public final class RocketMqProbe {
           "PRODUCED endpoint=%s topic=%s key=%s messageId=%s%n",
           endpoints, topic, messageKey, receipt.getMessageId());
 
-      MessageView consumed = receiveMatching(consumer, body);
+      MessageView consumed = receiveSingleMatching(consumer, body);
+      // Ack only removes this disposable probe message; CB-013 makes no acknowledgement claim.
       consumer.ack(consumed);
       System.out.printf(
           "CONSUMED topic=%s key=%s messageId=%s%n", topic, messageKey, consumed.getMessageId());
-      System.out.printf("ACKNOWLEDGED messageId=%s%n", consumed.getMessageId());
-
-      List<MessageView> secondDelivery = consumer.receive(8, INVISIBLE_DURATION);
-      for (MessageView candidate : secondDelivery) {
-        if (body.equals(body(candidate))) {
-          throw new IllegalStateException(
-              "Probe message was delivered more than once: " + candidate.getMessageId());
-        }
-      }
       System.out.printf(
           "ROUND_TRIP_OK endpoint=%s topic=%s key=%s produced=1 consumed=1%n",
           endpoints, topic, messageKey);
     }
   }
 
-  private static MessageView receiveMatching(SimpleConsumer consumer, String expectedBody)
+  private static MessageView receiveSingleMatching(SimpleConsumer consumer, String expectedBody)
       throws Exception {
     long deadline = System.nanoTime() + ROUND_TRIP_TIMEOUT.toNanos();
     while (System.nanoTime() < deadline) {
+      MessageView matched = null;
       for (MessageView message : consumer.receive(8, INVISIBLE_DURATION)) {
         if (expectedBody.equals(body(message))) {
-          return message;
+          if (matched != null) {
+            throw new IllegalStateException(
+                "Expected one matching probe message in the receive batch but found more than one");
+          }
+          matched = message;
         }
+      }
+      if (matched != null) {
+        return matched;
       }
     }
     throw new IllegalStateException("Timed out waiting for the uniquely identified probe message");

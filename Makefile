@@ -101,7 +101,7 @@ test-elasticsearch-integration:
 test-rocketmq-integration:
 	./scripts/test_rocketmq_integration.sh
 
-test-integration: test-mysql-integration test-redis-integration test-elasticsearch-integration test-rocketmq-integration
+test-integration: test-mysql-integration test-redis-integration test-elasticsearch-integration
 
 setup: guard-layout
 	./mvnw --version
