@@ -208,6 +208,7 @@ def test_aggregate_runtime_probe_and_ci_use_one_ordered_integration_entrypoint()
     makefile = (ROOT / "Makefile").read_text()
     workflow = (ROOT / ".github" / "workflows" / "ci.yml").read_text()
     integration = (ROOT / "scripts" / "test_runtime_integration.sh").read_text()
+    mysql_integration = (ROOT / "scripts" / "test_mysql_integration.sh").read_text()
 
     aggregate_target = re.search(
         r"(?ms)^test-integration:\n(.*?)(?=^[a-zA-Z][^:\n]*:|\Z)", makefile
@@ -243,6 +244,8 @@ def test_aggregate_runtime_probe_and_ci_use_one_ordered_integration_entrypoint()
     assert "preserves existing credentials" in integration
     assert "down preserves all durable volumes" in integration
     assert "sleep " not in integration
+    assert 'REDIS_COMMERCE_PORT="$((35000 + ($$ % 700)))"' in mysql_integration
+    assert 'REDIS_SUPPORT_PORT="$((36000 + ($$ % 700)))"' in mysql_integration
 
 
 def test_grant_job_uses_only_fixed_manifest_and_isolated_bootstrap_config() -> None:
