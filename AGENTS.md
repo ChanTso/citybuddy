@@ -18,6 +18,7 @@
 3. Put enforceable format, lint, type, test, dependency, and CI rules in executable configuration. Run the real `make ci` before slice closeout.
 4. Every non-trivial pull request records the commands actually run, their results, exercised rejection paths, and known incomplete or out-of-scope work.
 5. Never commit secrets, personal data, private URLs, internal accounts, or private planning material.
+6. A failed `gh auth status` inside the sandbox is inconclusive because the sandbox may not expose the host keyring, credential helper, network, or GitHub session. Retry the same non-mutating authentication check outside the sandbox with approval before claiming that credentials are invalid or asking the user to run `gh auth login`; only report an authentication blocker when the outside-sandbox check also fails.
 
 ## Implementation and comment style
 
