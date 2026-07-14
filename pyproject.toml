@@ -31,4 +31,4 @@ strict = true
 
 [tool.pytest.ini_options]
 addopts = "--strict-config --strict-markers"
-testpaths = ["agent-service/tests", "knowledge-indexer/tests"]
+testpaths = ["agent-service/tests", "knowledge-indexer/tests", "tests"]
