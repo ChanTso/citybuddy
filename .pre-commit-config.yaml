@@ -13,6 +13,13 @@ repos:
         args: [--fix=no]
   - repo: local
     hooks:
+      - id: docs-route
+        name: validate slice route and linked specifications
+        entry: uv run python scripts/check_docs_route.py
+        language: system
+        pass_filenames: false
+        always_run: true
+        files: ^(IMPLEMENTATION\.md|docs/CONTRACTS\.md|docs/slices/CB-[0-9]{3}\.md|scripts/check_docs_route\.py)$
       - id: gitleaks-staged
         name: detect staged secrets with Gitleaks
         entry: .tools/gitleaks git --pre-commit --redact --staged --verbose

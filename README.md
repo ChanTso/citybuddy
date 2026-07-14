@@ -4,13 +4,15 @@ CityBuddy is a local-commerce transaction and AI customer-support project design
 
 ## Current status
 
-CB-000 is in progress. The repository now contains executable, non-business skeletons for:
+The repository contains the verified executable, non-business baseline skeletons for:
 
 - `auth-service` and `commerce-service` in one Java 21 Maven reactor;
 - `agent-service` and `knowledge-indexer` in one Python 3.11 `uv` workspace;
 - `web` as a React/TypeScript/Vite shell managed by npm.
 
 The repository tooling includes committed Maven Wrapper, `uv.lock`, and `package-lock.json` entry points; Java, Python, and web formatting, linting, typing, unit tests, and builds; pre-commit text hygiene and staged secret detection; repository Gitleaks scanning; and GitHub Actions through the root `make ci` command.
+
+The current executable slice and its status are maintained only in [IMPLEMENTATION.md](IMPLEMENTATION.md).
 
 ## Repository checks
 
@@ -38,6 +40,6 @@ make format
 
 No business feature, service runtime topology, API contract, database schema, Docker Compose environment, RocketMQ topic, authentication flow, model-provider integration, performance result, deployment, or operational readiness claim is implemented by this baseline. The skeletons and their construction tests do not make the services production-runnable.
 
-Implementation must follow the single active slice in [IMPLEMENTATION.md](IMPLEMENTATION.md). Work starts only when that slice is `READY`; once a real feature branch and the first implementation change begin, work continues only on the same slice in `IN_PROGRESS` until it reaches a terminal state. Later slices must not be started early.
+Implementation starts from the single active row in [IMPLEMENTATION.md](IMPLEMENTATION.md), follows its linked slice specification, and begins with the frozen-contract sections referenced by that slice. Other slice specifications may be consulted when a dependency or contract question requires them, but they must not be implemented early.
 
 Runtime startup and integration-test instructions will be added only by the slices that implement and successfully execute them.
