@@ -56,7 +56,7 @@ The linked slice name is the canonical detailed specification. Target outcomes a
 | Slice | Priority | State | Depends on |
 |---|---:|---:|---|
 | [CB-000 — Repository and toolchain baseline](docs/slices/CB-000.md) | P0 | `VERIFIED` | Documentation baseline |
-| [CB-010 — MySQL migration and access foundation](docs/slices/CB-010.md) | P0 | `READY` | `CB-000` |
+| [CB-010 — MySQL migration and access foundation](docs/slices/CB-010.md) | P0 | `IN_PROGRESS` | `CB-000` |
 | [CB-011 — Dual Redis runtime foundation](docs/slices/CB-011.md) | P0 | `PLANNED` | `CB-010` |
 | [CB-012 — Elasticsearch and IK runtime foundation](docs/slices/CB-012.md) | P0 | `PLANNED` | `CB-011` |
 | [CB-013 — RocketMQ Broker and Proxy foundation](docs/slices/CB-013.md) | P0 | `PLANNED` | `CB-012` |
