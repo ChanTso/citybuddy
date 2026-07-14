@@ -50,11 +50,12 @@
 
 ## Continuous-slice Goals
 
-1. Only an explicit user-started Goal may activate continuous-slice execution. A normal request to implement one slice does not activate it, and a scheduled heartbeat is not required.
+1. Only an explicit user-started Goal may activate continuous-slice execution. A normal request to implement one slice does not activate it. The Goal is the sole execution driver: do not create, enable, or use a scheduled heartbeat or other recurring trigger for this loop unless the user explicitly changes this strategy.
 2. Continuous mode remains sequential: finish and merge one slice, update local `main`, confirm a clean working tree, delete the merged branch when safe, then re-read `AGENTS.md` and `IMPLEMENTATION.md` from updated `main` before considering another slice.
-3. Continue only when there is exactly one `READY` row, no `IN_PROGRESS` row, no unresolved active-slice pull request or branch, and the linked specification is complete. Start that slice through the normal branch, status, implementation, independent review, CI, closeout, and merge workflow.
-4. Standing authorization covers only repetition of the existing single-slice workflow. It does not authorize parallel writers, frozen-contract changes, route or scope changes, bypassing review or CI, destructive operations, new secrets, broader permissions, or other materially different actions.
-5. Stop continuous execution and report the reason when there are zero or multiple `READY` rows; a slice becomes `BLOCKED`; evidence conflicts with a frozen contract; `main`, branch, or pull-request state is ambiguous; a required check, review, merge, credential, or permission fails; or continuation requires new user authority.
+3. Resume an interrupted slice only when there is exactly one `IN_PROGRESS` row and no `READY` row, its linked specification is complete, its feature branch is uniquely identifiable, and any existing pull request unambiguously matches that branch and slice. Resume only that slice through the remaining normal implementation, independent review, CI, closeout, and merge workflow; do not start another slice.
+4. Start the next slice only when there is no `IN_PROGRESS` row, exactly one `READY` row, no unresolved branch or pull request from the preceding or another active slice, and the linked specification is complete. Start that slice through the normal branch, status, implementation, independent review, CI, closeout, and merge workflow.
+5. Standing authorization covers only repetition or resumption of the existing single-slice workflow. It does not authorize parallel writers, frozen-contract changes, route or scope changes, bypassing review or CI, destructive operations, new secrets, broader permissions, or other materially different actions.
+6. Stop continuous execution and report the reason when repository state matches neither the resume state nor the next-slice state above; a slice becomes `BLOCKED`; evidence conflicts with a frozen contract; `main`, branch, or pull-request state is ambiguous or contradictory; a required check, review, merge, credential, or permission fails; or continuation requires new user authority.
 
 ## Repository boundaries
 
