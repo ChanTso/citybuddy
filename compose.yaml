@@ -2,6 +2,7 @@ name: citybuddy
 
 x-mysql-image: &mysql-image mysql:8.4.10@sha256:c831a0f11348d402b43d77453e17d770be2eef356615a2823fe0f5a0d6c8b9af
 x-redis-image: &redis-image redis:7.2.14-bookworm@sha256:3d550f0b980dbf676953180fd6463dde8a982a74947a09656c98051c0a618faa
+x-elasticsearch-image: &elasticsearch-image ${ELASTICSEARCH_IMAGE:-citybuddy-elasticsearch-ik:8.19.8}
 x-migration-service: &migration-service
   image: *mysql-image
   restart: "no"
@@ -170,7 +171,34 @@ services:
       retries: 10
       start_period: 5s
 
+  elasticsearch:
+    build:
+      context: ./infra/elasticsearch
+    image: *elasticsearch-image
+    restart: unless-stopped
+    environment:
+      discovery.type: single-node
+      xpack.security.enabled: "false"
+      xpack.ml.enabled: "false"
+      ES_JAVA_OPTS: -Xms512m -Xmx512m
+    ports:
+      - "127.0.0.1:${ELASTICSEARCH_PORT:-9200}:9200"
+    volumes:
+      - elasticsearch-data:/usr/share/elasticsearch/data
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - >-
+          curl -fsS 'http://localhost:9200/_cluster/health?wait_for_status=yellow&timeout=3s' | grep -Eq '"status":"(yellow|green)"' &&
+          curl -fsS 'http://localhost:9200/_cat/plugins?h=component,version' | grep -Eq '^analysis-ik[[:space:]]+8.19.8$$' &&
+          curl -fsS -X POST 'http://localhost:9200/_analyze' -H 'Content-Type: application/json' --data '{"analyzer":"ik_smart","text":"CityBuddy本地商店"}' | grep -q '"tokens"'
+      interval: 3s
+      timeout: 10s
+      retries: 5
+      start_period: 20s
+
 volumes:
   mysql-data:
   redis-commerce-data:
   redis-support-data:
+  elasticsearch-data:

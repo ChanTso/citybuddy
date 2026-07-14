@@ -100,8 +100,10 @@ assert_fails "missing configuration blocks make up" 'Missing local configuration
 
 # Isolate the integration project from any developer runtime using a per-process
 # high port. The tests connect through the Docker network, not this host port.
-export MYSQL_PORT
+export MYSQL_PORT ELASTICSEARCH_PORT ELASTICSEARCH_IMAGE
 MYSQL_PORT="$((33060 + ($$ % 1000)))"
+ELASTICSEARCH_PORT="$((38000 + ($$ % 1000)))"
+ELASTICSEARCH_IMAGE="citybuddy-elasticsearch-ik:${project}"
 
 make ENV_FILE="$env_file" COMPOSE_PROJECT_NAME="$project" up
 

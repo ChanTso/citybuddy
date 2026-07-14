@@ -121,6 +121,41 @@ def test_compose_defines_distinct_authenticated_redis_policies_and_storage() -> 
     assert "CONFIG GET maxmemory" in support_config
 
 
+def test_elasticsearch_image_and_health_pin_the_matching_ik_analyzer() -> None:
+    compose = (ROOT / "compose.yaml").read_text()
+    dockerfile = (ROOT / "infra" / "elasticsearch" / "Dockerfile").read_text()
+    integration = (ROOT / "scripts" / "test_elasticsearch_integration.sh").read_text()
+
+    assert (
+        "docker.elastic.co/elasticsearch/elasticsearch:8.19.8@sha256:"
+        "1b6a877f18352510860ee065f01472bd37d33ac5eb1d943e0b9ed366b149638c"
+    ) in dockerfile
+    assert "https://get.infini.cloud/elasticsearch/analysis-ik/8.19.8" in dockerfile
+    assert "0afb783891e7a5443ef45b8964a2cb8d6ac2421827f94c587d1827936f00b81d" in dockerfile
+    assert "sha256sum --check" in dockerfile
+    assert "elasticsearch-plugin install --batch" in dockerfile
+    assert "${ELASTICSEARCH_IMAGE:-citybuddy-elasticsearch-ik:8.19.8}" in compose
+
+    elasticsearch = re.search(
+        r"(?ms)^  elasticsearch:\n(.*?)(?=^  [a-z][^:\n]*:\n|^volumes:)", compose
+    )
+    assert elasticsearch is not None
+    elasticsearch_config = elasticsearch.group(1)
+    assert "_cluster/health?wait_for_status=yellow" in elasticsearch_config
+    assert "_cat/plugins?h=component,version" in elasticsearch_config
+    assert "analysis-ik[[:space:]]+8.19.8" in elasticsearch_config
+    assert '"analyzer":"ik_smart"' in elasticsearch_config
+
+    assert '"type":"dense_vector"' in integration
+    assert '"knn"' in integration
+    assert 'POST "/_aliases"' in integration
+    assert 'ELASTICSEARCH_IMAGE="citybuddy-elasticsearch-ik:${project}"' in integration
+    assert "broken_container_id" in integration
+    assert "current_container_id" in integration
+    assert "container .*elasticsearch.* is unhealthy" in integration
+    assert "knowledge_docs_v" not in integration
+
+
 def test_grant_job_uses_only_fixed_manifest_and_isolated_bootstrap_config() -> None:
     script = (ROOT / "scripts" / "apply_mysql_grants.sh").read_text()
     manifest = (ROOT / "infra" / "mysql" / "grants" / "V001__migration_access.sql").read_text()

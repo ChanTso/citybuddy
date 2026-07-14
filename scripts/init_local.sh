@@ -42,6 +42,7 @@ redis_support_password="$(credential)"
   echo "SUPPORT_REDIS_URL=redis://:$redis_support_password@redis-support:6379/0"
   echo "REDIS_COMMERCE_PORT=6379"
   echo "REDIS_SUPPORT_PORT=6380"
+  echo "ELASTICSEARCH_PORT=9200"
 } >"$env_file"
 
 echo "Created fresh synthetic local configuration at $env_file."
