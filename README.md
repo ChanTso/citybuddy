@@ -38,11 +38,11 @@ make format
 
 ## Current limitations
 
-The local runtime currently covers only the verified MySQL and dual Redis foundations plus the
-active Elasticsearch/IK slice. No business feature, API contract, production business schema,
-complete service runtime, RocketMQ topic, authentication flow, model-provider integration,
-performance result, deployment, or operational readiness claim is implemented. The service
-skeletons are not production-runnable.
+The local runtime currently covers only the verified MySQL, dual Redis, and Elasticsearch/IK
+foundations. No business feature, API contract, production business schema, complete service
+runtime, RocketMQ topic, authentication flow, model-provider integration, performance result,
+deployment, or operational readiness claim is implemented. The service skeletons are not
+production-runnable.
 
 Implementation starts from the single active row in [IMPLEMENTATION.md](IMPLEMENTATION.md), follows its linked slice specification, and begins with the frozen-contract sections referenced by that slice. Other slice specifications may be consulted when a dependency or contract question requires them, but they must not be implemented early.
 
@@ -65,7 +65,8 @@ Elasticsearch is a single local node with the version-matched IK analyzer instal
 image. This runtime foundation does not create the later production knowledge index or make
 Elasticsearch authoritative storage.
 
-The normal shutdown path is non-destructive and preserves the MySQL and Redis named volumes:
+The normal shutdown path is non-destructive and preserves the MySQL, Redis, and Elasticsearch
+named volumes:
 
 ```shell
 make down
