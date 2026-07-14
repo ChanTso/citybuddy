@@ -204,6 +204,47 @@ def test_rocketmq_runtime_uses_pinned_proxy_and_grpc_probe() -> None:
     assert "produced=1 consumed=1" in integration
 
 
+def test_aggregate_runtime_probe_and_ci_use_one_ordered_integration_entrypoint() -> None:
+    makefile = (ROOT / "Makefile").read_text()
+    workflow = (ROOT / ".github" / "workflows" / "ci.yml").read_text()
+    integration = (ROOT / "scripts" / "test_runtime_integration.sh").read_text()
+
+    aggregate_target = re.search(
+        r"(?ms)^test-integration:\n(.*?)(?=^[a-zA-Z][^:\n]*:|\Z)", makefile
+    )
+    assert aggregate_target is not None
+    aggregate_commands = aggregate_target.group(1)
+    expected_targets = (
+        "test-runtime-integration",
+        "test-mysql-integration",
+        "test-redis-integration",
+        "test-elasticsearch-integration",
+        "test-rocketmq-integration",
+    )
+    positions = [aggregate_commands.index(target) for target in expected_targets]
+    assert positions == sorted(positions)
+    assert "ci: java-ci python-ci web-ci repo-ci test-integration" in makefile
+    assert "run: make ci" in workflow
+    assert "timeout-minutes: 30" in workflow
+
+    for service in (
+        "mysql",
+        "redis-commerce",
+        "redis-support",
+        "elasticsearch",
+        "rocketmq-namesrv",
+        "rocketmq-broker-proxy",
+        "rocketmq-probe",
+    ):
+        assert service in integration
+    assert "auth_schema_history" in integration
+    assert "commerce_schema_history" in integration
+    assert "agent_schema_history" in integration
+    assert "preserves existing credentials" in integration
+    assert "down preserves all durable volumes" in integration
+    assert "sleep " not in integration
+
+
 def test_grant_job_uses_only_fixed_manifest_and_isolated_bootstrap_config() -> None:
     script = (ROOT / "scripts" / "apply_mysql_grants.sh").read_text()
     manifest = (ROOT / "infra" / "mysql" / "grants" / "V001__migration_access.sql").read_text()
