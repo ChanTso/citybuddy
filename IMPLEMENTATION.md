@@ -35,7 +35,7 @@ Cross-slice target architecture, preflight conclusions, service/data ownership, 
 - Work continues only on that slice until it becomes `VERIFIED`, `BLOCKED`, or `DEFERRED`.
 - P0 and P1 slices remain `PLANNED` until their dependencies are `VERIFIED`. P2 slices remain `DEFERRED` unless explicitly promoted.
 - When multiple non-deferred slices become eligible, the earliest one in the route is selected unless a reviewed frozen-contract change alters the route.
-- Only existing full specifications are linked below. A later specification is created when it enters the rolling specification window; this governance change does not invent new slice requirements.
+- The rolling specification window is the active `READY`/`IN_PROGRESS` slice plus the next two non-`DEFERRED` route entries. Every row in that window must link to a complete specification before the active row can change. Specifications may be prepared earlier, but their presence does not make those slices active or authorize implementation.
 - A hard conflict with a frozen contract marks the active slice `BLOCKED`; record a concise impact in its Completion record and keep detailed evidence in the pull request.
 
 ## Status meanings
@@ -56,16 +56,20 @@ The linked slice name is the canonical detailed specification. Target outcomes a
 | Slice | Priority | State | Depends on |
 |---|---:|---:|---|
 | [CB-000 — Repository and toolchain baseline](docs/slices/CB-000.md) | P0 | `VERIFIED` | Documentation baseline |
-| [CB-010 — Local runtime and data foundation](docs/slices/CB-010.md) | P0 | `READY` | `CB-000` |
-| [CB-085 — Python RocketMQ consumer viability spike](docs/slices/CB-085.md) | P0 | `PLANNED` | `CB-010` |
-| `CB-020 — Identity, JWKS and JIT OBO vertical slice` | P0 | `PLANNED` | `CB-010` |
+| [CB-010 — MySQL migration and access foundation](docs/slices/CB-010.md) | P0 | `READY` | `CB-000` |
+| [CB-011 — Dual Redis runtime foundation](docs/slices/CB-011.md) | P0 | `PLANNED` | `CB-010` |
+| [CB-012 — Elasticsearch and IK runtime foundation](docs/slices/CB-012.md) | P0 | `PLANNED` | `CB-011` |
+| [CB-013 — RocketMQ Broker and Proxy foundation](docs/slices/CB-013.md) | P0 | `PLANNED` | `CB-012` |
+| [CB-014 — Local runtime integration closure](docs/slices/CB-014.md) | P0 | `PLANNED` | `CB-013` |
+| [CB-085 — Python RocketMQ consumer viability spike](docs/slices/CB-085.md) | P0 | `PLANNED` | `CB-014` |
+| `CB-020 — Identity, JWKS and JIT OBO vertical slice` | P0 | `PLANNED` | `CB-014` |
 | `CB-030 — Product catalog and cache invalidation` | P0 | `PLANNED` | `CB-020` |
 | `CB-040 — Standard ordering and MySQL inventory` | P0 | `PLANNED` | `CB-030` |
 | `CB-050 — Seckill quota, reservation, and Lua admission` | P0 | `PLANNED` | `CB-040` |
 | `CB-060 — RocketMQ transaction ordering and delayed cancellation` | P0 | `PLANNED` | `CB-050` |
 | `CB-070 — Mock payment, refund, ledger extension, and state machines` | P0 | `PLANNED` | `CB-060` |
 | `CB-080 — Single-agent control plane, tools, SSE, and support evidence` | P0 | `PLANNED` | `CB-020`, `CB-030`, `CB-040` |
-| `CB-090 — RAG core and initial versioned knowledge index` | P0 | `PLANNED` | `CB-010`, `CB-080` |
+| `CB-090 — RAG core and initial versioned knowledge index` | P0 | `PLANNED` | `CB-014`, `CB-080` |
 | `CB-100 — Evaluation profile, sandbox, identity provisioning, state, audit, version, and evidence` | P0 | `PLANNED` | `CB-020`, `CB-040`, `CB-060`, `CB-070`, `CB-080`, `CB-090` |
 | `CB-110 — FAQ publication, knowledge sync, cache versioning, and index rebuild` | P1 | `PLANNED` | `CB-030`, `CB-085`, `CB-090` |
 | `CB-120 — PendingAction, ActionReceipt, and turn commit point` | P1 | `PLANNED` | `CB-070`, `CB-080` |
