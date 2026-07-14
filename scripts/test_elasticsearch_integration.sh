@@ -7,7 +7,9 @@ cd "$repo_root"
 tmp_dir="$(mktemp -d)"
 env_file="$tmp_dir/.env"
 project="citybuddy-cb012-test-$$"
+fault_project="${project}-missing-ik"
 compose=(docker compose --project-name "$project" --env-file "$env_file" --file compose.yaml)
+fault_compose=(docker compose --project-name "$fault_project" --env-file "$env_file" --file compose.yaml)
 old_index="cb012-probe-$$-old"
 new_index="cb012-probe-$$-new"
 alias_name="cb012-probe-$$-read"
@@ -26,6 +28,7 @@ es_api() {
 cleanup() {
   es_api DELETE "/$old_index,$new_index" >/dev/null 2>&1 || true
   "${compose[@]}" down --volumes --remove-orphans >/dev/null 2>&1 || true
+  "${fault_compose[@]}" down --volumes --remove-orphans >/dev/null 2>&1 || true
   rm -rf "$tmp_dir"
 }
 trap cleanup EXIT
@@ -61,23 +64,6 @@ assert_fails() {
   fi
   echo "Verified rejection (exit $status): $label"
   sed -E 's/[0-9a-f]{48}/<redacted>/g' "$log"
-}
-
-wait_for_health() {
-  local expected="$1"
-  local container_id
-  local health
-  container_id="$("${compose[@]}" ps -q elasticsearch)"
-  for _ in $(seq 1 60); do
-    health="$(docker inspect --format '{{.State.Health.Status}}' "$container_id")"
-    if [[ "$health" == "$expected" ]]; then
-      return 0
-    fi
-    sleep 1
-  done
-  echo "Timed out waiting for elasticsearch health=$expected." >&2
-  docker inspect --format '{{json .State.Health}}' "$container_id" >&2
-  return 1
 }
 
 ENV_FILE="$env_file" ./scripts/init_local.sh
@@ -143,32 +129,37 @@ test "$new_status" = 404
 test "$alias_status" = 404
 echo "Verified disposable probe indexes and alias were removed."
 
-broken_container_id="$("${compose[@]}" ps -q elasticsearch)"
-"${compose[@]}" exec -T elasticsearch \
-  mv /usr/share/elasticsearch/plugins/analysis-ik /tmp/analysis-ik-disabled
-"${compose[@]}" restart elasticsearch
-wait_for_health unhealthy
+"${compose[@]}" down --volumes --remove-orphans
+
+missing_ik_image="docker.elastic.co/elasticsearch/elasticsearch:8.19.8@sha256:1b6a877f18352510860ee065f01472bd37d33ac5eb1d943e0b9ed366b149638c"
 assert_fails "startup rejects Elasticsearch without IK" 'container .*elasticsearch.* is unhealthy' \
-  make ENV_FILE="$env_file" COMPOSE_PROJECT_NAME="$project" COMPOSE_WAIT_TIMEOUT=15 \
-    COMPOSE_BUILD= up
-current_container_id="$("${compose[@]}" ps -q elasticsearch)"
-if [[ "$current_container_id" != "$broken_container_id" ]]; then
-  echo "Missing-plugin rejection recreated the Elasticsearch container." >&2
+  env ELASTICSEARCH_IMAGE="$missing_ik_image" \
+    make ENV_FILE="$env_file" COMPOSE_PROJECT_NAME="$fault_project" \
+      COMPOSE_WAIT_TIMEOUT=60 COMPOSE_BUILD= up
+fault_container_id="$("${fault_compose[@]}" ps -q elasticsearch)"
+if [[ -z "$fault_container_id" ]]; then
+  echo "Missing-plugin rejection did not leave an inspectable Elasticsearch container." >&2
   exit 1
 fi
-if "${compose[@]}" exec -T elasticsearch \
+fault_image="$(docker inspect --format '{{.Config.Image}}' "$fault_container_id")"
+if [[ "$fault_image" != "$missing_ik_image" ]]; then
+  echo "Missing-plugin rejection used unexpected image: $fault_image" >&2
+  exit 1
+fi
+fault_health="$(docker inspect --format '{{.State.Health.Status}}' "$fault_container_id")"
+if [[ "$fault_health" != unhealthy ]]; then
+  echo "Missing-plugin rejection ended with unexpected health: $fault_health" >&2
+  exit 1
+fi
+if "${fault_compose[@]}" exec -T elasticsearch \
   test -d /usr/share/elasticsearch/plugins/analysis-ik; then
-  echo "Missing-plugin rejection unexpectedly restored the IK plugin directory." >&2
+  echo "Missing-plugin fixture unexpectedly contains the IK plugin directory." >&2
   exit 1
 fi
-plugin_list="$("${compose[@]}" exec -T elasticsearch bin/elasticsearch-plugin list)"
+plugin_list="$("${fault_compose[@]}" exec -T elasticsearch bin/elasticsearch-plugin list)"
 if grep -Fxq analysis-ik <<<"$plugin_list"; then
-  echo "Missing-plugin rejection unexpectedly retained analysis-ik inventory." >&2
+  echo "Missing-plugin fixture unexpectedly lists analysis-ik." >&2
   exit 1
 fi
-"${compose[@]}" exec -T elasticsearch \
-  mv /tmp/analysis-ik-disabled /usr/share/elasticsearch/plugins/analysis-ik
-"${compose[@]}" restart elasticsearch
-wait_for_health healthy
 
 echo "CB-012 Elasticsearch and IK integration checks passed."

@@ -150,8 +150,10 @@ def test_elasticsearch_image_and_health_pin_the_matching_ik_analyzer() -> None:
     assert '"knn"' in integration
     assert 'POST "/_aliases"' in integration
     assert 'ELASTICSEARCH_IMAGE="citybuddy-elasticsearch-ik:${project}"' in integration
-    assert "broken_container_id" in integration
-    assert "current_container_id" in integration
+    assert 'fault_project="${project}-missing-ik"' in integration
+    assert 'env ELASTICSEARCH_IMAGE="$missing_ik_image"' in integration
+    assert "fault_container_id" in integration
+    assert "fault_health" in integration
     assert "container .*elasticsearch.* is unhealthy" in integration
     assert "knowledge_docs_v" not in integration
 
