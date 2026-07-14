@@ -130,6 +130,18 @@ for identity in "${identities[@]}"; do
   echo "Authenticated distinct identity: $current_user"
 done
 
+auto_roles="$(mysql_query bootstrap_admin "$bootstrap_password" "" 'SELECT @@GLOBAL.activate_all_roles_on_login')"
+test "$auto_roles" = "0"
+default_role="$(mysql_query bootstrap_admin "$bootstrap_password" "" 'SELECT CURRENT_ROLE()')"
+test "$default_role" = "NONE"
+echo "Verified bootstrap sessions start with no active role and automatic activation disabled."
+
+grant_output="$(make ENV_FILE="$env_file" COMPOSE_PROJECT_NAME="$project" grant-access)"
+grep -q 'role-before=NONE' <<<"$grant_output"
+grep -q 'role-active=`bootstrap_grant_role`@`%`' <<<"$grant_output"
+grep -q 'role-after=NONE' <<<"$grant_output"
+echo "$grant_output"
+
 auth_history="$(mysql_query auth_migration "$auth_migration_password" commerce_db 'SELECT COUNT(*) FROM auth_schema_history WHERE success = TRUE')"
 commerce_history="$(mysql_query commerce_migration "$commerce_migration_password" commerce_db 'SELECT COUNT(*) FROM commerce_schema_history WHERE success = TRUE')"
 agent_history="$(mysql_query agent_migration "$agent_migration_password" cs_db 'SELECT COUNT(*) FROM agent_schema_history WHERE success = TRUE')"
@@ -174,6 +186,41 @@ assert_fails "auth stream rejects the wrong target database" 'Migration configur
   "${compose[@]}" run --rm -e MYSQL_DATABASE=cs_db auth-migrate
 assert_fails "auth identity cannot execute the commerce stream" 'Migration configuration refuses identity' \
   "${compose[@]}" run --rm -e MIGRATION_STREAM=commerce auth-migrate
+assert_fails "grant job rejects caller-supplied SQL" 'rejects caller-supplied SQL or arguments' \
+  "${compose[@]}" run --rm mysql-grants 'SELECT 1'
+
+failure_grant_dir="$tmp_dir/failing-grants"
+mkdir -p "$failure_grant_dir"
+sed -n '1,4p' infra/mysql/grants/V001__migration_access.sql >"$failure_grant_dir/V001__migration_access.sql"
+printf '%s\n' 'SELECT * FROM commerce_db.auth_schema_history;' >>"$failure_grant_dir/V001__migration_access.sql"
+assert_fails "grant job rejects same-count business DML and non-allowlisted SQL" 'rejects non-allowlisted statement at line 5' \
+  "${compose[@]}" run --rm --volume "$failure_grant_dir:/opt/citybuddy/grants:ro" mysql-grants
+
+printf '%s\n' \
+  "REVOKE CREATE ON commerce_db.* FROM 'auth_migration'@'%';" \
+  "SET DEFAULT ROLE 'bootstrap_grant_role' TO 'bootstrap_admin'@'%';" | \
+  "${compose[@]}" exec -T -e MYSQL_PWD="$bootstrap_password" mysql \
+    mysql --protocol=socket --user=root
+assert_fails "grant job rejects an already active default role before grants" 'refuses a fresh session with active role' \
+  "${compose[@]}" run --rm mysql-grants
+auth_grants_after_rejection="$(mysql_query auth_migration "$auth_migration_password" "" 'SHOW GRANTS FOR CURRENT_USER')"
+if grep -Fq 'GRANT CREATE ON `commerce_db`.*' <<<"$auth_grants_after_rejection"; then
+  echo "Grant job mutated privileges before rejecting the active default role." >&2
+  exit 1
+fi
+printf '%s\n' "SET DEFAULT ROLE NONE TO 'bootstrap_admin'@'%';" | \
+  "${compose[@]}" exec -T -e MYSQL_PWD="$bootstrap_password" mysql \
+    mysql --protocol=socket --user=root
+make ENV_FILE="$env_file" COMPOSE_PROJECT_NAME="$project" grant-access
+
+"${compose[@]}" exec -T -e MYSQL_PWD="$bootstrap_password" mysql \
+  mysql --protocol=socket --user=root \
+  --execute='SET GLOBAL activate_all_roles_on_login = ON'
+assert_fails "grant job rejects automatic role activation" 'refuses activate_all_roles_on_login=ON' \
+  "${compose[@]}" run --rm mysql-grants
+"${compose[@]}" exec -T -e MYSQL_PWD="$bootstrap_password" mysql \
+  mysql --protocol=socket --user=root \
+  --execute='SET GLOBAL activate_all_roles_on_login = OFF'
 
 before_down="$auth_history:$commerce_history:$agent_history"
 make ENV_FILE="$env_file" COMPOSE_PROJECT_NAME="$project" down
@@ -184,6 +231,15 @@ test "$before_down" = "$after_down"
 echo "Verified make down preserves durable migration history."
 
 bad_password="$(printf '%048d' 0)"
+printf '%s\n' "ALTER USER 'bootstrap_admin'@'%' IDENTIFIED BY '$bad_password';" | \
+  "${compose[@]}" exec -T -e MYSQL_PWD="$bootstrap_password" mysql \
+    mysql --protocol=socket --user=root
+assert_fails "grant authentication failure makes startup non-zero" "Access denied for user 'bootstrap_admin'" \
+  make ENV_FILE="$env_file" COMPOSE_PROJECT_NAME="$project" up
+printf '%s\n' "ALTER USER 'bootstrap_admin'@'%' IDENTIFIED BY '$bootstrap_password';" | \
+  "${compose[@]}" exec -T -e MYSQL_PWD="$bootstrap_password" mysql \
+    mysql --protocol=socket --user=root
+
 sed "s/^MYSQL_AUTH_MIGRATION_PASSWORD=.*/MYSQL_AUTH_MIGRATION_PASSWORD=$bad_password/" "$env_file" >"$bad_env"
 assert_fails "migration authentication failure makes startup non-zero" "Access denied for user 'auth_migration'" \
   make ENV_FILE="$bad_env" COMPOSE_PROJECT_NAME="$project" up

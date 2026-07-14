@@ -81,3 +81,35 @@ def test_example_and_compose_contain_no_credential_defaults() -> None:
     assert "mysql:8.4.10@sha256:" in compose
     for name in CREDENTIAL_NAMES:
         assert f"${{{name}:?" in compose
+
+
+def test_grant_job_uses_only_fixed_manifest_and_isolated_bootstrap_config() -> None:
+    script = (ROOT / "scripts" / "apply_mysql_grants.sh").read_text()
+    manifest = (ROOT / "infra" / "mysql" / "grants" / "V001__migration_access.sql").read_text()
+    compose = (ROOT / "compose.yaml").read_text()
+
+    statements = [line for line in manifest.splitlines() if line]
+    assert statements
+    assert all(line.startswith(("GRANT ", "REVOKE ")) for line in statements)
+    assert "V001__migration_access.sql" in script
+    assert "Grant job rejects caller-supplied SQL" in script
+    assert "--activate-all-roles-on-login=OFF" in compose
+
+    migration_anchor = re.search(
+        r"(?ms)^x-migration-service:\s*&migration-service\n(.*?)(?=^\S|\Z)",
+        compose,
+    )
+    assert migration_anchor is not None
+    migration_config_blocks = [migration_anchor.group(1)]
+
+    for service in ("auth-migrate", "commerce-migrate", "agent-migrate"):
+        match = re.search(
+            rf"(?ms)^  {re.escape(service)}:\n(.*?)(?=^  [a-z][^:\n]*:\n|\Z)",
+            compose,
+        )
+        assert match is not None
+        migration_config_blocks.append(match.group(1))
+
+    for config_block in migration_config_blocks:
+        assert "MYSQL_BOOTSTRAP_PASSWORD" not in config_block
+        assert "bootstrap_grant_role" not in config_block

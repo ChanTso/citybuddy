@@ -8,7 +8,7 @@ COMPOSE_PROJECT_NAME ?= citybuddy
 COMPOSE := docker compose --project-name "$(COMPOSE_PROJECT_NAME)" --env-file "$(ENV_FILE)" --file compose.yaml
 
 .DEFAULT_GOAL := ci
-.PHONY: setup format lint typecheck test build docs-check secret-scan java-ci python-ci web-ci repo-ci ci guard-layout init-local up down reset-local migrate-auth migrate-commerce migrate-agent test-integration
+.PHONY: setup format lint typecheck test build docs-check secret-scan java-ci python-ci web-ci repo-ci ci guard-layout init-local up down reset-local grant-access migrate-auth migrate-commerce migrate-agent test-integration
 
 guard-layout:
 	test -x ./mvnw
@@ -27,11 +27,17 @@ guard-layout:
 	test -x scripts/install-gitleaks.sh
 	test -x scripts/init_local.sh
 	test -x scripts/require_local_env.sh
+	test -x scripts/apply_mysql_grants.sh
 	test -x scripts/run_mysql_migrations.sh
 	test -x scripts/test_mysql_integration.sh
+	test -f infra/mysql/grants/V001__migration_access.sql
 
 init-local:
 	ENV_FILE="$(ENV_FILE)" ./scripts/init_local.sh
+
+grant-access:
+	ENV_FILE="$(ENV_FILE)" ./scripts/require_local_env.sh
+	$(COMPOSE) run --rm mysql-grants
 
 migrate-auth:
 	ENV_FILE="$(ENV_FILE)" ./scripts/require_local_env.sh
@@ -48,6 +54,7 @@ migrate-agent:
 up:
 	ENV_FILE="$(ENV_FILE)" ./scripts/require_local_env.sh
 	$(COMPOSE) up --detach --wait mysql
+	$(MAKE) ENV_FILE=$(ENV_FILE) COMPOSE_PROJECT_NAME=$(COMPOSE_PROJECT_NAME) grant-access
 	$(MAKE) ENV_FILE=$(ENV_FILE) COMPOSE_PROJECT_NAME=$(COMPOSE_PROJECT_NAME) migrate-auth
 	$(MAKE) ENV_FILE=$(ENV_FILE) COMPOSE_PROJECT_NAME=$(COMPOSE_PROJECT_NAME) migrate-commerce
 	$(MAKE) ENV_FILE=$(ENV_FILE) COMPOSE_PROJECT_NAME=$(COMPOSE_PROJECT_NAME) migrate-agent

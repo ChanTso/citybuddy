@@ -37,20 +37,10 @@ CREATE USER 'commerce_app'@'%' IDENTIFIED BY '${MYSQL_COMMERCE_APP_PASSWORD}';
 CREATE USER 'agent_app'@'%' IDENTIFIED BY '${MYSQL_AGENT_APP_PASSWORD}';
 SQL
 
-# The grant role is deliberately not a default role. Bootstrap has no direct
-# application-data access and activates elevated privileges only while issuing
-# the explicit grants that define migration and runtime boundaries.
+# The grant role is deliberately not a default role. Root seeds its delegation
+# capability, while the separately invoked grant job controls role activation
+# and the exact grants issued through it.
 MYSQL_PWD="$MYSQL_ROOT_PASSWORD" mysql --protocol=socket --user=root <<SQL
 GRANT ALL PRIVILEGES ON commerce_db.* TO 'bootstrap_grant_role' WITH GRANT OPTION;
 GRANT ALL PRIVILEGES ON cs_db.* TO 'bootstrap_grant_role' WITH GRANT OPTION;
-SQL
-
-MYSQL_PWD="$MYSQL_BOOTSTRAP_PASSWORD" mysql --protocol=socket --user=bootstrap_admin <<SQL
-SET ROLE 'bootstrap_grant_role';
-GRANT CREATE ON commerce_db.* TO 'auth_migration'@'%';
-GRANT SELECT, INSERT, UPDATE, DELETE, CREATE, ALTER, DROP, INDEX, REFERENCES, TRIGGER ON commerce_db.auth_schema_history TO 'auth_migration'@'%';
-GRANT CREATE ON commerce_db.* TO 'commerce_migration'@'%';
-GRANT SELECT, INSERT, UPDATE, DELETE, CREATE, ALTER, DROP, INDEX, REFERENCES, TRIGGER ON commerce_db.commerce_schema_history TO 'commerce_migration'@'%';
-GRANT SELECT, INSERT, UPDATE, DELETE, CREATE, ALTER, DROP, INDEX, REFERENCES, CREATE VIEW, SHOW VIEW, TRIGGER ON cs_db.* TO 'agent_migration'@'%';
-SET ROLE NONE;
 SQL
