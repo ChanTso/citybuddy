@@ -7,7 +7,9 @@ name = "citybuddy-knowledge-indexer"
 version = "0.0.1"
 description = "CityBuddy knowledge indexer executable skeleton"
 requires-python = ">=3.11,<3.12"
-dependencies = []
+dependencies = [
+    "rocketmq-python-client==5.1.1",
+]
 
 [project.scripts]
 citybuddy-indexer = "citybuddy_indexer.__main__:main"
