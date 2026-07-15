@@ -204,7 +204,7 @@ def test_rocketmq_runtime_uses_pinned_proxy_and_grpc_probe() -> None:
     assert "produced=1 consumed=1" in integration
 
 
-def test_aggregate_runtime_probe_and_ci_use_one_ordered_integration_entrypoint() -> None:
+def test_local_ci_order_and_parallel_workflow_cover_every_required_target() -> None:
     makefile = (ROOT / "Makefile").read_text()
     workflow = (ROOT / ".github" / "workflows" / "ci.yml").read_text()
     integration = (ROOT / "scripts" / "test_runtime_integration.sh").read_text()
@@ -218,14 +218,27 @@ def test_aggregate_runtime_probe_and_ci_use_one_ordered_integration_entrypoint()
     expected_targets = (
         "test-runtime-integration",
         "test-mysql-integration",
+        "test-identity-integration",
+        "test-catalog-integration",
         "test-redis-integration",
         "test-elasticsearch-integration",
         "test-rocketmq-integration",
+        "test-knowledge-indexer-rocketmq-spike",
     )
     positions = [aggregate_commands.index(target) for target in expected_targets]
     assert positions == sorted(positions)
     assert "ci: java-ci python-ci web-ci repo-ci test-integration" in makefile
-    assert "run: make ci" in workflow
+    assert "setup: setup-java setup-python setup-web setup-repo" in makefile
+
+    matrix_targets = re.findall(r"^\s+- target: (test-[a-z0-9-]+)$", workflow, flags=re.MULTILINE)
+    assert matrix_targets == list(expected_targets)
+    for target in ("java-ci", "python-ci", "web-ci", "repo-ci"):
+        assert f"run: make {target}" in workflow
+    assert "cancel-in-progress: true" in workflow
+    assert "fail-fast: false" in workflow
+    assert "if: always()" in workflow
+    assert "needs: [java, python, web, repository, integration]" in workflow
+    assert workflow.count('test "$result" = success') == 1
     assert "timeout-minutes: 30" in workflow
 
     for service in (

@@ -10,7 +10,7 @@ The repository contains the verified executable, non-business baseline skeletons
 - `agent-service` and `knowledge-indexer` in one Python 3.11 `uv` workspace;
 - `web` as a React/TypeScript/Vite shell managed by npm.
 
-The repository tooling includes committed Maven Wrapper, `uv.lock`, and `package-lock.json` entry points; Java, Python, and web formatting, linting, typing, unit tests, and builds; pre-commit text hygiene and staged secret detection; repository Gitleaks scanning; and GitHub Actions through the root `make ci` command.
+The repository tooling includes committed Maven Wrapper, `uv.lock`, and `package-lock.json` entry points; Java, Python, and web formatting, linting, typing, unit tests, and builds; pre-commit text hygiene and staged secret detection; repository Gitleaks scanning; and GitHub Actions covering every target in the root `make ci` command.
 
 The current executable slice and its status are maintained only in [IMPLEMENTATION.md](IMPLEMENTATION.md).
 
@@ -86,8 +86,9 @@ and the MySQL, Redis, Elasticsearch/IK, and RocketMQ component probes and reject
 make test-integration
 ```
 
-The GitHub Actions entry point invokes the same scripts through `make ci`; component failures
-remain non-zero instead of being reported as skipped passes.
+GitHub Actions runs the same component and integration targets as `make ci` in isolated parallel
+lanes, then requires every lane through the final `ci` check. Component failures remain non-zero
+instead of being reported as skipped passes.
 
 `make reset-local CONFIRM_RESET_LOCAL=1` is the explicit destructive path; it removes local named
 volumes and the generated credential file.
