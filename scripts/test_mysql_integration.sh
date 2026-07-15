@@ -149,12 +149,14 @@ grep -q 'role-active=`bootstrap_grant_role`@`%`' <<<"$grant_output"
 grep -q 'role-after=NONE' <<<"$grant_output"
 echo "$grant_output"
 
+expected_auth_history="$(find infra/mysql/migrations/auth -maxdepth 1 -type f -name 'V*__*.sql' | wc -l | tr -d ' ')"
+expected_agent_history="$(find infra/mysql/migrations/agent -maxdepth 1 -type f -name 'V*__*.sql' | wc -l | tr -d ' ')"
 auth_history="$(mysql_query auth_migration "$auth_migration_password" commerce_db 'SELECT COUNT(*) FROM auth_schema_history WHERE success = TRUE')"
 commerce_history="$(mysql_query commerce_migration "$commerce_migration_password" commerce_db 'SELECT COUNT(*) FROM commerce_schema_history WHERE success = TRUE')"
 agent_history="$(mysql_query agent_migration "$agent_migration_password" cs_db 'SELECT COUNT(*) FROM agent_schema_history WHERE success = TRUE')"
-test "$auth_history" = "1"
+test "$auth_history" = "$expected_auth_history"
 test "$commerce_history" = "1"
-test "$agent_history" = "1"
+test "$agent_history" = "$expected_agent_history"
 echo "Verified three independent migration histories."
 
 make ENV_FILE="$env_file" COMPOSE_PROJECT_NAME="$project" migrate-auth
@@ -198,8 +200,8 @@ assert_fails "grant job rejects caller-supplied SQL" 'rejects caller-supplied SQ
 
 failure_grant_dir="$tmp_dir/failing-grants"
 mkdir -p "$failure_grant_dir"
-sed -n '1,4p' infra/mysql/grants/V001__migration_access.sql >"$failure_grant_dir/V001__migration_access.sql"
-printf '%s\n' 'SELECT * FROM commerce_db.auth_schema_history;' >>"$failure_grant_dir/V001__migration_access.sql"
+awk 'NR == 5 {$0 = "SELECT * FROM commerce_db.auth_schema_history;"} {print}' \
+  infra/mysql/grants/V001__migration_access.sql >"$failure_grant_dir/V001__migration_access.sql"
 assert_fails "grant job rejects same-count business DML and non-allowlisted SQL" 'rejects non-allowlisted statement at line 5' \
   "${compose[@]}" run --rm --volume "$failure_grant_dir:/opt/citybuddy/grants:ro" mysql-grants
 
@@ -256,10 +258,11 @@ make ENV_FILE="$env_file" COMPOSE_PROJECT_NAME="$project" up
 failure_dir="$tmp_dir/failing-auth-migrations"
 mkdir -p "$failure_dir"
 cp infra/mysql/migrations/auth/V001__validate_auth_target.sql "$failure_dir/"
-printf '%s\n' 'SELECT * FROM cb010_missing_failure_probe;' >"$failure_dir/V002__controlled_failure.sql"
+cp infra/mysql/migrations/auth/V002__identity_foundation.sql "$failure_dir/"
+printf '%s\n' 'SELECT * FROM cb010_missing_failure_probe;' >"$failure_dir/V999__controlled_failure.sql"
 assert_fails "failed migration is visible and non-zero" 'ERROR 1142.*SELECT command denied.*auth_migration' \
   "${compose[@]}" run --rm --volume "$failure_dir:/opt/citybuddy/migrations:ro" auth-migrate
-failed_history="$(mysql_query auth_migration "$auth_migration_password" commerce_db "SELECT success FROM auth_schema_history WHERE version = '002'")"
+failed_history="$(mysql_query auth_migration "$auth_migration_password" commerce_db "SELECT success FROM auth_schema_history WHERE version = '999'")"
 test "$failed_history" = "0"
 assert_fails "failed migration history blocks automatic retry" 'previously failed or is incomplete' \
   "${compose[@]}" run --rm --volume "$failure_dir:/opt/citybuddy/migrations:ro" auth-migrate

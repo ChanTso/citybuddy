@@ -9,7 +9,11 @@ description = "CityBuddy agent service executable skeleton"
 requires-python = ">=3.11,<3.12"
 dependencies = [
   "fastapi==0.116.1",
+  "httpx==0.28.1",
+  "PyJWT[crypto]==2.10.1",
   "pydantic==2.11.7",
+  "PyMySQL==1.1.1",
+  "uvicorn==0.35.0",
 ]
 
 [project.scripts]
