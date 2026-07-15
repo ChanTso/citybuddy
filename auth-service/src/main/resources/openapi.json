@@ -1,0 +1,70 @@
+{
+  "openapi": "3.1.0",
+  "info": {"title": "CityBuddy auth identity API", "version": "CB-020"},
+  "paths": {
+    "/auth/login": {
+      "post": {
+        "operationId": "login",
+        "requestBody": {
+          "required": true,
+          "content": {"application/json": {"schema": {"$ref": "#/components/schemas/LoginRequest"}}}
+        },
+        "responses": {"200": {"description": "RS256 direct-user bearer token", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/TokenResponse"}}}}, "401": {"description": "Invalid credentials, disabled principal, or production evaluation context"}}
+      }
+    },
+    "/auth/jwks": {
+      "get": {
+        "operationId": "jwks",
+        "parameters": [{"name": "X-Eval-Sandbox-Id", "in": "header", "required": false, "schema": {"type": "string"}}],
+        "responses": {"200": {"description": "Current and overlapping public RSA keys only", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/JwksResponse"}}}}, "401": {"description": "Production evaluation context is rejected"}}
+      }
+    },
+    "/auth/token/exchange": {
+      "post": {
+        "operationId": "exchangeAgentObo",
+        "security": [{"serviceBasic": []}],
+        "parameters": [{"name": "X-User-Authorization", "in": "header", "required": true, "schema": {"type": "string"}}],
+        "requestBody": {
+          "required": true,
+          "content": {"application/json": {"schema": {"$ref": "#/components/schemas/ExchangeRequest"}}}
+        },
+        "responses": {"200": {"description": "Short-lived exact-scope agent OBO", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/TokenResponse"}}}}, "401": {"description": "Invalid direct user, service credential, or production evaluation context"}, "403": {"description": "Invalid session assertion, principal state, or scope"}}
+      }
+    }
+  },
+  "components": {
+    "securitySchemes": {"serviceBasic": {"type": "http", "scheme": "basic"}},
+    "schemas": {
+      "LoginRequest": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["loginIdentifier", "password"],
+        "properties": {"loginIdentifier": {"type": "string"}, "password": {"type": "string", "format": "password"}}
+      },
+      "ExchangeRequest": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["sessionId", "userSubject", "scope"],
+        "properties": {"sessionId": {"type": "string", "minLength": 1}, "userSubject": {"type": "string", "minLength": 1}, "scope": {"type": "string", "minLength": 1, "pattern": "^[^*\\s]+$"}}
+      },
+      "TokenResponse": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["accessToken", "tokenType", "expiresIn"],
+        "properties": {"accessToken": {"type": "string"}, "tokenType": {"const": "Bearer"}, "expiresIn": {"type": "integer", "minimum": 1}}
+      },
+      "JwksResponse": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["keys"],
+        "properties": {"keys": {"type": "array", "items": {"$ref": "#/components/schemas/PublicRsaJwk"}}}
+      },
+      "PublicRsaJwk": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["kty", "kid", "alg", "n", "e"],
+        "properties": {"kty": {"const": "RSA"}, "kid": {"type": "string"}, "alg": {"const": "RS256"}, "use": {"type": "string"}, "n": {"type": "string"}, "e": {"type": "string"}}
+      }
+    }
+  }
+}

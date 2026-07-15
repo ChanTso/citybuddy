@@ -23,11 +23,16 @@ if [[ ! -f "$manifest" ]]; then
 fi
 
 expected=(
-  "GRANT CREATE ON commerce_db.* TO 'auth_migration'@'%';"
+  "GRANT CREATE, REFERENCES ON commerce_db.* TO 'auth_migration'@'%';"
   "GRANT SELECT, INSERT, UPDATE, DELETE, CREATE, ALTER, DROP, INDEX, REFERENCES, TRIGGER ON commerce_db.auth_schema_history TO 'auth_migration'@'%';"
   "GRANT CREATE ON commerce_db.* TO 'commerce_migration'@'%';"
   "GRANT SELECT, INSERT, UPDATE, DELETE, CREATE, ALTER, DROP, INDEX, REFERENCES, TRIGGER ON commerce_db.commerce_schema_history TO 'commerce_migration'@'%';"
   "GRANT SELECT, INSERT, UPDATE, DELETE, CREATE, ALTER, DROP, INDEX, REFERENCES, CREATE VIEW, SHOW VIEW, TRIGGER ON cs_db.* TO 'agent_migration'@'%';"
+  "GRANT SELECT, INSERT, UPDATE ON commerce_db.auth_user_principal TO 'auth_app'@'%';"
+  "GRANT SELECT, INSERT, UPDATE ON commerce_db.auth_login_credential TO 'auth_app'@'%';"
+  "GRANT SELECT, INSERT, UPDATE ON commerce_db.auth_service_identity TO 'auth_app'@'%';"
+  "GRANT SELECT, INSERT, UPDATE ON commerce_db.auth_signing_key_metadata TO 'auth_app'@'%';"
+  "GRANT SELECT, INSERT ON cs_db.support_session TO 'agent_app'@'%';"
 )
 mapfile -t actual < <(sed -e '/^[[:space:]]*$/d' -e '/^[[:space:]]*--/d' "$manifest")
 
@@ -65,9 +70,13 @@ if [[ "$fresh_role" != "NONE" ]]; then
 fi
 echo "role-before=$fresh_role"
 
+migration_statement_count=5
+migration_sql="$(printf '%s\n' "${actual[@]:0:$migration_statement_count}")"
+runtime_sql="$(printf '%s\n' "${actual[@]:$migration_statement_count}")"
+
 sql="SET ROLE 'bootstrap_grant_role';
 SELECT CONCAT('role-active=', CURRENT_ROLE());
-$(<"$manifest")
+$migration_sql
 SET ROLE NONE;
 SELECT CONCAT('role-after=', CURRENT_ROLE());"
 output="$(mysql "${mysql_args[@]}" --execute="$sql")"
@@ -75,4 +84,29 @@ echo "$output"
 
 grep -qx 'role-active=`bootstrap_grant_role`@`%`' <<<"$output"
 grep -qx 'role-after=NONE' <<<"$output"
+
+runtime_table_count="$(mysql "${mysql_args[@]}" --execute="
+  SET ROLE 'bootstrap_grant_role';
+  SELECT COUNT(*) FROM information_schema.tables
+  WHERE table_schema IN ('commerce_db', 'cs_db')
+    AND table_name IN (
+      'auth_user_principal',
+      'auth_login_credential',
+      'auth_service_identity',
+      'auth_signing_key_metadata',
+      'support_session'
+    );
+  SET ROLE NONE;")"
+if [[ "$runtime_table_count" == "5" ]]; then
+  mysql "${mysql_args[@]}" --execute="
+    SET ROLE 'bootstrap_grant_role';
+    $runtime_sql
+    SET ROLE NONE;"
+  echo "runtime-grants=applied"
+elif [[ "$runtime_table_count" == "0" ]]; then
+  echo "runtime-grants=deferred-until-migrations"
+else
+  echo "Grant job found an incomplete CB-020 runtime table set: $runtime_table_count of 5." >&2
+  exit 1
+fi
 echo "Grant manifest V001 applied with explicit role activation and cleanup."

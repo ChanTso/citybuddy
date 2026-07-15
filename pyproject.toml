@@ -5,11 +5,13 @@ requires-python = ">=3.11,<3.12"
 
 [dependency-groups]
 dev = [
+  "bcrypt==5.0.0",
   "build==1.2.2.post1",
   "mypy==1.17.0",
   "pre-commit==4.6.0",
   "pytest==8.4.1",
   "ruff==0.12.4",
+  "types-PyMySQL==1.1.0.20250516",
 ]
 
 [tool.uv]

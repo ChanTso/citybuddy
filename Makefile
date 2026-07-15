@@ -10,7 +10,7 @@ COMPOSE_BUILD ?= --build
 COMPOSE := docker compose --project-name "$(COMPOSE_PROJECT_NAME)" --env-file "$(ENV_FILE)" --file compose.yaml
 
 .DEFAULT_GOAL := ci
-.PHONY: setup format lint typecheck test build docs-check secret-scan java-ci python-ci web-ci repo-ci ci guard-layout init-local up down reset-local grant-access migrate-auth migrate-commerce migrate-agent rocketmq-store-init rocketmq-init test-integration test-runtime-integration test-mysql-integration test-redis-integration test-elasticsearch-integration test-rocketmq-integration test-knowledge-indexer-rocketmq-spike
+.PHONY: setup format lint typecheck test build docs-check secret-scan java-ci python-ci web-ci repo-ci ci guard-layout init-local up down reset-local grant-access migrate-auth migrate-commerce migrate-agent rocketmq-store-init rocketmq-init test-integration test-runtime-integration test-mysql-integration test-identity-integration test-redis-integration test-elasticsearch-integration test-rocketmq-integration test-knowledge-indexer-rocketmq-spike
 
 guard-layout:
 	test -x ./mvnw
@@ -32,6 +32,7 @@ guard-layout:
 	test -x scripts/apply_mysql_grants.sh
 	test -x scripts/run_mysql_migrations.sh
 	test -x scripts/test_mysql_integration.sh
+	test -x scripts/test_identity_integration.sh
 	test -x scripts/test_redis_integration.sh
 	test -x scripts/test_elasticsearch_integration.sh
 	test -x scripts/test_rocketmq_integration.sh
@@ -81,6 +82,7 @@ up:
 	$(MAKE) ENV_FILE=$(ENV_FILE) COMPOSE_PROJECT_NAME=$(COMPOSE_PROJECT_NAME) migrate-auth
 	$(MAKE) ENV_FILE=$(ENV_FILE) COMPOSE_PROJECT_NAME=$(COMPOSE_PROJECT_NAME) migrate-commerce
 	$(MAKE) ENV_FILE=$(ENV_FILE) COMPOSE_PROJECT_NAME=$(COMPOSE_PROJECT_NAME) migrate-agent
+	$(MAKE) ENV_FILE=$(ENV_FILE) COMPOSE_PROJECT_NAME=$(COMPOSE_PROJECT_NAME) grant-access
 
 down:
 	ENV_FILE="$(ENV_FILE)" ./scripts/require_local_env.sh
@@ -94,6 +96,9 @@ reset-local:
 
 test-mysql-integration:
 	./scripts/test_mysql_integration.sh
+
+test-identity-integration:
+	./scripts/test_identity_integration.sh
 
 test-redis-integration:
 	./scripts/test_redis_integration.sh
@@ -113,6 +118,7 @@ test-runtime-integration:
 test-integration:
 	$(MAKE) test-runtime-integration
 	$(MAKE) test-mysql-integration
+	$(MAKE) test-identity-integration
 	$(MAKE) test-redis-integration
 	$(MAKE) test-elasticsearch-integration
 	$(MAKE) test-rocketmq-integration

@@ -1,5 +1,5 @@
-"""Executable skeleton for the CityBuddy agent service."""
+"""CityBuddy support-session identity boundary."""
 
-from .application import AgentSettings, create_app
+from .application import AgentSettings, DirectJwtValidator, OboClient, create_app
 
-__all__ = ["AgentSettings", "create_app"]
+__all__ = ["AgentSettings", "DirectJwtValidator", "OboClient", "create_app"]

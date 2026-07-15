@@ -1,0 +1,24 @@
+{
+  "openapi": "3.1.0",
+  "info": {"title": "CityBuddy agent identity API", "version": "CB-020"},
+  "paths": {
+    "/api/sessions": {
+      "post": {
+        "operationId": "createSupportSession",
+        "security": [{"directUserBearer": []}],
+        "requestBody": {
+          "required": true,
+          "content": {"application/json": {"schema": {"type": "object", "additionalProperties": false, "maxProperties": 0}}}
+        },
+        "responses": {
+          "201": {
+            "description": "Opaque server-owned support session",
+            "content": {"application/json": {"schema": {"type": "object", "additionalProperties": false, "required": ["sessionId"], "properties": {"sessionId": {"type": "string"}}}}}
+          },
+          "401": {"description": "Invalid direct-user JWT or production evaluation context"}
+        }
+      }
+    }
+  },
+  "components": {"securitySchemes": {"directUserBearer": {"type": "http", "scheme": "bearer", "bearerFormat": "RS256 JWT"}}}
+}
