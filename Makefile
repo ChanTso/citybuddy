@@ -10,7 +10,7 @@ COMPOSE_BUILD ?= --build
 COMPOSE := docker compose --project-name "$(COMPOSE_PROJECT_NAME)" --env-file "$(ENV_FILE)" --file compose.yaml
 
 .DEFAULT_GOAL := ci
-.PHONY: setup format lint typecheck test build docs-check secret-scan java-ci python-ci web-ci repo-ci ci guard-layout init-local up down reset-local grant-access migrate-auth migrate-commerce migrate-agent rocketmq-store-init rocketmq-init test-integration test-runtime-integration test-mysql-integration test-redis-integration test-elasticsearch-integration test-rocketmq-integration
+.PHONY: setup format lint typecheck test build docs-check secret-scan java-ci python-ci web-ci repo-ci ci guard-layout init-local up down reset-local grant-access migrate-auth migrate-commerce migrate-agent rocketmq-store-init rocketmq-init test-integration test-runtime-integration test-mysql-integration test-redis-integration test-elasticsearch-integration test-rocketmq-integration test-knowledge-indexer-rocketmq-spike
 
 guard-layout:
 	test -x ./mvnw
@@ -35,11 +35,13 @@ guard-layout:
 	test -x scripts/test_redis_integration.sh
 	test -x scripts/test_elasticsearch_integration.sh
 	test -x scripts/test_rocketmq_integration.sh
+	test -x scripts/test_knowledge_indexer_rocketmq_spike.sh
 	test -x scripts/test_runtime_integration.sh
 	test -f infra/mysql/grants/V001__migration_access.sql
 	test -f infra/elasticsearch/Dockerfile
 	test -f infra/rocketmq/broker.conf
 	test -f infra/rocketmq/probe/Dockerfile
+	test -f infra/rocketmq/python-spike/Dockerfile
 	test -f infra/rocketmq/probe/pom.xml
 
 init-local:
@@ -102,6 +104,9 @@ test-elasticsearch-integration:
 test-rocketmq-integration:
 	./scripts/test_rocketmq_integration.sh
 
+test-knowledge-indexer-rocketmq-spike:
+	./scripts/test_knowledge_indexer_rocketmq_spike.sh
+
 test-runtime-integration:
 	./scripts/test_runtime_integration.sh
 
@@ -111,6 +116,7 @@ test-integration:
 	$(MAKE) test-redis-integration
 	$(MAKE) test-elasticsearch-integration
 	$(MAKE) test-rocketmq-integration
+	$(MAKE) test-knowledge-indexer-rocketmq-spike
 
 setup: guard-layout
 	./mvnw --version

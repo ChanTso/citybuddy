@@ -66,10 +66,10 @@ The linked slice name is the canonical detailed specification. Target outcomes a
 | [CB-012 — Elasticsearch and IK runtime foundation](docs/slices/CB-012.md) | P0 | `VERIFIED` | `CB-011` |
 | [CB-013 — RocketMQ Broker and Proxy foundation](docs/slices/CB-013.md) | P0 | `VERIFIED` | `CB-012` |
 | [CB-014 — Local runtime integration closure](docs/slices/CB-014.md) | P0 | `VERIFIED` | `CB-013` |
-| [CB-085 — Python RocketMQ consumer viability spike](docs/slices/CB-085.md) | P0 | `READY` | `CB-014` |
-| [CB-020 — Identity, JWKS and JIT OBO vertical slice](docs/slices/CB-020.md) | P0 | `PLANNED` | `CB-014` |
+| [CB-085 — Python RocketMQ consumer viability spike](docs/slices/CB-085.md) | P0 | `VERIFIED` | `CB-014` |
+| [CB-020 — Identity, JWKS and JIT OBO vertical slice](docs/slices/CB-020.md) | P0 | `READY` | `CB-014` |
 | [CB-030 — Product catalog and cache invalidation](docs/slices/CB-030.md) | P0 | `PLANNED` | `CB-020` |
-| `CB-040 — Standard ordering and MySQL inventory` | P0 | `PLANNED` | `CB-030` |
+| [CB-040 — Standard ordering and MySQL inventory](docs/slices/CB-040.md) | P0 | `PLANNED` | `CB-030` |
 | `CB-050 — Seckill quota, reservation, and Lua admission` | P0 | `PLANNED` | `CB-040` |
 | `CB-060 — RocketMQ transaction ordering and delayed cancellation` | P0 | `PLANNED` | `CB-050` |
 | `CB-070 — Mock payment, refund, ledger extension, and state machines` | P0 | `PLANNED` | `CB-060` |
