@@ -1,8 +1,8 @@
 # CityBuddy implementation index
 
-**Document version:** v0.11\
+**Document version:** v0.12\
 **Verification date:** 2026-07-16\
-**Repository phase:** Seckill activity allocation and projection verified; reservation and admission ready
+**Repository phase:** Seckill reservation and atomic admission verified; transaction-message order creation ready
 
 ## How to use this index
 
@@ -17,7 +17,7 @@
 
 CityBuddy targets local-commerce transactions and text-only AI customer support with independent identity, side-effect, retrieval, and evaluation boundaries.
 
-The repository contains the verified local-runtime foundations, identity vertical slice, product catalog vertical slice, standard-ordering vertical slice, and seckill activity-allocation foundation:
+The repository contains the verified local-runtime foundations, identity vertical slice, product catalog vertical slice, standard-ordering vertical slice, and seckill reservation/admission foundation:
 
 - executable non-business skeletons for `auth-service`, `commerce-service`, `agent-service`, `knowledge-indexer`, and `web`;
 - one Maven reactor and wrapper, one locked `uv` workspace, and one npm lockfile;
@@ -30,9 +30,10 @@ The repository contains the verified local-runtime foundations, identity vertica
 - commerce-owned product and CRM truth, authenticated published-product reads, a non-authoritative Redis cache with bounded penetration and hot-key protection, and transactional Outbox plus idempotent RocketMQ invalidation;
 - direct-user standard ordering with server-authoritative product and price snapshots, user-scoped idempotency, atomic MySQL stock/order/Outbox commit, bounded recognized-conflict retries, and least-privilege runtime grants;
 - MySQL-authoritative seckill activity allocation with versioned post-commit Commerce Redis projection, stale/conflicting/malformed write rejection, MySQL-only rebuild, and exact least-privilege activity grants;
+- MySQL-authoritative seckill reservation intent/status with owner-scoped idempotency and polling, atomic Commerce Redis Lua admission and deterministic decisions, bounded TTL/version/number invariants, MySQL-only reservation rebuild, and exact least-privilege reservation grants;
 - format, lint, type/compile, unit-test, build, pre-commit, Gitleaks, and GitHub Actions paths through `make ci`.
 
-It does not yet contain seckill reservation intent, Lua admission, owner-scoped polling, transaction-message order creation, or delayed cancellation; payment, refund, or support-agent business behavior; production Elasticsearch knowledge indexes; model-provider access; deployment; or measured performance claims.
+It does not yet contain public seckill reservation routes, transaction-message order creation, or delayed cancellation; payment, refund, or support-agent business behavior; production Elasticsearch knowledge indexes; model-provider access; deployment; or measured performance claims.
 
 Cross-slice target architecture, preflight conclusions, service/data ownership, interface and security boundaries, sequence diagrams, route outcomes, risks, and change control live in [docs/CONTRACTS.md](docs/CONTRACTS.md).
 
@@ -75,10 +76,10 @@ The linked slice name is the canonical detailed specification. Target outcomes a
 | [CB-030 — Product catalog and cache invalidation](docs/slices/CB-030.md) | P0 | `VERIFIED` | `CB-020` |
 | [CB-040 — Standard ordering and MySQL inventory](docs/slices/CB-040.md) | P0 | `VERIFIED` | `CB-030` |
 | [CB-050 — Seckill activity allocation and versioned Redis projection](docs/slices/CB-050.md) | P0 | `VERIFIED` | `CB-040` |
-| [CB-051 — Seckill reservation, atomic Lua admission, and owner-scoped polling](docs/slices/CB-051.md) | P0 | `IN_PROGRESS` | `CB-050` |
-| [CB-060 — RocketMQ transaction admission and idempotent seckill order creation](docs/slices/CB-060.md) | P0 | `PLANNED` | `CB-051` |
+| [CB-051 — Seckill reservation, atomic Lua admission, and owner-scoped polling](docs/slices/CB-051.md) | P0 | `VERIFIED` | `CB-050` |
+| [CB-060 — RocketMQ transaction admission and idempotent seckill order creation](docs/slices/CB-060.md) | P0 | `READY` | `CB-051` |
 | [CB-061 — Delayed unpaid cancellation and ledger restoration](docs/slices/CB-061.md) | P0 | `PLANNED` | `CB-060` |
-| `CB-070 — Idempotent mock payment, authenticated callback, and payment ledger transitions` | P0 | `PLANNED` | `CB-061` |
+| [CB-070 — Idempotent mock payment, authenticated callback, and payment ledger transitions](docs/slices/CB-070.md) | P0 | `PLANNED` | `CB-061` |
 | `CB-071 — Refund state machine and payment/refund reconciliation` | P0 | `PLANNED` | `CB-070` |
 | `CB-080 — Support conversation, event, and evidence lifecycle` | P0 | `PLANNED` | `CB-020`, `CB-030`, `CB-040` |
 | `CB-081 — Bounded agent, model routing, and ToolSpec control` | P0 | `PLANNED` | `CB-080` |
