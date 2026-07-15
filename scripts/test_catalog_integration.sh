@@ -114,10 +114,20 @@ cp infra/mysql/migrations/commerce/V001__validate_commerce_target.sql \
 legacy_grant_output="$(make ENV_FILE="$env_file" COMPOSE_PROJECT_NAME="$project" grant-access)"
 grep -q 'runtime-grants=legacy-applied-awaiting-migrations' <<<"$legacy_grant_output"
 echo "Verified exact CB-020 five-table grant state permits the CB-030 upgrade."
+catalog_commerce_migrations="$tmp_dir/catalog-commerce-migrations"
+mkdir -p "$catalog_commerce_migrations"
+cp infra/mysql/migrations/commerce/V001__validate_commerce_target.sql \
+  infra/mysql/migrations/commerce/V002__product_catalog_outbox.sql \
+  "$catalog_commerce_migrations/"
+"${compose[@]}" run --rm \
+  --volume "$catalog_commerce_migrations:/opt/citybuddy/migrations:ro" commerce-migrate
+catalog_grant_output="$(make ENV_FILE="$env_file" COMPOSE_PROJECT_NAME="$project" grant-access)"
+grep -q 'runtime-grants=catalog-applied-awaiting-order-migration' <<<"$catalog_grant_output"
+echo "Verified exact CB-030 nine-table grant state permits the CB-040 upgrade."
 make ENV_FILE="$env_file" COMPOSE_PROJECT_NAME="$project" migrate-commerce
 complete_grant_output="$(make ENV_FILE="$env_file" COMPOSE_PROJECT_NAME="$project" grant-access)"
 grep -q 'runtime-grants=applied' <<<"$complete_grant_output"
-echo "Verified CB-030 upgrade reaches the exact nine-table grant state."
+echo "Verified CB-040 upgrade reaches the exact eleven-table grant state."
 
 test "$(mysql_query commerce_app "$commerce_app_password" commerce_db 'SELECT COUNT(*) FROM crm_profile')" = 0
 test "$(mysql_query commerce_app "$commerce_app_password" commerce_db 'SELECT COUNT(*) FROM product')" = 0
@@ -134,6 +144,19 @@ for table in crm_profile product commerce_outbox; do
   assert_mysql_fails "auth_app cannot read $table" '(SELECT command denied|Access denied)' \
     mysql_query auth_app "$auth_app_password" commerce_db "SELECT * FROM $table"
 done
+for table in standard_order order_idempotency; do
+  test "$(mysql_query commerce_app "$commerce_app_password" commerce_db "SELECT COUNT(*) FROM $table")" = 0
+  assert_mysql_fails "auth_app cannot read $table" '(SELECT command denied|Access denied)' \
+    mysql_query auth_app "$auth_app_password" commerce_db "SELECT * FROM $table"
+  assert_mysql_fails "agent_app cannot read $table" '(SELECT command denied|Access denied)' \
+    mysql_query agent_app "$agent_app_password" commerce_db "SELECT * FROM $table"
+done
+assert_mysql_fails "commerce_app cannot update immutable orders" '(UPDATE command denied|Access denied)' \
+  mysql_query commerce_app "$commerce_app_password" commerce_db \
+  "UPDATE standard_order SET status = 'UNPAID' WHERE order_id = 'none'"
+assert_mysql_fails "commerce_app cannot delete idempotency truth" '(DELETE command denied|Access denied)' \
+  mysql_query commerce_app "$commerce_app_password" commerce_db \
+  "DELETE FROM order_idempotency WHERE user_subject = 'none'"
 assert_mysql_fails "auth_app cannot write CRM" '(INSERT command denied|Access denied)' \
   mysql_query auth_app "$auth_app_password" commerce_db \
   "INSERT INTO crm_profile (user_subject, display_name) VALUES ('forbidden', 'Forbidden')"
@@ -153,11 +176,21 @@ assert_mysql_fails "commerce_app cannot execute DDL" '(CREATE command denied|Acc
 
 user_password="$(openssl rand -hex 24)"
 user_hash="$(uv run python scripts/hash_test_credential.py "$user_password")"
+other_password="$(openssl rand -hex 24)"
+other_hash="$(uv run python scripts/hash_test_credential.py "$other_password")"
+limited_password="$(openssl rand -hex 24)"
+limited_hash="$(uv run python scripts/hash_test_credential.py "$limited_password")"
 mysql_query auth_app "$auth_app_password" commerce_db "
 INSERT INTO auth_user_principal (principal_id, subject, login_identifier, state, permissions)
-VALUES ('00000000-0000-0000-0000-000000000030', 'catalog-user', 'catalog-user', 'ACTIVE', 'catalog:read');
+VALUES
+  ('00000000-0000-0000-0000-000000000030', 'catalog-user', 'catalog-user', 'ACTIVE', 'catalog:read order:create'),
+  ('00000000-0000-0000-0000-000000000031', 'other-user', 'other-user', 'ACTIVE', 'catalog:read order:create'),
+  ('00000000-0000-0000-0000-000000000032', 'limited-user', 'limited-user', 'ACTIVE', 'catalog:read');
 INSERT INTO auth_login_credential (principal_id, password_hash)
-VALUES ('00000000-0000-0000-0000-000000000030', '$user_hash');
+VALUES
+  ('00000000-0000-0000-0000-000000000030', '$user_hash'),
+  ('00000000-0000-0000-0000-000000000031', '$other_hash'),
+  ('00000000-0000-0000-0000-000000000032', '$limited_hash');
 INSERT INTO auth_signing_key_metadata (kid, state, activated_at, retire_after)
 VALUES ('catalog-current', 'CURRENT', CURRENT_TIMESTAMP(6), NULL);
 "
@@ -195,6 +228,18 @@ login_status="$(curl --silent --show-error --output "$tmp_dir/login.json" --writ
   --data "{\"loginIdentifier\":\"catalog-user\",\"password\":\"$user_password\"}")"
 test "$login_status" = 200
 direct_token="$(uv run python scripts/read_json_field.py "$tmp_dir/login.json" accessToken)"
+login_status="$(curl --silent --show-error --output "$tmp_dir/other-login.json" --write-out '%{http_code}' \
+  --request POST "http://127.0.0.1:$auth_port/auth/login" \
+  --header 'Content-Type: application/json' \
+  --data "{\"loginIdentifier\":\"other-user\",\"password\":\"$other_password\"}")"
+test "$login_status" = 200
+other_direct_token="$(uv run python scripts/read_json_field.py "$tmp_dir/other-login.json" accessToken)"
+login_status="$(curl --silent --show-error --output "$tmp_dir/limited-login.json" --write-out '%{http_code}' \
+  --request POST "http://127.0.0.1:$auth_port/auth/login" \
+  --header 'Content-Type: application/json' \
+  --data "{\"loginIdentifier\":\"limited-user\",\"password\":\"$limited_password\"}")"
+test "$login_status" = 200
+limited_direct_token="$(uv run python scripts/read_json_field.py "$tmp_dir/limited-login.json" accessToken)"
 
 admin updateTopic \
   --namesrvAddr rocketmq-namesrv:9876 \
@@ -215,6 +260,7 @@ docker run --rm \
   --workdir /workspace \
   --volume "$repo_root:/workspace" \
   --volume "$HOME/.m2:/m2" \
+  --volume "$tmp_dir/current-private.pem:/tmp/catalog-current-private.pem:ro" \
   --env MAVEN_CONFIG=/tmp/maven \
   --env CATALOG_INTEGRATION=true \
   --env CATALOG_MYSQL_URL='jdbc:mysql://mysql:3306/commerce_db?useSSL=false&allowPublicKeyRetrieval=true' \
@@ -222,6 +268,9 @@ docker run --rm \
   --env CATALOG_REDIS_URL="redis://:$redis_password@redis-commerce:6379" \
   --env IDENTITY_JWKS_URL="http://$project-auth:8080/auth/jwks" \
   --env CATALOG_DIRECT_TOKEN="$direct_token" \
+  --env CATALOG_OTHER_DIRECT_TOKEN="$other_direct_token" \
+  --env CATALOG_LIMITED_DIRECT_TOKEN="$limited_direct_token" \
+  --env CATALOG_TEST_SIGNING_PRIVATE_KEY_PATH=/tmp/catalog-current-private.pem \
   --env ROCKETMQ_ENDPOINTS=rocketmq-broker-proxy:8081 \
   --env ROCKETMQ_TOPIC="$topic" \
   --env ROCKETMQ_CONSUMER_GROUP="$consumer_group" \
@@ -229,4 +278,4 @@ docker run --rm \
   mvn --batch-mode --no-transfer-progress -Dmaven.repo.local=/m2 \
   -pl commerce-service -Dtest=CatalogIntegrationTest test
 
-echo "CB-030 real MySQL, Redis, RocketMQ, API, failure, retry, and permission evidence passed."
+echo "CB-030 catalog and CB-040 real MySQL ordering, concurrency, rollback, API, and permission evidence passed."

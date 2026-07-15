@@ -152,6 +152,7 @@ public final class ProductRepository {
         SELECT event_id, payload
         FROM commerce_outbox
         WHERE publication_state = 'PENDING'
+          AND event_type = 'PRODUCT_PUBLICATION_CHANGED'
         ORDER BY created_at, event_id
         LIMIT ?
         """,

@@ -1,6 +1,6 @@
 {
   "openapi": "3.1.0",
-  "info": {"title": "CityBuddy commerce catalog API", "version": "CB-030"},
+  "info": {"title": "CityBuddy commerce API", "version": "CB-040"},
   "paths": {
     "/api/products": {
       "get": {
@@ -44,6 +44,31 @@
           "404": {"description": "Missing or unpublished product"}
         }
       }
+    },
+    "/api/orders": {
+      "post": {
+        "operationId": "createStandardOrder",
+        "security": [{"directUserBearer": []}],
+        "parameters": [
+          {"name": "Idempotency-Key", "in": "header", "required": true, "schema": {"type": "string", "minLength": 1, "maxLength": 128}},
+          {"name": "X-Correlation-Id", "in": "header", "required": false, "schema": {"type": "string", "pattern": "^[A-Za-z0-9._-]{1,64}$"}},
+          {"name": "X-Eval-Sandbox-Id", "in": "header", "required": false, "schema": {"type": "string"}}
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {"application/json": {"schema": {"$ref": "#/components/schemas/CreateOrderRequest"}}}
+        },
+        "responses": {
+          "200": {"description": "Same user, key, and canonical intent replay", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/StandardOrder"}}}},
+          "201": {"description": "Atomically created standard order", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/StandardOrder"}}}},
+          "400": {"description": "Validation rejection", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/OrderError"}}}},
+          "401": {"description": "Authentication rejection", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/OrderError"}}}},
+          "403": {"description": "Authorization or ownership rejection", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/OrderError"}}}},
+          "409": {"description": "Idempotency, stale-version, or insufficient-stock rejection", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/OrderError"}}}},
+          "422": {"description": "Missing, unpublished, or unavailable authoritative product", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/OrderError"}}}},
+          "503": {"description": "Finite recognized-concurrency retry exhaustion", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/OrderError"}}}}
+        }
+      }
     }
   },
   "components": {
@@ -64,6 +89,44 @@
           "stockQuantity": {"type": "integer", "minimum": 0},
           "available": {"type": "boolean"},
           "publicationVersion": {"type": "integer", "minimum": 1}
+        }
+      },
+      "CreateOrderRequest": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["productId", "quantity", "expectedProductVersion"],
+        "properties": {
+          "productId": {"type": "string", "minLength": 1, "maxLength": 64},
+          "quantity": {"type": "integer", "minimum": 1, "maximum": 100},
+          "expectedProductVersion": {"type": "integer", "minimum": 1}
+        }
+      },
+      "StandardOrder": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["orderId", "productId", "productName", "unitPriceMinor", "currency", "quantity", "totalPriceMinor", "productVersion", "status", "correlationId", "replayed"],
+        "properties": {
+          "orderId": {"type": "string", "format": "uuid"},
+          "productId": {"type": "string"},
+          "productName": {"type": "string"},
+          "unitPriceMinor": {"type": "integer", "minimum": 0},
+          "currency": {"type": "string", "pattern": "^[A-Z]{3}$"},
+          "quantity": {"type": "integer", "minimum": 1},
+          "totalPriceMinor": {"type": "integer", "minimum": 0},
+          "productVersion": {"type": "integer", "minimum": 1},
+          "status": {"type": "string", "enum": ["UNPAID"]},
+          "correlationId": {"type": "string"},
+          "replayed": {"type": "boolean"}
+        }
+      },
+      "OrderError": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["category", "message", "correlationId"],
+        "properties": {
+          "category": {"type": "string", "enum": ["AUTHENTICATION", "AUTHORIZATION", "VALIDATION", "OWNERSHIP", "IDEMPOTENCY_CONFLICT", "STALE_VERSION", "INSUFFICIENT_STOCK", "CONCURRENCY_EXHAUSTED"]},
+          "message": {"type": "string"},
+          "correlationId": {"type": "string"}
         }
       }
     }
