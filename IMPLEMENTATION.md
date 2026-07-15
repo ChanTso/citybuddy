@@ -75,7 +75,7 @@ The linked slice name is the canonical detailed specification. Target outcomes a
 | [CB-030 — Product catalog and cache invalidation](docs/slices/CB-030.md) | P0 | `VERIFIED` | `CB-020` |
 | [CB-040 — Standard ordering and MySQL inventory](docs/slices/CB-040.md) | P0 | `VERIFIED` | `CB-030` |
 | [CB-050 — Seckill activity allocation and versioned Redis projection](docs/slices/CB-050.md) | P0 | `VERIFIED` | `CB-040` |
-| [CB-051 — Seckill reservation, atomic Lua admission, and owner-scoped polling](docs/slices/CB-051.md) | P0 | `READY` | `CB-050` |
+| [CB-051 — Seckill reservation, atomic Lua admission, and owner-scoped polling](docs/slices/CB-051.md) | P0 | `IN_PROGRESS` | `CB-050` |
 | [CB-060 — RocketMQ transaction admission and idempotent seckill order creation](docs/slices/CB-060.md) | P0 | `PLANNED` | `CB-051` |
 | [CB-061 — Delayed unpaid cancellation and ledger restoration](docs/slices/CB-061.md) | P0 | `PLANNED` | `CB-060` |
 | `CB-070 — Idempotent mock payment, authenticated callback, and payment ledger transitions` | P0 | `PLANNED` | `CB-061` |

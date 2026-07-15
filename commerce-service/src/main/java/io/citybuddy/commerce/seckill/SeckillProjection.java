@@ -11,12 +11,16 @@ public record SeckillProjection(
     long remainingQuota) {
 
   static SeckillProjection from(SeckillActivity activity) {
+    return from(activity, activity.allocatedQuota());
+  }
+
+  static SeckillProjection from(SeckillActivity activity, long remainingQuota) {
     return new SeckillProjection(
         activity.activityId(),
         activity.projectionVersion(),
         activity.startsAt(),
         activity.endsAt(),
         activity.state(),
-        activity.allocatedQuota());
+        remainingQuota);
   }
 }

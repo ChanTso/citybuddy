@@ -42,6 +42,7 @@ class SeckillIntegrationTest {
   @Autowired private ObjectMapper objectMapper;
   @Autowired private StringRedisTemplate redis;
   @Autowired private SeckillActivityRepository repository;
+  @Autowired private SeckillReservationRepository reservationRepository;
   @Autowired private SeckillProjectionStore projectionStore;
   @Autowired private SeckillActivityService service;
   @Autowired private TransactionTemplate transactions;
@@ -136,7 +137,8 @@ class SeckillIntegrationTest {
     seedProduct("seckill-failure", 10);
     try (UnavailableProjection unavailable = unavailableProjection()) {
       SeckillActivityService failingService =
-          new SeckillActivityService(repository, unavailable.store(), transactions);
+          new SeckillActivityService(
+              repository, reservationRepository, unavailable.store(), transactions);
       assertThatThrownBy(
               () ->
                   failingService.create(
@@ -158,10 +160,9 @@ class SeckillIntegrationTest {
       RedisServerCommands server = connection.serverCommands();
       String originalMaxmemory = config(server, "maxmemory");
       String originalPolicy = config(server, "maxmemory-policy");
-      long usedMemory = Long.parseLong(server.info("memory").getProperty("used_memory"));
       try {
         server.setConfig("maxmemory-policy", "noeviction");
-        server.setConfig("maxmemory", Long.toString(usedMemory));
+        server.setConfig("maxmemory", "1");
         assertThatThrownBy(
                 () ->
                     service.create(

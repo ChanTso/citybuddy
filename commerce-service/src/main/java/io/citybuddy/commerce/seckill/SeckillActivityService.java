@@ -5,14 +5,17 @@ import org.springframework.transaction.support.TransactionTemplate;
 
 public final class SeckillActivityService {
   private final SeckillActivityRepository repository;
+  private final SeckillReservationRepository reservationRepository;
   private final SeckillProjectionStore projectionStore;
   private final TransactionTemplate transactions;
 
   public SeckillActivityService(
       SeckillActivityRepository repository,
+      SeckillReservationRepository reservationRepository,
       SeckillProjectionStore projectionStore,
       TransactionTemplate transactions) {
     this.repository = repository;
+    this.reservationRepository = reservationRepository;
     this.projectionStore = projectionStore;
     this.transactions = transactions;
   }
@@ -47,11 +50,9 @@ public final class SeckillActivityService {
 
   public AllocationResult changeAllocation(String activityId, long allocatedQuota) {
     validateIdentity(activityId, "Activity id");
-    if (allocatedQuota < 1) {
-      throw new IllegalArgumentException("Allocated quota must be positive");
-    }
-    SeckillActivity committed =
-        requireResult(
+    SeckillLuaNumber.requirePositiveExact(allocatedQuota, "Allocated quota");
+    ProjectionTruth committed =
+        requireProjectionTruth(
             transactions.execute(
                 status -> {
                   SeckillActivity current =
@@ -63,20 +64,54 @@ public final class SeckillActivityService {
                     throw new IllegalStateException(
                         "Closed seckill activity allocation is immutable");
                   }
+                  if (reservationRepository.hasPendingForActivity(activityId)) {
+                    throw new IllegalStateException(
+                        "Seckill activity has an indeterminate pending reservation");
+                  }
+                  long admitted = reservationRepository.admittedQuantity(activityId);
+                  if (allocatedQuota < admitted) {
+                    throw new IllegalArgumentException(
+                        "Allocated quota is below authoritative admitted reservations");
+                  }
                   long inventory = authoritativeInventory(current.productId());
                   rejectOverAllocation(allocatedQuota, inventory);
-                  return repository.updateAllocation(current, allocatedQuota);
+                  if (current.projectionVersion() >= SeckillLuaNumber.MAX_EXACT_INTEGER) {
+                    throw new IllegalStateException(
+                        "Seckill activity projection version cannot be incremented safely");
+                  }
+                  return new ProjectionTruth(
+                      repository.updateAllocation(current, allocatedQuota),
+                      allocatedQuota - admitted);
                 }));
-    return new AllocationResult(committed, projectionStore.publish(committed));
+    return new AllocationResult(
+        committed.activity(),
+        projectionStore.publish(committed.activity(), committed.remainingQuota()));
   }
 
   public AllocationResult rebuildProjection(String activityId) {
     validateIdentity(activityId, "Activity id");
-    SeckillActivity truth =
-        repository
-            .find(activityId)
-            .orElseThrow(() -> new IllegalArgumentException("Seckill activity is missing"));
-    return new AllocationResult(truth, projectionStore.publish(truth));
+    ProjectionTruth truth =
+        requireProjectionTruth(
+            transactions.execute(
+                status -> {
+                  SeckillActivity activity =
+                      repository
+                          .findForUpdate(activityId)
+                          .orElseThrow(
+                              () -> new IllegalArgumentException("Seckill activity is missing"));
+                  if (reservationRepository.hasPendingForActivity(activityId)) {
+                    throw new IllegalStateException(
+                        "Seckill activity has an indeterminate pending reservation");
+                  }
+                  long admitted = reservationRepository.admittedQuantity(activityId);
+                  if (admitted > activity.allocatedQuota()) {
+                    throw new IllegalStateException(
+                        "Admitted reservations exceed authoritative activity allocation");
+                  }
+                  return new ProjectionTruth(activity, activity.allocatedQuota() - admitted);
+                }));
+    return new AllocationResult(
+        truth.activity(), projectionStore.publish(truth.activity(), truth.remainingQuota()));
   }
 
   private long authoritativeInventory(String productId) {
@@ -105,9 +140,7 @@ public final class SeckillActivityService {
     if (command.state() == null) {
       throw new IllegalArgumentException("Seckill activity state is required");
     }
-    if (command.allocatedQuota() < 1) {
-      throw new IllegalArgumentException("Allocated quota must be positive");
-    }
+    SeckillLuaNumber.requirePositiveExact(command.allocatedQuota(), "Allocated quota");
   }
 
   private static void validateIdentity(String value, String label) {
@@ -123,6 +156,13 @@ public final class SeckillActivityService {
     return activity;
   }
 
+  private static ProjectionTruth requireProjectionTruth(ProjectionTruth truth) {
+    if (truth == null) {
+      throw new IllegalStateException("Seckill projection transaction returned no result");
+    }
+    return truth;
+  }
+
   public record CreateActivity(
       String activityId,
       String productId,
@@ -133,4 +173,6 @@ public final class SeckillActivityService {
 
   public record AllocationResult(
       SeckillActivity activity, SeckillProjectionStore.PublishResult projectionResult) {}
+
+  private record ProjectionTruth(SeckillActivity activity, long remainingQuota) {}
 }
