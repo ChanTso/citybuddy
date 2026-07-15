@@ -51,7 +51,18 @@ init-local:
 
 grant-access:
 	ENV_FILE="$(ENV_FILE)" ./scripts/require_local_env.sh
-	$(COMPOSE) run --rm mysql-grants
+	@status=0; $(COMPOSE) run --rm mysql-grants || status=$$?; \
+	if (( status != 0 )); then \
+		echo "MySQL grant job failed; collecting service diagnostics." >&2; \
+		$(COMPOSE) ps --all mysql >&2 || true; \
+		container_id="$$($(COMPOSE) ps --quiet mysql 2>/dev/null)"; \
+		if [[ -n "$$container_id" ]]; then \
+			docker inspect --format 'mysql-status={{.State.Status}} mysql-running={{.State.Running}} mysql-restarting={{.State.Restarting}} mysql-restart-count={{.RestartCount}} mysql-health={{if .State.Health}}{{.State.Health.Status}}{{else}}none{{end}}' "$$container_id" >&2 || true; \
+			docker inspect --format '{{range .State.Health.Log}}mysql-health-check end={{.End}} exit={{.ExitCode}} output={{json .Output}}{{println}}{{end}}' "$$container_id" >&2 || true; \
+		fi; \
+		$(COMPOSE) logs --no-color --tail 120 mysql >&2 || true; \
+		exit $$status; \
+	fi
 
 migrate-auth:
 	ENV_FILE="$(ENV_FILE)" ./scripts/require_local_env.sh
