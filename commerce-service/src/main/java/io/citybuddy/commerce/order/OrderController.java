@@ -2,11 +2,13 @@ package io.citybuddy.commerce.order;
 
 import io.citybuddy.commerce.catalog.CatalogException;
 import io.citybuddy.commerce.catalog.DirectUserAuthorizer;
+import jakarta.servlet.http.HttpServletRequest;
 import java.util.UUID;
 import java.util.regex.Pattern;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
+import org.springframework.http.converter.HttpMessageNotReadableException;
 import org.springframework.web.bind.annotation.ExceptionHandler;
 import org.springframework.web.bind.annotation.PostMapping;
 import org.springframework.web.bind.annotation.RequestBody;
@@ -52,14 +54,14 @@ public final class OrderController {
         .body(result);
   }
 
-  private static String correlationId(String supplied) {
+  static String correlationId(String supplied) {
     return supplied != null && SAFE_CORRELATION.matcher(supplied).matches()
         ? supplied
         : UUID.randomUUID().toString();
   }
 }
 
-@RestControllerAdvice
+@RestControllerAdvice(assignableTypes = OrderController.class)
 final class OrderExceptionHandler {
   @ExceptionHandler(OrderException.class)
   ResponseEntity<OrderError> handle(OrderException exception) {
@@ -67,6 +69,16 @@ final class OrderExceptionHandler {
         .body(
             new OrderError(
                 exception.category().name(), exception.getMessage(), exception.correlationId()));
+  }
+
+  @ExceptionHandler(HttpMessageNotReadableException.class)
+  ResponseEntity<OrderError> handleUnreadable(HttpServletRequest request) {
+    return ResponseEntity.badRequest()
+        .body(
+            new OrderError(
+                OrderCategory.VALIDATION.name(),
+                "Request body is invalid",
+                OrderController.correlationId(request.getHeader("X-Correlation-Id"))));
   }
 
   record OrderError(String category, String message, String correlationId) {}

@@ -5,9 +5,22 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.nimbusds.jose.JWSAlgorithm;
+import com.nimbusds.jose.JWSHeader;
+import com.nimbusds.jose.crypto.RSASSASigner;
+import com.nimbusds.jwt.JWTClaimsSet;
+import com.nimbusds.jwt.SignedJWT;
 import io.citybuddy.commerce.order.OrderRepository;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.security.KeyFactory;
+import java.security.interfaces.RSAPrivateKey;
+import java.security.spec.PKCS8EncodedKeySpec;
 import java.time.Duration;
+import java.time.Instant;
 import java.util.ArrayList;
+import java.util.Base64;
+import java.util.Date;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
@@ -110,6 +123,7 @@ class CatalogIntegrationTest {
     assertThat(created.getBody().get("totalPriceMinor").asLong()).isEqualTo(1500);
     assertThat(created.getBody().get("replayed").asBoolean()).isFalse();
     assertOrderCardinality("order-main", 8, 1, 1, 1);
+    assertTotalIdempotencyCount(1);
 
     ResponseEntity<JsonNode> replay =
         postOrder(
@@ -120,6 +134,7 @@ class CatalogIntegrationTest {
     assertThat(replay.getBody().get("orderId").asText()).isEqualTo(orderId);
     assertThat(replay.getBody().get("replayed").asBoolean()).isTrue();
     assertOrderCardinality("order-main", 8, 1, 1, 1);
+    assertTotalIdempotencyCount(1);
 
     assertOrderError(
         postOrder(
@@ -135,11 +150,34 @@ class CatalogIntegrationTest {
             Map.of("productId", "order-main", "quantity", 1, "expectedProductVersion", 4));
     assertThat(otherUser.getStatusCode()).isEqualTo(HttpStatus.CREATED);
     assertThat(otherUser.getBody().get("orderId").asText()).isNotEqualTo(orderId);
+    assertTotalIdempotencyCount(2);
 
     assertOrderError(
         postOrder(
             null,
             "auth-key",
+            Map.of("productId", "order-main", "quantity", 1, "expectedProductVersion", 4)),
+        HttpStatus.UNAUTHORIZED,
+        "AUTHENTICATION");
+    assertOrderError(
+        postOrder(
+            signedTestToken(
+                "https://wrong-identity.citybuddy.test", "citybuddy-web", "direct_user"),
+            "wrong-issuer-key",
+            Map.of("productId", "order-main", "quantity", 1, "expectedProductVersion", 4)),
+        HttpStatus.UNAUTHORIZED,
+        "AUTHENTICATION");
+    assertOrderError(
+        postOrder(
+            signedTestToken("https://identity.citybuddy.test", "commerce-service", "direct_user"),
+            "wrong-audience-key",
+            Map.of("productId", "order-main", "quantity", 1, "expectedProductVersion", 4)),
+        HttpStatus.UNAUTHORIZED,
+        "AUTHENTICATION");
+    assertOrderError(
+        postOrder(
+            signedTestToken("https://identity.citybuddy.test", "citybuddy-web", "agent_obo"),
+            "wrong-type-key",
             Map.of("productId", "order-main", "quantity", 1, "expectedProductVersion", 4)),
         HttpStatus.UNAUTHORIZED,
         "AUTHENTICATION");
@@ -178,6 +216,13 @@ class CatalogIntegrationTest {
                 4,
                 "priceMinor",
                 1)),
+        HttpStatus.BAD_REQUEST,
+        "VALIDATION");
+    assertOrderError(
+        postOrder(
+            token(),
+            "malformed-key",
+            Map.of("productId", "order-main", "quantity", "one", "expectedProductVersion", 4)),
         HttpStatus.BAD_REQUEST,
         "VALIDATION");
     assertOrderError(
@@ -247,6 +292,23 @@ class CatalogIntegrationTest {
         HttpStatus.UNPROCESSABLE_ENTITY,
         "VALIDATION");
     assertOrderCardinality("order-main", 7, 2, 2, 2);
+    assertTotalIdempotencyCount(2);
+    assertIdempotencyKeysAbsent(
+        "auth-key",
+        "wrong-issuer-key",
+        "wrong-audience-key",
+        "wrong-type-key",
+        "permission-key",
+        "owner-key",
+        "price-key",
+        "stock-authority-key",
+        "quantity-key",
+        "malformed-key",
+        "stale-key",
+        "stock-key",
+        "missing-key",
+        "hidden-key",
+        "unavailable-key");
 
     proveRealMysqlRollback();
     proveLimitedStockConcurrency();
@@ -318,6 +380,7 @@ class CatalogIntegrationTest {
     assertThat(successes).isEqualTo(3);
     assertThat(insufficient).isEqualTo(5);
     assertOrderCardinality("order-limited", 0, 3, 3, 3);
+    assertTotalIdempotencyCount(5);
   }
 
   private void proveConcurrentDuplicateIdempotency() throws Exception {
@@ -367,6 +430,7 @@ class CatalogIntegrationTest {
     assertThat(created).isEqualTo(1);
     assertThat(replayed).isEqualTo(7);
     assertOrderCardinality("order-duplicate", 4, 1, 1, 1);
+    assertTotalIdempotencyCount(6);
   }
 
   private void seedOrderProduct(
@@ -420,6 +484,27 @@ class CatalogIntegrationTest {
                 Integer.class,
                 productId))
         .isEqualTo(outbox);
+  }
+
+  private void assertTotalIdempotencyCount(int expected) {
+    assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM order_idempotency", Integer.class))
+        .isEqualTo(expected);
+  }
+
+  private void assertIdempotencyKeysAbsent(String... keys) {
+    for (String key : keys) {
+      assertThat(
+              jdbc.queryForObject(
+                  """
+                  SELECT COUNT(*)
+                  FROM order_idempotency
+                  WHERE user_subject = 'catalog-user' AND idempotency_key = ?
+                  """,
+                  Integer.class,
+                  key))
+          .as("rejected key %s must not leave an idempotency guard", key)
+          .isZero();
+    }
   }
 
   private static void assertOrderError(
@@ -887,8 +972,7 @@ class CatalogIntegrationTest {
         JsonNode.class);
   }
 
-  private ResponseEntity<JsonNode> postOrder(
-      String bearer, String idempotencyKey, Map<String, Object> body) {
+  private ResponseEntity<JsonNode> postOrder(String bearer, String idempotencyKey, Object body) {
     HttpHeaders headers = new HttpHeaders();
     if (bearer != null) {
       headers.setBearerAuth(bearer);
@@ -937,6 +1021,40 @@ class CatalogIntegrationTest {
 
   private static String limitedToken() {
     return required("CATALOG_LIMITED_DIRECT_TOKEN");
+  }
+
+  private static String signedTestToken(String issuer, String audience, String tokenType)
+      throws Exception {
+    Instant now = Instant.now();
+    JWTClaimsSet claims =
+        new JWTClaimsSet.Builder()
+            .issuer(issuer)
+            .audience(audience)
+            .subject("catalog-user")
+            .claim("token_type", tokenType)
+            .claim("principal_state", "ACTIVE")
+            .claim("permissions", List.of("order:create"))
+            .issueTime(Date.from(now))
+            .notBeforeTime(Date.from(now))
+            .expirationTime(Date.from(now.plusSeconds(300)))
+            .jwtID(UUID.randomUUID().toString())
+            .build();
+    SignedJWT jwt =
+        new SignedJWT(
+            new JWSHeader.Builder(JWSAlgorithm.RS256).keyID("catalog-current").build(), claims);
+    jwt.sign(new RSASSASigner(testSigningPrivateKey()));
+    return jwt.serialize();
+  }
+
+  private static RSAPrivateKey testSigningPrivateKey() throws Exception {
+    String pem = Files.readString(Path.of(required("CATALOG_TEST_SIGNING_PRIVATE_KEY_PATH")));
+    String encoded =
+        pem.replace("-----BEGIN PRIVATE KEY-----", "")
+            .replace("-----END PRIVATE KEY-----", "")
+            .replaceAll("\\s", "");
+    return (RSAPrivateKey)
+        KeyFactory.getInstance("RSA")
+            .generatePrivate(new PKCS8EncodedKeySpec(Base64.getDecoder().decode(encoded)));
   }
 
   private static String required(String name) {

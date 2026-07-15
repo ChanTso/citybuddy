@@ -260,6 +260,7 @@ docker run --rm \
   --workdir /workspace \
   --volume "$repo_root:/workspace" \
   --volume "$HOME/.m2:/m2" \
+  --volume "$tmp_dir/current-private.pem:/tmp/catalog-current-private.pem:ro" \
   --env MAVEN_CONFIG=/tmp/maven \
   --env CATALOG_INTEGRATION=true \
   --env CATALOG_MYSQL_URL='jdbc:mysql://mysql:3306/commerce_db?useSSL=false&allowPublicKeyRetrieval=true' \
@@ -269,6 +270,7 @@ docker run --rm \
   --env CATALOG_DIRECT_TOKEN="$direct_token" \
   --env CATALOG_OTHER_DIRECT_TOKEN="$other_direct_token" \
   --env CATALOG_LIMITED_DIRECT_TOKEN="$limited_direct_token" \
+  --env CATALOG_TEST_SIGNING_PRIVATE_KEY_PATH=/tmp/catalog-current-private.pem \
   --env ROCKETMQ_ENDPOINTS=rocketmq-broker-proxy:8081 \
   --env ROCKETMQ_TOPIC="$topic" \
   --env ROCKETMQ_CONSUMER_GROUP="$consumer_group" \
