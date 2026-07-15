@@ -12,6 +12,7 @@ public final class SeckillProjectionStore {
   private static final DefaultRedisScript<Long> PUBLISH_SCRIPT =
       new DefaultRedisScript<>(
           """
+          local MAX_JSON_INTEGER = 99999999999999
           local current = redis.call('GET', KEYS[1])
           if not current then
             redis.call('SET', KEYS[1], ARGV[1])
@@ -23,14 +24,33 @@ public final class SeckillProjectionStore {
           end
           local current_version = tonumber(projection.projectionVersion)
           local incoming_version = tonumber(ARGV[2])
-          if not current_version or not incoming_version then
+          local current_remaining = tonumber(projection.remainingQuota)
+          if not current_version or current_version < 1 or current_version > MAX_JSON_INTEGER
+              or not incoming_version or incoming_version < 1
+              or incoming_version > MAX_JSON_INTEGER
+              or not current_remaining or current_remaining < 0
+              or current_remaining > MAX_JSON_INTEGER then
             return -1
           end
           if current_version > incoming_version then
             return 0
           end
           if current_version == incoming_version then
-            if current == ARGV[1] then
+            local incoming_ok, incoming = pcall(cjson.decode, ARGV[1])
+            if not incoming_ok or type(incoming) ~= 'table' then
+              return -1
+            end
+            local incoming_remaining = tonumber(incoming.remainingQuota)
+            if not incoming_remaining or incoming_remaining < 0
+                or incoming_remaining > MAX_JSON_INTEGER then
+              return -1
+            end
+            if projection.activityId == incoming.activityId
+                and projection.projectionVersion == incoming.projectionVersion
+                and projection.startsAt == incoming.startsAt
+                and projection.endsAt == incoming.endsAt
+                and projection.state == incoming.state
+                and projection.remainingQuota == incoming.remainingQuota then
               return 2
             end
             return -2
@@ -49,7 +69,18 @@ public final class SeckillProjectionStore {
   }
 
   public PublishResult publish(SeckillActivity activity) {
-    SeckillProjection projection = SeckillProjection.from(activity);
+    return publish(activity, activity.allocatedQuota());
+  }
+
+  public PublishResult publish(SeckillActivity activity, long remainingQuota) {
+    SeckillLuaNumber.requirePositiveExact(
+        activity.projectionVersion(), "Seckill projection version");
+    SeckillLuaNumber.requirePositiveExact(activity.allocatedQuota(), "Allocated quota");
+    SeckillLuaNumber.requireNonNegativeExact(remainingQuota, "Remaining seckill quota");
+    if (remainingQuota > activity.allocatedQuota()) {
+      throw new IllegalArgumentException("Remaining seckill quota is invalid");
+    }
+    SeckillProjection projection = SeckillProjection.from(activity, remainingQuota);
     String payload = serialize(projection);
     final Long result;
     try {

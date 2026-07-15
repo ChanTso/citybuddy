@@ -14,4 +14,5 @@ GRANT SELECT, INSERT, UPDATE ON commerce_db.commerce_outbox TO 'commerce_app'@'%
 GRANT SELECT, INSERT ON commerce_db.standard_order TO 'commerce_app'@'%';
 GRANT SELECT, INSERT, UPDATE ON commerce_db.order_idempotency TO 'commerce_app'@'%';
 GRANT SELECT, INSERT, UPDATE ON commerce_db.seckill_activity TO 'commerce_app'@'%';
+GRANT SELECT, INSERT, UPDATE ON commerce_db.seckill_reservation TO 'commerce_app'@'%';
 GRANT SELECT, INSERT ON cs_db.support_session TO 'agent_app'@'%';
