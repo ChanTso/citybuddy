@@ -10,7 +10,7 @@ COMPOSE_BUILD ?= --build
 COMPOSE := docker compose --project-name "$(COMPOSE_PROJECT_NAME)" --env-file "$(ENV_FILE)" --file compose.yaml
 
 .DEFAULT_GOAL := ci
-.PHONY: setup format lint typecheck test build docs-check secret-scan java-ci python-ci web-ci repo-ci ci guard-layout init-local up down reset-local grant-access migrate-auth migrate-commerce migrate-agent rocketmq-store-init rocketmq-init test-integration test-runtime-integration test-mysql-integration test-identity-integration test-catalog-integration test-redis-integration test-elasticsearch-integration test-rocketmq-integration test-knowledge-indexer-rocketmq-spike
+.PHONY: setup setup-java setup-python setup-web setup-repo format lint typecheck test build docs-check secret-scan java-ci python-ci web-ci repo-ci ci guard-layout init-local up down reset-local grant-access migrate-auth migrate-commerce migrate-agent rocketmq-store-init rocketmq-init test-integration test-runtime-integration test-mysql-integration test-identity-integration test-catalog-integration test-redis-integration test-elasticsearch-integration test-rocketmq-integration test-knowledge-indexer-rocketmq-spike
 
 guard-layout:
 	test -x ./mvnw
@@ -140,10 +140,18 @@ test-integration:
 	$(MAKE) test-rocketmq-integration
 	$(MAKE) test-knowledge-indexer-rocketmq-spike
 
-setup: guard-layout
+setup: setup-java setup-python setup-web setup-repo
+
+setup-java: guard-layout
 	./mvnw --version
+
+setup-python: guard-layout
 	uv sync --all-packages --locked
+
+setup-web: guard-layout
 	npm --prefix web ci
+
+setup-repo: setup-python
 	GITLEAKS_VERSION=$(GITLEAKS_VERSION) ./scripts/install-gitleaks.sh
 	uv run pre-commit install-hooks
 

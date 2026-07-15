@@ -8,32 +8,154 @@ on:
 permissions:
   contents: read
 
+concurrency:
+  group: ci-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
 jobs:
-  ci:
+  java:
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
-        with:
-          fetch-depth: 0
       - uses: actions/setup-java@0f481fcb613427c0f801b606911222b5b6f3083a # v5
         with:
           distribution: temurin
           java-version: "21"
           cache: maven
+      - name: Install Java toolchain
+        run: make setup-java
+      - name: Run Java checks
+        run: make java-ci
+
+  python:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
       - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
         with:
           python-version: "3.11"
+      - uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
+        with:
+          version: "0.11.24"
+          enable-cache: true
+      - name: Install Python toolchain
+        run: make setup-python
+      - name: Run Python checks
+        run: make python-ci
+
+  web:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
       - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
         with:
           node-version: "24.17.0"
           cache: npm
           cache-dependency-path: web/package-lock.json
+      - name: Install web toolchain
+        run: make setup-web
+      - name: Run web checks
+        run: make web-ci
+
+  repository:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          python-version: "3.11"
       - uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
         with:
           version: "0.11.24"
           enable-cache: true
-      - name: Install locked toolchains
-        run: make setup
-      - name: Run repository CI
-        run: make ci
+      - name: Install repository toolchain
+        run: make setup-repo
+      - name: Run repository checks
+        run: make repo-ci
+
+  integration:
+    name: integration (${{ matrix.target }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: test-runtime-integration
+            java: false
+            python: false
+          - target: test-mysql-integration
+            java: false
+            python: false
+          - target: test-identity-integration
+            java: true
+            python: true
+          - target: test-catalog-integration
+            java: true
+            python: true
+          - target: test-redis-integration
+            java: false
+            python: false
+          - target: test-elasticsearch-integration
+            java: false
+            python: false
+          - target: test-rocketmq-integration
+            java: false
+            python: false
+          - target: test-knowledge-indexer-rocketmq-spike
+            java: false
+            python: false
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+      - if: matrix.java
+        uses: actions/setup-java@0f481fcb613427c0f801b606911222b5b6f3083a # v5
+        with:
+          distribution: temurin
+          java-version: "21"
+          cache: maven
+      - if: matrix.python
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          python-version: "3.11"
+      - if: matrix.python
+        uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
+        with:
+          version: "0.11.24"
+          enable-cache: true
+      - if: matrix.java
+        name: Install Java toolchain
+        run: make setup-java
+      - if: matrix.python
+        name: Install Python toolchain
+        run: make setup-python
+      - name: Run integration suite
+        run: make ${{ matrix.target }}
+
+  ci:
+    if: always()
+    needs: [java, python, web, repository, integration]
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Require every CI lane
+        env:
+          JAVA_RESULT: ${{ needs.java.result }}
+          PYTHON_RESULT: ${{ needs.python.result }}
+          WEB_RESULT: ${{ needs.web.result }}
+          REPOSITORY_RESULT: ${{ needs.repository.result }}
+          INTEGRATION_RESULT: ${{ needs.integration.result }}
+        run: |
+          for result in \
+            "$JAVA_RESULT" \
+            "$PYTHON_RESULT" \
+            "$WEB_RESULT" \
+            "$REPOSITORY_RESULT" \
+            "$INTEGRATION_RESULT"; do
+            test "$result" = success
+          done
