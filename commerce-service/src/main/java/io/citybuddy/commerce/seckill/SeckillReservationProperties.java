@@ -7,10 +7,10 @@ import org.springframework.boot.context.properties.ConfigurationProperties;
 public record SeckillReservationProperties(
     Duration reservationTtl,
     Duration decisionMarkerTtl,
-    Duration plannedBrokerTransactionTimeout,
-    Duration plannedBrokerCheckInterval,
-    Integer plannedBrokerMaximumChecks,
-    Duration plannedBrokerSafetyMargin,
+    Duration brokerTransactionTimeout,
+    Duration brokerCheckInterval,
+    Integer brokerMaximumChecks,
+    Duration brokerSafetyMargin,
     Duration rebuildLockTtl) {
 
   private static final long MAX_REDIS_TTL_MILLIS = 99_999_999_999_999L;
@@ -18,43 +18,35 @@ public record SeckillReservationProperties(
   public SeckillReservationProperties {
     reservationTtl = defaulted(reservationTtl, Duration.ofMinutes(15));
     decisionMarkerTtl = defaulted(decisionMarkerTtl, Duration.ofMinutes(15));
-    plannedBrokerTransactionTimeout =
-        defaulted(plannedBrokerTransactionTimeout, Duration.ofMinutes(1));
-    plannedBrokerCheckInterval = defaulted(plannedBrokerCheckInterval, Duration.ofSeconds(15));
-    plannedBrokerMaximumChecks =
-        plannedBrokerMaximumChecks == null ? 5 : plannedBrokerMaximumChecks;
-    plannedBrokerSafetyMargin = defaulted(plannedBrokerSafetyMargin, Duration.ofSeconds(30));
+    brokerTransactionTimeout = defaulted(brokerTransactionTimeout, Duration.ofSeconds(6));
+    brokerCheckInterval = defaulted(brokerCheckInterval, Duration.ofSeconds(1));
+    brokerMaximumChecks = brokerMaximumChecks == null ? 3 : brokerMaximumChecks;
+    brokerSafetyMargin = defaulted(brokerSafetyMargin, Duration.ofSeconds(2));
     rebuildLockTtl = defaulted(rebuildLockTtl, Duration.ofSeconds(30));
 
     requireRedisMillisecond(reservationTtl, "Reservation TTL");
     requireRedisMillisecond(decisionMarkerTtl, "Decision-marker TTL");
-    requireRedisMillisecond(plannedBrokerTransactionTimeout, "Planned broker transaction timeout");
-    requireRedisMillisecond(plannedBrokerCheckInterval, "Planned broker check interval");
-    requireRedisMillisecond(plannedBrokerSafetyMargin, "Planned broker safety margin");
+    requireRedisMillisecond(brokerTransactionTimeout, "Broker transaction timeout");
+    requireRedisMillisecond(brokerCheckInterval, "Broker check interval");
+    requireRedisMillisecond(brokerSafetyMargin, "Broker safety margin");
     requireRedisMillisecond(rebuildLockTtl, "Rebuild lock TTL");
-    if (plannedBrokerMaximumChecks < 1) {
-      throw new IllegalArgumentException("Planned broker maximum checks must be positive");
+    if (brokerMaximumChecks < 1) {
+      throw new IllegalArgumentException("Broker maximum checks must be positive");
     }
 
     Duration requiredCoverage =
         brokerCoverage(
-            plannedBrokerTransactionTimeout,
-            plannedBrokerCheckInterval,
-            plannedBrokerMaximumChecks,
-            plannedBrokerSafetyMargin);
+            brokerTransactionTimeout, brokerCheckInterval, brokerMaximumChecks, brokerSafetyMargin);
     if (reservationTtl.compareTo(requiredCoverage) < 0
         || decisionMarkerTtl.compareTo(requiredCoverage) < 0) {
       throw new IllegalArgumentException(
-          "Reservation and decision-marker TTLs must cover the planned broker window");
+          "Reservation and decision-marker TTLs must cover the broker window");
     }
   }
 
-  public Duration minimumPlannedBrokerCoverage() {
+  public Duration minimumBrokerCoverage() {
     return brokerCoverage(
-        plannedBrokerTransactionTimeout,
-        plannedBrokerCheckInterval,
-        plannedBrokerMaximumChecks,
-        plannedBrokerSafetyMargin);
+        brokerTransactionTimeout, brokerCheckInterval, brokerMaximumChecks, brokerSafetyMargin);
   }
 
   private static Duration defaulted(Duration value, Duration defaultValue) {
@@ -84,7 +76,7 @@ public record SeckillReservationProperties(
     try {
       return transactionTimeout.plus(checkInterval.multipliedBy(maximumChecks)).plus(safetyMargin);
     } catch (ArithmeticException exception) {
-      throw new IllegalArgumentException("Planned broker window is too large", exception);
+      throw new IllegalArgumentException("Broker window is too large", exception);
     }
   }
 }

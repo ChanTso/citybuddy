@@ -1,6 +1,6 @@
 GRANT CREATE, REFERENCES ON commerce_db.* TO 'auth_migration'@'%';
 GRANT SELECT, INSERT, UPDATE, DELETE, CREATE, ALTER, DROP, INDEX, REFERENCES, TRIGGER ON commerce_db.auth_schema_history TO 'auth_migration'@'%';
-GRANT CREATE ON commerce_db.* TO 'commerce_migration'@'%';
+GRANT CREATE, ALTER ON commerce_db.* TO 'commerce_migration'@'%';
 GRANT SELECT, INSERT, UPDATE, DELETE, CREATE, ALTER, DROP, INDEX, REFERENCES, TRIGGER ON commerce_db.commerce_schema_history TO 'commerce_migration'@'%';
 GRANT SELECT, INSERT, UPDATE, DELETE, CREATE, ALTER, DROP, INDEX, REFERENCES, CREATE VIEW, SHOW VIEW, TRIGGER ON cs_db.* TO 'agent_migration'@'%';
 GRANT SELECT, INSERT, UPDATE ON commerce_db.auth_user_principal TO 'auth_app'@'%';
@@ -15,4 +15,6 @@ GRANT SELECT, INSERT ON commerce_db.standard_order TO 'commerce_app'@'%';
 GRANT SELECT, INSERT, UPDATE ON commerce_db.order_idempotency TO 'commerce_app'@'%';
 GRANT SELECT, INSERT, UPDATE ON commerce_db.seckill_activity TO 'commerce_app'@'%';
 GRANT SELECT, INSERT, UPDATE ON commerce_db.seckill_reservation TO 'commerce_app'@'%';
+GRANT SELECT, INSERT ON commerce_db.seckill_order TO 'commerce_app'@'%';
+GRANT SELECT, INSERT ON commerce_db.inventory_ledger TO 'commerce_app'@'%';
 GRANT SELECT, INSERT ON cs_db.support_session TO 'agent_app'@'%';

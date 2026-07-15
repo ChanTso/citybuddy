@@ -9,7 +9,8 @@ public record ReservationResult(
     ReservationDecisionCode decisionCode,
     long projectionVersion,
     boolean replay,
-    boolean durableOrderCreated) {
+    boolean durableOrderCreated,
+    String orderId) {
 
   static ReservationResult from(SeckillReservation reservation, boolean replay) {
     return new ReservationResult(
@@ -21,6 +22,21 @@ public record ReservationResult(
         reservation.decisionCode(),
         reservation.projectionVersion(),
         replay,
-        false);
+        reservation.state() == ReservationState.ORDERED,
+        reservation.orderId());
+  }
+
+  ReservationResult asReplay() {
+    return new ReservationResult(
+        reservationId,
+        activityId,
+        quantity,
+        activityProjectionVersion,
+        state,
+        decisionCode,
+        projectionVersion,
+        true,
+        durableOrderCreated,
+        orderId);
   }
 }

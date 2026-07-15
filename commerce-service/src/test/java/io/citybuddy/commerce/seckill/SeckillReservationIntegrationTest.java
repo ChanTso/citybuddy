@@ -520,7 +520,7 @@ class SeckillReservationIntegrationTest {
     assertThat(redis.hasKey(admissionStore.rebuildKey("reservation-rebuild"))).isFalse();
     redis.delete(rejectedOnlyUserKey);
 
-    Duration minimum = properties.minimumPlannedBrokerCoverage();
+    Duration minimum = properties.minimumBrokerCoverage();
     assertThat(properties.reservationTtl()).isGreaterThanOrEqualTo(minimum);
     assertThat(properties.decisionMarkerTtl()).isGreaterThanOrEqualTo(minimum);
     assertThat(

@@ -9,6 +9,7 @@ import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.UUID;
+import org.apache.rocketmq.client.apis.producer.TransactionResolution;
 import org.springframework.data.redis.core.StringRedisTemplate;
 import org.springframework.data.redis.core.script.DefaultRedisScript;
 
@@ -273,7 +274,7 @@ public final class ReservationAdmissionStore {
                 or incoming.reservationId ~= reservation_id
                 or tonumber(incoming.reservationVersion) ~= version
                 or not version or version < 1 or version > MAX_JSON_INTEGER
-                or (state ~= 'ADMITTED' and state ~= 'REJECTED') then
+                or (state ~= 'ADMITTED' and state ~= 'REJECTED' and state ~= 'ORDERED') then
               return -12
             end
             local quantity = tonumber(incoming.quantity)
@@ -304,7 +305,8 @@ public final class ReservationAdmissionStore {
             end
 
             local existing_user = redis.call('GET', KEYS[key_base])
-            if state == 'ADMITTED' and expected_user_marker ~= reservation_id then return -12 end
+            if (state == 'ADMITTED' or state == 'ORDERED')
+                and expected_user_marker ~= reservation_id then return -12 end
             if expected_user_marker == '' then
               if existing_user then return -12 end
             elseif existing_user and existing_user ~= expected_user_marker then
@@ -319,7 +321,7 @@ public final class ReservationAdmissionStore {
             local payload = ARGV[argument_base]
             local state = ARGV[argument_base + 1]
             local reservation_id = ARGV[argument_base + 2]
-            if state == 'ADMITTED' then
+            if state == 'ADMITTED' or state == 'ORDERED' then
               table.insert(writes, KEYS[key_base])
               table.insert(writes, reservation_id)
             end
@@ -333,7 +335,8 @@ public final class ReservationAdmissionStore {
           for index = 0, count - 1 do
             local key_base = 3 + index * 3
             local argument_base = 7 + index * 5
-            if ARGV[argument_base + 1] == 'ADMITTED' then
+            if ARGV[argument_base + 1] == 'ADMITTED'
+                or ARGV[argument_base + 1] == 'ORDERED' then
               redis.call('PEXPIRE', KEYS[key_base], ARGV[4])
             end
             redis.call('PEXPIRE', KEYS[key_base + 1], ARGV[4])
@@ -423,6 +426,35 @@ public final class ReservationAdmissionStore {
     };
   }
 
+  public TransactionResolution transactionResolution(String reservationId) {
+    final String marker;
+    try {
+      marker = redis.opsForValue().get(decisionKey(reservationId));
+    } catch (RuntimeException exception) {
+      return TransactionResolution.UNKNOWN;
+    }
+    if (marker == null) {
+      return TransactionResolution.UNKNOWN;
+    }
+    try {
+      var payload = objectMapper.readTree(marker);
+      if (!reservationId.equals(payload.path("reservationId").asText())) {
+        return TransactionResolution.UNKNOWN;
+      }
+      String state = payload.path("state").asText();
+      String code = payload.path("decisionCode").asText();
+      if (("ADMITTED".equals(state) || "ORDERED".equals(state)) && "ADMITTED".equals(code)) {
+        return TransactionResolution.COMMIT;
+      }
+      if ("REJECTED".equals(state) && !code.isBlank() && !"ADMITTED".equals(code)) {
+        return TransactionResolution.ROLLBACK;
+      }
+      return TransactionResolution.UNKNOWN;
+    } catch (JsonProcessingException exception) {
+      return TransactionResolution.UNKNOWN;
+    }
+  }
+
   public String acquireRebuild(String activityId) {
     String token = UUID.randomUUID().toString();
     final Boolean acquired;
@@ -476,16 +508,21 @@ public final class ReservationAdmissionStore {
     for (SeckillReservation reservation : reservations) {
       if (reservation.state() == ReservationState.PENDING
           || reservation.decisionCode() == null
-          || reservation.projectionVersion() != 2) {
+          || (reservation.state() == ReservationState.ORDERED
+              ? reservation.projectionVersion() != 3 || reservation.orderId() == null
+              : reservation.projectionVersion() != 2)) {
         throw new AdmissionIndeterminateException(
             "Pending reservation prevents projection rebuild");
       }
       String userHash = SeckillReservationService.sha256(reservation.userSubject());
-      if (reservation.state() == ReservationState.ADMITTED && !admittedUsers.add(userHash)) {
+      if ((reservation.state() == ReservationState.ADMITTED
+              || reservation.state() == ReservationState.ORDERED)
+          && !admittedUsers.add(userHash)) {
         throw new AdmissionIndeterminateException(
             "MySQL truth contains repeated admitted reservations for one user");
       }
-      if (reservation.state() == ReservationState.ADMITTED) {
+      if (reservation.state() == ReservationState.ADMITTED
+          || reservation.state() == ReservationState.ORDERED) {
         admittedReservationByUser.put(userHash, reservation.reservationId());
       }
     }
@@ -507,7 +544,7 @@ public final class ReservationAdmissionStore {
                   reservation.projectionVersion(),
                   reservation.state(),
                   reservation.decisionCode(),
-                  false)));
+                  reservation.state() == ReservationState.ORDERED)));
       arguments.add(reservation.state().name());
       arguments.add(reservation.reservationId());
       arguments.add(Long.toString(reservation.projectionVersion()));

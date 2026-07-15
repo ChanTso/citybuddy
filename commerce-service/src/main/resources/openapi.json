@@ -1,6 +1,6 @@
 {
   "openapi": "3.1.0",
-  "info": {"title": "CityBuddy commerce API", "version": "CB-040"},
+  "info": {"title": "CityBuddy commerce API", "version": "CB-060"},
   "paths": {
     "/api/products": {
       "get": {
@@ -69,6 +69,48 @@
           "503": {"description": "Finite recognized-concurrency retry exhaustion", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/OrderError"}}}}
         }
       }
+    },
+    "/api/seckill/activities/{activityId}/reservations": {
+      "post": {
+        "operationId": "createSeckillReservation",
+        "security": [{"directUserBearer": []}],
+        "parameters": [
+          {"name": "activityId", "in": "path", "required": true, "schema": {"type": "string", "minLength": 1, "maxLength": 64}},
+          {"name": "Idempotency-Key", "in": "header", "required": true, "schema": {"type": "string", "minLength": 1, "maxLength": 128}},
+          {"name": "X-Eval-Sandbox-Id", "in": "header", "required": false, "schema": {"type": "string"}}
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {"application/json": {"schema": {"$ref": "#/components/schemas/SeckillReservationRequest"}}}
+        },
+        "responses": {
+          "200": {"description": "Owned idempotent replay or durable ordered result", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/SeckillReservation"}}}},
+          "201": {"description": "Admission marker committed; durable order is not yet claimed", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/SeckillReservation"}}}},
+          "202": {"description": "Owned reservation is pending a bounded transaction outcome", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/SeckillReservation"}}}},
+          "400": {"description": "Validation or body-identity rejection", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/SeckillError"}}}},
+          "401": {"description": "Authentication rejection", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/SeckillError"}}}},
+          "403": {"description": "Authorization rejection", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/SeckillError"}}}},
+          "409": {"description": "Explicit rejected reservation or idempotency conflict", "content": {"application/json": {"schema": {"oneOf": [{"$ref": "#/components/schemas/SeckillReservation"}, {"$ref": "#/components/schemas/SeckillError"}]}}}},
+          "503": {"description": "Transaction admission transport unavailable", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/SeckillError"}}}}
+        }
+      }
+    },
+    "/api/reservations/{reservationId}": {
+      "get": {
+        "operationId": "getOwnedSeckillReservation",
+        "security": [{"directUserBearer": []}],
+        "parameters": [
+          {"name": "reservationId", "in": "path", "required": true, "schema": {"type": "string", "format": "uuid"}},
+          {"name": "X-Eval-Sandbox-Id", "in": "header", "required": false, "schema": {"type": "string"}}
+        ],
+        "responses": {
+          "200": {"description": "Owned durable reservation status", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/SeckillReservation"}}}},
+          "400": {"description": "Invalid reservation identifier", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/SeckillError"}}}},
+          "401": {"description": "Authentication rejection", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/SeckillError"}}}},
+          "403": {"description": "Authorization rejection", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/SeckillError"}}}},
+          "404": {"description": "Unknown or cross-user reservation", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/SeckillError"}}}}
+        }
+      }
     }
   },
   "components": {
@@ -127,6 +169,41 @@
           "category": {"type": "string", "enum": ["AUTHENTICATION", "AUTHORIZATION", "VALIDATION", "OWNERSHIP", "IDEMPOTENCY_CONFLICT", "STALE_VERSION", "INSUFFICIENT_STOCK", "CONCURRENCY_EXHAUSTED"]},
           "message": {"type": "string"},
           "correlationId": {"type": "string"}
+        }
+      },
+      "SeckillReservationRequest": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["quantity", "expectedActivityVersion"],
+        "properties": {
+          "quantity": {"type": "integer", "minimum": 1},
+          "expectedActivityVersion": {"type": "integer", "minimum": 1, "maximum": 99999999999999}
+        }
+      },
+      "SeckillReservation": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["reservationId", "activityId", "quantity", "activityProjectionVersion", "state", "decisionCode", "projectionVersion", "replay", "durableOrderCreated", "orderId"],
+        "properties": {
+          "reservationId": {"type": "string", "format": "uuid"},
+          "activityId": {"type": "string"},
+          "quantity": {"type": "integer", "minimum": 1},
+          "activityProjectionVersion": {"type": "integer", "minimum": 1},
+          "state": {"type": "string", "enum": ["PENDING", "ADMITTED", "REJECTED", "ORDERED"]},
+          "decisionCode": {"type": ["string", "null"], "enum": ["ADMITTED", "ACTIVITY_INACTIVE", "NOT_OPEN", "EXPIRED", "STALE_VERSION", "EXHAUSTED", "DUPLICATE_USER", null]},
+          "projectionVersion": {"type": "integer", "minimum": 1, "maximum": 3},
+          "replay": {"type": "boolean"},
+          "durableOrderCreated": {"type": "boolean"},
+          "orderId": {"type": ["string", "null"], "format": "uuid"}
+        }
+      },
+      "SeckillError": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["category", "message"],
+        "properties": {
+          "category": {"type": "string", "enum": ["AUTHENTICATION", "AUTHORIZATION", "VALIDATION", "CONFLICT", "UNAVAILABLE"]},
+          "message": {"type": "string"}
         }
       }
     }

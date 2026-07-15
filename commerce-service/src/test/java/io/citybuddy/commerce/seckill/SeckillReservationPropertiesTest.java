@@ -19,12 +19,11 @@ class SeckillReservationPropertiesTest {
             Duration.ofSeconds(30),
             Duration.ofSeconds(20));
 
-    assertThat(properties.minimumPlannedBrokerCoverage())
-        .isEqualTo(Duration.ofMinutes(2).plusSeconds(30));
+    assertThat(properties.minimumBrokerCoverage()).isEqualTo(Duration.ofMinutes(2).plusSeconds(30));
   }
 
   @Test
-  void rejectsTtlsThatCannotCoverPlannedBrokerChecks() {
+  void rejectsTtlsThatCannotCoverBrokerChecks() {
     assertThatThrownBy(
             () ->
                 new SeckillReservationProperties(
@@ -36,7 +35,7 @@ class SeckillReservationPropertiesTest {
                     Duration.ofSeconds(30),
                     Duration.ofSeconds(20)))
         .isInstanceOf(IllegalArgumentException.class)
-        .hasMessageContaining("cover the planned broker window");
+        .hasMessageContaining("cover the broker window");
   }
 
   @Test

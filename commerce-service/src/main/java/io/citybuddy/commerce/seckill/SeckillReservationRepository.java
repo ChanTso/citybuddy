@@ -9,7 +9,7 @@ import org.springframework.jdbc.core.JdbcTemplate;
 public final class SeckillReservationRepository {
   private static final String COLUMNS =
       "reservation_id, user_subject, activity_id, idempotency_key, intent_hash, quantity, "
-          + "activity_projection_version, state, decision_code, projection_version";
+          + "activity_projection_version, state, decision_code, projection_version, order_id";
 
   private final JdbcTemplate jdbc;
 
@@ -89,7 +89,7 @@ public final class SeckillReservationRepository {
     Long quantity =
         jdbc.queryForObject(
             "SELECT COALESCE(SUM(quantity), 0) FROM seckill_reservation "
-                + "WHERE activity_id = ? AND state = 'ADMITTED'",
+                + "WHERE activity_id = ? AND state IN ('ADMITTED', 'ORDERED')",
             Long.class,
             activityId);
     return quantity == null ? 0 : quantity;
@@ -120,7 +120,36 @@ public final class SeckillReservationRepository {
         current.activityProjectionVersion(),
         state,
         decisionCode,
-        2);
+        2,
+        null);
+  }
+
+  public SeckillReservation markOrdered(SeckillReservation current, String orderId) {
+    int changed =
+        jdbc.update(
+            """
+            UPDATE seckill_reservation
+            SET state = 'ORDERED', projection_version = 3, order_id = ?
+            WHERE reservation_id = ? AND state = 'ADMITTED'
+              AND projection_version = 2 AND order_id IS NULL
+            """,
+            orderId,
+            current.reservationId());
+    if (changed != 1) {
+      throw new IllegalStateException("Reservation changed during its locked order transition");
+    }
+    return new SeckillReservation(
+        current.reservationId(),
+        current.userSubject(),
+        current.activityId(),
+        current.idempotencyKey(),
+        current.intentHash(),
+        current.quantity(),
+        current.activityProjectionVersion(),
+        ReservationState.ORDERED,
+        current.decisionCode(),
+        3,
+        orderId);
   }
 
   private Optional<SeckillReservation> queryOne(String sql, Object... arguments) {
@@ -140,6 +169,7 @@ public final class SeckillReservationRepository {
         result.getLong("activity_projection_version"),
         ReservationState.valueOf(result.getString("state")),
         code == null ? null : ReservationDecisionCode.valueOf(code),
-        result.getLong("projection_version"));
+        result.getLong("projection_version"),
+        result.getString("order_id"));
   }
 }
