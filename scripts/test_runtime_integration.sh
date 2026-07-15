@@ -88,11 +88,13 @@ assert_migrations_complete() {
   agent_password="$(read_value MYSQL_AGENT_MIGRATION_PASSWORD)"
 
   local expected_auth
+  local expected_commerce
   local expected_agent
   expected_auth="$(find infra/mysql/migrations/auth -maxdepth 1 -type f -name 'V*__*.sql' | wc -l | tr -d ' ')"
+  expected_commerce="$(find infra/mysql/migrations/commerce -maxdepth 1 -type f -name 'V*__*.sql' | wc -l | tr -d ' ')"
   expected_agent="$(find infra/mysql/migrations/agent -maxdepth 1 -type f -name 'V*__*.sql' | wc -l | tr -d ' ')"
   test "$(mysql_count auth_migration "$auth_password" commerce_db auth_schema_history)" = "$expected_auth"
-  test "$(mysql_count commerce_migration "$commerce_password" commerce_db commerce_schema_history)" = 1
+  test "$(mysql_count commerce_migration "$commerce_password" commerce_db commerce_schema_history)" = "$expected_commerce"
   test "$(mysql_count agent_migration "$agent_password" cs_db agent_schema_history)" = "$expected_agent"
 }
 
