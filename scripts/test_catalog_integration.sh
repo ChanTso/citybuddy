@@ -124,10 +124,21 @@ cp infra/mysql/migrations/commerce/V001__validate_commerce_target.sql \
 catalog_grant_output="$(make ENV_FILE="$env_file" COMPOSE_PROJECT_NAME="$project" grant-access)"
 grep -q 'runtime-grants=catalog-applied-awaiting-order-migration' <<<"$catalog_grant_output"
 echo "Verified exact CB-030 nine-table grant state permits the CB-040 upgrade."
+order_commerce_migrations="$tmp_dir/order-commerce-migrations"
+mkdir -p "$order_commerce_migrations"
+cp infra/mysql/migrations/commerce/V001__validate_commerce_target.sql \
+  infra/mysql/migrations/commerce/V002__product_catalog_outbox.sql \
+  infra/mysql/migrations/commerce/V003__standard_ordering.sql \
+  "$order_commerce_migrations/"
+"${compose[@]}" run --rm \
+  --volume "$order_commerce_migrations:/opt/citybuddy/migrations:ro" commerce-migrate
+order_grant_output="$(make ENV_FILE="$env_file" COMPOSE_PROJECT_NAME="$project" grant-access)"
+grep -q 'runtime-grants=order-applied-awaiting-seckill-migration' <<<"$order_grant_output"
+echo "Verified exact CB-040 eleven-table grant state permits the CB-050 upgrade."
 make ENV_FILE="$env_file" COMPOSE_PROJECT_NAME="$project" migrate-commerce
 complete_grant_output="$(make ENV_FILE="$env_file" COMPOSE_PROJECT_NAME="$project" grant-access)"
 grep -q 'runtime-grants=applied' <<<"$complete_grant_output"
-echo "Verified CB-040 upgrade reaches the exact eleven-table grant state."
+echo "Verified CB-050 upgrade reaches the exact twelve-table grant state."
 
 test "$(mysql_query commerce_app "$commerce_app_password" commerce_db 'SELECT COUNT(*) FROM crm_profile')" = 0
 test "$(mysql_query commerce_app "$commerce_app_password" commerce_db 'SELECT COUNT(*) FROM product')" = 0
@@ -151,6 +162,27 @@ for table in standard_order order_idempotency; do
   assert_mysql_fails "agent_app cannot read $table" '(SELECT command denied|Access denied)' \
     mysql_query agent_app "$agent_app_password" commerce_db "SELECT * FROM $table"
 done
+test "$(mysql_query commerce_app "$commerce_app_password" commerce_db 'SELECT COUNT(*) FROM seckill_activity')" = 0
+for identity in auth_app agent_app; do
+  password="$auth_app_password"
+  if [[ "$identity" = agent_app ]]; then
+    password="$agent_app_password"
+  fi
+  assert_mysql_fails "$identity cannot read seckill activities" '(SELECT command denied|Access denied)' \
+    mysql_query "$identity" "$password" commerce_db 'SELECT * FROM seckill_activity'
+  assert_mysql_fails "$identity cannot write seckill activities" '(INSERT command denied|Access denied)' \
+    mysql_query "$identity" "$password" commerce_db \
+    "INSERT INTO seckill_activity (activity_id, product_id, starts_at, ends_at, state, allocated_quota, projection_version) VALUES ('forbidden', 'none', '2030-01-01 00:00:00', '2030-01-01 01:00:00', 'DRAFT', 1, 1)"
+done
+assert_mysql_fails "commerce_app cannot delete seckill activity truth" '(DELETE command denied|Access denied)' \
+  mysql_query commerce_app "$commerce_app_password" commerce_db \
+  "DELETE FROM seckill_activity WHERE activity_id = 'none'"
+assert_mysql_fails "database rejects an invalid seckill window" '(Check constraint|CONSTRAINT.*failed)' \
+  mysql_query commerce_app "$commerce_app_password" commerce_db \
+  "INSERT INTO seckill_activity (activity_id, product_id, starts_at, ends_at, state, allocated_quota, projection_version) VALUES ('invalid-window', 'none', '2030-01-01 01:00:00', '2030-01-01 00:00:00', 'DRAFT', 1, 1)"
+assert_mysql_fails "database rejects an invalid seckill state" '(Data truncated|Incorrect.*value)' \
+  mysql_query commerce_app "$commerce_app_password" commerce_db \
+  "INSERT INTO seckill_activity (activity_id, product_id, starts_at, ends_at, state, allocated_quota, projection_version) VALUES ('invalid-state', 'none', '2030-01-01 00:00:00', '2030-01-01 01:00:00', 'UNKNOWN', 1, 1)"
 assert_mysql_fails "commerce_app cannot update immutable orders" '(UPDATE command denied|Access denied)' \
   mysql_query commerce_app "$commerce_app_password" commerce_db \
   "UPDATE standard_order SET status = 'UNPAID' WHERE order_id = 'none'"
@@ -173,6 +205,17 @@ assert_mysql_fails "commerce_app cannot read auth-private credentials" '(SELECT 
 assert_mysql_fails "commerce_app cannot execute DDL" '(CREATE command denied|Access denied)' \
   mysql_query commerce_app "$commerce_app_password" commerce_db \
   'CREATE TABLE forbidden_catalog_ddl (id INT)'
+
+if rg -n 'bootstrap_admin|commerce_migration|MYSQL_BOOTSTRAP|MYSQL_COMMERCE_MIGRATION' \
+  commerce-service/src/main commerce-service/src/test/resources; then
+  echo "Commerce application configuration contains migration or bootstrap credentials." >&2
+  exit 1
+fi
+if rg -n 'reservation|user.?marker|decision.?marker|RocketMq|standard_order' \
+  commerce-service/src/main/java/io/citybuddy/commerce/seckill; then
+  echo "CB-050 seckill implementation contains later-slice behavior." >&2
+  exit 1
+fi
 
 user_password="$(openssl rand -hex 24)"
 user_hash="$(uv run python scripts/hash_test_credential.py "$user_password")"
@@ -276,6 +319,6 @@ docker run --rm \
   --env ROCKETMQ_CONSUMER_GROUP="$consumer_group" \
   maven:3.9.11-eclipse-temurin-21@sha256:6fdc855a6ed81d288ca7ca37ac6ff5e9308b612485c0801d70b25a858c83d237 \
   mvn --batch-mode --no-transfer-progress -Dmaven.repo.local=/m2 \
-  -pl commerce-service -Dtest=CatalogIntegrationTest test
+  -pl commerce-service -Dtest=CatalogIntegrationTest,SeckillIntegrationTest test
 
-echo "CB-030 catalog and CB-040 real MySQL ordering, concurrency, rollback, API, and permission evidence passed."
+echo "CB-030 catalog, CB-040 ordering, and CB-050 real MySQL/Redis allocation, projection, failure, and permission evidence passed."
