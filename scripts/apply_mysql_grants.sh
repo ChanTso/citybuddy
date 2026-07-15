@@ -11,6 +11,17 @@ fi
 : "${MYSQL_USER:?MYSQL_USER is required}"
 : "${MYSQL_PASSWORD:?MYSQL_PASSWORD is required}"
 
+mysql_connect_attempts="${MYSQL_CONNECT_ATTEMPTS:-30}"
+mysql_connect_retry_seconds="${MYSQL_CONNECT_RETRY_SECONDS:-1}"
+if [[ ! "$mysql_connect_attempts" =~ ^[1-9][0-9]*$ ]]; then
+  echo "MYSQL_CONNECT_ATTEMPTS must be a positive integer." >&2
+  exit 1
+fi
+if [[ ! "$mysql_connect_retry_seconds" =~ ^[0-9]+$ ]]; then
+  echo "MYSQL_CONNECT_RETRY_SECONDS must be a non-negative integer." >&2
+  exit 1
+fi
+
 if [[ "$MYSQL_USER" != "bootstrap_admin" ]]; then
   echo "Grant job requires the bootstrap_admin identity." >&2
   exit 1
@@ -57,9 +68,41 @@ mysql_args=(
   --host="$MYSQL_HOST"
   --port="$MYSQL_PORT"
   --user="$MYSQL_USER"
+  --connect-timeout=2
   --batch
   --skip-column-names
 )
+
+wait_for_mysql_tcp() {
+  local attempt
+  local output
+  for ((attempt = 1; attempt <= mysql_connect_attempts; attempt++)); do
+    if output="$(mysql "${mysql_args[@]}" --execute='SELECT 1' 2>&1)"; then
+      if [[ "$output" != "1" ]]; then
+        echo "MySQL TCP readiness returned an unexpected response: $output" >&2
+        return 1
+      fi
+      if (( attempt > 1 )); then
+        echo "mysql-tcp-ready-after-attempt=$attempt"
+      fi
+      return 0
+    fi
+
+    if ! grep -Eq 'ERROR 2003 .*Can.t connect to MySQL server' <<<"$output"; then
+      printf '%s\n' "$output" >&2
+      return 1
+    fi
+    if (( attempt == mysql_connect_attempts )); then
+      echo "MySQL TCP readiness failed after $mysql_connect_attempts attempts." >&2
+      printf '%s\n' "$output" >&2
+      return 1
+    fi
+    echo "MySQL TCP is not ready (attempt $attempt/$mysql_connect_attempts); retrying." >&2
+    sleep "$mysql_connect_retry_seconds"
+  done
+}
+
+wait_for_mysql_tcp
 
 auto_roles="$(mysql "${mysql_args[@]}" --execute='SELECT @@GLOBAL.activate_all_roles_on_login')"
 if [[ "$auto_roles" != "0" ]]; then

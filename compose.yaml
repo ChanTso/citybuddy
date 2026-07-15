@@ -57,7 +57,7 @@ services:
     healthcheck:
       test:
         - CMD-SHELL
-        - MYSQL_PWD="$${MYSQL_ROOT_PASSWORD}" mysql --protocol=socket --user=root --database=mysql --batch --skip-column-names --execute='SELECT 1' | grep -qx 1
+        - MYSQL_PWD="$${MYSQL_ROOT_PASSWORD}" mysql --protocol=tcp --host=127.0.0.1 --port=3306 --connect-timeout=2 --user=root --database=mysql --batch --skip-column-names --execute='SELECT 1' | grep -qx 1
       interval: 2s
       timeout: 5s
       retries: 30

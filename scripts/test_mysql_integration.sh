@@ -120,6 +120,17 @@ auth_app_password="$(read_value MYSQL_AUTH_APP_PASSWORD)"
 commerce_app_password="$(read_value MYSQL_COMMERCE_APP_PASSWORD)"
 agent_app_password="$(read_value MYSQL_AGENT_APP_PASSWORD)"
 
+assert_fails "grant job retries only bounded TCP unavailability" \
+  'MySQL TCP readiness failed after 2 attempts' \
+  "${compose[@]}" run --rm --no-deps \
+  -e MYSQL_PORT=3307 \
+  -e MYSQL_CONNECT_ATTEMPTS=2 \
+  -e MYSQL_CONNECT_RETRY_SECONDS=0 \
+  mysql-grants
+grep -q 'MySQL TCP is not ready (attempt 1/2); retrying.' "$tmp_dir/rejection.log"
+grep -Eq 'ERROR 2003 .*Can.t connect to MySQL server' "$tmp_dir/rejection.log"
+echo "Verified bounded retry is limited to TCP readiness failures."
+
 declare -a identities=(
   "bootstrap_admin:$bootstrap_password"
   "auth_migration:$auth_migration_password"
@@ -246,6 +257,11 @@ printf '%s\n' "ALTER USER 'bootstrap_admin'@'%' IDENTIFIED BY '$bad_password';" 
     mysql --protocol=socket --user=root
 assert_fails "grant authentication failure makes startup non-zero" "Access denied for user 'bootstrap_admin'" \
   make ENV_FILE="$env_file" COMPOSE_PROJECT_NAME="$project" up
+if grep -Eq 'MySQL TCP is not ready|mysql-tcp-ready-after-attempt' "$tmp_dir/rejection.log"; then
+  echo "Grant authentication failure must not enter the TCP readiness retry path." >&2
+  exit 1
+fi
+echo "Verified grant authentication failures are not retried."
 printf '%s\n' "ALTER USER 'bootstrap_admin'@'%' IDENTIFIED BY '$bootstrap_password';" | \
   "${compose[@]}" exec -T -e MYSQL_PWD="$bootstrap_password" mysql \
     mysql --protocol=socket --user=root
