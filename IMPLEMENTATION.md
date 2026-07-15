@@ -1,8 +1,8 @@
 # CityBuddy implementation index
 
-**Document version:** v0.7\
+**Document version:** v0.8\
 **Verification date:** 2026-07-15\
-**Repository phase:** Identity vertical slice verified; product catalog ready
+**Repository phase:** Product catalog verified; standard ordering ready
 
 ## How to use this index
 
@@ -17,7 +17,7 @@
 
 CityBuddy targets local-commerce transactions and text-only AI customer support with independent identity, side-effect, retrieval, and evaluation boundaries.
 
-The repository contains the verified local-runtime foundations plus the first identity vertical slice:
+The repository contains the verified local-runtime foundations, identity vertical slice, and product catalog vertical slice:
 
 - executable non-business skeletons for `auth-service`, `commerce-service`, `agent-service`, `knowledge-indexer`, and `web`;
 - one Maven reactor and wrapper, one locked `uv` workspace, and one npm lockfile;
@@ -27,9 +27,10 @@ The repository contains the verified local-runtime foundations plus the first id
 - one digest-pinned RocketMQ 5.5.0 NameServer and combined Broker/Proxy runtime with behavior-gated readiness, a Java 5.x gRPC client route probe, and a disposable uniquely identified normal-message round trip;
 - one ordered local and CI integration entry point proving clean aggregate startup, seven health gates, three migration histories, repeat-start idempotence, credential preservation, non-destructive shutdown, component probes, and controlled failures;
 - RS256 direct-user login and JWKS publication, server-owned support sessions, independently authenticated exact-scope JIT OBO exchange, and fail-closed commerce authorization with bounded key refresh and overlap handling;
+- commerce-owned product and CRM truth, authenticated published-product reads, a non-authoritative Redis cache with bounded penetration and hot-key protection, and transactional Outbox plus idempotent RocketMQ invalidation;
 - format, lint, type/compile, unit-test, build, pre-commit, Gitleaks, and GitHub Actions paths through `make ci`.
 
-It does not yet contain product, order, seckill, payment, refund, or support-agent business behavior; production business schemas, Elasticsearch indexes, RocketMQ topics or event schemas; model-provider access; deployment; or measured performance claims.
+It does not yet contain order, seckill, payment, refund, or support-agent business behavior; production Elasticsearch knowledge indexes; model-provider access; deployment; or measured performance claims.
 
 Cross-slice target architecture, preflight conclusions, service/data ownership, interface and security boundaries, sequence diagrams, route outcomes, risks, and change control live in [docs/CONTRACTS.md](docs/CONTRACTS.md).
 
@@ -69,10 +70,10 @@ The linked slice name is the canonical detailed specification. Target outcomes a
 | [CB-014 — Local runtime integration closure](docs/slices/CB-014.md) | P0 | `VERIFIED` | `CB-013` |
 | [CB-085 — Python RocketMQ consumer viability spike](docs/slices/CB-085.md) | P0 | `VERIFIED` | `CB-014` |
 | [CB-020 — Identity, JWKS and JIT OBO vertical slice](docs/slices/CB-020.md) | P0 | `VERIFIED` | `CB-014` |
-| [CB-030 — Product catalog and cache invalidation](docs/slices/CB-030.md) | P0 | `IN_PROGRESS` | `CB-020` |
-| [CB-040 — Standard ordering and MySQL inventory](docs/slices/CB-040.md) | P0 | `PLANNED` | `CB-030` |
+| [CB-030 — Product catalog and cache invalidation](docs/slices/CB-030.md) | P0 | `VERIFIED` | `CB-020` |
+| [CB-040 — Standard ordering and MySQL inventory](docs/slices/CB-040.md) | P0 | `READY` | `CB-030` |
 | [CB-050 — Seckill quota, reservation, and Lua admission](docs/slices/CB-050.md) | P0 | `PLANNED` | `CB-040` |
-| `CB-060 — RocketMQ transaction ordering and delayed cancellation` | P0 | `PLANNED` | `CB-050` |
+| [CB-060 — RocketMQ transaction ordering and delayed cancellation](docs/slices/CB-060.md) | P0 | `PLANNED` | `CB-050` |
 | `CB-070 — Mock payment, refund, ledger extension, and state machines` | P0 | `PLANNED` | `CB-060` |
 | `CB-080 — Single-agent control plane, tools, SSE, and support evidence` | P0 | `PLANNED` | `CB-020`, `CB-030`, `CB-040` |
 | `CB-090 — RAG core and initial versioned knowledge index` | P0 | `PLANNED` | `CB-014`, `CB-080` |
