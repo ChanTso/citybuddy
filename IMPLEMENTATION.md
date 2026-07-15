@@ -1,6 +1,6 @@
 # CityBuddy implementation index
 
-**Document version:** v0.8\
+**Document version:** v0.9\
 **Verification date:** 2026-07-15\
 **Repository phase:** Product catalog verified; standard ordering ready
 
@@ -72,17 +72,32 @@ The linked slice name is the canonical detailed specification. Target outcomes a
 | [CB-020 — Identity, JWKS and JIT OBO vertical slice](docs/slices/CB-020.md) | P0 | `VERIFIED` | `CB-014` |
 | [CB-030 — Product catalog and cache invalidation](docs/slices/CB-030.md) | P0 | `VERIFIED` | `CB-020` |
 | [CB-040 — Standard ordering and MySQL inventory](docs/slices/CB-040.md) | P0 | `READY` | `CB-030` |
-| [CB-050 — Seckill quota, reservation, and Lua admission](docs/slices/CB-050.md) | P0 | `PLANNED` | `CB-040` |
-| [CB-060 — RocketMQ transaction ordering and delayed cancellation](docs/slices/CB-060.md) | P0 | `PLANNED` | `CB-050` |
-| `CB-070 — Mock payment, refund, ledger extension, and state machines` | P0 | `PLANNED` | `CB-060` |
-| `CB-080 — Single-agent control plane, tools, SSE, and support evidence` | P0 | `PLANNED` | `CB-020`, `CB-030`, `CB-040` |
-| `CB-090 — RAG core and initial versioned knowledge index` | P0 | `PLANNED` | `CB-014`, `CB-080` |
-| `CB-100 — Evaluation profile, sandbox, identity provisioning, state, audit, version, and evidence` | P0 | `PLANNED` | `CB-020`, `CB-040`, `CB-060`, `CB-070`, `CB-080`, `CB-090` |
-| `CB-110 — FAQ publication, knowledge sync, cache versioning, and index rebuild` | P1 | `PLANNED` | `CB-030`, `CB-085`, `CB-090` |
-| `CB-120 — PendingAction, ActionReceipt, and turn commit point` | P1 | `PLANNED` | `CB-070`, `CB-080` |
-| `CB-130 — Memory watermarks, tiered output, and human handoff` | P1 | `PLANNED` | `CB-110`, `CB-120` |
-| `CB-140 — Minimal web demonstration` | P1 | `PLANNED` | `CB-020`, `CB-030`, `CB-060`, `CB-080`, `CB-090`, `CB-120` |
-| `CB-150 — Observability, scripted demonstration, fault drills, and measured evidence` | P1 | `PLANNED` | `CB-100`, `CB-130`, `CB-140` |
+| [CB-050 — Seckill activity allocation and versioned Redis projection](docs/slices/CB-050.md) | P0 | `PLANNED` | `CB-040` |
+| [CB-051 — Seckill reservation, atomic Lua admission, and owner-scoped polling](docs/slices/CB-051.md) | P0 | `PLANNED` | `CB-050` |
+| [CB-060 — RocketMQ transaction admission and idempotent seckill order creation](docs/slices/CB-060.md) | P0 | `PLANNED` | `CB-051` |
+| [CB-061 — Delayed unpaid cancellation and ledger restoration](docs/slices/CB-061.md) | P0 | `PLANNED` | `CB-060` |
+| `CB-070 — Idempotent mock payment, authenticated callback, and payment ledger transitions` | P0 | `PLANNED` | `CB-061` |
+| `CB-071 — Refund state machine and payment/refund reconciliation` | P0 | `PLANNED` | `CB-070` |
+| `CB-080 — Support conversation, event, and evidence lifecycle` | P0 | `PLANNED` | `CB-020`, `CB-030`, `CB-040` |
+| `CB-081 — Bounded agent, model routing, and ToolSpec control` | P0 | `PLANNED` | `CB-080` |
+| `CB-082 — Filtered SSE, feedback, and deterministic support end-to-end evidence` | P0 | `PLANNED` | `CB-081` |
+| `CB-090 — Versioned hybrid knowledge index and deterministic retrieval fusion` | P0 | `PLANNED` | `CB-014`, `CB-082` |
+| `CB-091 — Rerank, sufficiency calibration, and retrieval evidence` | P0 | `PLANNED` | `CB-090` |
+| `CB-100 — Evaluation identity provisioning and sandbox-bound token lifecycle` | P0 | `PLANNED` | `CB-020`, `CB-040`, `CB-061`, `CB-071`, `CB-082`, `CB-091` |
+| `CB-101 — Evaluation sandbox lifecycle and fail-closed enforcement` | P0 | `PLANNED` | `CB-100` |
+| `CB-102 — Evaluation state, audit, version, evidence, and async liveness guards` | P0 | `PLANNED` | `CB-101` |
+| `CB-110 — FAQ publication truth and transactional Outbox` | P1 | `PLANNED` | `CB-030`, `CB-085`, `CB-091` |
+| `CB-111 — Incremental knowledge sync and versioned two-level cache` | P1 | `PLANNED` | `CB-110` |
+| `CB-112 — Knowledge rebuild validation and atomic alias switch` | P1 | `PLANNED` | `CB-111` |
+| `CB-120 — Commerce PendingAction and atomic ActionReceipt transaction` | P1 | `PLANNED` | `CB-071`, `CB-082` |
+| `CB-121 — Agent confirmation, receipt projection, and turn commit` | P1 | `PLANNED` | `CB-120`, `CB-082` |
+| `CB-130 — Memory watermarks, prompt/PII, and tiered output safety` | P1 | `PLANNED` | `CB-112`, `CB-121` |
+| `CB-131 — Authoritative handoff tickets and agent projection` | P1 | `PLANNED` | `CB-130` |
+| `CB-132 — Reviewed failure-candidate capture and authenticated export` | P1 | `PLANNED` | `CB-131` |
+| `CB-140 — Minimal web demonstration` | P1 | `PLANNED` | `CB-020`, `CB-030`, `CB-061`, `CB-082`, `CB-091`, `CB-121` |
+| `CB-150 — Metrics and optional no-op trace sink` | P1 | `PLANNED` | `CB-102`, `CB-132`, `CB-140` |
+| `CB-151 — Scripted reset/demo and repeatable fault drills` | P1 | `PLANNED` | `CB-150` |
+| `CB-152 — Load, latency, and quality evidence` | P1 | `PLANNED` | `CB-151` |
 | `CB-900 — Multimodal intake and object storage outline` | P2 | `DEFERRED` | Explicit promotion only |
 | `CB-910 — Action recovery scanning and advanced resilience outline` | P2 | `DEFERRED` | Explicit promotion only |
 | `CB-920 — Advanced retrieval, provider-cache experiments, and expanded operations views` | P2 | `DEFERRED` | Explicit promotion only |
