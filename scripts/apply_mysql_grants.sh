@@ -32,6 +32,10 @@ expected=(
   "GRANT SELECT, INSERT, UPDATE ON commerce_db.auth_login_credential TO 'auth_app'@'%';"
   "GRANT SELECT, INSERT, UPDATE ON commerce_db.auth_service_identity TO 'auth_app'@'%';"
   "GRANT SELECT, INSERT, UPDATE ON commerce_db.auth_signing_key_metadata TO 'auth_app'@'%';"
+  "GRANT SELECT, INSERT, UPDATE ON commerce_db.crm_profile TO 'commerce_app'@'%';"
+  "GRANT SELECT, INSERT, UPDATE ON commerce_db.product TO 'commerce_app'@'%';"
+  "GRANT SELECT, INSERT, UPDATE ON commerce_db.catalog_metadata TO 'commerce_app'@'%';"
+  "GRANT SELECT, INSERT, UPDATE ON commerce_db.commerce_outbox TO 'commerce_app'@'%';"
   "GRANT SELECT, INSERT ON cs_db.support_session TO 'agent_app'@'%';"
 )
 mapfile -t actual < <(sed -e '/^[[:space:]]*$/d' -e '/^[[:space:]]*--/d' "$manifest")
@@ -73,6 +77,7 @@ echo "role-before=$fresh_role"
 migration_statement_count=5
 migration_sql="$(printf '%s\n' "${actual[@]:0:$migration_statement_count}")"
 runtime_sql="$(printf '%s\n' "${actual[@]:$migration_statement_count}")"
+legacy_runtime_sql="$(printf '%s\n' "${actual[@]:5:4}" "${actual[13]}")"
 
 sql="SET ROLE 'bootstrap_grant_role';
 SELECT CONCAT('role-active=', CURRENT_ROLE());
@@ -85,28 +90,52 @@ echo "$output"
 grep -qx 'role-active=`bootstrap_grant_role`@`%`' <<<"$output"
 grep -qx 'role-after=NONE' <<<"$output"
 
-runtime_table_count="$(mysql "${mysql_args[@]}" --execute="
+runtime_table_state="$(mysql "${mysql_args[@]}" --execute="
   SET ROLE 'bootstrap_grant_role';
-  SELECT COUNT(*) FROM information_schema.tables
+  SELECT CONCAT(
+    COUNT(*),
+    ':',
+    COALESCE(
+      GROUP_CONCAT(
+        CONCAT(table_schema, '.', table_name)
+        ORDER BY table_schema, table_name
+        SEPARATOR ','
+      ),
+      'none'
+    )
+  ) FROM information_schema.tables
   WHERE table_schema IN ('commerce_db', 'cs_db')
     AND table_name IN (
       'auth_user_principal',
       'auth_login_credential',
       'auth_service_identity',
       'auth_signing_key_metadata',
+      'crm_profile',
+      'product',
+      'catalog_metadata',
+      'commerce_outbox',
       'support_session'
     );
   SET ROLE NONE;")"
-if [[ "$runtime_table_count" == "5" ]]; then
+legacy_runtime_table_state="5:commerce_db.auth_login_credential,commerce_db.auth_service_identity,commerce_db.auth_signing_key_metadata,commerce_db.auth_user_principal,cs_db.support_session"
+complete_runtime_table_state="9:commerce_db.auth_login_credential,commerce_db.auth_service_identity,commerce_db.auth_signing_key_metadata,commerce_db.auth_user_principal,commerce_db.catalog_metadata,commerce_db.commerce_outbox,commerce_db.crm_profile,commerce_db.product,cs_db.support_session"
+
+if [[ "$runtime_table_state" == "$complete_runtime_table_state" ]]; then
   mysql "${mysql_args[@]}" --execute="
     SET ROLE 'bootstrap_grant_role';
     $runtime_sql
     SET ROLE NONE;"
   echo "runtime-grants=applied"
-elif [[ "$runtime_table_count" == "0" ]]; then
+elif [[ "$runtime_table_state" == "$legacy_runtime_table_state" ]]; then
+  mysql "${mysql_args[@]}" --execute="
+    SET ROLE 'bootstrap_grant_role';
+    $legacy_runtime_sql
+    SET ROLE NONE;"
+  echo "runtime-grants=legacy-applied-awaiting-migrations"
+elif [[ "$runtime_table_state" == "0:none" ]]; then
   echo "runtime-grants=deferred-until-migrations"
 else
-  echo "Grant job found an incomplete CB-020 runtime table set: $runtime_table_count of 5." >&2
+  echo "Grant job found an unexpected runtime table set: $runtime_table_state" >&2
   exit 1
 fi
 echo "Grant manifest V001 applied with explicit role activation and cleanup."

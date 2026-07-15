@@ -7,4 +7,8 @@ GRANT SELECT, INSERT, UPDATE ON commerce_db.auth_user_principal TO 'auth_app'@'%
 GRANT SELECT, INSERT, UPDATE ON commerce_db.auth_login_credential TO 'auth_app'@'%';
 GRANT SELECT, INSERT, UPDATE ON commerce_db.auth_service_identity TO 'auth_app'@'%';
 GRANT SELECT, INSERT, UPDATE ON commerce_db.auth_signing_key_metadata TO 'auth_app'@'%';
+GRANT SELECT, INSERT, UPDATE ON commerce_db.crm_profile TO 'commerce_app'@'%';
+GRANT SELECT, INSERT, UPDATE ON commerce_db.product TO 'commerce_app'@'%';
+GRANT SELECT, INSERT, UPDATE ON commerce_db.catalog_metadata TO 'commerce_app'@'%';
+GRANT SELECT, INSERT, UPDATE ON commerce_db.commerce_outbox TO 'commerce_app'@'%';
 GRANT SELECT, INSERT ON cs_db.support_session TO 'agent_app'@'%';

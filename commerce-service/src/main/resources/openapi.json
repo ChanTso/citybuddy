@@ -1,0 +1,71 @@
+{
+  "openapi": "3.1.0",
+  "info": {"title": "CityBuddy commerce catalog API", "version": "CB-030"},
+  "paths": {
+    "/api/products": {
+      "get": {
+        "operationId": "listPublishedProducts",
+        "security": [{"directUserBearer": []}],
+        "parameters": [
+          {
+            "name": "X-Eval-Sandbox-Id",
+            "in": "header",
+            "required": false,
+            "schema": {"type": "string"}
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Published products with live commerce fields",
+            "content": {
+              "application/json": {
+                "schema": {"type": "array", "items": {"$ref": "#/components/schemas/Product"}}
+              }
+            }
+          },
+          "401": {"description": "Invalid direct-user identity or production evaluation context"}
+        }
+      }
+    },
+    "/api/products/{productId}": {
+      "get": {
+        "operationId": "getPublishedProduct",
+        "security": [{"directUserBearer": []}],
+        "parameters": [
+          {"name": "productId", "in": "path", "required": true, "schema": {"type": "string", "minLength": 1}},
+          {"name": "X-Eval-Sandbox-Id", "in": "header", "required": false, "schema": {"type": "string"}}
+        ],
+        "responses": {
+          "200": {
+            "description": "Published product with live commerce fields",
+            "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Product"}}}
+          },
+          "401": {"description": "Invalid direct-user identity or production evaluation context"},
+          "404": {"description": "Missing or unpublished product"}
+        }
+      }
+    }
+  },
+  "components": {
+    "securitySchemes": {
+      "directUserBearer": {"type": "http", "scheme": "bearer", "bearerFormat": "JWT"}
+    },
+    "schemas": {
+      "Product": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["productId", "name", "description", "priceMinor", "currency", "stockQuantity", "available", "publicationVersion"],
+        "properties": {
+          "productId": {"type": "string"},
+          "name": {"type": "string"},
+          "description": {"type": "string"},
+          "priceMinor": {"type": "integer", "minimum": 0},
+          "currency": {"type": "string", "pattern": "^[A-Z]{3}$"},
+          "stockQuantity": {"type": "integer", "minimum": 0},
+          "available": {"type": "boolean"},
+          "publicationVersion": {"type": "integer", "minimum": 1}
+        }
+      }
+    }
+  }
+}
