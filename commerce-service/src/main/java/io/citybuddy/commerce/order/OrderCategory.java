@@ -1,0 +1,12 @@
+package io.citybuddy.commerce.order;
+
+public enum OrderCategory {
+  AUTHENTICATION,
+  AUTHORIZATION,
+  VALIDATION,
+  OWNERSHIP,
+  IDEMPOTENCY_CONFLICT,
+  STALE_VERSION,
+  INSUFFICIENT_STOCK,
+  CONCURRENCY_EXHAUSTED
+}

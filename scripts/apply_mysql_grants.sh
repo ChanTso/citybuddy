@@ -47,6 +47,8 @@ expected=(
   "GRANT SELECT, INSERT, UPDATE ON commerce_db.product TO 'commerce_app'@'%';"
   "GRANT SELECT, INSERT, UPDATE ON commerce_db.catalog_metadata TO 'commerce_app'@'%';"
   "GRANT SELECT, INSERT, UPDATE ON commerce_db.commerce_outbox TO 'commerce_app'@'%';"
+  "GRANT SELECT, INSERT ON commerce_db.standard_order TO 'commerce_app'@'%';"
+  "GRANT SELECT, INSERT, UPDATE ON commerce_db.order_idempotency TO 'commerce_app'@'%';"
   "GRANT SELECT, INSERT ON cs_db.support_session TO 'agent_app'@'%';"
 )
 mapfile -t actual < <(sed -e '/^[[:space:]]*$/d' -e '/^[[:space:]]*--/d' "$manifest")
@@ -120,7 +122,7 @@ echo "role-before=$fresh_role"
 migration_statement_count=5
 migration_sql="$(printf '%s\n' "${actual[@]:0:$migration_statement_count}")"
 runtime_sql="$(printf '%s\n' "${actual[@]:$migration_statement_count}")"
-legacy_runtime_sql="$(printf '%s\n' "${actual[@]:5:4}" "${actual[13]}")"
+legacy_runtime_sql="$(printf '%s\n' "${actual[@]:5:4}" "${actual[15]}")"
 
 sql="SET ROLE 'bootstrap_grant_role';
 SELECT CONCAT('role-active=', CURRENT_ROLE());
@@ -157,11 +159,14 @@ runtime_table_state="$(mysql "${mysql_args[@]}" --execute="
       'product',
       'catalog_metadata',
       'commerce_outbox',
+      'standard_order',
+      'order_idempotency',
       'support_session'
     );
   SET ROLE NONE;")"
 legacy_runtime_table_state="5:commerce_db.auth_login_credential,commerce_db.auth_service_identity,commerce_db.auth_signing_key_metadata,commerce_db.auth_user_principal,cs_db.support_session"
-complete_runtime_table_state="9:commerce_db.auth_login_credential,commerce_db.auth_service_identity,commerce_db.auth_signing_key_metadata,commerce_db.auth_user_principal,commerce_db.catalog_metadata,commerce_db.commerce_outbox,commerce_db.crm_profile,commerce_db.product,cs_db.support_session"
+catalog_runtime_table_state="9:commerce_db.auth_login_credential,commerce_db.auth_service_identity,commerce_db.auth_signing_key_metadata,commerce_db.auth_user_principal,commerce_db.catalog_metadata,commerce_db.commerce_outbox,commerce_db.crm_profile,commerce_db.product,cs_db.support_session"
+complete_runtime_table_state="11:commerce_db.auth_login_credential,commerce_db.auth_service_identity,commerce_db.auth_signing_key_metadata,commerce_db.auth_user_principal,commerce_db.catalog_metadata,commerce_db.commerce_outbox,commerce_db.crm_profile,commerce_db.order_idempotency,commerce_db.product,commerce_db.standard_order,cs_db.support_session"
 
 if [[ "$runtime_table_state" == "$complete_runtime_table_state" ]]; then
   mysql "${mysql_args[@]}" --execute="
@@ -169,6 +174,12 @@ if [[ "$runtime_table_state" == "$complete_runtime_table_state" ]]; then
     $runtime_sql
     SET ROLE NONE;"
   echo "runtime-grants=applied"
+elif [[ "$runtime_table_state" == "$catalog_runtime_table_state" ]]; then
+  mysql "${mysql_args[@]}" --execute="
+    SET ROLE 'bootstrap_grant_role';
+    $(printf '%s\n' "${actual[@]:5:8}" "${actual[15]}")
+    SET ROLE NONE;"
+  echo "runtime-grants=catalog-applied-awaiting-order-migration"
 elif [[ "$runtime_table_state" == "$legacy_runtime_table_state" ]]; then
   mysql "${mysql_args[@]}" --execute="
     SET ROLE 'bootstrap_grant_role';

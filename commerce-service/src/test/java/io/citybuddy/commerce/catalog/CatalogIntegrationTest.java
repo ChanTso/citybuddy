@@ -5,9 +5,11 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import io.citybuddy.commerce.order.OrderRepository;
 import java.time.Duration;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Map;
 import java.util.Optional;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
@@ -55,6 +57,10 @@ class CatalogIntegrationTest {
     registry.add("citybuddy.catalog.jwks-cache-ttl", () -> "30s");
     registry.add("citybuddy.catalog.clock-skew", () -> "30s");
     registry.add("citybuddy.catalog.required-permission", () -> "catalog:read");
+    registry.add("citybuddy.orders.enabled", () -> "true");
+    registry.add("citybuddy.orders.required-permission", () -> "order:create");
+    registry.add("citybuddy.orders.maximum-quantity", () -> "100");
+    registry.add("citybuddy.orders.maximum-concurrency-attempts", () -> "10");
     registry.add("citybuddy.catalog.cache-ttl", () -> "30s");
     registry.add("citybuddy.catalog.cache-jitter", () -> "10s");
     registry.add("citybuddy.catalog.null-ttl", () -> "3s");
@@ -80,6 +86,7 @@ class CatalogIntegrationTest {
   @Autowired private StringRedisTemplate redis;
   @Autowired private TestRestTemplate rest;
   @Autowired private TransactionTemplate transactions;
+  @Autowired private OrderRepository orderRepository;
 
   @Test
   void provesCatalogTruthCacheOutboxAndNormalEventRecovery() throws Exception {
@@ -87,6 +94,340 @@ class CatalogIntegrationTest {
     proveAuthenticatedContractsAndLiveFields();
     proveRedisProtectionsAndMysqlFallback();
     provePublicationAtomicityAndNormalEventRecovery();
+  }
+
+  @Test
+  void provesStandardOrderApiAtomicityIdempotencyAndConcurrency() throws Exception {
+    seedOrderProduct("order-main", 10, true, "PUBLISHED", 4);
+    ResponseEntity<JsonNode> created =
+        postOrder(
+            token(),
+            "shared-key",
+            Map.of("productId", "order-main", "quantity", 2, "expectedProductVersion", 4));
+    assertThat(created.getStatusCode()).isEqualTo(HttpStatus.CREATED);
+    String orderId = created.getBody().get("orderId").asText();
+    assertThat(created.getBody().get("unitPriceMinor").asLong()).isEqualTo(750);
+    assertThat(created.getBody().get("totalPriceMinor").asLong()).isEqualTo(1500);
+    assertThat(created.getBody().get("replayed").asBoolean()).isFalse();
+    assertOrderCardinality("order-main", 8, 1, 1, 1);
+
+    ResponseEntity<JsonNode> replay =
+        postOrder(
+            token(),
+            "shared-key",
+            Map.of("productId", "order-main", "quantity", 2, "expectedProductVersion", 4));
+    assertThat(replay.getStatusCode()).isEqualTo(HttpStatus.OK);
+    assertThat(replay.getBody().get("orderId").asText()).isEqualTo(orderId);
+    assertThat(replay.getBody().get("replayed").asBoolean()).isTrue();
+    assertOrderCardinality("order-main", 8, 1, 1, 1);
+
+    assertOrderError(
+        postOrder(
+            token(),
+            "shared-key",
+            Map.of("productId", "order-main", "quantity", 1, "expectedProductVersion", 4)),
+        HttpStatus.CONFLICT,
+        "IDEMPOTENCY_CONFLICT");
+    ResponseEntity<JsonNode> otherUser =
+        postOrder(
+            otherToken(),
+            "shared-key",
+            Map.of("productId", "order-main", "quantity", 1, "expectedProductVersion", 4));
+    assertThat(otherUser.getStatusCode()).isEqualTo(HttpStatus.CREATED);
+    assertThat(otherUser.getBody().get("orderId").asText()).isNotEqualTo(orderId);
+
+    assertOrderError(
+        postOrder(
+            null,
+            "auth-key",
+            Map.of("productId", "order-main", "quantity", 1, "expectedProductVersion", 4)),
+        HttpStatus.UNAUTHORIZED,
+        "AUTHENTICATION");
+    assertOrderError(
+        postOrder(
+            limitedToken(),
+            "permission-key",
+            Map.of("productId", "order-main", "quantity", 1, "expectedProductVersion", 4)),
+        HttpStatus.FORBIDDEN,
+        "AUTHORIZATION");
+    assertOrderError(
+        postOrder(
+            token(),
+            "owner-key",
+            Map.of(
+                "productId",
+                "order-main",
+                "quantity",
+                1,
+                "expectedProductVersion",
+                4,
+                "userSubject",
+                "other-user")),
+        HttpStatus.FORBIDDEN,
+        "OWNERSHIP");
+    assertOrderError(
+        postOrder(
+            token(),
+            "price-key",
+            Map.of(
+                "productId",
+                "order-main",
+                "quantity",
+                1,
+                "expectedProductVersion",
+                4,
+                "priceMinor",
+                1)),
+        HttpStatus.BAD_REQUEST,
+        "VALIDATION");
+    assertOrderError(
+        postOrder(
+            token(),
+            "stock-authority-key",
+            Map.of(
+                "productId",
+                "order-main",
+                "quantity",
+                1,
+                "expectedProductVersion",
+                4,
+                "stockQuantity",
+                999)),
+        HttpStatus.BAD_REQUEST,
+        "VALIDATION");
+    assertOrderError(
+        postOrder(
+            token(),
+            null,
+            Map.of("productId", "order-main", "quantity", 1, "expectedProductVersion", 4)),
+        HttpStatus.BAD_REQUEST,
+        "VALIDATION");
+    assertOrderError(
+        postOrder(
+            token(),
+            "quantity-key",
+            Map.of("productId", "order-main", "quantity", 0, "expectedProductVersion", 4)),
+        HttpStatus.BAD_REQUEST,
+        "VALIDATION");
+    assertOrderError(
+        postOrder(
+            token(),
+            "stale-key",
+            Map.of("productId", "order-main", "quantity", 1, "expectedProductVersion", 3)),
+        HttpStatus.CONFLICT,
+        "STALE_VERSION");
+    assertOrderError(
+        postOrder(
+            token(),
+            "stock-key",
+            Map.of("productId", "order-main", "quantity", 100, "expectedProductVersion", 4)),
+        HttpStatus.CONFLICT,
+        "INSUFFICIENT_STOCK");
+    assertOrderError(
+        postOrder(
+            token(),
+            "missing-key",
+            Map.of("productId", "order-missing", "quantity", 1, "expectedProductVersion", 1)),
+        HttpStatus.UNPROCESSABLE_ENTITY,
+        "VALIDATION");
+    seedOrderProduct("order-hidden", 5, true, "UNPUBLISHED", 1);
+    assertOrderError(
+        postOrder(
+            token(),
+            "hidden-key",
+            Map.of("productId", "order-hidden", "quantity", 1, "expectedProductVersion", 1)),
+        HttpStatus.UNPROCESSABLE_ENTITY,
+        "VALIDATION");
+    seedOrderProduct("order-unavailable", 5, false, "PUBLISHED", 1);
+    assertOrderError(
+        postOrder(
+            token(),
+            "unavailable-key",
+            Map.of("productId", "order-unavailable", "quantity", 1, "expectedProductVersion", 1)),
+        HttpStatus.UNPROCESSABLE_ENTITY,
+        "VALIDATION");
+    assertOrderCardinality("order-main", 7, 2, 2, 2);
+
+    proveRealMysqlRollback();
+    proveLimitedStockConcurrency();
+    proveConcurrentDuplicateIdempotency();
+  }
+
+  private void proveRealMysqlRollback() {
+    seedOrderProduct("order-rollback", 5, true, "PUBLISHED", 1);
+    assertThatThrownBy(
+            () ->
+                transactions.executeWithoutResult(
+                    status -> {
+                      OrderRepository.ProductSnapshot product =
+                          orderRepository.findProduct("order-rollback").orElseThrow();
+                      orderRepository.reserveIdempotency(
+                          "catalog-user",
+                          "rollback-key",
+                          "0".repeat(64),
+                          "00000000-0000-0000-0000-000000000040");
+                      assertThat(orderRepository.decrementStock(product, 2)).isTrue();
+                      orderRepository.insertOrder(
+                          "catalog-user", "00000000-0000-0000-0000-000000000040", product, 2);
+                      throw new IllegalStateException("controlled failure before required Outbox");
+                    }))
+        .isInstanceOf(IllegalStateException.class)
+        .hasMessage("controlled failure before required Outbox");
+    assertOrderCardinality("order-rollback", 5, 0, 0, 0);
+    assertThat(
+            jdbc.queryForObject(
+                "SELECT COUNT(*) FROM order_idempotency WHERE user_subject = 'catalog-user' AND idempotency_key = 'rollback-key'",
+                Integer.class))
+        .isZero();
+  }
+
+  private void proveLimitedStockConcurrency() throws Exception {
+    seedOrderProduct("order-limited", 3, true, "PUBLISHED", 1);
+    var executor = Executors.newFixedThreadPool(8);
+    CountDownLatch ready = new CountDownLatch(8);
+    CountDownLatch start = new CountDownLatch(1);
+    List<java.util.concurrent.Future<ResponseEntity<JsonNode>>> futures = new ArrayList<>();
+    for (int index = 0; index < 8; index++) {
+      int requestIndex = index;
+      futures.add(
+          executor.submit(
+              () -> {
+                ready.countDown();
+                start.await();
+                return postOrder(
+                    token(),
+                    "limited-" + requestIndex,
+                    Map.of(
+                        "productId", "order-limited", "quantity", 1, "expectedProductVersion", 1));
+              }));
+    }
+    assertThat(ready.await(5, TimeUnit.SECONDS)).isTrue();
+    start.countDown();
+    int successes = 0;
+    int insufficient = 0;
+    for (var future : futures) {
+      ResponseEntity<JsonNode> response = future.get(15, TimeUnit.SECONDS);
+      if (response.getStatusCode() == HttpStatus.CREATED) {
+        successes++;
+      } else {
+        assertOrderError(response, HttpStatus.CONFLICT, "INSUFFICIENT_STOCK");
+        insufficient++;
+      }
+    }
+    executor.shutdownNow();
+    assertThat(successes).isEqualTo(3);
+    assertThat(insufficient).isEqualTo(5);
+    assertOrderCardinality("order-limited", 0, 3, 3, 3);
+  }
+
+  private void proveConcurrentDuplicateIdempotency() throws Exception {
+    seedOrderProduct("order-duplicate", 5, true, "PUBLISHED", 1);
+    var executor = Executors.newFixedThreadPool(8);
+    CountDownLatch ready = new CountDownLatch(8);
+    CountDownLatch start = new CountDownLatch(1);
+    List<java.util.concurrent.Future<ResponseEntity<JsonNode>>> futures = new ArrayList<>();
+    for (int index = 0; index < 8; index++) {
+      futures.add(
+          executor.submit(
+              () -> {
+                ready.countDown();
+                start.await();
+                return postOrder(
+                    token(),
+                    "duplicate-key",
+                    Map.of(
+                        "productId",
+                        "order-duplicate",
+                        "quantity",
+                        1,
+                        "expectedProductVersion",
+                        1));
+              }));
+    }
+    assertThat(ready.await(5, TimeUnit.SECONDS)).isTrue();
+    start.countDown();
+    int created = 0;
+    int replayed = 0;
+    String orderId = null;
+    for (var future : futures) {
+      ResponseEntity<JsonNode> response = future.get(15, TimeUnit.SECONDS);
+      assertThat(response.getStatusCode()).isIn(HttpStatus.CREATED, HttpStatus.OK);
+      if (response.getStatusCode() == HttpStatus.CREATED) {
+        created++;
+      } else {
+        replayed++;
+      }
+      String current = response.getBody().get("orderId").asText();
+      if (orderId == null) {
+        orderId = current;
+      }
+      assertThat(current).isEqualTo(orderId);
+    }
+    executor.shutdownNow();
+    assertThat(created).isEqualTo(1);
+    assertThat(replayed).isEqualTo(7);
+    assertOrderCardinality("order-duplicate", 4, 1, 1, 1);
+  }
+
+  private void seedOrderProduct(
+      String productId, long stock, boolean available, String publicationState, long version) {
+    jdbc.update(
+        """
+        INSERT INTO product
+          (product_id, name, description, price_minor, currency, stock_quantity,
+           available, publication_state, publication_version)
+        VALUES (?, ?, 'Order integration product', 750, 'AUD', ?, ?, ?, ?)
+        """,
+        productId,
+        productId + " name",
+        stock,
+        available,
+        publicationState,
+        version);
+  }
+
+  private void assertOrderCardinality(
+      String productId, long stock, int orders, int idempotency, int outbox) {
+    assertThat(
+            jdbc.queryForObject(
+                "SELECT stock_quantity FROM product WHERE product_id = ?", Long.class, productId))
+        .isEqualTo(stock);
+    assertThat(
+            jdbc.queryForObject(
+                "SELECT COUNT(*) FROM standard_order WHERE product_id = ?",
+                Integer.class,
+                productId))
+        .isEqualTo(orders);
+    assertThat(
+            jdbc.queryForObject(
+                """
+                SELECT COUNT(*)
+                FROM order_idempotency i
+                JOIN standard_order o ON o.order_id = i.order_id
+                WHERE o.product_id = ?
+                """,
+                Integer.class,
+                productId))
+        .isEqualTo(idempotency);
+    assertThat(
+            jdbc.queryForObject(
+                """
+                SELECT COUNT(*)
+                FROM commerce_outbox x
+                JOIN standard_order o ON o.order_id = x.aggregate_id
+                WHERE x.aggregate_type = 'STANDARD_ORDER' AND o.product_id = ?
+                """,
+                Integer.class,
+                productId))
+        .isEqualTo(outbox);
+  }
+
+  private static void assertOrderError(
+      ResponseEntity<JsonNode> response, HttpStatus status, String category) {
+    assertThat(response.getStatusCode()).isEqualTo(status);
+    assertThat(response.getBody().get("category").asText()).isEqualTo(category);
+    assertThat(response.getBody().get("correlationId").asText()).isNotBlank();
+    assertThat(response.getBody().toString()).doesNotContain("Bearer", "password", "other-user");
   }
 
   private void seedPublishedAndUnpublishedProducts() {
@@ -117,8 +458,9 @@ class CatalogIntegrationTest {
     assertThat(list.getStatusCode()).isEqualTo(HttpStatus.OK);
     assertThat(list.getBody()).isNotNull();
     assertThat(list.getBody().isArray()).isTrue();
-    assertThat(list.getBody()).hasSize(1);
-    assertThat(list.getBody().get(0).get("productId").asText()).isEqualTo(VISIBLE_ID);
+    assertThat(list.getBody().findValuesAsText("productId"))
+        .contains(VISIBLE_ID)
+        .doesNotContain(HIDDEN_ID);
 
     ResponseEntity<JsonNode> first = get("/api/products/" + VISIBLE_ID, token(), null);
     assertThat(first.getStatusCode()).isEqualTo(HttpStatus.OK);
@@ -545,6 +887,23 @@ class CatalogIntegrationTest {
         JsonNode.class);
   }
 
+  private ResponseEntity<JsonNode> postOrder(
+      String bearer, String idempotencyKey, Map<String, Object> body) {
+    HttpHeaders headers = new HttpHeaders();
+    if (bearer != null) {
+      headers.setBearerAuth(bearer);
+    }
+    if (idempotencyKey != null) {
+      headers.set("Idempotency-Key", idempotencyKey);
+    }
+    headers.set("X-Correlation-Id", "cb040-integration");
+    return rest.exchange(
+        "http://127.0.0.1:" + port + "/api/orders",
+        HttpMethod.POST,
+        new HttpEntity<>(body, headers),
+        JsonNode.class);
+  }
+
   private UnavailableCache unavailableCache() {
     RedisStandaloneConfiguration standalone = new RedisStandaloneConfiguration("127.0.0.1", 1);
     LettuceClientConfiguration client =
@@ -570,6 +929,14 @@ class CatalogIntegrationTest {
 
   private static String token() {
     return required("CATALOG_DIRECT_TOKEN");
+  }
+
+  private static String otherToken() {
+    return required("CATALOG_OTHER_DIRECT_TOKEN");
+  }
+
+  private static String limitedToken() {
+    return required("CATALOG_LIMITED_DIRECT_TOKEN");
   }
 
   private static String required(String name) {

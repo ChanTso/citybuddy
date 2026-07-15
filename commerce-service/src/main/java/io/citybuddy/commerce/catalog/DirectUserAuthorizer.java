@@ -32,6 +32,11 @@ public final class DirectUserAuthorizer {
   }
 
   public DirectPrincipal authorize(String authorization, String evalSandboxHeader) {
+    return authorize(authorization, evalSandboxHeader, properties.requiredPermission());
+  }
+
+  public DirectPrincipal authorize(
+      String authorization, String evalSandboxHeader, String requiredPermission) {
     try {
       require(evalSandboxHeader == null, "Evaluation context is not enabled");
       require(authorization != null && authorization.startsWith("Bearer "), "Invalid bearer token");
@@ -53,7 +58,7 @@ public final class DirectUserAuthorizer {
       require(key != null, "Unknown signing key");
       require(jwt.verify(new RSASSAVerifier(key.toRSAPublicKey())), "Invalid signature");
       JWTClaimsSet claims = jwt.getJWTClaimsSet();
-      validateClaims(claims);
+      validateClaims(claims, requiredPermission);
       return new DirectPrincipal(claims.getSubject());
     } catch (ParseException | JOSEException | RuntimeException exception) {
       if (exception instanceof CatalogException catalogException) {
@@ -63,7 +68,8 @@ public final class DirectUserAuthorizer {
     }
   }
 
-  private void validateClaims(JWTClaimsSet claims) throws ParseException {
+  private void validateClaims(JWTClaimsSet claims, String requiredPermission)
+      throws ParseException {
     require(properties.issuer().equals(claims.getIssuer()), "Wrong issuer");
     require(claims.getAudience().equals(List.of(properties.userAudience())), "Wrong audience");
     require("direct_user".equals(claims.getClaimAsString("token_type")), "Wrong token type");
@@ -75,9 +81,12 @@ public final class DirectUserAuthorizer {
     require(claims.getClaim("eval_sandbox") == null, "Evaluation context is not enabled");
     require(hasText(claims.getJWTID()), "Missing token identifier");
     List<String> permissions = claims.getStringListClaim("permissions");
-    require(
-        permissions != null && permissions.contains(properties.requiredPermission()),
-        "Missing permission");
+    if (requiredPermission == null
+        || requiredPermission.isBlank()
+        || permissions == null
+        || !permissions.contains(requiredPermission)) {
+      throw new CatalogException(403, "Missing permission");
+    }
     validateTime(claims);
   }
 
