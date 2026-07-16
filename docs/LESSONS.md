@@ -108,8 +108,8 @@ This file records only factual pitfalls supported by merged pull-request, commit
 
 ## CB-071 — Refund state machine and payment/refund reconciliation
 
-- 现象：首轮真实 MySQL 集成中，两笔并发部分退款虽然先通过同一 payment attempt 排队，后进入的事务仍从旧的 REPEATABLE READ 快照计算已预留金额，导致两笔都被受理；修正这一点后，第二笔合法部分退款又被旧的 `(order_id, movement_type)` 唯一键拒绝。
-- 证据链接：[slice PR #29](https://github.com/ChanTso/citybuddy/pull/29)、[implementation and recovery commit `e159f37`](https://github.com/ChanTso/citybuddy/commit/e159f3754e95)
-- 根因：InnoDB 的锁等待只负责串行化访问，不会自动刷新事务早先建立的一致性快照；普通聚合读仍可能看到等待前的历史视图。另一方面，支付阶段“一种 movement 每单最多一条”的旧约束被直接套到退款，但一笔付款允许多次部分退款，二者的基数不相同。
-- 解决：预留金额不再用普通聚合快照，而是在持有 payment/order 锁后对该 attempt 的 refund 行执行 `SELECT ... FOR UPDATE` current read，再以受锁行求和；并把旧唯一键替换为 generated conditional singleton key，只对既有下单、取消和支付 movement 保持每单单例，退款 movement 则由稳定的 `mock-refund:{refundId}` business-event key 唯一化。十轮并发超额退款均只接受一笔，两笔合法部分退款可累计成功，同时第二条 `STANDARD_PAYMENT` 仍由数据库拒绝。
-- 结论：`FOR UPDATE` 不只表示“加锁”，在 InnoDB 中还意味着读取锁定时的当前已提交版本；涉及锁等待后的派生总额时，必须明确选择 current read。数据库唯一性也应表达业务事件真实基数：支付可以每单单例，部分退款必须每个稳定 refund identity 单例，不能用一个过宽的旧约束混为一谈。
+- 现象：首轮真实 MySQL 集成中，两笔并发部分退款虽然先通过同一 payment attempt 排队，后进入的事务仍从旧的 REPEATABLE READ 快照计算已预留金额，导致两笔都被受理；修正这一点后，第二笔合法部分退款又被旧的 `(order_id, movement_type)` 唯一键拒绝。最终独立复核还发现同类窗口：reconcile 可先读到旧 PROCESSING refund，再等待并发成功提交；若锁后仍普通读取 ledger，就会把刚提交的合法 movement 误报为矛盾。
+- 证据链接：[slice PR #29](https://github.com/ChanTso/citybuddy/pull/29)、[implementation and integration recovery `e159f37`](https://github.com/ChanTso/citybuddy/commit/e159f3754e95)、[reconciliation current-read recovery `b8a1964`](https://github.com/ChanTso/citybuddy/commit/b8a1964)
+- 根因：InnoDB 的锁等待只负责串行化访问，不会自动刷新事务早先建立的一致性快照；任何后续普通聚合或 ledger 读仍可能看到等待前的历史视图。另一方面，支付阶段“一种 movement 每单最多一条”的旧约束被直接套到退款，但一笔付款允许多次部分退款，二者的基数不相同。
+- 解决：预留金额在持有 payment/order 锁后对该 attempt 的 refund 行执行 `SELECT ... FOR UPDATE` current read，再以受锁行求和；reconcile 锁后的 payment/refund/timeout ledger 查询统一使用 `FOR SHARE` current read。受控测试让 reconcile 先建立旧快照并等待成功事务提交，随后仍返回 `CONSISTENT`。旧唯一键改为 generated conditional singleton key，只对既有下单、取消和支付 movement 保持每单单例，退款 movement 则由稳定的 `mock-refund:{refundId}` business-event key 唯一化。十轮并发超额退款均只接受一笔，两笔合法部分退款可累计成功，同时第二条 `STANDARD_PAYMENT` 仍由数据库拒绝。
+- 结论：`FOR UPDATE`/`FOR SHARE` 不只表示“加锁”，在 InnoDB 中还意味着读取锁定时的当前已提交版本；涉及锁等待后的任何派生总额或关联事实时，必须逐条审计并明确选择 current read，不能只修第一个查询。数据库唯一性也应表达业务事件真实基数：支付可以每单单例，部分退款必须每个稳定 refund identity 单例，不能用一个过宽的旧约束混为一谈。
