@@ -173,10 +173,26 @@ reservation_grant_output="$(make ENV_FILE="$env_file" COMPOSE_PROJECT_NAME="$pro
 grep -q 'runtime-grants=reservation-applied-awaiting-transaction-order-migration' \
   <<<"$reservation_grant_output"
 echo "Verified exact CB-051 thirteen-table grant state permits the CB-060 upgrade."
+transaction_commerce_migrations="$tmp_dir/transaction-commerce-migrations"
+mkdir -p "$transaction_commerce_migrations"
+cp infra/mysql/migrations/commerce/V001__validate_commerce_target.sql \
+  infra/mysql/migrations/commerce/V002__product_catalog_outbox.sql \
+  infra/mysql/migrations/commerce/V003__standard_ordering.sql \
+  infra/mysql/migrations/commerce/V004__seckill_activity_projection.sql \
+  infra/mysql/migrations/commerce/V005__seckill_reservation_admission.sql \
+  infra/mysql/migrations/commerce/V006__seckill_transaction_order.sql \
+  infra/mysql/migrations/commerce/V007__seckill_unpaid_cancellation.sql \
+  "$transaction_commerce_migrations/"
+"${compose[@]}" run --rm \
+  --volume "$transaction_commerce_migrations:/opt/citybuddy/migrations:ro" commerce-migrate
+transaction_grant_output="$(make ENV_FILE="$env_file" COMPOSE_PROJECT_NAME="$project" grant-access)"
+grep -q 'runtime-grants=transaction-applied-awaiting-payment-migration' \
+  <<<"$transaction_grant_output"
+echo "Verified exact CB-061 fifteen-table grant state permits the CB-070 upgrade."
 make ENV_FILE="$env_file" COMPOSE_PROJECT_NAME="$project" migrate-commerce
 complete_grant_output="$(make ENV_FILE="$env_file" COMPOSE_PROJECT_NAME="$project" grant-access)"
 grep -q 'runtime-grants=applied' <<<"$complete_grant_output"
-echo "Verified CB-060 upgrade reaches the exact fifteen-table grant state."
+echo "Verified CB-070 upgrade reaches the exact seventeen-table grant state."
 
 test "$(mysql_query commerce_app "$commerce_app_password" commerce_db 'SELECT COUNT(*) FROM crm_profile')" = 0
 test "$(mysql_query commerce_app "$commerce_app_password" commerce_db 'SELECT COUNT(*) FROM product')" = 0
@@ -193,7 +209,7 @@ for table in crm_profile product commerce_outbox; do
   assert_mysql_fails "auth_app cannot read $table" '(SELECT command denied|Access denied)' \
     mysql_query auth_app "$auth_app_password" commerce_db "SELECT * FROM $table"
 done
-for table in standard_order order_idempotency; do
+for table in standard_order order_idempotency mock_payment_attempt mock_payment_callback; do
   test "$(mysql_query commerce_app "$commerce_app_password" commerce_db "SELECT COUNT(*) FROM $table")" = 0
   assert_mysql_fails "auth_app cannot read $table" '(SELECT command denied|Access denied)' \
     mysql_query auth_app "$auth_app_password" commerce_db "SELECT * FROM $table"
@@ -233,6 +249,15 @@ assert_mysql_fails "commerce_app cannot delete seckill reservation truth" '(DELE
 assert_mysql_fails "commerce_app cannot delete seckill orders" '(DELETE command denied|Access denied)' \
   mysql_query commerce_app "$commerce_app_password" commerce_db \
   "DELETE FROM seckill_order WHERE order_id = 'none'"
+assert_mysql_fails "commerce_app cannot delete payment attempts" '(DELETE command denied|Access denied)' \
+  mysql_query commerce_app "$commerce_app_password" commerce_db \
+  "DELETE FROM mock_payment_attempt WHERE attempt_id = 'none'"
+assert_mysql_fails "commerce_app cannot update callback truth" '(UPDATE command denied|Access denied)' \
+  mysql_query commerce_app "$commerce_app_password" commerce_db \
+  "UPDATE mock_payment_callback SET result_state = 'APPLIED' WHERE callback_event_id = 'none'"
+assert_mysql_fails "commerce_app cannot delete callback truth" '(DELETE command denied|Access denied)' \
+  mysql_query commerce_app "$commerce_app_password" commerce_db \
+  "DELETE FROM mock_payment_callback WHERE callback_event_id = 'none'"
 assert_mysql_fails "commerce_app cannot update append-only inventory ledger" '(UPDATE command denied|Access denied)' \
   mysql_query commerce_app "$commerce_app_password" commerce_db \
   "UPDATE inventory_ledger SET inventory_delta = inventory_delta WHERE movement_id = 'none'"
@@ -251,9 +276,6 @@ assert_mysql_fails "database rejects a zero reservation quantity" '(Check constr
 assert_mysql_fails "database rejects a terminal reservation without a decision" '(Check constraint|CONSTRAINT.*failed)' \
   mysql_query commerce_app "$commerce_app_password" commerce_db \
   "INSERT INTO seckill_reservation (reservation_id, user_subject, activity_id, idempotency_key, intent_hash, quantity, activity_projection_version, state, projection_version, transaction_resolution_due_at) VALUES ('00000000-0000-0000-0000-000000000053', 'invalid', 'none', 'terminal', REPEAT('0', 64), 1, 1, 'ADMITTED', 2, CURRENT_TIMESTAMP(6))"
-assert_mysql_fails "commerce_app cannot update immutable orders" '(UPDATE command denied|Access denied)' \
-  mysql_query commerce_app "$commerce_app_password" commerce_db \
-  "UPDATE standard_order SET status = 'UNPAID' WHERE order_id = 'none'"
 assert_mysql_fails "commerce_app cannot delete idempotency truth" '(DELETE command denied|Access denied)' \
   mysql_query commerce_app "$commerce_app_password" commerce_db \
   "DELETE FROM order_idempotency WHERE user_subject = 'none'"
@@ -296,8 +318,8 @@ limited_hash="$(uv run python scripts/hash_test_credential.py "$limited_password
 mysql_query auth_app "$auth_app_password" commerce_db "
 INSERT INTO auth_user_principal (principal_id, subject, login_identifier, state, permissions)
 VALUES
-  ('00000000-0000-0000-0000-000000000030', 'catalog-user', 'catalog-user', 'ACTIVE', 'catalog:read order:create seckill:reserve'),
-  ('00000000-0000-0000-0000-000000000031', 'other-user', 'other-user', 'ACTIVE', 'catalog:read order:create seckill:reserve'),
+  ('00000000-0000-0000-0000-000000000030', 'catalog-user', 'catalog-user', 'ACTIVE', 'catalog:read order:create seckill:reserve payment:create'),
+  ('00000000-0000-0000-0000-000000000031', 'other-user', 'other-user', 'ACTIVE', 'catalog:read order:create seckill:reserve payment:create'),
   ('00000000-0000-0000-0000-000000000032', 'limited-user', 'limited-user', 'ACTIVE', 'catalog:read');
 INSERT INTO auth_login_credential (principal_id, password_hash)
 VALUES
@@ -407,6 +429,8 @@ docker run --rm \
   --env CATALOG_DIRECT_TOKEN="$direct_token" \
   --env CATALOG_OTHER_DIRECT_TOKEN="$other_direct_token" \
   --env CATALOG_LIMITED_DIRECT_TOKEN="$limited_direct_token" \
+  --env MOCK_PAYMENT_CALLBACK_KEY_ID=integration-key \
+  --env MOCK_PAYMENT_CALLBACK_SECRET=not-a-secret-not-a-secret-not-a-secret \
   --env CATALOG_TEST_SIGNING_PRIVATE_KEY_PATH=/tmp/catalog-current-private.pem \
   --env ROCKETMQ_ENDPOINTS=rocketmq-broker-proxy:8081 \
   --env ROCKETMQ_TOPIC="$topic" \
@@ -418,7 +442,7 @@ docker run --rm \
   maven:3.9.11-eclipse-temurin-21@sha256:6fdc855a6ed81d288ca7ca37ac6ff5e9308b612485c0801d70b25a858c83d237 \
   mvn --batch-mode --no-transfer-progress -Dmaven.repo.local=/m2 \
   -pl commerce-service \
-  -Dtest=CatalogIntegrationTest,SeckillIntegrationTest,SeckillReservationIntegrationTest,SeckillTransactionIntegrationTest test
+  -Dtest=CatalogIntegrationTest,SeckillIntegrationTest,SeckillReservationIntegrationTest,SeckillTransactionIntegrationTest,MockPaymentIntegrationTest test
 
 terminal_key='00000000-0000-0000-0000-000000000060'
 terminal_output=''
@@ -439,4 +463,4 @@ if ! grep -q "$terminal_key" <<<"$terminal_output"; then
 fi
 echo "Verified repeated UNKNOWN reached Broker terminal topic TRANS_CHECK_MAX_TIME_TOPIC."
 
-echo "CB-030 through CB-061 catalog, order, seckill reservation, transaction admission, durable order, delayed cancellation, restoration ledger, polling, checkback, failure, and permission evidence passed."
+echo "CB-030 through CB-070 catalog, order, seckill, durable cancellation, mock-payment callback, atomic paid transition, ledger, failure, and permission evidence passed."

@@ -1,8 +1,8 @@
 # CityBuddy implementation index
 
-**Document version:** v0.14\
-**Verification date:** 2026-07-16\
-**Repository phase:** Delayed unpaid cancellation verified; mock payment ready
+**Document version:** v0.15\
+**Verification date:** 2026-07-17\
+**Repository phase:** Mock payment verified; refund ready
 
 ## How to use this index
 
@@ -17,7 +17,7 @@
 
 CityBuddy targets local-commerce transactions and text-only AI customer support with independent identity, side-effect, retrieval, and evaluation boundaries.
 
-The repository contains the verified local-runtime foundations, identity vertical slice, product catalog vertical slice, standard-ordering vertical slice, and seckill reservation, admission, and durable-order mainline:
+The repository contains the verified local-runtime foundations, identity vertical slice, product catalog vertical slice, standard-ordering vertical slice, and seckill reservation, durable-order, cancellation, and mock-payment mainline:
 
 - executable non-business skeletons for `auth-service`, `commerce-service`, `agent-service`, `knowledge-indexer`, and `web`;
 - one Maven reactor and wrapper, one locked `uv` workspace, and one npm lockfile;
@@ -33,9 +33,10 @@ The repository contains the verified local-runtime foundations, identity vertica
 - MySQL-authoritative seckill reservation intent/status with owner-scoped idempotency and polling, atomic Commerce Redis Lua admission and deterministic decisions, bounded TTL/version/number invariants, MySQL-only reservation rebuild, and exact least-privilege reservation grants;
 - public owner-scoped seckill reservation submission and polling, half-message-before-Lua transaction admission, durable-marker-only checkback, restart-stable bounded deadline convergence, and idempotent atomic MySQL order/reservation/order-create-ledger/unpaid-timeout creation;
 - durable bounded handoff and delayed-message dispatch for unpaid deadlines, current-state cancellation with atomic inventory/activity-quota restoration ledger, and post-commit or MySQL-rebuilt Redis projection;
+- owner-scoped idempotent mock-payment attempts, separately HMAC-authenticated callbacks, atomic MySQL attempt/order/payment-ledger/callback truth, exclusive-lock-first duplicate convergence, and bounded exact-1213 deadlock recovery;
 - format, lint, type/compile, unit-test, build, pre-commit, Gitleaks, and GitHub Actions paths through `make ci`.
 
-It does not yet contain payment, refund, or support-agent business behavior; production Elasticsearch knowledge indexes; model-provider access; deployment; or measured performance claims.
+It does not yet contain refund or support-agent business behavior; production Elasticsearch knowledge indexes; model-provider access; deployment; or measured performance claims.
 
 Cross-slice target architecture, preflight conclusions, service/data ownership, interface and security boundaries, sequence diagrams, route outcomes, risks, and change control live in [docs/CONTRACTS.md](docs/CONTRACTS.md).
 
@@ -81,10 +82,10 @@ The linked slice name is the canonical detailed specification. Target outcomes a
 | [CB-051 — Seckill reservation, atomic Lua admission, and owner-scoped polling](docs/slices/CB-051.md) | P0 | `VERIFIED` | `CB-050` |
 | [CB-060 — RocketMQ transaction admission and idempotent seckill order creation](docs/slices/CB-060.md) | P0 | `VERIFIED` | `CB-051` |
 | [CB-061 — Delayed unpaid cancellation and ledger restoration](docs/slices/CB-061.md) | P0 | `VERIFIED` | `CB-060` |
-| [CB-070 — Idempotent mock payment, authenticated callback, and payment ledger transitions](docs/slices/CB-070.md) | P0 | `READY` | `CB-061` |
-| [CB-071 — Refund state machine and payment/refund reconciliation](docs/slices/CB-071.md) | P0 | `PLANNED` | `CB-070` |
+| [CB-070 — Idempotent mock payment, authenticated callback, and payment ledger transitions](docs/slices/CB-070.md) | P0 | `VERIFIED` | `CB-061` |
+| [CB-071 — Refund state machine and payment/refund reconciliation](docs/slices/CB-071.md) | P0 | `READY` | `CB-070` |
 | [CB-080 — Support conversation, event, and evidence lifecycle](docs/slices/CB-080.md) | P0 | `PLANNED` | `CB-020`, `CB-030`, `CB-040` |
-| `CB-081 — Bounded agent, model routing, and ToolSpec control` | P0 | `PLANNED` | `CB-080` |
+| [CB-081 — Bounded agent, model routing, and ToolSpec control](docs/slices/CB-081.md) | P0 | `PLANNED` | `CB-080` |
 | `CB-082 — Filtered SSE, feedback, and deterministic support end-to-end evidence` | P0 | `PLANNED` | `CB-081` |
 | `CB-090 — Versioned hybrid knowledge index and deterministic retrieval fusion` | P0 | `PLANNED` | `CB-014`, `CB-082` |
 | `CB-091 — Rerank, sufficiency calibration, and retrieval evidence` | P0 | `PLANNED` | `CB-090` |
