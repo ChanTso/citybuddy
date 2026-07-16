@@ -1,6 +1,7 @@
 package io.citybuddy.commerce.seckill;
 
 import com.fasterxml.jackson.core.JsonProcessingException;
+import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import java.time.Clock;
 import java.util.ArrayList;
@@ -585,21 +586,69 @@ public final class ReservationAdmissionStore {
     }
     try {
       var payload = objectMapper.readTree(marker);
-      if (!reservationId.equals(payload.path("reservationId").asText())) {
+      if (!hasCompleteDecisionIdentity(payload, reservationId)) {
         return TransactionResolution.UNKNOWN;
       }
       String state = payload.path("state").asText();
       String code = payload.path("decisionCode").asText();
-      if (("ADMITTED".equals(state) || "ORDERED".equals(state)) && "ADMITTED".equals(code)) {
+      long version = payload.path("reservationVersion").asLong();
+      boolean durableOrderCreated = payload.path("durableOrderCreated").asBoolean();
+      if ("ADMITTED".equals(state)
+          && "ADMITTED".equals(code)
+          && version == 2
+          && !durableOrderCreated) {
         return TransactionResolution.COMMIT;
       }
-      if ("REJECTED".equals(state) && !code.isBlank() && !"ADMITTED".equals(code)) {
-        return TransactionResolution.ROLLBACK;
+      if ("ORDERED".equals(state)
+          && "ADMITTED".equals(code)
+          && version == 3
+          && durableOrderCreated) {
+        return TransactionResolution.COMMIT;
+      }
+      if ("REJECTED".equals(state) && version == 2 && !durableOrderCreated) {
+        try {
+          return ReservationDecisionCode.valueOf(code) == ReservationDecisionCode.ADMITTED
+              ? TransactionResolution.UNKNOWN
+              : TransactionResolution.ROLLBACK;
+        } catch (IllegalArgumentException exception) {
+          return TransactionResolution.UNKNOWN;
+        }
       }
       return TransactionResolution.UNKNOWN;
     } catch (JsonProcessingException exception) {
       return TransactionResolution.UNKNOWN;
     }
+  }
+
+  private static boolean hasCompleteDecisionIdentity(JsonNode payload, String reservationId) {
+    JsonNode activityId = payload.path("activityId");
+    JsonNode userHash = payload.path("userHash");
+    JsonNode quantity = payload.path("quantity");
+    JsonNode activityVersion = payload.path("activityProjectionVersion");
+    JsonNode reservationVersion = payload.path("reservationVersion");
+    JsonNode state = payload.path("state");
+    JsonNode decisionCode = payload.path("decisionCode");
+    JsonNode durableOrderCreated = payload.path("durableOrderCreated");
+    return payload.isObject()
+        && reservationId.equals(payload.path("reservationId").textValue())
+        && activityId.isTextual()
+        && !activityId.textValue().isBlank()
+        && activityId.textValue().length() <= 64
+        && activityId.textValue().equals(activityId.textValue().strip())
+        && userHash.isTextual()
+        && userHash.textValue().matches("[0-9a-f]{64}")
+        && quantity.isIntegralNumber()
+        && quantity.canConvertToInt()
+        && quantity.intValue() > 0
+        && activityVersion.isIntegralNumber()
+        && activityVersion.canConvertToLong()
+        && activityVersion.longValue() > 0
+        && activityVersion.longValue() <= SeckillLuaNumber.MAX_EXACT_INTEGER
+        && reservationVersion.isIntegralNumber()
+        && reservationVersion.canConvertToLong()
+        && state.isTextual()
+        && decisionCode.isTextual()
+        && durableOrderCreated.isBoolean();
   }
 
   public String acquireRebuild(String activityId) {

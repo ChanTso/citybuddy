@@ -279,6 +279,52 @@ class SeckillTransactionIntegrationTest {
         .isEqualTo("UNKNOWN");
     redis.delete(admissionStore.decisionKey(unreadableReservationId));
 
+    String incompleteReservationId = "00000000-0000-0000-0000-000000000062";
+    redis
+        .opsForValue()
+        .set(
+            admissionStore.decisionKey(incompleteReservationId),
+            objectMapper.writeValueAsString(
+                Map.of(
+                    "reservationId",
+                    incompleteReservationId,
+                    "state",
+                    "ADMITTED",
+                    "decisionCode",
+                    "ADMITTED")));
+    assertThat(admissionStore.transactionResolution(incompleteReservationId).name())
+        .isEqualTo("UNKNOWN");
+    redis.delete(admissionStore.decisionKey(incompleteReservationId));
+
+    String unknownCodeReservationId = "00000000-0000-0000-0000-000000000063";
+    redis
+        .opsForValue()
+        .set(
+            admissionStore.decisionKey(unknownCodeReservationId),
+            objectMapper.writeValueAsString(
+                Map.of(
+                    "reservationId",
+                    unknownCodeReservationId,
+                    "activityId",
+                    rejectedActivityId,
+                    "userHash",
+                    "0".repeat(64),
+                    "quantity",
+                    1,
+                    "activityProjectionVersion",
+                    1,
+                    "reservationVersion",
+                    2,
+                    "state",
+                    "REJECTED",
+                    "decisionCode",
+                    "UNKNOWN_REJECTION",
+                    "durableOrderCreated",
+                    false)));
+    assertThat(admissionStore.transactionResolution(unknownCodeReservationId).name())
+        .isEqualTo("UNKNOWN");
+    redis.delete(admissionStore.decisionKey(unknownCodeReservationId));
+
     String missingReservationId = "00000000-0000-0000-0000-000000000060";
     SeckillTransactionMessage unknown =
         new SeckillTransactionMessage(
