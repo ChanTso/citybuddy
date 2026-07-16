@@ -221,7 +221,7 @@ class SeckillTransactionIntegrationTest {
 
   @Test
   @Order(3)
-  void missingSecondPhaseUsesMarkerOnlyAndUnknownStopsAtBrokerBoundary() throws Exception {
+  void checkerMapsOnlyDurableMarkersAndUnknownStopsAtBrokerBoundary() throws Exception {
     String pendingActivityId = "cb060-public-pending";
     seedActivity(
         pendingActivityId, "cb060-product-public-pending", SeckillActivityState.ACTIVE, 1, 1);
@@ -252,9 +252,32 @@ class SeckillTransactionIntegrationTest {
       producer.send(message(SeckillTransactionMessage.from(prepared.reservation())), unresolved);
       ReservationResult admitted = reservationService.admit(prepared.reservation().reservationId());
       assertThat(admitted.state()).isEqualTo(ReservationState.ADMITTED);
+      assertThat(admissionStore.transactionResolution(admitted.reservationId()).name())
+          .isEqualTo("COMMIT");
       assertThat(consumeEventually()).isEqualTo(1);
       assertThat(admittedChecks.get()).isGreaterThanOrEqualTo(1);
     }
+
+    String rejectedActivityId = "cb060-checkback-rejected";
+    seedActivity(
+        rejectedActivityId, "cb060-product-checkback-rejected", SeckillActivityState.DRAFT, 1, 1);
+    var rejectedPrepared =
+        reservationService.prepare(
+            USER,
+            rejectedActivityId,
+            "cb060-key-checkback-rejected",
+            request(Map.of("quantity", 1, "expectedActivityVersion", 1)));
+    ReservationResult rejected =
+        reservationService.admit(rejectedPrepared.reservation().reservationId());
+    assertThat(rejected.state()).isEqualTo(ReservationState.REJECTED);
+    assertThat(admissionStore.transactionResolution(rejected.reservationId()).name())
+        .isEqualTo("ROLLBACK");
+
+    String unreadableReservationId = "00000000-0000-0000-0000-000000000061";
+    redis.opsForValue().set(admissionStore.decisionKey(unreadableReservationId), "{unreadable");
+    assertThat(admissionStore.transactionResolution(unreadableReservationId).name())
+        .isEqualTo("UNKNOWN");
+    redis.delete(admissionStore.decisionKey(unreadableReservationId));
 
     String missingReservationId = "00000000-0000-0000-0000-000000000060";
     SeckillTransactionMessage unknown =
