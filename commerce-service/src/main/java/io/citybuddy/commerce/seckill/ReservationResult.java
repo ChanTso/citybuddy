@@ -22,7 +22,8 @@ public record ReservationResult(
         reservation.decisionCode(),
         reservation.projectionVersion(),
         replay,
-        reservation.state() == ReservationState.ORDERED,
+        reservation.state() == ReservationState.ORDERED
+            || reservation.state() == ReservationState.CANCELLED,
         reservation.orderId());
   }
 

@@ -14,7 +14,7 @@ import org.springframework.transaction.support.TransactionTemplate;
 
 @Configuration(proxyBeanMethods = false)
 @ConditionalOnProperty(name = "citybuddy.seckill.order.enabled", havingValue = "true")
-@EnableConfigurationProperties(SeckillOrderProperties.class)
+@EnableConfigurationProperties({SeckillOrderProperties.class, SeckillTimeoutProperties.class})
 @EnableScheduling
 public class SeckillOrderConfiguration {
   @Bean
@@ -61,5 +61,43 @@ public class SeckillOrderConfiguration {
   SeckillTransactionResolutionWorker seckillTransactionResolutionWorker(
       SeckillReservationService reservations) {
     return new SeckillTransactionResolutionWorker(reservations);
+  }
+
+  @Bean(destroyMethod = "close")
+  RocketMqSeckillTimeouts rocketMqSeckillTimeouts(
+      ObjectMapper objectMapper, SeckillTimeoutProperties properties) throws Exception {
+    return new RocketMqSeckillTimeouts(objectMapper, properties);
+  }
+
+  @Bean
+  SeckillCancellationService seckillCancellationService(
+      SeckillOrderRepository orders,
+      SeckillReservationRepository reservations,
+      SeckillActivityRepository activities,
+      SeckillProjectionStore projections,
+      PlatformTransactionManager transactionManager,
+      Clock seckillClock) {
+    TransactionTemplate transaction = new TransactionTemplate(transactionManager);
+    transaction.setPropagationBehavior(TransactionDefinition.PROPAGATION_REQUIRES_NEW);
+    return new SeckillCancellationService(
+        orders, reservations, activities, projections, transaction, seckillClock);
+  }
+
+  @Bean
+  SeckillTimeoutDispatchService seckillTimeoutDispatchService(
+      SeckillOrderRepository orders,
+      RocketMqSeckillTimeouts messaging,
+      SeckillTimeoutProperties properties) {
+    return new SeckillTimeoutDispatchService(orders, messaging, properties);
+  }
+
+  @Bean
+  SeckillTimeoutWorker seckillTimeoutWorker(
+      SeckillTimeoutDispatchService dispatch,
+      RocketMqSeckillTimeouts messaging,
+      SeckillCancellationService cancellations,
+      SeckillTimeoutProperties properties,
+      Clock seckillClock) {
+    return new SeckillTimeoutWorker(dispatch, messaging, cancellations, properties, seckillClock);
   }
 }

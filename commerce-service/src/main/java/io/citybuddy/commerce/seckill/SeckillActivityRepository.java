@@ -91,6 +91,31 @@ public final class SeckillActivityRepository {
         nextVersion);
   }
 
+  public SeckillActivity advanceProjectionVersion(SeckillActivity current) {
+    long nextVersion = Math.addExact(current.projectionVersion(), 1);
+    int changed =
+        jdbc.update(
+            """
+            UPDATE seckill_activity
+            SET projection_version = ?
+            WHERE activity_id = ? AND projection_version = ?
+            """,
+            nextVersion,
+            current.activityId(),
+            current.projectionVersion());
+    if (changed != 1) {
+      throw new IllegalStateException("Seckill activity changed during projection advancement");
+    }
+    return new SeckillActivity(
+        current.activityId(),
+        current.productId(),
+        current.startsAt(),
+        current.endsAt(),
+        current.state(),
+        current.allocatedQuota(),
+        nextVersion);
+  }
+
   private static SeckillActivity mapActivity(ResultSet result, int row) throws SQLException {
     return new SeckillActivity(
         result.getString("activity_id"),

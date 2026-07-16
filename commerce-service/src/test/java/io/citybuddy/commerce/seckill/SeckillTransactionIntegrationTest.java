@@ -4,10 +4,12 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
+import java.time.Clock;
 import java.time.Duration;
 import java.time.Instant;
 import java.time.temporal.ChronoUnit;
 import java.util.Map;
+import java.util.UUID;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 import org.apache.rocketmq.client.apis.ClientConfiguration;
@@ -81,6 +83,22 @@ class SeckillTransactionIntegrationTest {
     registry.add("citybuddy.seckill.order.receive-await", () -> "1s");
     registry.add("citybuddy.seckill.order.receive-invisible-duration", () -> "10s");
     registry.add("citybuddy.seckill.order.unpaid-timeout", () -> "15m");
+    registry.add(
+        "citybuddy.seckill.timeout.rocketmq-endpoints", () -> required("ROCKETMQ_ENDPOINTS"));
+    registry.add(
+        "citybuddy.seckill.timeout.rocketmq-topic", () -> required("ROCKETMQ_TIMEOUT_TOPIC"));
+    registry.add(
+        "citybuddy.seckill.timeout.rocketmq-consumer-group",
+        () -> required("ROCKETMQ_TIMEOUT_GROUP"));
+    registry.add("citybuddy.seckill.timeout.dispatch-worker-initial-delay-ms", () -> "3600000");
+    registry.add("citybuddy.seckill.timeout.dispatch-worker-delay-ms", () -> "3600000");
+    registry.add("citybuddy.seckill.timeout.consumer-worker-initial-delay-ms", () -> "3600000");
+    registry.add("citybuddy.seckill.timeout.consumer-worker-delay-ms", () -> "3600000");
+    registry.add("citybuddy.seckill.timeout.receive-await", () -> "1s");
+    registry.add("citybuddy.seckill.timeout.receive-invisible-duration", () -> "10s");
+    registry.add("citybuddy.seckill.timeout.dispatch-batch-size", () -> "32");
+    registry.add("citybuddy.seckill.timeout.maximum-dispatch-attempts", () -> "3");
+    registry.add("citybuddy.seckill.timeout.maximum-delivery-attempts", () -> "3");
   }
 
   @Autowired private TestRestTemplate http;
@@ -96,6 +114,12 @@ class SeckillTransactionIntegrationTest {
   @Autowired private RocketMqSeckillTransactions messaging;
   @Autowired private SeckillOrderService orderService;
   @Autowired private SeckillTransactionResolutionWorker resolutionWorker;
+  @Autowired private SeckillOrderRepository orderRepository;
+  @Autowired private SeckillTimeoutProperties timeoutProperties;
+  @Autowired private RocketMqSeckillTimeouts timeoutMessaging;
+  @Autowired private SeckillTimeoutDispatchService timeoutDispatch;
+  @Autowired private SeckillCancellationService cancellationService;
+  @Autowired private SeckillTimeoutWorker timeoutWorker;
   @Autowired private PlatformTransactionManager transactionManager;
 
   @Test
@@ -548,6 +572,266 @@ class SeckillTransactionIntegrationTest {
         .isZero();
   }
 
+  @Test
+  @Order(7)
+  void boundedActivationHandoffAndNormalDispatchCancelAndRestoreExactlyOnce() throws Exception {
+    String activityId = "cb061-handoff";
+    String productId = "cb061-product-handoff";
+    String reservationId = createOrderedReservation(activityId, productId, "cb061-handoff-key", 2);
+    forceOrderDueIn(reservationId, Duration.ofSeconds(10));
+
+    SeckillTimeoutWorker restartedWorker =
+        new SeckillTimeoutWorker(
+            new SeckillTimeoutDispatchService(orderRepository, timeoutMessaging, timeoutProperties),
+            timeoutMessaging,
+            cancellationService,
+            timeoutProperties,
+            Clock.systemUTC());
+    SeckillTimeoutDispatchService.DispatchBatch handoff = restartedWorker.dispatchOnce();
+    assertThat(handoff.selected()).isBetween(1, timeoutProperties.dispatchBatchSize());
+    assertDispatchEvidence(reservationId);
+
+    assertThat(timeoutMessaging.consumeOnce(cancellationService)).isZero();
+    assertThat(orderStatus(reservationId)).isEqualTo("UNPAID");
+    assertThat(consumeTimeoutEventually(Duration.ofSeconds(20))).isEqualTo(1);
+    assertCancelledAndRestored(reservationId, 2, 2);
+
+    SeckillOrderRepository.OrderRecord cancelled =
+        orderRepository.findByReservation(reservationId).orElseThrow();
+    timeoutMessaging.send(SeckillTimeoutMessage.from(cancelled));
+    assertThat(consumeTimeoutEventually(Duration.ofSeconds(10))).isEqualTo(1);
+    assertCancelledAndRestored(reservationId, 2, 2);
+    String userMarker = admissionStore.userKey(activityId, SeckillReservationService.sha256(USER));
+    assertThat(redis.opsForValue().get(userMarker)).isEqualTo(reservationId);
+    assertThat(reservationService.rebuildActivityState(activityId))
+        .isEqualTo(ReservationAdmissionStore.RebuildResult.APPLIED);
+    assertThat(redis.opsForValue().get(userMarker)).isEqualTo(reservationId);
+    assertThat(projectionRemaining(activityId)).isEqualTo(2);
+    ResponseEntity<ReservationResult> repeatedUser =
+        reserve(
+            directToken(),
+            activityId,
+            "cb061-handoff-second-order",
+            Map.of("quantity", 1, "expectedActivityVersion", 2));
+    assertThat(repeatedUser.getStatusCode()).isEqualTo(HttpStatus.CONFLICT);
+    assertThat(repeatedUser.getBody()).isNotNull();
+    assertThat(repeatedUser.getBody().decisionCode())
+        .isEqualTo(ReservationDecisionCode.DUPLICATE_USER);
+    assertThat(
+            jdbc.queryForObject(
+                "SELECT COUNT(*) FROM seckill_order WHERE activity_id = ?",
+                Integer.class,
+                activityId))
+        .isEqualTo(1);
+
+    restartedWorker.dispatchOnce();
+    String normalActivityId = "cb061-normal";
+    String normalReservationId =
+        createOrderedReservation(normalActivityId, "cb061-product-normal", "cb061-normal-key", 1);
+    forceOrderDueIn(normalReservationId, Duration.ofMinutes(5));
+    assertThat(restartedWorker.dispatchOnce().sent()).isGreaterThanOrEqualTo(1);
+    assertDispatchEvidence(normalReservationId);
+  }
+
+  @Test
+  @Order(8)
+  void earlyStaleAndPaidTimeoutsDoNotMutateAndRedisRetryUsesCommittedTruth() throws Exception {
+    String earlyActivity = "cb061-early";
+    String earlyReservation =
+        createOrderedReservation(earlyActivity, "cb061-product-early", "cb061-early-key", 1);
+    forceOrderDueIn(earlyReservation, Duration.ofMinutes(1));
+    SeckillOrderRepository.OrderRecord earlyOrder =
+        orderRepository.findByReservation(earlyReservation).orElseThrow();
+    sendImmediateTimeout(SeckillTimeoutMessage.from(earlyOrder));
+    assertThat(timeoutMessaging.consumeOnce(cancellationService)).isZero();
+    assertThat(orderStatus(earlyReservation)).isEqualTo("UNPAID");
+    assertThat(cancellationMovementCount(earlyReservation)).isZero();
+
+    SeckillTimeoutMessage stale =
+        new SeckillTimeoutMessage(
+            UUID.randomUUID().toString(),
+            earlyOrder.orderId(),
+            earlyOrder.reservationId(),
+            "UNPAID",
+            1,
+            earlyOrder.unpaidDeadline(),
+            earlyOrder.transactionEventId());
+    assertThat(cancellationService.cancel(stale).outcome())
+        .isEqualTo(SeckillCancellationService.Outcome.STALE);
+    assertThat(orderStatus(earlyReservation)).isEqualTo("UNPAID");
+
+    String paidActivity = "cb061-paid";
+    String paidReservation =
+        createOrderedReservation(paidActivity, "cb061-product-paid", "cb061-paid-key", 1);
+    forceOrderDueIn(paidReservation, Duration.ofSeconds(-1));
+    assertThat(
+            jdbc.update(
+                "UPDATE seckill_order SET status = 'PAID', state_version = 2 "
+                    + "WHERE reservation_id = ?",
+                paidReservation))
+        .isEqualTo(1);
+    SeckillOrderRepository.OrderRecord paidOrder =
+        orderRepository.findByReservation(paidReservation).orElseThrow();
+    sendImmediateTimeout(SeckillTimeoutMessage.from(paidOrder));
+    assertThat(consumeTimeoutEventually(Duration.ofSeconds(10))).isEqualTo(1);
+    assertThat(orderStatus(paidReservation)).isEqualTo("PAID");
+    assertThat(cancellationMovementCount(paidReservation)).isZero();
+
+    String redisActivity = "cb061-redis-retry";
+    String redisReservation =
+        createOrderedReservation(
+            redisActivity, "cb061-product-redis-retry", "cb061-redis-retry-key", 1);
+    forceOrderDueIn(redisReservation, Duration.ofSeconds(-1));
+    SeckillActivity activity = activityRepository.find(redisActivity).orElseThrow();
+    redis
+        .opsForValue()
+        .set(
+            projections.key(redisActivity),
+            objectMapper.writeValueAsString(
+                new SeckillProjection(
+                    activity.activityId(),
+                    2,
+                    activity.startsAt(),
+                    activity.endsAt(),
+                    activity.state(),
+                    0)));
+    SeckillOrderRepository.OrderRecord redisOrder =
+        orderRepository.findByReservation(redisReservation).orElseThrow();
+    sendImmediateTimeout(SeckillTimeoutMessage.from(redisOrder));
+    assertThatThrownBy(() -> timeoutMessaging.consumeOnce(cancellationService))
+        .isInstanceOf(SeckillProjectionStore.ProjectionWriteException.class)
+        .hasMessageContaining("same version");
+    assertDurableCancelledAndRestored(redisReservation, 1);
+    assertThat(projectionRemaining(redisActivity)).isZero();
+    redis.delete(projections.key(redisActivity));
+    assertThat(consumeTimeoutEventually(Duration.ofSeconds(15))).isEqualTo(1);
+    assertThat(projectionRemaining(redisActivity)).isEqualTo(1);
+    assertCancelledAndRestored(redisReservation, 1, 1);
+  }
+
+  @Test
+  @Order(9)
+  void databaseFailureIsNotAcknowledgedAndDispatchRetryIsBoundedAndReplaySafe() throws Exception {
+    String activityId = "cb061-database-retry";
+    String reservationId =
+        createOrderedReservation(
+            activityId, "cb061-product-database-retry", "cb061-database-retry-key", 1);
+    forceOrderDueIn(reservationId, Duration.ofSeconds(-1));
+    TransactionTemplate controlledRollback = new TransactionTemplate(transactionManager);
+    controlledRollback.setPropagationBehavior(TransactionDefinition.PROPAGATION_REQUIRES_NEW);
+    assertThatThrownBy(
+            () ->
+                controlledRollback.executeWithoutResult(
+                    status -> {
+                      SeckillOrderRepository.OrderRecord currentOrder =
+                          orderRepository
+                              .findByReservation(reservationId)
+                              .flatMap(order -> orderRepository.findForUpdate(order.orderId()))
+                              .orElseThrow();
+                      SeckillReservation currentReservation =
+                          reservationRepository.findForUpdate(reservationId).orElseThrow();
+                      SeckillActivity currentActivity =
+                          activityRepository.findForUpdate(activityId).orElseThrow();
+                      SeckillOrderRepository.ProductSnapshot currentProduct =
+                          orderRepository
+                              .findProductForUpdate(currentOrder.productId())
+                              .orElseThrow();
+                      orderRepository.restoreInventory(currentProduct, currentOrder.quantity());
+                      orderRepository.insertUnpaidCancellationMovement(currentOrder);
+                      orderRepository.markCancelled(currentOrder);
+                      reservationRepository.markCancelled(currentReservation);
+                      activityRepository.advanceProjectionVersion(currentActivity);
+                      throw new IllegalStateException("controlled atomic cancellation rollback");
+                    }))
+        .isInstanceOf(IllegalStateException.class)
+        .hasMessage("controlled atomic cancellation rollback");
+    SeckillOrderRepository.OrderRecord order =
+        orderRepository.findByReservation(reservationId).orElseThrow();
+    assertThat(orderStatus(reservationId)).isEqualTo("UNPAID");
+    assertThat(cancellationMovementCount(reservationId)).isZero();
+    assertThat(productStock(order.productId())).isZero();
+    assertThat(reservationRepository.find(reservationId).orElseThrow().state())
+        .isEqualTo(ReservationState.ORDERED);
+
+    assertThat(
+            jdbc.update(
+                "UPDATE seckill_activity SET projection_version = ? WHERE activity_id = ?",
+                SeckillLuaNumber.MAX_EXACT_INTEGER,
+                activityId))
+        .isEqualTo(1);
+    sendImmediateTimeout(SeckillTimeoutMessage.from(order));
+    assertThatThrownBy(() -> timeoutMessaging.consumeOnce(cancellationService))
+        .isInstanceOf(IllegalStateException.class)
+        .hasMessageContaining("cannot be incremented safely");
+    assertThat(orderStatus(reservationId)).isEqualTo("UNPAID");
+    assertThat(cancellationMovementCount(reservationId)).isZero();
+    assertThat(productStock(order.productId())).isZero();
+    assertThat(reservationRepository.find(reservationId).orElseThrow().state())
+        .isEqualTo(ReservationState.ORDERED);
+
+    assertThat(
+            jdbc.update(
+                "UPDATE seckill_activity SET projection_version = 1 WHERE activity_id = ?",
+                activityId))
+        .isEqualTo(1);
+    assertThat(consumeTimeoutEventually(Duration.ofSeconds(20))).isEqualTo(1);
+    assertCancelledAndRestored(reservationId, 1, 1);
+
+    String dispatchActivity = "cb061-dispatch-bound";
+    String dispatchReservation =
+        createOrderedReservation(
+            dispatchActivity, "cb061-product-dispatch-bound", "cb061-dispatch-bound-key", 1);
+    forceOrderDueIn(dispatchReservation, Duration.ofMinutes(5));
+    SeckillTimeoutProperties twoAttempts =
+        new SeckillTimeoutProperties(
+            timeoutProperties.rocketmqEndpoints(),
+            timeoutProperties.rocketmqTopic(),
+            timeoutProperties.rocketmqConsumerGroup(),
+            timeoutProperties.receiveAwait(),
+            timeoutProperties.receiveInvisibleDuration(),
+            timeoutProperties.receiveBatchSize(),
+            timeoutProperties.dispatchBatchSize(),
+            2,
+            timeoutProperties.maximumDeliveryAttempts());
+    SeckillTimeoutDispatchService ambiguousDispatch =
+        new SeckillTimeoutDispatchService(
+            orderRepository,
+            message -> {
+              timeoutMessaging.send(message);
+              throw new org.apache.rocketmq.client.apis.ClientException(
+                  "controlled lost send receipt");
+            },
+            twoAttempts);
+    assertThat(ambiguousDispatch.dispatchCurrentOnce().failed()).isGreaterThanOrEqualTo(1);
+    assertThat(timeoutDispatchAttempts(dispatchReservation)).isEqualTo(1);
+    assertThat(timeoutDispatchState(dispatchReservation)).isEqualTo("PENDING");
+    assertThat(timeoutDispatch.dispatchCurrentOnce().sent()).isGreaterThanOrEqualTo(1);
+    assertDispatchEvidence(dispatchReservation);
+
+    String exhaustedActivity = "cb061-dispatch-exhausted";
+    String exhaustedReservation =
+        createOrderedReservation(
+            exhaustedActivity,
+            "cb061-product-dispatch-exhausted",
+            "cb061-dispatch-exhausted-key",
+            1);
+    forceOrderDueIn(exhaustedReservation, Duration.ofMinutes(5));
+    SeckillTimeoutDispatchService alwaysFailing =
+        new SeckillTimeoutDispatchService(
+            orderRepository,
+            message -> {
+              throw new org.apache.rocketmq.client.apis.ClientException(
+                  "controlled broker unavailability");
+            },
+            twoAttempts);
+    while ("PENDING".equals(timeoutDispatchState(exhaustedReservation))) {
+      alwaysFailing.dispatchCurrentOnce();
+    }
+    assertThat(timeoutDispatchState(exhaustedReservation)).isEqualTo("FAILED");
+    assertThat(timeoutDispatchAttempts(exhaustedReservation)).isEqualTo(2);
+    assertThat(alwaysFailing.dispatchCurrentOnce().selected()).isZero();
+  }
+
   private void forceDue(String reservationId) {
     assertThat(
             jdbc.update(
@@ -555,6 +839,152 @@ class SeckillTransactionIntegrationTest {
                     + "TIMESTAMPADD(SECOND, -1, CURRENT_TIMESTAMP(6)) WHERE reservation_id = ?",
                 reservationId))
         .isEqualTo(1);
+  }
+
+  private String createOrderedReservation(
+      String activityId, String productId, String idempotencyKey, long initialStock)
+      throws Exception {
+    seedActivity(activityId, productId, SeckillActivityState.ACTIVE, initialStock, initialStock);
+    ResponseEntity<ReservationResult> response =
+        reserve(
+            directToken(),
+            activityId,
+            idempotencyKey,
+            Map.of("quantity", 1, "expectedActivityVersion", 1));
+    assertThat(response.getStatusCode()).isEqualTo(HttpStatus.CREATED);
+    ReservationResult admitted = response.getBody();
+    assertThat(admitted).isNotNull();
+    assertThat(consumeEventually()).isEqualTo(1);
+    ReservationResult ordered = poll(directToken(), admitted.reservationId()).getBody();
+    assertThat(ordered).isNotNull();
+    assertThat(ordered.state()).isEqualTo(ReservationState.ORDERED);
+    return admitted.reservationId();
+  }
+
+  private void forceOrderDueIn(String reservationId, Duration offset) {
+    assertThat(
+            jdbc.update(
+                "UPDATE seckill_order SET unpaid_deadline = ? WHERE reservation_id = ?",
+                java.sql.Timestamp.from(Instant.now().plus(offset).truncatedTo(ChronoUnit.MICROS)),
+                reservationId))
+        .isEqualTo(1);
+  }
+
+  private void assertDispatchEvidence(String reservationId) {
+    Map<String, Object> evidence =
+        jdbc.queryForMap(
+            "SELECT timeout_dispatch_state, timeout_broker_message_id, "
+                + "timeout_dispatched_at FROM seckill_order WHERE reservation_id = ?",
+            reservationId);
+    assertThat(evidence.get("timeout_dispatch_state")).isEqualTo("SENT");
+    assertThat(evidence.get("timeout_broker_message_id")).asString().isNotBlank();
+    assertThat(evidence.get("timeout_dispatched_at")).isNotNull();
+  }
+
+  private void assertCancelledAndRestored(
+      String reservationId, long expectedStock, long expectedRemainingQuota) throws Exception {
+    assertDurableCancelledAndRestored(reservationId, expectedStock);
+    SeckillOrderRepository.OrderRecord order =
+        orderRepository.findByReservation(reservationId).orElseThrow();
+    assertThat(projectionRemaining(order.activityId())).isEqualTo(expectedRemainingQuota);
+  }
+
+  private void assertDurableCancelledAndRestored(String reservationId, long expectedStock) {
+    SeckillOrderRepository.OrderRecord order =
+        orderRepository.findByReservation(reservationId).orElseThrow();
+    assertThat(order.status()).isEqualTo("CANCELLED");
+    assertThat(order.stateVersion()).isEqualTo(2);
+    assertThat(reservationRepository.find(reservationId).orElseThrow().state())
+        .isEqualTo(ReservationState.CANCELLED);
+    assertThat(productStock(order.productId())).isEqualTo(expectedStock);
+    assertThat(cancellationMovementCount(reservationId)).isEqualTo(1);
+    assertThat(
+            jdbc.queryForObject(
+                "SELECT COUNT(*) FROM inventory_ledger WHERE reservation_id = ? "
+                    + "AND movement_type = 'SECKILL_UNPAID_CANCEL' "
+                    + "AND business_event_key = CONCAT('seckill-unpaid-cancel:', ?) "
+                    + "AND inventory_delta = 1 AND activity_quota_delta = 1",
+                Integer.class,
+                reservationId,
+                order.timeoutEventId()))
+        .isEqualTo(1);
+  }
+
+  private long projectionRemaining(String activityId) throws Exception {
+    String projection = redis.opsForValue().get(projections.key(activityId));
+    assertThat(projection).isNotNull();
+    return objectMapper.readTree(projection).path("remainingQuota").asLong();
+  }
+
+  private String orderStatus(String reservationId) {
+    return jdbc.queryForObject(
+        "SELECT status FROM seckill_order WHERE reservation_id = ?", String.class, reservationId);
+  }
+
+  private int cancellationMovementCount(String reservationId) {
+    return jdbc.queryForObject(
+        "SELECT COUNT(*) FROM inventory_ledger WHERE reservation_id = ? "
+            + "AND movement_type = 'SECKILL_UNPAID_CANCEL'",
+        Integer.class,
+        reservationId);
+  }
+
+  private long productStock(String productId) {
+    return jdbc.queryForObject(
+        "SELECT stock_quantity FROM product WHERE product_id = ?", Long.class, productId);
+  }
+
+  private String timeoutDispatchState(String reservationId) {
+    return jdbc.queryForObject(
+        "SELECT timeout_dispatch_state FROM seckill_order WHERE reservation_id = ?",
+        String.class,
+        reservationId);
+  }
+
+  private int timeoutDispatchAttempts(String reservationId) {
+    return jdbc.queryForObject(
+        "SELECT timeout_dispatch_attempts FROM seckill_order WHERE reservation_id = ?",
+        Integer.class,
+        reservationId);
+  }
+
+  private int consumeTimeoutEventually(Duration timeout) throws Exception {
+    long deadline = System.nanoTime() + timeout.toNanos();
+    while (System.nanoTime() < deadline) {
+      int consumed = timeoutMessaging.consumeOnce(cancellationService);
+      if (consumed > 0) {
+        return consumed;
+      }
+    }
+    return 0;
+  }
+
+  private void sendImmediateTimeout(SeckillTimeoutMessage payload) throws Exception {
+    try (Producer producer = plainProducer(required("ROCKETMQ_TIMEOUT_TOPIC"))) {
+      producer.send(
+          ClientServiceProvider.loadService()
+              .newMessageBuilder()
+              .setTopic(required("ROCKETMQ_TIMEOUT_TOPIC"))
+              .setTag(RocketMqSeckillTimeouts.TAG)
+              .setKeys(payload.eventId())
+              .setDeliveryTimestamp(System.currentTimeMillis())
+              .setBody(objectMapper.writeValueAsBytes(payload))
+              .build());
+    }
+  }
+
+  private Producer plainProducer(String topic) throws Exception {
+    ClientConfiguration configuration =
+        ClientConfiguration.newBuilder()
+            .setEndpoints(required("ROCKETMQ_ENDPOINTS"))
+            .setRequestTimeout(Duration.ofSeconds(10))
+            .enableSsl(false)
+            .build();
+    return ClientServiceProvider.loadService()
+        .newProducerBuilder()
+        .setClientConfiguration(configuration)
+        .setTopics(topic)
+        .build();
   }
 
   private void deferExistingPendingDeadlines() {
