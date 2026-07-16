@@ -2,6 +2,7 @@ package io.citybuddy.commerce.seckill;
 
 import java.sql.ResultSet;
 import java.sql.SQLException;
+import java.time.Duration;
 import java.util.List;
 import java.util.Optional;
 import org.springframework.jdbc.core.JdbcTemplate;
@@ -9,7 +10,8 @@ import org.springframework.jdbc.core.JdbcTemplate;
 public final class SeckillReservationRepository {
   private static final String COLUMNS =
       "reservation_id, user_subject, activity_id, idempotency_key, intent_hash, quantity, "
-          + "activity_projection_version, state, decision_code, projection_version, order_id";
+          + "activity_projection_version, state, decision_code, projection_version, order_id, "
+          + "transaction_resolution_due_at";
 
   private final JdbcTemplate jdbc;
 
@@ -17,13 +19,23 @@ public final class SeckillReservationRepository {
     this.jdbc = jdbc;
   }
 
-  public void reservePending(SeckillReservation reservation) {
+  public void reservePending(SeckillReservation reservation, Duration resolutionWindow) {
+    long resolutionWindowMicros;
+    try {
+      resolutionWindowMicros = Math.multiplyExact(resolutionWindow.toMillis(), 1_000L);
+    } catch (ArithmeticException exception) {
+      throw new IllegalArgumentException("Transaction resolution window is too large", exception);
+    }
+    if (resolutionWindowMicros < 1) {
+      throw new IllegalArgumentException("Transaction resolution window must be positive");
+    }
     jdbc.update(
         """
         INSERT INTO seckill_reservation
           (reservation_id, user_subject, activity_id, idempotency_key, intent_hash, quantity,
-           activity_projection_version, state, projection_version)
-        VALUES (?, ?, ?, ?, ?, ?, ?, 'PENDING', 1)
+           activity_projection_version, state, projection_version, transaction_resolution_due_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, 'PENDING', 1,
+                TIMESTAMPADD(MICROSECOND, ?, CURRENT_TIMESTAMP(6)))
         """,
         reservation.reservationId(),
         reservation.userSubject(),
@@ -31,7 +43,8 @@ public final class SeckillReservationRepository {
         reservation.idempotencyKey(),
         reservation.intentHash(),
         reservation.quantity(),
-        reservation.activityProjectionVersion());
+        reservation.activityProjectionVersion(),
+        resolutionWindowMicros);
   }
 
   public Optional<SeckillReservation> findByIdempotencyForUpdate(
@@ -85,6 +98,20 @@ public final class SeckillReservationRepository {
     return count != null && count > 0;
   }
 
+  public List<SeckillReservation> findDuePending(int limit) {
+    if (limit < 1 || limit > 1_000) {
+      throw new IllegalArgumentException("Due reservation batch size is invalid");
+    }
+    return jdbc.query(
+        "SELECT "
+            + COLUMNS
+            + " FROM seckill_reservation "
+            + "WHERE state = 'PENDING' AND transaction_resolution_due_at <= CURRENT_TIMESTAMP(6) "
+            + "ORDER BY transaction_resolution_due_at, reservation_id LIMIT ?",
+        SeckillReservationRepository::mapReservation,
+        limit);
+  }
+
   public long admittedQuantity(String activityId) {
     Long quantity =
         jdbc.queryForObject(
@@ -121,7 +148,8 @@ public final class SeckillReservationRepository {
         state,
         decisionCode,
         2,
-        null);
+        null,
+        current.transactionResolutionDueAt());
   }
 
   public SeckillReservation markOrdered(SeckillReservation current, String orderId) {
@@ -149,7 +177,8 @@ public final class SeckillReservationRepository {
         ReservationState.ORDERED,
         current.decisionCode(),
         3,
-        orderId);
+        orderId,
+        current.transactionResolutionDueAt());
   }
 
   private Optional<SeckillReservation> queryOne(String sql, Object... arguments) {
@@ -170,6 +199,7 @@ public final class SeckillReservationRepository {
         ReservationState.valueOf(result.getString("state")),
         code == null ? null : ReservationDecisionCode.valueOf(code),
         result.getLong("projection_version"),
-        result.getString("order_id"));
+        result.getString("order_id"),
+        result.getTimestamp("transaction_resolution_due_at").toInstant());
   }
 }

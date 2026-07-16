@@ -56,4 +56,10 @@ public class SeckillOrderConfiguration {
       RocketMqSeckillTransactions messaging, SeckillOrderService orders) {
     return new SeckillOrderWorker(messaging, orders);
   }
+
+  @Bean
+  SeckillTransactionResolutionWorker seckillTransactionResolutionWorker(
+      SeckillReservationService reservations) {
+    return new SeckillTransactionResolutionWorker(reservations);
+  }
 }

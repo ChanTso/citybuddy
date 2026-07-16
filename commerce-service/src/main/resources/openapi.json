@@ -190,7 +190,7 @@
           "quantity": {"type": "integer", "minimum": 1},
           "activityProjectionVersion": {"type": "integer", "minimum": 1},
           "state": {"type": "string", "enum": ["PENDING", "ADMITTED", "REJECTED", "ORDERED"]},
-          "decisionCode": {"type": ["string", "null"], "enum": ["ADMITTED", "ACTIVITY_INACTIVE", "NOT_OPEN", "EXPIRED", "STALE_VERSION", "EXHAUSTED", "DUPLICATE_USER", null]},
+          "decisionCode": {"type": ["string", "null"], "enum": ["ADMITTED", "ACTIVITY_INACTIVE", "NOT_OPEN", "EXPIRED", "STALE_VERSION", "EXHAUSTED", "DUPLICATE_USER", "TRANSACTION_TIMEOUT", null]},
           "projectionVersion": {"type": "integer", "minimum": 1, "maximum": 3},
           "replay": {"type": "boolean"},
           "durableOrderCreated": {"type": "boolean"},

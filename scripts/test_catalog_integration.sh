@@ -241,10 +241,10 @@ assert_mysql_fails "database rejects an invalid seckill state" '(Data truncated|
   "INSERT INTO seckill_activity (activity_id, product_id, starts_at, ends_at, state, allocated_quota, projection_version) VALUES ('invalid-state', 'none', '2030-01-01 00:00:00', '2030-01-01 01:00:00', 'UNKNOWN', 1, 1)"
 assert_mysql_fails "database rejects a zero reservation quantity" '(Check constraint|CONSTRAINT.*failed)' \
   mysql_query commerce_app "$commerce_app_password" commerce_db \
-  "INSERT INTO seckill_reservation (reservation_id, user_subject, activity_id, idempotency_key, intent_hash, quantity, activity_projection_version) VALUES ('00000000-0000-0000-0000-000000000052', 'invalid', 'none', 'zero', REPEAT('0', 64), 0, 1)"
+  "INSERT INTO seckill_reservation (reservation_id, user_subject, activity_id, idempotency_key, intent_hash, quantity, activity_projection_version, transaction_resolution_due_at) VALUES ('00000000-0000-0000-0000-000000000052', 'invalid', 'none', 'zero', REPEAT('0', 64), 0, 1, CURRENT_TIMESTAMP(6))"
 assert_mysql_fails "database rejects a terminal reservation without a decision" '(Check constraint|CONSTRAINT.*failed)' \
   mysql_query commerce_app "$commerce_app_password" commerce_db \
-  "INSERT INTO seckill_reservation (reservation_id, user_subject, activity_id, idempotency_key, intent_hash, quantity, activity_projection_version, state, projection_version) VALUES ('00000000-0000-0000-0000-000000000053', 'invalid', 'none', 'terminal', REPEAT('0', 64), 1, 1, 'ADMITTED', 2)"
+  "INSERT INTO seckill_reservation (reservation_id, user_subject, activity_id, idempotency_key, intent_hash, quantity, activity_projection_version, state, projection_version, transaction_resolution_due_at) VALUES ('00000000-0000-0000-0000-000000000053', 'invalid', 'none', 'terminal', REPEAT('0', 64), 1, 1, 'ADMITTED', 2, CURRENT_TIMESTAMP(6))"
 assert_mysql_fails "commerce_app cannot update immutable orders" '(UPDATE command denied|Access denied)' \
   mysql_query commerce_app "$commerce_app_password" commerce_db \
   "UPDATE standard_order SET status = 'UNPAID' WHERE order_id = 'none'"

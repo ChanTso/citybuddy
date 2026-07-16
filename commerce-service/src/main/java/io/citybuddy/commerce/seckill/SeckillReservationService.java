@@ -18,16 +18,19 @@ public final class SeckillReservationService {
   private final SeckillActivityRepository activityRepository;
   private final ReservationAdmissionStore admissionStore;
   private final TransactionTemplate transactions;
+  private final SeckillReservationProperties properties;
 
   public SeckillReservationService(
       SeckillReservationRepository repository,
       SeckillActivityRepository activityRepository,
       ReservationAdmissionStore admissionStore,
-      TransactionTemplate transactions) {
+      TransactionTemplate transactions,
+      SeckillReservationProperties properties) {
     this.repository = repository;
     this.activityRepository = activityRepository;
     this.admissionStore = admissionStore;
     this.transactions = transactions;
+    this.properties = properties;
   }
 
   public ReservationResult reserve(
@@ -123,6 +126,17 @@ public final class SeckillReservationService {
     }
   }
 
+  public int resolveDueReservations(int batchSize) {
+    List<SeckillReservation> due = repository.findDuePending(batchSize);
+    for (SeckillReservation reservation : due) {
+      ReservationAdmissionStore.AdmissionDecision decision =
+          admissionStore.resolveDeadline(reservation, sha256(reservation.userSubject()));
+      requireReservation(
+          transactions.execute(status -> persistDecision(reservation.reservationId(), decision)));
+    }
+    return due.size();
+  }
+
   private PreparedReservation reserveIntent(
       String userSubject, String activityId, String idempotencyKey, ValidatedIntent intent) {
     activityRepository
@@ -149,7 +163,7 @@ public final class SeckillReservationService {
             ReservationState.PENDING,
             null,
             1);
-    repository.reservePending(pending);
+    repository.reservePending(pending, properties.minimumBrokerCoverage());
     SeckillReservation persisted =
         repository
             .findForUpdate(pending.reservationId())
@@ -164,6 +178,13 @@ public final class SeckillReservationService {
             .findForUpdate(reservationId)
             .orElseThrow(() -> new IllegalStateException("Reservation truth is missing"));
     if (current.state() != ReservationState.PENDING) {
+      if (current.state() == ReservationState.ORDERED
+          && decision.state() == ReservationState.ADMITTED
+          && decision.decisionCode() == ReservationDecisionCode.ADMITTED
+          && current.decisionCode() == ReservationDecisionCode.ADMITTED
+          && current.projectionVersion() == 3) {
+        return current;
+      }
       if (current.state() != decision.state()
           || current.decisionCode() != decision.decisionCode()
           || current.projectionVersion() != 2) {

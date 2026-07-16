@@ -32,6 +32,9 @@ import org.springframework.http.ResponseEntity;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.test.context.DynamicPropertyRegistry;
 import org.springframework.test.context.DynamicPropertySource;
+import org.springframework.transaction.PlatformTransactionManager;
+import org.springframework.transaction.TransactionDefinition;
+import org.springframework.transaction.support.TransactionTemplate;
 
 @EnabledIfEnvironmentVariable(named = "CATALOG_INTEGRATION", matches = "true")
 @SpringBootTest(webEnvironment = SpringBootTest.WebEnvironment.RANDOM_PORT)
@@ -73,6 +76,8 @@ class SeckillTransactionIntegrationTest {
         () -> required("ROCKETMQ_TRANSACTION_GROUP"));
     registry.add("citybuddy.seckill.order.worker-initial-delay-ms", () -> "3600000");
     registry.add("citybuddy.seckill.order.worker-delay-ms", () -> "3600000");
+    registry.add("citybuddy.seckill.order.resolution-worker-initial-delay", () -> "3600000");
+    registry.add("citybuddy.seckill.order.resolution-worker-delay", () -> "3600000");
     registry.add("citybuddy.seckill.order.receive-await", () -> "1s");
     registry.add("citybuddy.seckill.order.receive-invisible-duration", () -> "10s");
     registry.add("citybuddy.seckill.order.unpaid-timeout", () -> "15m");
@@ -90,6 +95,8 @@ class SeckillTransactionIntegrationTest {
   @Autowired private ReservationAdmissionStore admissionStore;
   @Autowired private RocketMqSeckillTransactions messaging;
   @Autowired private SeckillOrderService orderService;
+  @Autowired private SeckillTransactionResolutionWorker resolutionWorker;
+  @Autowired private PlatformTransactionManager transactionManager;
 
   @Test
   @Order(1)
@@ -319,6 +326,190 @@ class SeckillTransactionIntegrationTest {
     assertThat(ordered).isNotNull();
     assertThat(ordered.state()).isEqualTo(ReservationState.ORDERED);
     assertAtomicOrder(admitted.reservationId(), ordered.orderId(), 0);
+  }
+
+  @Test
+  @Order(5)
+  void deadlineCasConvergesEveryCrashWindowAndPreservesAdmission() throws Exception {
+    deferExistingPendingDeadlines();
+    String preHalfActivity = "cb060-deadline-pre-half";
+    seedActivity(
+        preHalfActivity, "cb060-product-deadline-pre-half", SeckillActivityState.ACTIVE, 1, 1);
+    var beforeHalf =
+        reservationService.prepare(
+            USER,
+            preHalfActivity,
+            "cb060-deadline-pre-half-key",
+            request(Map.of("quantity", 1, "expectedActivityVersion", 1)));
+    Instant persistedDeadline = beforeHalf.reservation().transactionResolutionDueAt();
+    assertThat(persistedDeadline).isNotNull();
+    assertThat(
+            reservationService
+                .prepare(
+                    USER,
+                    preHalfActivity,
+                    "cb060-deadline-pre-half-key",
+                    request(Map.of("quantity", 1, "expectedActivityVersion", 1)))
+                .reservation()
+                .transactionResolutionDueAt())
+        .isEqualTo(persistedDeadline);
+    forceDue(beforeHalf.reservation().reservationId());
+    assertThat(reservationService.resolveDueReservations(32)).isEqualTo(1);
+    assertTimedOutWithoutOrder(beforeHalf.reservation().reservationId());
+    String timeoutMarker =
+        redis
+            .opsForValue()
+            .get(admissionStore.decisionKey(beforeHalf.reservation().reservationId()));
+    assertThat(reservationService.admit(beforeHalf.reservation().reservationId()).decisionCode())
+        .isEqualTo(ReservationDecisionCode.TRANSACTION_TIMEOUT);
+    assertThat(
+            redis
+                .opsForValue()
+                .get(admissionStore.decisionKey(beforeHalf.reservation().reservationId())))
+        .isEqualTo(timeoutMarker);
+
+    String halfActivity = "cb060-deadline-half";
+    seedActivity(halfActivity, "cb060-product-deadline-half", SeckillActivityState.ACTIVE, 1, 1);
+    var afterHalf =
+        reservationService.prepare(
+            USER,
+            halfActivity,
+            "cb060-deadline-half-key",
+            request(Map.of("quantity", 1, "expectedActivityVersion", 1)));
+    try (Producer producer = producer(new AtomicInteger())) {
+      Transaction unresolved = producer.beginTransaction();
+      producer.send(message(SeckillTransactionMessage.from(afterHalf.reservation())), unresolved);
+      forceDue(afterHalf.reservation().reservationId());
+      assertThat(reservationService.resolveDueReservations(32)).isEqualTo(1);
+    }
+    assertTimedOutWithoutOrder(afterHalf.reservation().reservationId());
+
+    String markerActivity = "cb060-deadline-marker";
+    seedActivity(
+        markerActivity, "cb060-product-deadline-marker", SeckillActivityState.ACTIVE, 1, 1);
+    var afterMarker =
+        reservationService.prepare(
+            USER,
+            markerActivity,
+            "cb060-deadline-marker-key",
+            request(Map.of("quantity", 1, "expectedActivityVersion", 1)));
+    SeckillActivity activity = activityRepository.find(markerActivity).orElseThrow();
+    ReservationAdmissionStore.AdmissionDecision admittedMarker =
+        admissionStore.decide(
+            afterMarker.reservation(),
+            activity,
+            SeckillReservationService.sha256(afterMarker.reservation().userSubject()));
+    TransactionTemplate controlledFailure = new TransactionTemplate(transactionManager);
+    controlledFailure.setPropagationBehavior(TransactionDefinition.PROPAGATION_REQUIRES_NEW);
+    assertThatThrownBy(
+            () ->
+                controlledFailure.executeWithoutResult(
+                    status -> {
+                      SeckillReservation current =
+                          reservationRepository
+                              .findForUpdate(afterMarker.reservation().reservationId())
+                              .orElseThrow();
+                      reservationRepository.applyDecision(
+                          current, admittedMarker.state(), admittedMarker.decisionCode());
+                      throw new IllegalStateException("controlled MySQL decision failure");
+                    }))
+        .isInstanceOf(IllegalStateException.class)
+        .hasMessage("controlled MySQL decision failure");
+    assertThat(
+            reservationRepository
+                .find(afterMarker.reservation().reservationId())
+                .orElseThrow()
+                .state())
+        .isEqualTo(ReservationState.PENDING);
+    forceDue(afterMarker.reservation().reservationId());
+    TransactionTemplate restartedTransactions = new TransactionTemplate(transactionManager);
+    restartedTransactions.setPropagationBehavior(TransactionDefinition.PROPAGATION_REQUIRES_NEW);
+    SeckillReservationService restarted =
+        new SeckillReservationService(
+            reservationRepository,
+            activityRepository,
+            admissionStore,
+            restartedTransactions,
+            reservationProperties);
+    assertThat(restarted.resolveDueReservations(32)).isEqualTo(1);
+    assertThat(
+            reservationRepository
+                .find(afterMarker.reservation().reservationId())
+                .orElseThrow()
+                .state())
+        .isEqualTo(ReservationState.ADMITTED);
+    assertThat(
+            admissionStore
+                .resolveDeadline(
+                    afterMarker.reservation(),
+                    SeckillReservationService.sha256(afterMarker.reservation().userSubject()))
+                .decisionCode())
+        .isEqualTo(ReservationDecisionCode.ADMITTED);
+  }
+
+  @Test
+  @Order(6)
+  void deadlineWorkerUsesABoundedBatch() {
+    String activityId = "cb060-deadline-batch";
+    seedActivity(activityId, "cb060-product-deadline-batch", SeckillActivityState.ACTIVE, 40, 40);
+    for (int index = 0; index < SeckillTransactionResolutionWorker.BATCH_SIZE + 1; index++) {
+      reservationService.prepare(
+          "batch-user-" + index,
+          activityId,
+          "batch-key-" + index,
+          request(Map.of("quantity", 1, "expectedActivityVersion", 1)));
+    }
+    jdbc.update(
+        "UPDATE seckill_reservation SET transaction_resolution_due_at = "
+            + "TIMESTAMPADD(SECOND, -1, CURRENT_TIMESTAMP(6)) WHERE activity_id = ?",
+        activityId);
+    resolutionWorker.resolveDueReservations();
+    assertThat(
+            jdbc.queryForObject(
+                "SELECT COUNT(*) FROM seckill_reservation WHERE activity_id = ? AND state = 'PENDING'",
+                Integer.class,
+                activityId))
+        .isEqualTo(1);
+    resolutionWorker.resolveDueReservations();
+    assertThat(
+            jdbc.queryForObject(
+                "SELECT COUNT(*) FROM seckill_reservation WHERE activity_id = ? AND state = 'PENDING'",
+                Integer.class,
+                activityId))
+        .isZero();
+  }
+
+  private void forceDue(String reservationId) {
+    assertThat(
+            jdbc.update(
+                "UPDATE seckill_reservation SET transaction_resolution_due_at = "
+                    + "TIMESTAMPADD(SECOND, -1, CURRENT_TIMESTAMP(6)) WHERE reservation_id = ?",
+                reservationId))
+        .isEqualTo(1);
+  }
+
+  private void deferExistingPendingDeadlines() {
+    jdbc.update(
+        "UPDATE seckill_reservation SET transaction_resolution_due_at = "
+            + "TIMESTAMPADD(DAY, 1, CURRENT_TIMESTAMP(6)) WHERE state = 'PENDING'");
+  }
+
+  private void assertTimedOutWithoutOrder(String reservationId) {
+    SeckillReservation reservation = reservationRepository.find(reservationId).orElseThrow();
+    assertThat(reservation.state()).isEqualTo(ReservationState.REJECTED);
+    assertThat(reservation.decisionCode()).isEqualTo(ReservationDecisionCode.TRANSACTION_TIMEOUT);
+    assertThat(
+            jdbc.queryForObject(
+                "SELECT COUNT(*) FROM seckill_order WHERE reservation_id = ?",
+                Integer.class,
+                reservationId))
+        .isZero();
+    assertThat(
+            jdbc.queryForObject(
+                "SELECT COUNT(*) FROM inventory_ledger WHERE reservation_id = ?",
+                Integer.class,
+                reservationId))
+        .isZero();
   }
 
   private void seedActivity(

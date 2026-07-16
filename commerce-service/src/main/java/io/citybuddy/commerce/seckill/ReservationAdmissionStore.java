@@ -42,6 +42,7 @@ public final class ReservationAdmissionStore {
             elseif code == 'STALE_VERSION' then return 13
             elseif code == 'EXHAUSTED' then return 14
             elseif code == 'DUPLICATE_USER' then return 15
+            elseif code == 'TRANSACTION_TIMEOUT' then return 16
             end
             return -12
           end
@@ -187,6 +188,64 @@ public final class ReservationAdmissionStore {
           redis.call('PEXPIRE', KEYS[2], ARGV[12])
           redis.call('PEXPIRE', KEYS[3], ARGV[12])
           redis.call('PEXPIRE', KEYS[4], ARGV[13])
+          return 1
+          """,
+          Long.class);
+
+  private static final DefaultRedisScript<Long> DEADLINE_SCRIPT =
+      new DefaultRedisScript<>(
+          """
+          local function decode(value)
+            local ok, decoded = pcall(cjson.decode, value)
+            if not ok or type(decoded) ~= 'table' then return nil end
+            return decoded
+          end
+
+          local function same(left, right)
+            return left.reservationId == right.reservationId
+              and left.activityId == right.activityId
+              and left.userHash == right.userHash
+              and left.quantity == right.quantity
+              and left.activityProjectionVersion == right.activityProjectionVersion
+              and left.reservationVersion == right.reservationVersion
+              and left.state == right.state
+              and left.decisionCode == right.decisionCode
+              and left.durableOrderCreated == right.durableOrderCreated
+          end
+
+          local incoming = decode(ARGV[1])
+          if not incoming
+              or incoming.state ~= 'REJECTED'
+              or incoming.decisionCode ~= 'TRANSACTION_TIMEOUT'
+              or incoming.reservationVersion ~= 2
+              or incoming.durableOrderCreated ~= false then
+            return -12
+          end
+
+          local existing_decision_value = redis.call('GET', KEYS[2])
+          if existing_decision_value then
+            local existing_decision = decode(existing_decision_value)
+            local existing_reservation_value = redis.call('GET', KEYS[1])
+            local existing_reservation =
+              existing_reservation_value and decode(existing_reservation_value) or nil
+            if not existing_decision or not existing_reservation
+                or not same(existing_decision, existing_reservation)
+                or existing_decision.reservationId ~= incoming.reservationId
+                or existing_decision.activityId ~= incoming.activityId
+                or existing_decision.userHash ~= incoming.userHash
+                or existing_decision.quantity ~= incoming.quantity
+                or existing_decision.activityProjectionVersion
+                    ~= incoming.activityProjectionVersion
+                or existing_decision.reservationVersion ~= incoming.reservationVersion then
+              return -13
+            end
+            return 2
+          end
+
+          if redis.call('EXISTS', KEYS[1]) == 1 then return -13 end
+          redis.call('MSET', KEYS[1], ARGV[1], KEYS[2], ARGV[1])
+          redis.call('PEXPIRE', KEYS[1], ARGV[2])
+          redis.call('PEXPIRE', KEYS[2], ARGV[3])
           return 1
           """,
           Long.class);
@@ -412,6 +471,7 @@ public final class ReservationAdmissionStore {
       case 13 -> rejected(ReservationDecisionCode.STALE_VERSION);
       case 14 -> rejected(ReservationDecisionCode.EXHAUSTED);
       case 15 -> rejected(ReservationDecisionCode.DUPLICATE_USER);
+      case 16 -> rejected(ReservationDecisionCode.TRANSACTION_TIMEOUT);
       case -10 -> throw new AdmissionIndeterminateException("Activity projection is missing");
       case -11 -> throw new AdmissionIndeterminateException("Activity projection is malformed");
       case -12 -> throw new AdmissionIndeterminateException("Admission projection conflicts");
@@ -424,6 +484,93 @@ public final class ReservationAdmissionStore {
       default ->
           throw new AdmissionIndeterminateException("Seckill admission returned an unknown result");
     };
+  }
+
+  public AdmissionDecision resolveDeadline(SeckillReservation reservation, String userHash) {
+    SeckillLuaNumber.requirePositiveExact(
+        reservation.activityProjectionVersion(), "Reservation activity projection version");
+    String timeoutProjection =
+        json(
+            new ReservationProjection(
+                reservation.reservationId(),
+                reservation.activityId(),
+                userHash,
+                reservation.quantity(),
+                reservation.activityProjectionVersion(),
+                2,
+                ReservationState.REJECTED,
+                ReservationDecisionCode.TRANSACTION_TIMEOUT,
+                false));
+    final Long result;
+    try {
+      result =
+          redis.execute(
+              DEADLINE_SCRIPT,
+              List.of(
+                  reservationKey(reservation.reservationId()),
+                  decisionKey(reservation.reservationId())),
+              timeoutProjection,
+              Long.toString(properties.reservationTtl().toMillis()),
+              Long.toString(properties.decisionMarkerTtl().toMillis()));
+    } catch (RuntimeException exception) {
+      throw new AdmissionIndeterminateException(
+          "Transaction deadline resolution failed", exception);
+    }
+    if (result == null) {
+      throw new AdmissionIndeterminateException(
+          "Transaction deadline resolution returned no result");
+    }
+    if (result == -12) {
+      throw new AdmissionIndeterminateException("Transaction deadline projection is malformed");
+    }
+    if (result == -13) {
+      throw new AdmissionIndeterminateException("Transaction deadline projection conflicts");
+    }
+    if (result != 1 && result != 2) {
+      throw new AdmissionIndeterminateException(
+          "Transaction deadline resolution returned an unknown result");
+    }
+    return readDurableDecision(reservation, userHash);
+  }
+
+  private AdmissionDecision readDurableDecision(
+      SeckillReservation reservation, String expectedUserHash) {
+    final String marker;
+    try {
+      marker = redis.opsForValue().get(decisionKey(reservation.reservationId()));
+    } catch (RuntimeException exception) {
+      throw new AdmissionIndeterminateException("Durable decision read failed", exception);
+    }
+    if (marker == null) {
+      throw new AdmissionIndeterminateException("Durable decision is missing");
+    }
+    try {
+      var payload = objectMapper.readTree(marker);
+      if (!reservation.reservationId().equals(payload.path("reservationId").asText())
+          || !reservation.activityId().equals(payload.path("activityId").asText())
+          || !expectedUserHash.equals(payload.path("userHash").asText())
+          || reservation.quantity() != payload.path("quantity").asInt()
+          || reservation.activityProjectionVersion()
+              != payload.path("activityProjectionVersion").asLong()
+          || payload.path("reservationVersion").asLong() != 2) {
+        throw new AdmissionIndeterminateException("Durable decision conflicts with MySQL truth");
+      }
+      String state = payload.path("state").asText();
+      String code = payload.path("decisionCode").asText();
+      if ("ADMITTED".equals(state) && "ADMITTED".equals(code)) {
+        return new AdmissionDecision(ReservationState.ADMITTED, ReservationDecisionCode.ADMITTED);
+      }
+      if ("REJECTED".equals(state) && !code.isBlank() && !"ADMITTED".equals(code)) {
+        try {
+          return rejected(ReservationDecisionCode.valueOf(code));
+        } catch (IllegalArgumentException exception) {
+          throw new AdmissionIndeterminateException("Durable decision code is unknown", exception);
+        }
+      }
+      throw new AdmissionIndeterminateException("Durable decision is malformed");
+    } catch (JsonProcessingException exception) {
+      throw new AdmissionIndeterminateException("Durable decision is unreadable", exception);
+    }
   }
 
   public TransactionResolution transactionResolution(String reservationId) {

@@ -362,7 +362,8 @@ class SeckillReservationIntegrationTest {
             1,
             ReservationState.PENDING,
             null,
-            1));
+            1),
+        properties.minimumBrokerCoverage());
     redis.opsForValue().set(admissionStore.reservationKey(partialId), "{}");
     assertThatThrownBy(
             () ->
@@ -391,7 +392,8 @@ class SeckillReservationIntegrationTest {
                               1,
                               ReservationState.PENDING,
                               null,
-                              1));
+                              1),
+                          properties.minimumBrokerCoverage());
                       throw new IllegalStateException("controlled reservation rollback");
                     }))
         .isInstanceOf(IllegalStateException.class)
@@ -406,7 +408,11 @@ class SeckillReservationIntegrationTest {
     try (UnavailableAdmission unavailable = unavailableAdmission()) {
       SeckillReservationService failingService =
           new SeckillReservationService(
-              reservationRepository, activityRepository, unavailable.store(), transactions);
+              reservationRepository,
+              activityRepository,
+              unavailable.store(),
+              transactions,
+              properties);
       assertThatThrownBy(
               () ->
                   failingService.reserve(
@@ -458,6 +464,48 @@ class SeckillReservationIntegrationTest {
                     SeckillReservationService.sha256("noeviction-subject"))))
         .isFalse();
     assertNoOrderOrOutbox("reservation-product-noeviction");
+  }
+
+  @Test
+  void deadlineResolutionTreatsRedisFailureAsIndeterminate() throws Exception {
+    createActivity(
+        "reservation-deadline-unavailable",
+        "reservation-product-deadline-unavailable",
+        SeckillActivityState.ACTIVE,
+        2);
+    var prepared =
+        reservationService.prepare(
+            "deadline-unavailable-subject",
+            "reservation-deadline-unavailable",
+            "deadline-unavailable-key",
+            request(1, 1));
+    assertThat(
+            jdbc.update(
+                "UPDATE seckill_reservation SET transaction_resolution_due_at = "
+                    + "TIMESTAMPADD(SECOND, -1, CURRENT_TIMESTAMP(6)) WHERE reservation_id = ?",
+                prepared.reservation().reservationId()))
+        .isEqualTo(1);
+    try (UnavailableAdmission unavailable = unavailableAdmission()) {
+      SeckillReservationService failingService =
+          new SeckillReservationService(
+              reservationRepository,
+              activityRepository,
+              unavailable.store(),
+              transactions,
+              properties);
+      assertThatThrownBy(() -> failingService.resolveDueReservations(32))
+          .isInstanceOf(ReservationAdmissionStore.AdmissionIndeterminateException.class)
+          .hasMessageContaining("deadline resolution failed")
+          .hasStackTraceContaining("Connection refused");
+    }
+    assertThat(
+            reservationRepository
+                .find(prepared.reservation().reservationId())
+                .orElseThrow()
+                .state())
+        .isEqualTo(ReservationState.PENDING);
+    assertThat(redis.hasKey(admissionStore.decisionKey(prepared.reservation().reservationId())))
+        .isFalse();
   }
 
   @Test

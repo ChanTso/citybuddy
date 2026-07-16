@@ -3,9 +3,28 @@ ALTER TABLE seckill_reservation
 
 ALTER TABLE seckill_reservation
   MODIFY state ENUM('PENDING', 'ADMITTED', 'REJECTED', 'ORDERED') NOT NULL DEFAULT 'PENDING',
+  MODIFY decision_code ENUM(
+    'ADMITTED',
+    'ACTIVITY_INACTIVE',
+    'NOT_OPEN',
+    'EXPIRED',
+    'STALE_VERSION',
+    'EXHAUSTED',
+    'DUPLICATE_USER',
+    'TRANSACTION_TIMEOUT'
+  ) NULL,
+  ADD COLUMN transaction_resolution_due_at TIMESTAMP(6) NOT NULL
+    DEFAULT (TIMESTAMPADD(SECOND, 11, CURRENT_TIMESTAMP(6))) AFTER projection_version,
   ADD COLUMN order_id CHAR(36) NULL AFTER projection_version,
-  ADD CONSTRAINT uq_seckill_reservation_order UNIQUE (order_id),
+  ADD CONSTRAINT uq_seckill_reservation_order UNIQUE (order_id);
+
+ALTER TABLE seckill_reservation
+  MODIFY transaction_resolution_due_at TIMESTAMP(6) NOT NULL,
+  ADD INDEX idx_seckill_reservation_resolution_due
+    (state, transaction_resolution_due_at, reservation_id),
   ADD CONSTRAINT chk_seckill_reservation_projection_version CHECK (
+    transaction_resolution_due_at IS NOT NULL
+    AND (
     (state = 'PENDING' AND decision_code IS NULL AND projection_version = 1 AND order_id IS NULL)
     OR
     (state = 'ADMITTED' AND decision_code IS NOT NULL AND decision_code = 'ADMITTED'
@@ -16,6 +35,7 @@ ALTER TABLE seckill_reservation
     OR
     (state = 'ORDERED' AND decision_code IS NOT NULL AND decision_code = 'ADMITTED'
       AND projection_version = 3 AND order_id IS NOT NULL)
+    )
   );
 
 CREATE TABLE seckill_order (

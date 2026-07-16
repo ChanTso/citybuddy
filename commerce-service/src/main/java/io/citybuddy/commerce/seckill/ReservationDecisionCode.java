@@ -7,5 +7,6 @@ public enum ReservationDecisionCode {
   EXPIRED,
   STALE_VERSION,
   EXHAUSTED,
-  DUPLICATE_USER
+  DUPLICATE_USER,
+  TRANSACTION_TIMEOUT
 }
