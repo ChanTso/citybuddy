@@ -63,10 +63,11 @@ public class SeckillConfiguration {
       SeckillReservationRepository repository,
       SeckillActivityRepository activityRepository,
       ReservationAdmissionStore admissionStore,
+      SeckillReservationProperties properties,
       PlatformTransactionManager transactionManager) {
     TransactionTemplate committedTransaction = new TransactionTemplate(transactionManager);
     committedTransaction.setPropagationBehavior(TransactionDefinition.PROPAGATION_REQUIRES_NEW);
     return new SeckillReservationService(
-        repository, activityRepository, admissionStore, committedTransaction);
+        repository, activityRepository, admissionStore, committedTransaction, properties);
   }
 }

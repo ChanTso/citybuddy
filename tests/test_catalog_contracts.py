@@ -22,6 +22,8 @@ def test_catalog_contract_exposes_only_authenticated_published_reads() -> None:
         "/api/products",
         "/api/products/{productId}",
         "/api/orders",
+        "/api/seckill/activities/{activityId}/reservations",
+        "/api/reservations/{reservationId}",
     }
     for path in [
         contract["paths"]["/api/products"],
@@ -114,3 +116,51 @@ def test_order_result_and_rejection_expose_safe_deterministic_evidence() -> None
         "INSUFFICIENT_STOCK",
         "CONCURRENCY_EXHAUSTED",
     }
+
+
+def test_seckill_contract_is_owner_derived_idempotent_and_status_explicit() -> None:
+    contract = load_contract()
+    submission = contract["paths"]["/api/seckill/activities/{activityId}/reservations"]["post"]
+    polling = contract["paths"]["/api/reservations/{reservationId}"]["get"]
+
+    assert submission["security"] == [{"directUserBearer": []}]
+    assert {item["name"] for item in submission["parameters"]} == {
+        "activityId",
+        "Idempotency-Key",
+        "X-Eval-Sandbox-Id",
+    }
+    assert set(submission["responses"]) == {
+        "200",
+        "201",
+        "202",
+        "400",
+        "401",
+        "403",
+        "409",
+        "503",
+    }
+    assert (
+        len(submission["responses"]["409"]["content"]["application/json"]["schema"]["oneOf"]) == 2
+    )
+    request = contract["components"]["schemas"]["SeckillReservationRequest"]
+    assert request["additionalProperties"] is False
+    assert set(request["properties"]) == {"quantity", "expectedActivityVersion"}
+
+    assert polling["security"] == [{"directUserBearer": []}]
+    assert set(polling["responses"]) == {"200", "400", "401", "403", "404"}
+
+
+def test_seckill_result_never_claims_an_order_without_explicit_durable_state() -> None:
+    result = load_contract()["components"]["schemas"]["SeckillReservation"]
+
+    assert result["additionalProperties"] is False
+    assert set(result["properties"]["state"]["enum"]) == {
+        "PENDING",
+        "ADMITTED",
+        "REJECTED",
+        "ORDERED",
+    }
+    assert {"durableOrderCreated", "orderId", "replay", "projectionVersion"} <= set(
+        result["required"]
+    )
+    assert "userSubject" not in result["properties"]

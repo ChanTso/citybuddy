@@ -18,40 +18,60 @@ public final class SeckillReservationService {
   private final SeckillActivityRepository activityRepository;
   private final ReservationAdmissionStore admissionStore;
   private final TransactionTemplate transactions;
+  private final SeckillReservationProperties properties;
 
   public SeckillReservationService(
       SeckillReservationRepository repository,
       SeckillActivityRepository activityRepository,
       ReservationAdmissionStore admissionStore,
-      TransactionTemplate transactions) {
+      TransactionTemplate transactions,
+      SeckillReservationProperties properties) {
     this.repository = repository;
     this.activityRepository = activityRepository;
     this.admissionStore = admissionStore;
     this.transactions = transactions;
+    this.properties = properties;
   }
 
   public ReservationResult reserve(
       String userSubject, String activityId, String idempotencyKey, ReservationRequest request) {
-    ValidatedIntent intent = validate(userSubject, activityId, idempotencyKey, request);
-    IntentReservation intentReservation =
-        requireIntentReservation(
-            transactions.execute(
-                status -> reserveIntent(userSubject, activityId, idempotencyKey, intent)));
+    PreparedReservation intentReservation =
+        prepare(userSubject, activityId, idempotencyKey, request);
     SeckillReservation reservation = intentReservation.reservation();
+    if (reservation.state() != ReservationState.PENDING) {
+      return ReservationResult.from(reservation, true);
+    }
+
+    return admit(reservation.reservationId());
+  }
+
+  public PreparedReservation prepare(
+      String userSubject, String activityId, String idempotencyKey, ReservationRequest request) {
+    ValidatedIntent intent = validate(userSubject, activityId, idempotencyKey, request);
+    return requirePreparedReservation(
+        transactions.execute(
+            status -> reserveIntent(userSubject, activityId, idempotencyKey, intent)));
+  }
+
+  public ReservationResult admit(String reservationId) {
+    SeckillReservation reservation =
+        repository
+            .find(reservationId)
+            .orElseThrow(() -> new IllegalArgumentException("Reservation is missing"));
     if (reservation.state() != ReservationState.PENDING) {
       return ReservationResult.from(reservation, true);
     }
 
     SeckillActivity activity =
         activityRepository
-            .find(activityId)
+            .find(reservation.activityId())
             .orElseThrow(() -> new IllegalStateException("Reservation activity truth is missing"));
     ReservationAdmissionStore.AdmissionDecision decision =
-        admissionStore.decide(reservation, activity, sha256(userSubject));
+        admissionStore.decide(reservation, activity, sha256(reservation.userSubject()));
     SeckillReservation decided =
         requireReservation(
             transactions.execute(status -> persistDecision(reservation.reservationId(), decision)));
-    return ReservationResult.from(decided, intentReservation.existing());
+    return ReservationResult.from(decided, false);
   }
 
   public ReservationResult pollOwned(String userSubject, String reservationId) {
@@ -86,7 +106,10 @@ public final class SeckillReservationService {
                     }
                     long admitted =
                         reservations.stream()
-                            .filter(reservation -> reservation.state() == ReservationState.ADMITTED)
+                            .filter(
+                                reservation ->
+                                    reservation.state() == ReservationState.ADMITTED
+                                        || reservation.state() == ReservationState.ORDERED)
                             .mapToLong(SeckillReservation::quantity)
                             .sum();
                     if (admitted > activity.allocatedQuota()) {
@@ -103,7 +126,18 @@ public final class SeckillReservationService {
     }
   }
 
-  private IntentReservation reserveIntent(
+  public int resolveDueReservations(int batchSize) {
+    List<SeckillReservation> due = repository.findDuePending(batchSize);
+    for (SeckillReservation reservation : due) {
+      ReservationAdmissionStore.AdmissionDecision decision =
+          admissionStore.resolveDeadline(reservation, sha256(reservation.userSubject()));
+      requireReservation(
+          transactions.execute(status -> persistDecision(reservation.reservationId(), decision)));
+    }
+    return due.size();
+  }
+
+  private PreparedReservation reserveIntent(
       String userSubject, String activityId, String idempotencyKey, ValidatedIntent intent) {
     activityRepository
         .findForUpdate(activityId)
@@ -114,7 +148,7 @@ public final class SeckillReservationService {
         throw new IllegalStateException(
             "Idempotency key is bound to a conflicting reservation intent");
       }
-      return new IntentReservation(existing.get(), true);
+      return new PreparedReservation(existing.get(), true);
     }
 
     SeckillReservation pending =
@@ -129,12 +163,12 @@ public final class SeckillReservationService {
             ReservationState.PENDING,
             null,
             1);
-    repository.reservePending(pending);
+    repository.reservePending(pending, properties.minimumBrokerCoverage());
     SeckillReservation persisted =
         repository
             .findForUpdate(pending.reservationId())
             .orElseThrow(() -> new IllegalStateException("Inserted reservation truth is missing"));
-    return new IntentReservation(persisted, false);
+    return new PreparedReservation(persisted, false);
   }
 
   private SeckillReservation persistDecision(
@@ -144,6 +178,13 @@ public final class SeckillReservationService {
             .findForUpdate(reservationId)
             .orElseThrow(() -> new IllegalStateException("Reservation truth is missing"));
     if (current.state() != ReservationState.PENDING) {
+      if (current.state() == ReservationState.ORDERED
+          && decision.state() == ReservationState.ADMITTED
+          && decision.decisionCode() == ReservationDecisionCode.ADMITTED
+          && current.decisionCode() == ReservationDecisionCode.ADMITTED
+          && current.projectionVersion() == 3) {
+        return current;
+      }
       if (current.state() != decision.state()
           || current.decisionCode() != decision.decisionCode()
           || current.projectionVersion() != 2) {
@@ -203,7 +244,7 @@ public final class SeckillReservationService {
     }
   }
 
-  private static IntentReservation requireIntentReservation(IntentReservation reservation) {
+  private static PreparedReservation requirePreparedReservation(PreparedReservation reservation) {
     if (reservation == null) {
       throw new IllegalStateException("Reservation intent transaction returned no result");
     }
@@ -226,7 +267,7 @@ public final class SeckillReservationService {
 
   private record ValidatedIntent(int quantity, long expectedActivityVersion, String intentHash) {}
 
-  private record IntentReservation(SeckillReservation reservation, boolean existing) {}
+  public record PreparedReservation(SeckillReservation reservation, boolean existing) {}
 
   private record RebuildTruth(
       SeckillActivity activity, List<SeckillReservation> reservations, long remainingQuota) {}

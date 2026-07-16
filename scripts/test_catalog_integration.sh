@@ -13,6 +13,8 @@ export REDIS_COMMERCE_PORT="$((35000 + ($$ % 500)))"
 export ROCKETMQ_PROXY_PORT="$((42000 + ($$ % 500)))"
 topic="cb030-catalog-$$"
 consumer_group="cb030-catalog-consumer-$$"
+transaction_topic="cb060-seckill-transaction-$$"
+transaction_group="cb060-seckill-order-consumer-$$"
 compose=(docker compose --project-name "$project" --env-file "$env_file" --file compose.yaml)
 auth_container=""
 topic_created=0
@@ -32,10 +34,14 @@ cleanup() {
         --groupName "$consumer_group" --removeOffset true >/dev/null 2>&1 || true
       admin deleteSubGroup --namesrvAddr rocketmq-namesrv:9876 --clusterName DefaultCluster \
         --groupName "$consumer_group-closed" --removeOffset true >/dev/null 2>&1 || true
+      admin deleteSubGroup --namesrvAddr rocketmq-namesrv:9876 --clusterName DefaultCluster \
+        --groupName "$transaction_group" --removeOffset true >/dev/null 2>&1 || true
     fi
     if [[ "$topic_created" = 1 ]]; then
       admin deleteTopic --namesrvAddr rocketmq-namesrv:9876 --clusterName DefaultCluster \
         --topic "$topic" >/dev/null 2>&1 || true
+      admin deleteTopic --namesrvAddr rocketmq-namesrv:9876 --clusterName DefaultCluster \
+        --topic "$transaction_topic" >/dev/null 2>&1 || true
     fi
   fi
   "${compose[@]}" down --volumes --remove-orphans >/dev/null 2>&1 || true
@@ -147,10 +153,24 @@ cp infra/mysql/migrations/commerce/V001__validate_commerce_target.sql \
 seckill_grant_output="$(make ENV_FILE="$env_file" COMPOSE_PROJECT_NAME="$project" grant-access)"
 grep -q 'runtime-grants=seckill-applied-awaiting-reservation-migration' <<<"$seckill_grant_output"
 echo "Verified exact CB-050 twelve-table grant state permits the CB-051 upgrade."
+reservation_commerce_migrations="$tmp_dir/reservation-commerce-migrations"
+mkdir -p "$reservation_commerce_migrations"
+cp infra/mysql/migrations/commerce/V001__validate_commerce_target.sql \
+  infra/mysql/migrations/commerce/V002__product_catalog_outbox.sql \
+  infra/mysql/migrations/commerce/V003__standard_ordering.sql \
+  infra/mysql/migrations/commerce/V004__seckill_activity_projection.sql \
+  infra/mysql/migrations/commerce/V005__seckill_reservation_admission.sql \
+  "$reservation_commerce_migrations/"
+"${compose[@]}" run --rm \
+  --volume "$reservation_commerce_migrations:/opt/citybuddy/migrations:ro" commerce-migrate
+reservation_grant_output="$(make ENV_FILE="$env_file" COMPOSE_PROJECT_NAME="$project" grant-access)"
+grep -q 'runtime-grants=reservation-applied-awaiting-transaction-order-migration' \
+  <<<"$reservation_grant_output"
+echo "Verified exact CB-051 thirteen-table grant state permits the CB-060 upgrade."
 make ENV_FILE="$env_file" COMPOSE_PROJECT_NAME="$project" migrate-commerce
 complete_grant_output="$(make ENV_FILE="$env_file" COMPOSE_PROJECT_NAME="$project" grant-access)"
 grep -q 'runtime-grants=applied' <<<"$complete_grant_output"
-echo "Verified CB-051 upgrade reaches the exact thirteen-table grant state."
+echo "Verified CB-060 upgrade reaches the exact fifteen-table grant state."
 
 test "$(mysql_query commerce_app "$commerce_app_password" commerce_db 'SELECT COUNT(*) FROM crm_profile')" = 0
 test "$(mysql_query commerce_app "$commerce_app_password" commerce_db 'SELECT COUNT(*) FROM product')" = 0
@@ -176,6 +196,8 @@ for table in standard_order order_idempotency; do
 done
 test "$(mysql_query commerce_app "$commerce_app_password" commerce_db 'SELECT COUNT(*) FROM seckill_activity')" = 0
 test "$(mysql_query commerce_app "$commerce_app_password" commerce_db 'SELECT COUNT(*) FROM seckill_reservation')" = 0
+test "$(mysql_query commerce_app "$commerce_app_password" commerce_db 'SELECT COUNT(*) FROM seckill_order')" = 0
+test "$(mysql_query commerce_app "$commerce_app_password" commerce_db 'SELECT COUNT(*) FROM inventory_ledger')" = 0
 for identity in auth_app agent_app; do
   password="$auth_app_password"
   if [[ "$identity" = agent_app ]]; then
@@ -191,6 +213,10 @@ for identity in auth_app agent_app; do
   assert_mysql_fails "$identity cannot write seckill reservations" '(INSERT command denied|Access denied)' \
     mysql_query "$identity" "$password" commerce_db \
     "INSERT INTO seckill_reservation (reservation_id, user_subject, activity_id, idempotency_key, intent_hash, quantity, activity_projection_version) VALUES ('00000000-0000-0000-0000-000000000051', 'forbidden', 'none', 'forbidden', REPEAT('0', 64), 1, 1)"
+  for table in seckill_order inventory_ledger; do
+    assert_mysql_fails "$identity cannot read $table" '(SELECT command denied|Access denied)' \
+      mysql_query "$identity" "$password" commerce_db "SELECT * FROM $table"
+  done
 done
 assert_mysql_fails "commerce_app cannot delete seckill activity truth" '(DELETE command denied|Access denied)' \
   mysql_query commerce_app "$commerce_app_password" commerce_db \
@@ -198,6 +224,15 @@ assert_mysql_fails "commerce_app cannot delete seckill activity truth" '(DELETE 
 assert_mysql_fails "commerce_app cannot delete seckill reservation truth" '(DELETE command denied|Access denied)' \
   mysql_query commerce_app "$commerce_app_password" commerce_db \
   "DELETE FROM seckill_reservation WHERE reservation_id = 'none'"
+assert_mysql_fails "commerce_app cannot update immutable seckill orders" '(UPDATE command denied|Access denied)' \
+  mysql_query commerce_app "$commerce_app_password" commerce_db \
+  "UPDATE seckill_order SET status = 'UNPAID' WHERE order_id = 'none'"
+assert_mysql_fails "commerce_app cannot update append-only inventory ledger" '(UPDATE command denied|Access denied)' \
+  mysql_query commerce_app "$commerce_app_password" commerce_db \
+  "UPDATE inventory_ledger SET inventory_delta = inventory_delta WHERE movement_id = 'none'"
+assert_mysql_fails "commerce_app cannot delete append-only inventory ledger" '(DELETE command denied|Access denied)' \
+  mysql_query commerce_app "$commerce_app_password" commerce_db \
+  "DELETE FROM inventory_ledger WHERE movement_id = 'none'"
 assert_mysql_fails "database rejects an invalid seckill window" '(Check constraint|CONSTRAINT.*failed)' \
   mysql_query commerce_app "$commerce_app_password" commerce_db \
   "INSERT INTO seckill_activity (activity_id, product_id, starts_at, ends_at, state, allocated_quota, projection_version) VALUES ('invalid-window', 'none', '2030-01-01 01:00:00', '2030-01-01 00:00:00', 'DRAFT', 1, 1)"
@@ -206,10 +241,10 @@ assert_mysql_fails "database rejects an invalid seckill state" '(Data truncated|
   "INSERT INTO seckill_activity (activity_id, product_id, starts_at, ends_at, state, allocated_quota, projection_version) VALUES ('invalid-state', 'none', '2030-01-01 00:00:00', '2030-01-01 01:00:00', 'UNKNOWN', 1, 1)"
 assert_mysql_fails "database rejects a zero reservation quantity" '(Check constraint|CONSTRAINT.*failed)' \
   mysql_query commerce_app "$commerce_app_password" commerce_db \
-  "INSERT INTO seckill_reservation (reservation_id, user_subject, activity_id, idempotency_key, intent_hash, quantity, activity_projection_version) VALUES ('00000000-0000-0000-0000-000000000052', 'invalid', 'none', 'zero', REPEAT('0', 64), 0, 1)"
+  "INSERT INTO seckill_reservation (reservation_id, user_subject, activity_id, idempotency_key, intent_hash, quantity, activity_projection_version, transaction_resolution_due_at) VALUES ('00000000-0000-0000-0000-000000000052', 'invalid', 'none', 'zero', REPEAT('0', 64), 0, 1, CURRENT_TIMESTAMP(6))"
 assert_mysql_fails "database rejects a terminal reservation without a decision" '(Check constraint|CONSTRAINT.*failed)' \
   mysql_query commerce_app "$commerce_app_password" commerce_db \
-  "INSERT INTO seckill_reservation (reservation_id, user_subject, activity_id, idempotency_key, intent_hash, quantity, activity_projection_version, state, projection_version) VALUES ('00000000-0000-0000-0000-000000000053', 'invalid', 'none', 'terminal', REPEAT('0', 64), 1, 1, 'ADMITTED', 2)"
+  "INSERT INTO seckill_reservation (reservation_id, user_subject, activity_id, idempotency_key, intent_hash, quantity, activity_projection_version, state, projection_version, transaction_resolution_due_at) VALUES ('00000000-0000-0000-0000-000000000053', 'invalid', 'none', 'terminal', REPEAT('0', 64), 1, 1, 'ADMITTED', 2, CURRENT_TIMESTAMP(6))"
 assert_mysql_fails "commerce_app cannot update immutable orders" '(UPDATE command denied|Access denied)' \
   mysql_query commerce_app "$commerce_app_password" commerce_db \
   "UPDATE standard_order SET status = 'UNPAID' WHERE order_id = 'none'"
@@ -238,9 +273,10 @@ if rg -n 'bootstrap_admin|commerce_migration|MYSQL_BOOTSTRAP|MYSQL_COMMERCE_MIGR
   echo "Commerce application configuration contains migration or bootstrap credentials." >&2
   exit 1
 fi
-if rg -n 'RocketMq|standard_order|inventory_ledger|@RestController|@RequestMapping|/api/' \
-  commerce-service/src/main/java/io/citybuddy/commerce/seckill; then
-  echo "CB-051 seckill implementation contains public routing, ordering, messaging, or ledger behavior." >&2
+if rg -n 'setDeliveryTimestamp|mock.?payment|refund|PendingAction|ActionReceipt' \
+  commerce-service/src/main/java/io/citybuddy/commerce/seckill \
+  infra/mysql/migrations/commerce/V006__seckill_transaction_order.sql; then
+  echo "CB-060 implementation contains delayed cancellation, payment, refund, or agent behavior." >&2
   exit 1
 fi
 
@@ -253,8 +289,8 @@ limited_hash="$(uv run python scripts/hash_test_credential.py "$limited_password
 mysql_query auth_app "$auth_app_password" commerce_db "
 INSERT INTO auth_user_principal (principal_id, subject, login_identifier, state, permissions)
 VALUES
-  ('00000000-0000-0000-0000-000000000030', 'catalog-user', 'catalog-user', 'ACTIVE', 'catalog:read order:create'),
-  ('00000000-0000-0000-0000-000000000031', 'other-user', 'other-user', 'ACTIVE', 'catalog:read order:create'),
+  ('00000000-0000-0000-0000-000000000030', 'catalog-user', 'catalog-user', 'ACTIVE', 'catalog:read order:create seckill:reserve'),
+  ('00000000-0000-0000-0000-000000000031', 'other-user', 'other-user', 'ACTIVE', 'catalog:read order:create seckill:reserve'),
   ('00000000-0000-0000-0000-000000000032', 'limited-user', 'limited-user', 'ACTIVE', 'catalog:read');
 INSERT INTO auth_login_credential (principal_id, password_hash)
 VALUES
@@ -311,6 +347,12 @@ login_status="$(curl --silent --show-error --output "$tmp_dir/limited-login.json
 test "$login_status" = 200
 limited_direct_token="$(uv run python scripts/read_json_field.py "$tmp_dir/limited-login.json" accessToken)"
 
+broker_config="$(admin getBrokerConfig -b rocketmq-broker-proxy:10911)"
+grep -Eq 'transactionTimeOut[[:space:]]*=[[:space:]]*6000' <<<"$broker_config"
+grep -Eq 'transactionCheckInterval[[:space:]]*=[[:space:]]*1000' <<<"$broker_config"
+grep -Eq 'transactionCheckMax[[:space:]]*=[[:space:]]*3' <<<"$broker_config"
+echo "Verified pinned Broker transaction timeout=6000ms, interval=1000ms, maximum checks=3."
+
 admin updateTopic \
   --namesrvAddr rocketmq-namesrv:9876 \
   --clusterName DefaultCluster \
@@ -322,6 +364,15 @@ admin updateSubGroup --namesrvAddr rocketmq-namesrv:9876 --clusterName DefaultCl
   --groupName "$consumer_group" --consumeEnable true
 admin updateSubGroup --namesrvAddr rocketmq-namesrv:9876 --clusterName DefaultCluster \
   --groupName "$consumer_group-closed" --consumeEnable true
+admin updateTopic \
+  --namesrvAddr rocketmq-namesrv:9876 \
+  --clusterName DefaultCluster \
+  --topic "$transaction_topic" \
+  --readQueueNums 4 \
+  --writeQueueNums 4 \
+  -a +message.type=TRANSACTION
+admin updateSubGroup --namesrvAddr rocketmq-namesrv:9876 --clusterName DefaultCluster \
+  --groupName "$transaction_group" --consumeEnable true
 groups_created=1
 
 docker run --rm \
@@ -344,9 +395,30 @@ docker run --rm \
   --env ROCKETMQ_ENDPOINTS=rocketmq-broker-proxy:8081 \
   --env ROCKETMQ_TOPIC="$topic" \
   --env ROCKETMQ_CONSUMER_GROUP="$consumer_group" \
+  --env ROCKETMQ_TRANSACTION_TOPIC="$transaction_topic" \
+  --env ROCKETMQ_TRANSACTION_GROUP="$transaction_group" \
   maven:3.9.11-eclipse-temurin-21@sha256:6fdc855a6ed81d288ca7ca37ac6ff5e9308b612485c0801d70b25a858c83d237 \
   mvn --batch-mode --no-transfer-progress -Dmaven.repo.local=/m2 \
   -pl commerce-service \
-  -Dtest=CatalogIntegrationTest,SeckillIntegrationTest,SeckillReservationIntegrationTest test
+  -Dtest=CatalogIntegrationTest,SeckillIntegrationTest,SeckillReservationIntegrationTest,SeckillTransactionIntegrationTest test
 
-echo "CB-030 catalog, CB-040 ordering, CB-050 allocation, and CB-051 real MySQL/Redis reservation, atomic admission, polling, rebuild, failure, and permission evidence passed."
+terminal_key='00000000-0000-0000-0000-000000000060'
+terminal_output=''
+for _ in {1..10}; do
+  terminal_output="$(admin queryMsgByKey \
+    --namesrvAddr rocketmq-namesrv:9876 \
+    --topic TRANS_CHECK_MAX_TIME_TOPIC \
+    --msgKey "$terminal_key" 2>&1 || true)"
+  if grep -q "$terminal_key" <<<"$terminal_output"; then
+    break
+  fi
+  sleep 1
+done
+if ! grep -q "$terminal_key" <<<"$terminal_output"; then
+  echo "UNKNOWN transaction did not reach the Broker terminal topic." >&2
+  printf '%s\n' "$terminal_output" >&2
+  exit 1
+fi
+echo "Verified repeated UNKNOWN reached Broker terminal topic TRANS_CHECK_MAX_TIME_TOPIC."
+
+echo "CB-030 through CB-060 catalog, order, seckill reservation, transaction admission, durable order, ledger, polling, checkback, failure, and permission evidence passed."
