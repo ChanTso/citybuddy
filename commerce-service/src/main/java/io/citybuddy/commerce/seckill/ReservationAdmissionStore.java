@@ -334,7 +334,8 @@ public final class ReservationAdmissionStore {
                 or incoming.reservationId ~= reservation_id
                 or tonumber(incoming.reservationVersion) ~= version
                 or not version or version < 1 or version > MAX_JSON_INTEGER
-                or (state ~= 'ADMITTED' and state ~= 'REJECTED' and state ~= 'ORDERED') then
+                or (state ~= 'ADMITTED' and state ~= 'REJECTED'
+                  and state ~= 'ORDERED' and state ~= 'CANCELLED') then
               return -12
             end
             local quantity = tonumber(incoming.quantity)
@@ -365,7 +366,7 @@ public final class ReservationAdmissionStore {
             end
 
             local existing_user = redis.call('GET', KEYS[key_base])
-            if (state == 'ADMITTED' or state == 'ORDERED')
+            if (state == 'ADMITTED' or state == 'ORDERED' or state == 'CANCELLED')
                 and expected_user_marker ~= reservation_id then return -12 end
             if expected_user_marker == '' then
               if existing_user then return -12 end
@@ -381,7 +382,7 @@ public final class ReservationAdmissionStore {
             local payload = ARGV[argument_base]
             local state = ARGV[argument_base + 1]
             local reservation_id = ARGV[argument_base + 2]
-            if state == 'ADMITTED' or state == 'ORDERED' then
+            if state == 'ADMITTED' or state == 'ORDERED' or state == 'CANCELLED' then
               table.insert(writes, KEYS[key_base])
               table.insert(writes, reservation_id)
             end
@@ -396,7 +397,8 @@ public final class ReservationAdmissionStore {
             local key_base = 3 + index * 3
             local argument_base = 7 + index * 5
             if ARGV[argument_base + 1] == 'ADMITTED'
-                or ARGV[argument_base + 1] == 'ORDERED' then
+                or ARGV[argument_base + 1] == 'ORDERED'
+                or ARGV[argument_base + 1] == 'CANCELLED' then
               redis.call('PEXPIRE', KEYS[key_base], ARGV[4])
             end
             redis.call('PEXPIRE', KEYS[key_base + 1], ARGV[4])
@@ -605,6 +607,12 @@ public final class ReservationAdmissionStore {
           && durableOrderCreated) {
         return TransactionResolution.COMMIT;
       }
+      if ("CANCELLED".equals(state)
+          && "ADMITTED".equals(code)
+          && version == 4
+          && durableOrderCreated) {
+        return TransactionResolution.COMMIT;
+      }
       if ("REJECTED".equals(state) && version == 2 && !durableOrderCreated) {
         try {
           return ReservationDecisionCode.valueOf(code) == ReservationDecisionCode.ADMITTED
@@ -704,21 +712,26 @@ public final class ReservationAdmissionStore {
     for (SeckillReservation reservation : reservations) {
       if (reservation.state() == ReservationState.PENDING
           || reservation.decisionCode() == null
-          || (reservation.state() == ReservationState.ORDERED
-              ? reservation.projectionVersion() != 3 || reservation.orderId() == null
+          || ((reservation.state() == ReservationState.ORDERED
+                  || reservation.state() == ReservationState.CANCELLED)
+              ? reservation.projectionVersion()
+                      != (reservation.state() == ReservationState.ORDERED ? 3 : 4)
+                  || reservation.orderId() == null
               : reservation.projectionVersion() != 2)) {
         throw new AdmissionIndeterminateException(
             "Pending reservation prevents projection rebuild");
       }
       String userHash = SeckillReservationService.sha256(reservation.userSubject());
       if ((reservation.state() == ReservationState.ADMITTED
-              || reservation.state() == ReservationState.ORDERED)
+              || reservation.state() == ReservationState.ORDERED
+              || reservation.state() == ReservationState.CANCELLED)
           && !admittedUsers.add(userHash)) {
         throw new AdmissionIndeterminateException(
             "MySQL truth contains repeated admitted reservations for one user");
       }
       if (reservation.state() == ReservationState.ADMITTED
-          || reservation.state() == ReservationState.ORDERED) {
+          || reservation.state() == ReservationState.ORDERED
+          || reservation.state() == ReservationState.CANCELLED) {
         admittedReservationByUser.put(userHash, reservation.reservationId());
       }
     }
@@ -740,7 +753,8 @@ public final class ReservationAdmissionStore {
                   reservation.projectionVersion(),
                   reservation.state(),
                   reservation.decisionCode(),
-                  reservation.state() == ReservationState.ORDERED)));
+                  reservation.state() == ReservationState.ORDERED
+                      || reservation.state() == ReservationState.CANCELLED)));
       arguments.add(reservation.state().name());
       arguments.add(reservation.reservationId());
       arguments.add(Long.toString(reservation.projectionVersion()));

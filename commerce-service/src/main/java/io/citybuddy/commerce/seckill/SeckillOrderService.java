@@ -44,7 +44,8 @@ public final class SeckillOrderService {
             .findForUpdate(message.reservationId())
             .orElseThrow(() -> new IllegalStateException("Committed reservation is missing"));
     requireMessageMatchesTruth(message, reservation);
-    if (reservation.state() == ReservationState.ORDERED) {
+    if (reservation.state() == ReservationState.ORDERED
+        || reservation.state() == ReservationState.CANCELLED) {
       return requireExistingOrder(reservation);
     }
     if (reservation.state() != ReservationState.ADMITTED) {

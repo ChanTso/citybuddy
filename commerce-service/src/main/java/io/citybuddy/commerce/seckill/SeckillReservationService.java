@@ -179,11 +179,13 @@ public final class SeckillReservationService {
             .orElseThrow(() -> new IllegalStateException("Reservation truth is missing"));
     if (current.state() != ReservationState.PENDING) {
       if (current.state() == ReservationState.ORDERED
-          && decision.state() == ReservationState.ADMITTED
-          && decision.decisionCode() == ReservationDecisionCode.ADMITTED
-          && current.decisionCode() == ReservationDecisionCode.ADMITTED
-          && current.projectionVersion() == 3) {
-        return current;
+          || current.state() == ReservationState.CANCELLED) {
+        if (decision.state() == ReservationState.ADMITTED
+            && decision.decisionCode() == ReservationDecisionCode.ADMITTED
+            && current.decisionCode() == ReservationDecisionCode.ADMITTED
+            && (current.projectionVersion() == 3 || current.projectionVersion() == 4)) {
+          return current;
+        }
       }
       if (current.state() != decision.state()
           || current.decisionCode() != decision.decisionCode()

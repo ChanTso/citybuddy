@@ -181,6 +181,35 @@ public final class SeckillReservationRepository {
         current.transactionResolutionDueAt());
   }
 
+  public SeckillReservation markCancelled(SeckillReservation current) {
+    int changed =
+        jdbc.update(
+            """
+            UPDATE seckill_reservation
+            SET state = 'CANCELLED', projection_version = 4
+            WHERE reservation_id = ? AND state = 'ORDERED'
+              AND projection_version = 3 AND order_id = ?
+            """,
+            current.reservationId(),
+            current.orderId());
+    if (changed != 1) {
+      throw new IllegalStateException("Reservation changed during its locked cancellation");
+    }
+    return new SeckillReservation(
+        current.reservationId(),
+        current.userSubject(),
+        current.activityId(),
+        current.idempotencyKey(),
+        current.intentHash(),
+        current.quantity(),
+        current.activityProjectionVersion(),
+        ReservationState.CANCELLED,
+        current.decisionCode(),
+        4,
+        current.orderId(),
+        current.transactionResolutionDueAt());
+  }
+
   private Optional<SeckillReservation> queryOne(String sql, Object... arguments) {
     return jdbc.query(sql, SeckillReservationRepository::mapReservation, arguments).stream()
         .findFirst();

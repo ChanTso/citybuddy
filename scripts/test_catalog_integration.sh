@@ -15,6 +15,8 @@ topic="cb030-catalog-$$"
 consumer_group="cb030-catalog-consumer-$$"
 transaction_topic="cb060-seckill-transaction-$$"
 transaction_group="cb060-seckill-order-consumer-$$"
+timeout_topic="cb061-seckill-timeout-$$"
+timeout_group="cb061-seckill-timeout-consumer-$$"
 compose=(docker compose --project-name "$project" --env-file "$env_file" --file compose.yaml)
 auth_container=""
 topic_created=0
@@ -36,12 +38,16 @@ cleanup() {
         --groupName "$consumer_group-closed" --removeOffset true >/dev/null 2>&1 || true
       admin deleteSubGroup --namesrvAddr rocketmq-namesrv:9876 --clusterName DefaultCluster \
         --groupName "$transaction_group" --removeOffset true >/dev/null 2>&1 || true
+      admin deleteSubGroup --namesrvAddr rocketmq-namesrv:9876 --clusterName DefaultCluster \
+        --groupName "$timeout_group" --removeOffset true >/dev/null 2>&1 || true
     fi
     if [[ "$topic_created" = 1 ]]; then
       admin deleteTopic --namesrvAddr rocketmq-namesrv:9876 --clusterName DefaultCluster \
         --topic "$topic" >/dev/null 2>&1 || true
       admin deleteTopic --namesrvAddr rocketmq-namesrv:9876 --clusterName DefaultCluster \
         --topic "$transaction_topic" >/dev/null 2>&1 || true
+      admin deleteTopic --namesrvAddr rocketmq-namesrv:9876 --clusterName DefaultCluster \
+        --topic "$timeout_topic" >/dev/null 2>&1 || true
     fi
   fi
   "${compose[@]}" down --volumes --remove-orphans >/dev/null 2>&1 || true
@@ -224,9 +230,9 @@ assert_mysql_fails "commerce_app cannot delete seckill activity truth" '(DELETE 
 assert_mysql_fails "commerce_app cannot delete seckill reservation truth" '(DELETE command denied|Access denied)' \
   mysql_query commerce_app "$commerce_app_password" commerce_db \
   "DELETE FROM seckill_reservation WHERE reservation_id = 'none'"
-assert_mysql_fails "commerce_app cannot update immutable seckill orders" '(UPDATE command denied|Access denied)' \
+assert_mysql_fails "commerce_app cannot delete seckill orders" '(DELETE command denied|Access denied)' \
   mysql_query commerce_app "$commerce_app_password" commerce_db \
-  "UPDATE seckill_order SET status = 'UNPAID' WHERE order_id = 'none'"
+  "DELETE FROM seckill_order WHERE order_id = 'none'"
 assert_mysql_fails "commerce_app cannot update append-only inventory ledger" '(UPDATE command denied|Access denied)' \
   mysql_query commerce_app "$commerce_app_password" commerce_db \
   "UPDATE inventory_ledger SET inventory_delta = inventory_delta WHERE movement_id = 'none'"
@@ -273,10 +279,11 @@ if rg -n 'bootstrap_admin|commerce_migration|MYSQL_BOOTSTRAP|MYSQL_COMMERCE_MIGR
   echo "Commerce application configuration contains migration or bootstrap credentials." >&2
   exit 1
 fi
-if rg -n 'setDeliveryTimestamp|mock.?payment|refund|PendingAction|ActionReceipt' \
+if rg -n 'mock.?payment|refund|PendingAction|ActionReceipt' \
   commerce-service/src/main/java/io/citybuddy/commerce/seckill \
-  infra/mysql/migrations/commerce/V006__seckill_transaction_order.sql; then
-  echo "CB-060 implementation contains delayed cancellation, payment, refund, or agent behavior." >&2
+  infra/mysql/migrations/commerce/V006__seckill_transaction_order.sql \
+  infra/mysql/migrations/commerce/V007__seckill_unpaid_cancellation.sql; then
+  echo "Seckill implementation contains payment, refund, or agent behavior." >&2
   exit 1
 fi
 
@@ -373,6 +380,15 @@ admin updateTopic \
   -a +message.type=TRANSACTION
 admin updateSubGroup --namesrvAddr rocketmq-namesrv:9876 --clusterName DefaultCluster \
   --groupName "$transaction_group" --consumeEnable true
+admin updateTopic \
+  --namesrvAddr rocketmq-namesrv:9876 \
+  --clusterName DefaultCluster \
+  --topic "$timeout_topic" \
+  --readQueueNums 4 \
+  --writeQueueNums 4 \
+  -a +message.type=DELAY
+admin updateSubGroup --namesrvAddr rocketmq-namesrv:9876 --clusterName DefaultCluster \
+  --groupName "$timeout_group" --consumeEnable true --retryMaxTimes 3
 groups_created=1
 
 docker run --rm \
@@ -397,6 +413,8 @@ docker run --rm \
   --env ROCKETMQ_CONSUMER_GROUP="$consumer_group" \
   --env ROCKETMQ_TRANSACTION_TOPIC="$transaction_topic" \
   --env ROCKETMQ_TRANSACTION_GROUP="$transaction_group" \
+  --env ROCKETMQ_TIMEOUT_TOPIC="$timeout_topic" \
+  --env ROCKETMQ_TIMEOUT_GROUP="$timeout_group" \
   maven:3.9.11-eclipse-temurin-21@sha256:6fdc855a6ed81d288ca7ca37ac6ff5e9308b612485c0801d70b25a858c83d237 \
   mvn --batch-mode --no-transfer-progress -Dmaven.repo.local=/m2 \
   -pl commerce-service \
@@ -421,4 +439,4 @@ if ! grep -q "$terminal_key" <<<"$terminal_output"; then
 fi
 echo "Verified repeated UNKNOWN reached Broker terminal topic TRANS_CHECK_MAX_TIME_TOPIC."
 
-echo "CB-030 through CB-060 catalog, order, seckill reservation, transaction admission, durable order, ledger, polling, checkback, failure, and permission evidence passed."
+echo "CB-030 through CB-061 catalog, order, seckill reservation, transaction admission, durable order, delayed cancellation, restoration ledger, polling, checkback, failure, and permission evidence passed."

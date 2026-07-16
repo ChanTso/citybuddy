@@ -46,7 +46,7 @@ public final class SeckillReservationController {
           case PENDING -> HttpStatus.ACCEPTED;
           case REJECTED -> HttpStatus.CONFLICT;
           case ADMITTED -> result.replay() ? HttpStatus.OK : HttpStatus.CREATED;
-          case ORDERED -> HttpStatus.OK;
+          case ORDERED, CANCELLED -> HttpStatus.OK;
         };
     return ResponseEntity.status(status).body(result);
   }
