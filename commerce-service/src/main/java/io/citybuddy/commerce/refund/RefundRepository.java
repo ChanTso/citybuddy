@@ -252,6 +252,7 @@ public class RefundRepository {
                    payment_amount_minor, payment_currency
             FROM inventory_ledger
             WHERE business_event_key = ?
+            FOR SHARE
             """,
             (result, row) ->
                 new MovementRecord(
@@ -281,6 +282,7 @@ public class RefundRepository {
         FROM inventory_ledger
         WHERE order_id = ? AND movement_type IN ('STANDARD_REFUND', 'SECKILL_REFUND')
         ORDER BY business_event_key
+        FOR SHARE
         """,
         (result, row) ->
             new MovementRecord(
@@ -298,13 +300,19 @@ public class RefundRepository {
   }
 
   public boolean hasMovement(String orderId, String movementType) {
-    Integer count =
-        jdbc.queryForObject(
-            "SELECT COUNT(*) FROM inventory_ledger WHERE order_id = ? AND movement_type = ?",
-            Integer.class,
+    List<String> rows =
+        jdbc.query(
+            """
+            SELECT business_event_key
+            FROM inventory_ledger
+            WHERE order_id = ? AND movement_type = ?
+            LIMIT 1
+            FOR SHARE
+            """,
+            (result, row) -> result.getString("business_event_key"),
             orderId,
             movementType);
-    return count != null && count > 0;
+    return !rows.isEmpty();
   }
 
   public void insertOutbox(RefundRecord refund, String eventType, long version) {

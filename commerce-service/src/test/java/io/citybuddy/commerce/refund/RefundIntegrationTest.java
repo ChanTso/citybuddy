@@ -33,6 +33,7 @@ import java.util.Base64;
 import java.util.Date;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 import java.util.UUID;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CountDownLatch;
@@ -405,6 +406,59 @@ class RefundIntegrationTest {
   }
 
   @Test
+  void reconciliationUsesCurrentLedgerTruthAfterWaitingForConcurrentSuccess() throws Exception {
+    PaidFixture paid = seedPaidStandard(900, "reconcile-lock-wait");
+    RefundResult refund =
+        refunds.request(
+            USER,
+            paid.orderId(),
+            "refund-reconcile-lock-wait",
+            new RefundRequest(900L, "AUD", null));
+    refunds.markProcessing(refund.refundId());
+
+    CountDownLatch successReadyToCommit = new CountDownLatch(1);
+    CountDownLatch releaseSuccessCommit = new CountDownLatch(1);
+    RefundRepository pausedSuccessRepository =
+        new RefundRepository(jdbc, objectMapper) {
+          @Override
+          public void insertOutbox(RefundRecord current, String eventType, long version) {
+            super.insertOutbox(current, eventType, version);
+            if ("REFUND_SUCCEEDED".equals(eventType)) {
+              successReadyToCommit.countDown();
+              awaitLatch(releaseSuccessCommit, "Concurrent refund success was not released");
+            }
+          }
+        };
+
+    CountDownLatch reconciliationReadOldRefund = new CountDownLatch(1);
+    RefundRepository observedReconciliationRepository =
+        new RefundRepository(jdbc, objectMapper) {
+          @Override
+          public Optional<RefundRecord> findById(String refundId) {
+            Optional<RefundRecord> identified = super.findById(refundId);
+            reconciliationReadOldRefund.countDown();
+            return identified;
+          }
+        };
+
+    CompletableFuture<RefundResult> success =
+        CompletableFuture.supplyAsync(
+            () -> service(pausedSuccessRepository).succeed(refund.refundId()));
+    assertThat(successReadyToCommit.await(10, TimeUnit.SECONDS)).isTrue();
+    CompletableFuture<RefundReconciliationResult> reconciliation =
+        CompletableFuture.supplyAsync(
+            () -> service(observedReconciliationRepository).reconcile(refund.refundId()));
+    assertThat(reconciliationReadOldRefund.await(10, TimeUnit.SECONDS)).isTrue();
+    releaseSuccessCommit.countDown();
+
+    assertThat(success.get(10, TimeUnit.SECONDS).state()).isEqualTo("SUCCEEDED");
+    assertThat(reconciliation.get(10, TimeUnit.SECONDS).outcome())
+        .isEqualTo(RefundReconciliationResult.Outcome.CONSISTENT);
+    assertThat(attemptRefunded(paid.attemptId())).isEqualTo(900);
+    assertThat(refundMovementCount(paid.orderId())).isOne();
+  }
+
+  @Test
   void reconciliationReportsMissingCallbackAndLateTimeoutNeverRestoresRefundedSeckill() {
     RawRefund raw = seedRawRefundWithoutCallback();
     RefundReconciliationResult missingCallback = refunds.reconcile(raw.refundId());
@@ -704,6 +758,17 @@ class RefundIntegrationTest {
     } catch (InterruptedException exception) {
       Thread.currentThread().interrupt();
       throw new IllegalStateException("Refund race was interrupted", exception);
+    }
+  }
+
+  private static void awaitLatch(CountDownLatch latch, String message) {
+    try {
+      if (!latch.await(10, TimeUnit.SECONDS)) {
+        throw new IllegalStateException(message);
+      }
+    } catch (InterruptedException exception) {
+      Thread.currentThread().interrupt();
+      throw new IllegalStateException(message, exception);
     }
   }
 
