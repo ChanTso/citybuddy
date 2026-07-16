@@ -92,8 +92,8 @@ This file records only factual pitfalls supported by merged pull-request, commit
 
 ## CB-061 — Delayed unpaid cancellation and ledger restoration
 
-- 现象：首轮真实 migration 证据发现，终态行缺少 `decision_code` 仍能通过 V007 的组合 `CHECK`；后续真实延迟集成又暴露 2 秒到期窗口过紧，以及把 durable MySQL 状态与 Redis projection 断言混在一起会污染下一用例。完整 diff 自检还发现，取消后恢复活动配额不等于允许同一用户再次下单：MySQL rebuild 必须继续保留 one-user-one-order marker。
+- 现象：首轮真实 migration 证据发现，终态行缺少 `decision_code` 仍能通过 V007 的组合 `CHECK`；后续真实延迟集成又暴露 2 秒到期窗口过紧，以及把 durable MySQL 状态与 Redis projection 断言混在一起会污染下一用例。完整 diff 自检还发现，取消后恢复活动配额不等于允许同一用户再次下单；独立复核进一步发现，按 MySQL 当前计数绝对覆盖 Redis 会漏掉“Redis 已 durable ADMITTED、MySQL 仍 PENDING”的并发扣减，可能放大剩余额度。
 - 证据链接：[slice PR #27](https://github.com/ChanTso/citybuddy/pull/27)、[implementation commit `ebdceab`](https://github.com/ChanTso/citybuddy/commit/ebdceab)
-- 根因：MySQL `CHECK` 表达式结果为 `UNKNOWN` 时不会拒绝该行，组合条件没有显式要求终态决定非空；异步测试把调度抖动当作精确时钟，并混淆了 durable truth 与可失败 projection；配额恢复和用户唯一性是两个独立不变量。
-- 解决：在终态约束中增加显式 `decision_code IS NOT NULL`；使用稳定到期余量并拆分 MySQL/Redis 证据，增加受控事务中途异常的完整回滚验证；CANCELLED reservation 不再计入已占活动配额，但 rebuild 仍重建用户 marker。最终实现以索引化有界 handoff/dispatcher 发送稳定 timeout identity，消费端重读并锁定 MySQL，在一个事务内完成取消、库存与活动配额恢复及稳定 ledger 写入，提交后才从 MySQL 投影 Redis。
-- 结论：数据库约束必须按 SQL 三值逻辑写出非空前提；异步证据要给真实调度留余量并分离权威状态与投影；“恢复额度”和“保留一次购买资格已使用”必须分别建模和验证。
+- 根因：MySQL `CHECK` 表达式结果为 `UNKNOWN` 时不会拒绝该行，组合条件没有显式要求终态决定非空；异步测试把调度抖动当作精确时钟，并混淆了 durable truth 与可失败 projection；配额恢复和用户唯一性是两个独立不变量，而 Redis durable marker 又可能暂时领先 MySQL 状态，不能被 MySQL 快照当作不存在。
+- 解决：在终态约束中增加显式 `decision_code IS NOT NULL`；使用稳定到期余量并拆分 MySQL/Redis 证据，增加受控事务中途异常的完整回滚验证；CANCELLED reservation 不再计入已占活动配额，但 rebuild 仍重建用户 marker。每次取消同时持久化自己的 projection version，提交后由 Redis Lua 只执行相邻版本的原子增量恢复，保留并发 admission 已产生的扣减；缺失或跨版本不做绝对覆盖，而是失败后通过完整 MySQL rebuild 收敛。真实测试覆盖 durable-marker/MySQL-PENDING 与 MySQL 已提交、Redis 尚未迁移两个窗口。
+- 结论：数据库约束必须按 SQL 三值逻辑写出非空前提；异步证据要给真实调度留余量并分离权威状态与投影；“恢复额度”和“保留一次购买资格已使用”必须分别建模，跨存储恢复还必须保留可能领先于 MySQL 的 durable 决定。
