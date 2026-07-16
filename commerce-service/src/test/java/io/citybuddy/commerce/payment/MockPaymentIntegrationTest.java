@@ -26,6 +26,7 @@ import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.boot.test.web.client.TestRestTemplate;
 import org.springframework.dao.CannotAcquireLockException;
 import org.springframework.dao.DataAccessResourceFailureException;
+import org.springframework.dao.DuplicateKeyException;
 import org.springframework.http.HttpEntity;
 import org.springframework.http.HttpHeaders;
 import org.springframework.http.HttpMethod;
@@ -198,6 +199,104 @@ class MockPaymentIntegrationTest {
   }
 
   @Test
+  void callbackRejectsUnknownMismatchedIneligibleAndConflictingTruthWithoutWrites() {
+    long callbacksBefore = count("mock_payment_callback");
+    long movementsBefore = count("inventory_ledger");
+    MockPaymentCallbackRequest unknown =
+        new MockPaymentCallbackRequest(
+            UUID.randomUUID().toString(),
+            UUID.randomUUID().toString(),
+            UUID.randomUUID().toString(),
+            1L,
+            "AUD",
+            "SUCCEEDED");
+    assertCallbackRejected("callback-unknown", unknown, 404);
+    assertThat(count("mock_payment_callback")).isEqualTo(callbacksBefore);
+    assertThat(count("inventory_ledger")).isEqualTo(movementsBefore);
+
+    String mismatchedOrderId = seedStandardOrder(USER, 2300);
+    MockPaymentResult mismatched =
+        payments.start(
+            USER,
+            mismatchedOrderId,
+            "payment-mismatched-callback",
+            new MockPaymentRequest(2300L, "AUD", null));
+    MockPaymentCallbackRequest wrongAmount =
+        new MockPaymentCallbackRequest(
+            UUID.randomUUID().toString(),
+            mismatched.callbackCorrelationId(),
+            mismatched.orderId(),
+            2301L,
+            "AUD",
+            "SUCCEEDED");
+    assertCallbackRejected("callback-wrong-amount", wrongAmount, 409);
+    MockPaymentCallbackRequest wrongOrder =
+        new MockPaymentCallbackRequest(
+            UUID.randomUUID().toString(),
+            mismatched.callbackCorrelationId(),
+            UUID.randomUUID().toString(),
+            2300L,
+            "AUD",
+            "SUCCEEDED");
+    assertCallbackRejected("callback-wrong-order", wrongOrder, 409);
+    assertThat(attemptState(mismatched.attemptId())).containsExactly("PENDING", "1");
+    assertThat(paymentMovementCount(mismatched.attemptId())).isZero();
+    assertThat(count("mock_payment_callback")).isEqualTo(callbacksBefore);
+    assertThat(count("inventory_ledger")).isEqualTo(movementsBefore);
+
+    assertThat(
+            jdbc.update(
+                "UPDATE mock_payment_attempt SET state = 'FAILED', state_version = 2 "
+                    + "WHERE attempt_id = ? AND state = 'PENDING' AND state_version = 1",
+                mismatched.attemptId()))
+        .isOne();
+    assertCallbackRejected(
+        "callback-failed-attempt", callback(mismatched, UUID.randomUUID().toString()), 409);
+    assertThat(attemptState(mismatched.attemptId())).containsExactly("FAILED", "2");
+    assertThat(paymentMovementCount(mismatched.attemptId())).isZero();
+    assertThat(count("mock_payment_callback")).isEqualTo(callbacksBefore);
+    assertThat(count("inventory_ledger")).isEqualTo(movementsBefore);
+
+    String appliedOrderId = seedStandardOrder(USER, 2400);
+    MockPaymentResult appliedAttempt =
+        payments.start(
+            USER,
+            appliedOrderId,
+            "payment-conflict-applied",
+            new MockPaymentRequest(2400L, "AUD", null));
+    String existingEventId = UUID.randomUUID().toString();
+    payments.callback("callback-conflict-shared", callback(appliedAttempt, existingEventId));
+
+    String pendingOrderId = seedStandardOrder(USER, 2500);
+    MockPaymentResult pendingAttempt =
+        payments.start(
+            USER,
+            pendingOrderId,
+            "payment-conflict-pending",
+            new MockPaymentRequest(2500L, "AUD", null));
+    long callbacksAfterApplied = count("mock_payment_callback");
+    long movementsAfterApplied = count("inventory_ledger");
+    MockPaymentCallbackRequest pendingCallback =
+        callback(pendingAttempt, UUID.randomUUID().toString());
+    assertCallbackRejected("callback-conflict-shared", pendingCallback, 409);
+    MockPaymentCallbackRequest reusedEvent = callback(pendingAttempt, existingEventId);
+    assertCallbackRejected("callback-conflict-new-key", reusedEvent, 409);
+    MockPaymentCallbackRequest reusedCorrelation =
+        new MockPaymentCallbackRequest(
+            UUID.randomUUID().toString(),
+            appliedAttempt.callbackCorrelationId(),
+            pendingAttempt.orderId(),
+            pendingAttempt.amountMinor(),
+            pendingAttempt.currency(),
+            "SUCCEEDED");
+    assertCallbackRejected("callback-conflict-correlation", reusedCorrelation, 409);
+    assertThat(attemptState(pendingAttempt.attemptId())).containsExactly("PENDING", "1");
+    assertThat(paymentMovementCount(pendingAttempt.attemptId())).isZero();
+    assertThat(count("mock_payment_callback")).isEqualTo(callbacksAfterApplied);
+    assertThat(count("inventory_ledger")).isEqualTo(movementsAfterApplied);
+  }
+
+  @Test
   void concurrentDuplicateCallbackCommitsExactlyOnce() throws Exception {
     for (int iteration = 0; iteration < 20; iteration++) {
       long amount = 3300L + iteration;
@@ -271,6 +370,29 @@ class MockPaymentIntegrationTest {
     assertThatThrownBy(() -> nonRetrying.callback("callback-deadlock", callback))
         .isInstanceOf(CannotAcquireLockException.class);
     assertThat(timeoutCalls).hasValue(1);
+    assertThat(paymentMovementCount(attempt.attemptId())).isOne();
+
+    AtomicInteger duplicateCalls = new AtomicInteger();
+    MockPaymentRepository duplicateConflict =
+        new MockPaymentRepository(jdbc) {
+          @Override
+          public java.util.Optional<AttemptRecord> findAttemptByCorrelationForUpdate(
+              String correlationId) {
+            duplicateCalls.incrementAndGet();
+            throw new DuplicateKeyException("controlled callback uniqueness conflict");
+          }
+        };
+    MockPaymentService duplicateRejecting =
+        new MockPaymentService(duplicateConflict, transactionTemplate(), Clock.systemUTC());
+
+    assertThatThrownBy(() -> duplicateRejecting.callback("callback-deadlock", callback))
+        .isInstanceOfSatisfying(
+            MockPaymentException.class,
+            exception -> {
+              assertThat(exception.status()).isEqualTo(409);
+              assertThat(exception.category()).isEqualTo("CONFLICT");
+            });
+    assertThat(duplicateCalls).hasValue(1);
     assertThat(paymentMovementCount(attempt.attemptId())).isOne();
   }
 
@@ -533,6 +655,14 @@ class MockPaymentIntegrationTest {
     return new CannotAcquireLockException(
         "controlled MySQL lock failure",
         new SQLException("controlled MySQL lock failure", "40001", errorCode));
+  }
+
+  private void assertCallbackRejected(
+      String idempotencyKey, MockPaymentCallbackRequest request, int expectedStatus) {
+    assertThatThrownBy(() -> payments.callback(idempotencyKey, request))
+        .isInstanceOfSatisfying(
+            MockPaymentException.class,
+            exception -> assertThat(exception.status()).isEqualTo(expectedStatus));
   }
 
   private void assertPaidTruth(

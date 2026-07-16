@@ -53,7 +53,7 @@ public final class MockPaymentService {
                 Long.toString(valid.amountMinor()),
                 valid.currency(),
                 valid.outcome()));
-    return withCallbackConcurrencyRetry(() -> callbackOnce(idempotencyKey, valid, intentHash));
+    return withCallbackDeadlockRetry(() -> callbackOnce(idempotencyKey, valid, intentHash));
   }
 
   private MockPaymentResult startOnce(
@@ -224,14 +224,12 @@ public final class MockPaymentService {
     }
   }
 
-  private <T> T withCallbackConcurrencyRetry(java.util.function.Supplier<T> work) {
+  private <T> T withCallbackDeadlockRetry(java.util.function.Supplier<T> work) {
     for (int attempt = 1; attempt <= MAXIMUM_CONCURRENCY_ATTEMPTS; attempt++) {
       try {
         return execute(work);
       } catch (DuplicateKeyException exception) {
-        if (attempt == MAXIMUM_CONCURRENCY_ATTEMPTS) {
-          throw exception;
-        }
+        throw conflict("Callback identity conflicts with a concurrent result");
       } catch (CannotAcquireLockException exception) {
         if (attempt == MAXIMUM_CONCURRENCY_ATTEMPTS || !isMySqlDeadlock(exception)) {
           throw exception;
