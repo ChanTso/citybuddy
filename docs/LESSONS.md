@@ -105,3 +105,11 @@ This file records only factual pitfalls supported by merged pull-request, commit
 - 根因：这是典型的 S→X 锁升级环：事务 A、B 都先获得兼容的共享/间隙锁，随后都等待对方释放锁以升级为写所需的排他锁，InnoDB 只能选择一个受害者回滚。共享读发生在真正的串行化点之前，使死锁成了常态竞争路径；同时，把“唯一约束拒绝”与“InnoDB 死锁受害者”合并成宽泛并发重试，会掩盖不同错误语义。
 - 解决：回调事务第一步按唯一 callback correlation 对 payment attempt 执行 `SELECT ... FOR UPDATE`，相同 attempt 的回调从入口就排队；取得排他锁后再普通读取 immutable callback truth，因此不会先共同持有 S 锁再争抢 X 锁。仍保留最多两次总尝试的兜底，但只有异常链明确包含 MySQL error 1213 的 `CannotAcquireLockException` 才重试；受害事务完整回滚后，新事务重新读取已提交 callback/order/attempt/ledger truth并返回同一结果。error 1205 不重试，`DuplicateKeyException` 也只执行一次并转为稳定 409。五次真实目录运行各执行 20 轮并发重复回调，累计 100 轮均通过；受控 1213 证明只重试一次并保持一条 payment ledger movement，受控 1205 和唯一键冲突都证明一次调用后立即可见。
 - 结论：`FOR UPDATE` 能解决这里的根因，不是因为它“不会死锁”，而是因为它把同一业务实体的并发者在读取派生状态前就按同一排他锁顺序串行化，消除了常见的 S→X 升级环。有限的精确 1213 重试仍需保留，因为真实事务还可能与取消等其他资源形成罕见锁环，InnoDB 的受害者回滚是可恢复并发结果；前提是重试必须从新事务重新读已提交 truth、次数有界、其他错误不伪装成死锁，并由唯一键和条件更新保证绝不产生第二次 ledger movement。
+
+## CB-071 — Refund state machine and payment/refund reconciliation
+
+- 现象：首轮真实 MySQL 集成中，两笔并发部分退款虽然先通过同一 payment attempt 排队，后进入的事务仍从旧的 REPEATABLE READ 快照计算已预留金额，导致两笔都被受理；修正这一点后，第二笔合法部分退款又被旧的 `(order_id, movement_type)` 唯一键拒绝。
+- 证据链接：[slice PR #29](https://github.com/ChanTso/citybuddy/pull/29)、[implementation and recovery commit `e159f37`](https://github.com/ChanTso/citybuddy/commit/e159f3754e95)
+- 根因：InnoDB 的锁等待只负责串行化访问，不会自动刷新事务早先建立的一致性快照；普通聚合读仍可能看到等待前的历史视图。另一方面，支付阶段“一种 movement 每单最多一条”的旧约束被直接套到退款，但一笔付款允许多次部分退款，二者的基数不相同。
+- 解决：预留金额不再用普通聚合快照，而是在持有 payment/order 锁后对该 attempt 的 refund 行执行 `SELECT ... FOR UPDATE` current read，再以受锁行求和；并把旧唯一键替换为 generated conditional singleton key，只对既有下单、取消和支付 movement 保持每单单例，退款 movement 则由稳定的 `mock-refund:{refundId}` business-event key 唯一化。十轮并发超额退款均只接受一笔，两笔合法部分退款可累计成功，同时第二条 `STANDARD_PAYMENT` 仍由数据库拒绝。
+- 结论：`FOR UPDATE` 不只表示“加锁”，在 InnoDB 中还意味着读取锁定时的当前已提交版本；涉及锁等待后的派生总额时，必须明确选择 current read。数据库唯一性也应表达业务事件真实基数：支付可以每单单例，部分退款必须每个稳定 refund identity 单例，不能用一个过宽的旧约束混为一谈。
