@@ -239,6 +239,7 @@ public class MockPaymentRepository {
         result.getString("request_idempotency_key"),
         result.getString("intent_hash"),
         result.getLong("amount_minor"),
+        result.getLong("refunded_amount_minor"),
         result.getString("currency"),
         result.getString("state"),
         result.getLong("state_version"));
@@ -256,7 +257,8 @@ public class MockPaymentRepository {
 
   private static String attemptColumns() {
     return "attempt_id, callback_correlation_id, user_subject, order_id, order_kind, "
-        + "request_idempotency_key, intent_hash, amount_minor, currency, state, state_version";
+        + "request_idempotency_key, intent_hash, amount_minor, refunded_amount_minor, currency, "
+        + "state, state_version";
   }
 
   private static String callbackColumns() {
@@ -285,6 +287,7 @@ public class MockPaymentRepository {
       String requestIdempotencyKey,
       String intentHash,
       long amountMinor,
+      long refundedAmountMinor,
       String currency,
       String state,
       long stateVersion) {
@@ -307,6 +310,7 @@ public class MockPaymentRepository {
           requestIdempotencyKey,
           intentHash,
           amountMinor,
+          0,
           currency,
           "PENDING",
           1);

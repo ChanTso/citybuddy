@@ -20,4 +20,5 @@ GRANT SELECT, INSERT, UPDATE ON commerce_db.seckill_activity TO 'commerce_app'@'
 GRANT SELECT, INSERT, UPDATE ON commerce_db.seckill_reservation TO 'commerce_app'@'%';
 GRANT SELECT, INSERT, UPDATE ON commerce_db.seckill_order TO 'commerce_app'@'%';
 GRANT SELECT, INSERT ON commerce_db.inventory_ledger TO 'commerce_app'@'%';
+GRANT SELECT, INSERT, UPDATE ON commerce_db.mock_refund TO 'commerce_app'@'%';
 GRANT SELECT, INSERT ON cs_db.support_session TO 'agent_app'@'%';
