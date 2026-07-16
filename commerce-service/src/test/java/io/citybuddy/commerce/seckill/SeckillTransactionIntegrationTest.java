@@ -10,6 +10,8 @@ import java.time.Instant;
 import java.time.temporal.ChronoUnit;
 import java.util.Map;
 import java.util.UUID;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 import org.apache.rocketmq.client.apis.ClientConfiguration;
@@ -682,28 +684,28 @@ class SeckillTransactionIntegrationTest {
         createOrderedReservation(
             redisActivity, "cb061-product-redis-retry", "cb061-redis-retry-key", 1);
     forceOrderDueIn(redisReservation, Duration.ofSeconds(-1));
-    SeckillActivity activity = activityRepository.find(redisActivity).orElseThrow();
-    redis
-        .opsForValue()
-        .set(
-            projections.key(redisActivity),
-            objectMapper.writeValueAsString(
-                new SeckillProjection(
-                    activity.activityId(),
-                    2,
-                    activity.startsAt(),
-                    activity.endsAt(),
-                    activity.state(),
-                    0)));
+    String preCancellationProjection = redis.opsForValue().get(projections.key(redisActivity));
+    assertThat(preCancellationProjection).isNotNull();
+    redis.opsForValue().set(projections.key(redisActivity), "{malformed");
     SeckillOrderRepository.OrderRecord redisOrder =
         orderRepository.findByReservation(redisReservation).orElseThrow();
     sendImmediateTimeout(SeckillTimeoutMessage.from(redisOrder));
     assertThatThrownBy(() -> timeoutMessaging.consumeOnce(cancellationService))
         .isInstanceOf(SeckillProjectionStore.ProjectionWriteException.class)
-        .hasMessageContaining("same version");
+        .hasMessageContaining("malformed");
     assertDurableCancelledAndRestored(redisReservation, 1);
-    assertThat(projectionRemaining(redisActivity)).isZero();
+    assertThat(redis.opsForValue().get(projections.key(redisActivity))).isEqualTo("{malformed");
+    redis.opsForValue().set(projections.key(redisActivity), preCancellationProjection);
+    assertThat(consumeTimeoutEventually(Duration.ofSeconds(15))).isEqualTo(1);
+    assertThat(projectionRemaining(redisActivity)).isEqualTo(1);
+
     redis.delete(projections.key(redisActivity));
+    sendImmediateTimeout(SeckillTimeoutMessage.from(redisOrder));
+    assertThatThrownBy(() -> timeoutMessaging.consumeOnce(cancellationService))
+        .isInstanceOf(SeckillProjectionStore.ProjectionWriteException.class)
+        .hasMessageContaining("missing or has a version gap");
+    assertThat(reservationService.rebuildActivityState(redisActivity))
+        .isEqualTo(ReservationAdmissionStore.RebuildResult.APPLIED);
     assertThat(consumeTimeoutEventually(Duration.ofSeconds(15))).isEqualTo(1);
     assertThat(projectionRemaining(redisActivity)).isEqualTo(1);
     assertCancelledAndRestored(redisReservation, 1, 1);
@@ -711,6 +713,133 @@ class SeckillTransactionIntegrationTest {
 
   @Test
   @Order(9)
+  void cancellationProjectionPreservesCrashWindowAdmissionsAndBlocksVersionGapAdmissions()
+      throws Exception {
+    String markerActivity = "cb061-projection-marker-race";
+    String cancelledReservation =
+        createOrderedReservation(
+            markerActivity,
+            "cb061-product-projection-marker-race",
+            "cb061-projection-marker-race-order",
+            2);
+    SeckillReservationService.PreparedReservation pending =
+        reservationService.prepare(
+            "cb061-marker-race-user",
+            markerActivity,
+            "cb061-projection-marker-race-pending",
+            request(Map.of("quantity", 1, "expectedActivityVersion", 1)));
+    SeckillActivity markerTruth = activityRepository.find(markerActivity).orElseThrow();
+    assertThat(
+            admissionStore
+                .decide(
+                    pending.reservation(),
+                    markerTruth,
+                    SeckillReservationService.sha256(pending.reservation().userSubject()))
+                .state())
+        .isEqualTo(ReservationState.ADMITTED);
+    assertThat(
+            reservationRepository.find(pending.reservation().reservationId()).orElseThrow().state())
+        .isEqualTo(ReservationState.PENDING);
+    assertThat(projectionRemaining(markerActivity)).isZero();
+
+    forceOrderDueIn(cancelledReservation, Duration.ofSeconds(-1));
+    SeckillOrderRepository.OrderRecord markerOrder =
+        orderRepository.findByReservation(cancelledReservation).orElseThrow();
+    assertThat(cancellationService.cancel(SeckillTimeoutMessage.from(markerOrder)).outcome())
+        .isEqualTo(SeckillCancellationService.Outcome.CANCELLED);
+    assertThat(projectionRemaining(markerActivity)).isEqualTo(1);
+    assertThat(reservationService.admit(pending.reservation().reservationId()).state())
+        .isEqualTo(ReservationState.ADMITTED);
+    assertThat(projectionRemaining(markerActivity)).isEqualTo(1);
+    assertThat(
+            reservationService
+                .admit(
+                    reservationService
+                        .prepare(
+                            "cb061-marker-race-third-user",
+                            markerActivity,
+                            "cb061-projection-marker-race-third",
+                            request(Map.of("quantity", 1, "expectedActivityVersion", 2)))
+                        .reservation()
+                        .reservationId())
+                .state())
+        .isEqualTo(ReservationState.ADMITTED);
+    assertThat(projectionRemaining(markerActivity)).isZero();
+    assertThat(
+            reservationService
+                .admit(
+                    reservationService
+                        .prepare(
+                            "cb061-marker-race-fourth-user",
+                            markerActivity,
+                            "cb061-projection-marker-race-fourth",
+                            request(Map.of("quantity", 1, "expectedActivityVersion", 2)))
+                        .reservation()
+                        .reservationId())
+                .decisionCode())
+        .isEqualTo(ReservationDecisionCode.EXHAUSTED);
+
+    String gapActivity = "cb061-projection-commit-gap";
+    String gapReservation =
+        createOrderedReservation(
+            gapActivity,
+            "cb061-product-projection-commit-gap",
+            "cb061-projection-commit-gap-order",
+            2);
+    forceOrderDueIn(gapReservation, Duration.ofSeconds(-1));
+    SeckillOrderRepository.OrderRecord gapOrder =
+        orderRepository.findByReservation(gapReservation).orElseThrow();
+    CountDownLatch durableCommitReached = new CountDownLatch(1);
+    CountDownLatch allowProjection = new CountDownLatch(1);
+    TransactionTemplate concurrentTransactions = new TransactionTemplate(transactionManager);
+    concurrentTransactions.setPropagationBehavior(TransactionDefinition.PROPAGATION_REQUIRES_NEW);
+    SeckillCancellationService pausedProjection =
+        new SeckillCancellationService(
+            orderRepository,
+            reservationRepository,
+            activityRepository,
+            (activity, targetVersion, quantity) -> {
+              durableCommitReached.countDown();
+              try {
+                if (!allowProjection.await(10, TimeUnit.SECONDS)) {
+                  throw new IllegalStateException("Timed out waiting to resume projection");
+                }
+              } catch (InterruptedException exception) {
+                Thread.currentThread().interrupt();
+                throw new IllegalStateException("Projection wait was interrupted", exception);
+              }
+              projections.restoreQuota(activity, targetVersion, quantity);
+            },
+            concurrentTransactions,
+            Clock.systemUTC());
+    CompletableFuture<SeckillCancellationService.CancellationResult> cancellation =
+        CompletableFuture.supplyAsync(
+            () -> pausedProjection.cancel(SeckillTimeoutMessage.from(gapOrder)));
+    assertThat(durableCommitReached.await(10, TimeUnit.SECONDS)).isTrue();
+    assertThat(orderStatus(gapReservation)).isEqualTo("CANCELLED");
+    assertThat(projectionRemaining(gapActivity)).isEqualTo(1);
+
+    SeckillReservationService.PreparedReservation duringGap =
+        reservationService.prepare(
+            "cb061-commit-gap-user",
+            gapActivity,
+            "cb061-projection-commit-gap-pending",
+            request(Map.of("quantity", 1, "expectedActivityVersion", 2)));
+    assertThatThrownBy(() -> reservationService.admit(duringGap.reservation().reservationId()))
+        .isInstanceOf(ReservationAdmissionStore.AdmissionIndeterminateException.class)
+        .hasMessageContaining("differs from MySQL truth");
+    assertThat(projectionRemaining(gapActivity)).isEqualTo(1);
+    allowProjection.countDown();
+    assertThat(cancellation.get(10, TimeUnit.SECONDS).outcome())
+        .isEqualTo(SeckillCancellationService.Outcome.CANCELLED);
+    assertThat(projectionRemaining(gapActivity)).isEqualTo(2);
+    assertThat(reservationService.admit(duringGap.reservation().reservationId()).state())
+        .isEqualTo(ReservationState.ADMITTED);
+    assertThat(projectionRemaining(gapActivity)).isEqualTo(1);
+  }
+
+  @Test
+  @Order(10)
   void databaseFailureIsNotAcknowledgedAndDispatchRetryIsBoundedAndReplaySafe() throws Exception {
     String activityId = "cb061-database-retry";
     String reservationId =
@@ -738,9 +867,10 @@ class SeckillTransactionIntegrationTest {
                               .orElseThrow();
                       orderRepository.restoreInventory(currentProduct, currentOrder.quantity());
                       orderRepository.insertUnpaidCancellationMovement(currentOrder);
-                      orderRepository.markCancelled(currentOrder);
+                      SeckillActivity advanced =
+                          activityRepository.advanceProjectionVersion(currentActivity);
+                      orderRepository.markCancelled(currentOrder, advanced.projectionVersion());
                       reservationRepository.markCancelled(currentReservation);
-                      activityRepository.advanceProjectionVersion(currentActivity);
                       throw new IllegalStateException("controlled atomic cancellation rollback");
                     }))
         .isInstanceOf(IllegalStateException.class)

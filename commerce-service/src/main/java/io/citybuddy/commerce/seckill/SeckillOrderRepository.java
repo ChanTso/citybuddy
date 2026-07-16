@@ -219,19 +219,20 @@ public final class SeckillOrderRepository {
     }
   }
 
-  public OrderRecord markCancelled(OrderRecord order) {
+  public OrderRecord markCancelled(OrderRecord order, long cancellationProjectionVersion) {
     int changed =
         jdbc.update(
             """
             UPDATE seckill_order
-            SET status = 'CANCELLED', state_version = 2
+            SET status = 'CANCELLED', state_version = 2, cancellation_projection_version = ?
             WHERE order_id = ? AND status = 'UNPAID' AND state_version = 1
             """,
+            cancellationProjectionVersion,
             order.orderId());
     if (changed != 1) {
       throw new IllegalStateException("Seckill order changed during its locked cancellation");
     }
-    return order.withState("CANCELLED", 2);
+    return order.withState("CANCELLED", 2, cancellationProjectionVersion);
   }
 
   public boolean hasUnpaidCancellationMovement(String orderId) {
@@ -255,7 +256,8 @@ public final class SeckillOrderRepository {
   private static String columns() {
     return "order_id, reservation_id, transaction_event_id, timeout_event_id, user_subject, "
         + "activity_id, product_id, product_name, unit_price_minor, currency, quantity, "
-        + "total_price_minor, status, state_version, unpaid_deadline, timeout_dispatch_state, "
+        + "total_price_minor, status, state_version, cancellation_projection_version, "
+        + "unpaid_deadline, timeout_dispatch_state, "
         + "timeout_dispatch_attempts, timeout_broker_message_id, timeout_dispatched_at, "
         + "timeout_dispatch_error";
   }
@@ -278,6 +280,7 @@ public final class SeckillOrderRepository {
         result.getLong("total_price_minor"),
         result.getString("status"),
         result.getLong("state_version"),
+        result.getObject("cancellation_projection_version", Long.class),
         result.getTimestamp("unpaid_deadline").toInstant(),
         result.getString("timeout_dispatch_state"),
         result.getInt("timeout_dispatch_attempts"),
@@ -318,6 +321,7 @@ public final class SeckillOrderRepository {
       long totalPriceMinor,
       String status,
       long stateVersion,
+      Long cancellationProjectionVersion,
       Instant unpaidDeadline,
       String timeoutDispatchState,
       int timeoutDispatchAttempts,
@@ -354,6 +358,7 @@ public final class SeckillOrderRepository {
           totalPriceMinor,
           "UNPAID",
           1,
+          null,
           unpaidDeadline,
           "PENDING",
           0,
@@ -362,7 +367,8 @@ public final class SeckillOrderRepository {
           null);
     }
 
-    OrderRecord withState(String nextStatus, long nextVersion) {
+    OrderRecord withState(
+        String nextStatus, long nextVersion, Long nextCancellationProjectionVersion) {
       return new OrderRecord(
           orderId,
           reservationId,
@@ -378,6 +384,7 @@ public final class SeckillOrderRepository {
           totalPriceMinor,
           nextStatus,
           nextVersion,
+          nextCancellationProjectionVersion,
           unpaidDeadline,
           timeoutDispatchState,
           timeoutDispatchAttempts,

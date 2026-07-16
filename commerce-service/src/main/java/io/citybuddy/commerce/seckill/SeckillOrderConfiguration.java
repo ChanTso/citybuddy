@@ -80,7 +80,13 @@ public class SeckillOrderConfiguration {
     TransactionTemplate transaction = new TransactionTemplate(transactionManager);
     transaction.setPropagationBehavior(TransactionDefinition.PROPAGATION_REQUIRES_NEW);
     return new SeckillCancellationService(
-        orders, reservations, activities, projections, transaction, seckillClock);
+        orders,
+        reservations,
+        activities,
+        (activity, targetVersion, quantity) ->
+            projections.restoreQuota(activity, targetVersion, quantity),
+        transaction,
+        seckillClock);
   }
 
   @Bean

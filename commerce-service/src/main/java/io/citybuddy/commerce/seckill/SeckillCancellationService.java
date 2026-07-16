@@ -11,7 +11,7 @@ public final class SeckillCancellationService {
   private final SeckillOrderRepository orders;
   private final SeckillReservationRepository reservations;
   private final SeckillActivityRepository activities;
-  private final SeckillProjectionStore projections;
+  private final QuotaRestorationPublisher projections;
   private final TransactionTemplate transactions;
   private final Clock clock;
 
@@ -19,7 +19,7 @@ public final class SeckillCancellationService {
       SeckillOrderRepository orders,
       SeckillReservationRepository reservations,
       SeckillActivityRepository activities,
-      SeckillProjectionStore projections,
+      QuotaRestorationPublisher projections,
       TransactionTemplate transactions,
       Clock clock) {
     this.orders = orders;
@@ -36,7 +36,8 @@ public final class SeckillCancellationService {
       throw new IllegalStateException("Seckill cancellation transaction returned no result");
     }
     if (truth.activity() != null) {
-      projections.publish(truth.activity(), truth.remainingQuota());
+      projections.restore(
+          truth.activity(), truth.targetProjectionVersion(), truth.restoredQuantity());
     }
     return new CancellationResult(truth.outcome(), truth.retryAfter());
   }
@@ -56,7 +57,7 @@ public final class SeckillCancellationService {
     }
     if (clock.instant().isBefore(order.unpaidDeadline())) {
       Duration untilDue = Duration.between(clock.instant(), order.unpaidDeadline());
-      return new CancellationTruth(Outcome.EARLY, null, 0, boundedRetry(untilDue));
+      return new CancellationTruth(Outcome.EARLY, null, 0, 0, boundedRetry(untilDue));
     }
 
     SeckillReservation reservation =
@@ -83,11 +84,11 @@ public final class SeckillCancellationService {
 
     orders.restoreInventory(product, order.quantity());
     orders.insertUnpaidCancellationMovement(order);
-    orders.markCancelled(order);
-    reservations.markCancelled(reservation);
     SeckillActivity advanced = activities.advanceProjectionVersion(activity);
-    long remainingQuota = remainingQuota(advanced);
-    return new CancellationTruth(Outcome.CANCELLED, advanced, remainingQuota, Duration.ZERO);
+    orders.markCancelled(order, advanced.projectionVersion());
+    reservations.markCancelled(reservation);
+    return new CancellationTruth(
+        Outcome.CANCELLED, advanced, advanced.projectionVersion(), order.quantity(), Duration.ZERO);
   }
 
   private CancellationTruth existingCancellation(SeckillOrderRepository.OrderRecord order) {
@@ -97,7 +98,8 @@ public final class SeckillCancellationService {
             .orElseThrow(() -> new IllegalStateException("Cancelled reservation truth is missing"));
     if (reservation.state() != ReservationState.CANCELLED
         || !order.orderId().equals(reservation.orderId())
-        || !orders.hasUnpaidCancellationMovement(order.orderId())) {
+        || !orders.hasUnpaidCancellationMovement(order.orderId())
+        || order.cancellationProjectionVersion() == null) {
       throw new IllegalStateException("Cancelled order restoration truth is incomplete");
     }
     SeckillActivity activity =
@@ -105,15 +107,11 @@ public final class SeckillCancellationService {
             .findForUpdate(order.activityId())
             .orElseThrow(() -> new IllegalStateException("Seckill activity truth is missing"));
     return new CancellationTruth(
-        Outcome.ALREADY_CANCELLED, activity, remainingQuota(activity), Duration.ZERO);
-  }
-
-  private long remainingQuota(SeckillActivity activity) {
-    long admitted = reservations.admittedQuantity(activity.activityId());
-    if (admitted > activity.allocatedQuota()) {
-      throw new IllegalStateException("Admitted reservations exceed activity allocation");
-    }
-    return activity.allocatedQuota() - admitted;
+        Outcome.ALREADY_CANCELLED,
+        activity,
+        order.cancellationProjectionVersion(),
+        order.quantity(),
+        Duration.ZERO);
   }
 
   private static SeckillTimeoutMessage requireMessage(SeckillTimeoutMessage message) {
@@ -166,10 +164,19 @@ public final class SeckillCancellationService {
 
   public record CancellationResult(Outcome outcome, Duration retryAfter) {}
 
+  @FunctionalInterface
+  public interface QuotaRestorationPublisher {
+    void restore(SeckillActivity activity, long targetProjectionVersion, long restoredQuantity);
+  }
+
   private record CancellationTruth(
-      Outcome outcome, SeckillActivity activity, long remainingQuota, Duration retryAfter) {
+      Outcome outcome,
+      SeckillActivity activity,
+      long targetProjectionVersion,
+      long restoredQuantity,
+      Duration retryAfter) {
     static CancellationTruth of(Outcome outcome) {
-      return new CancellationTruth(outcome, null, 0, Duration.ZERO);
+      return new CancellationTruth(outcome, null, 0, 0, Duration.ZERO);
     }
   }
 }

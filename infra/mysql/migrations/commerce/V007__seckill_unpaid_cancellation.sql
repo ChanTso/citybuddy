@@ -29,6 +29,7 @@ ALTER TABLE seckill_order
 
 ALTER TABLE seckill_order
   MODIFY status ENUM('UNPAID', 'CANCELLED', 'PAID') NOT NULL DEFAULT 'UNPAID',
+  ADD COLUMN cancellation_projection_version BIGINT UNSIGNED NULL AFTER state_version,
   ADD COLUMN timeout_dispatch_state ENUM('PENDING', 'SENT', 'FAILED')
     NOT NULL DEFAULT 'PENDING' AFTER unpaid_deadline,
   ADD COLUMN timeout_dispatch_attempts INT UNSIGNED NOT NULL DEFAULT 0
@@ -37,9 +38,13 @@ ALTER TABLE seckill_order
   ADD COLUMN timeout_dispatched_at TIMESTAMP(6) NULL AFTER timeout_broker_message_id,
   ADD COLUMN timeout_dispatch_error VARCHAR(500) NULL AFTER timeout_dispatched_at,
   ADD CONSTRAINT chk_seckill_order_state_version CHECK (
-    (status = 'UNPAID' AND state_version = 1)
-    OR (status = 'CANCELLED' AND state_version = 2)
-    OR (status = 'PAID' AND state_version >= 2)
+    (status = 'UNPAID' AND state_version = 1
+      AND cancellation_projection_version IS NULL)
+    OR (status = 'CANCELLED' AND state_version = 2
+      AND cancellation_projection_version IS NOT NULL
+      AND cancellation_projection_version >= 2)
+    OR (status = 'PAID' AND state_version >= 2
+      AND cancellation_projection_version IS NULL)
   ),
   ADD CONSTRAINT chk_seckill_order_timeout_dispatch CHECK (
     (timeout_dispatch_state = 'PENDING'
