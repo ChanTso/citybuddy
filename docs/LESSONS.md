@@ -89,3 +89,11 @@ This file records only factual pitfalls supported by merged pull-request, commit
 - 根因：Broker 的终止时机并没有通过应用可依赖的 callback-count 协议暴露，系统终止主题又属于 Proxy 禁止应用访问的系统边界；把实测次数或消息 payload 当 durable truth 会让重启和竞争结果不可靠。
 - 解决：废弃两个未提交恢复方案——应用消费系统主题，以及按 checker callback 计数/修改消息 payload 终止。最终在 MySQL 持久化一次性 `transaction_resolution_due_at`，由 Broker check window 配置推导上限并加安全余量且重启不重算；索引化 worker 以 32 行有界批量处理到期 `PENDING`，Redis Lua CAS 让 admission/timeout 第一个合法决定胜出并写 durable marker，再幂等收敛 MySQL。checker 恢复为只读 marker 的纯映射，不可读 Redis 返回 `UNKNOWN`，Broker 终态由独立 `mqadmin` 系统主题取证。
 - 结论：`3` 与实测 `2` 只是诊断差异，绝不能固化为应用协议。应用终态应由自己的持久截止时间和 durable CAS 决定，Broker 终态则由独立管理面取证；两者职责分离后，admission/timeout 两种竞争顺序、Redis 成功/MySQL 失败重启、三个崩溃窗口、ADMITTED 不被覆盖和 timeout 无 order/ledger 都可收敛并被真实测试证明。
+
+## CB-061 — Delayed unpaid cancellation and ledger restoration
+
+- 现象：首轮真实 migration 证据发现，终态行缺少 `decision_code` 仍能通过 V007 的组合 `CHECK`；后续真实延迟集成又暴露 2 秒到期窗口过紧，以及把 durable MySQL 状态与 Redis projection 断言混在一起会污染下一用例。完整 diff 自检还发现，取消后恢复活动配额不等于允许同一用户再次下单：MySQL rebuild 必须继续保留 one-user-one-order marker。
+- 证据链接：[slice PR #27](https://github.com/ChanTso/citybuddy/pull/27)、[implementation commit `ebdceab`](https://github.com/ChanTso/citybuddy/commit/ebdceab)
+- 根因：MySQL `CHECK` 表达式结果为 `UNKNOWN` 时不会拒绝该行，组合条件没有显式要求终态决定非空；异步测试把调度抖动当作精确时钟，并混淆了 durable truth 与可失败 projection；配额恢复和用户唯一性是两个独立不变量。
+- 解决：在终态约束中增加显式 `decision_code IS NOT NULL`；使用稳定到期余量并拆分 MySQL/Redis 证据，增加受控事务中途异常的完整回滚验证；CANCELLED reservation 不再计入已占活动配额，但 rebuild 仍重建用户 marker。最终实现以索引化有界 handoff/dispatcher 发送稳定 timeout identity，消费端重读并锁定 MySQL，在一个事务内完成取消、库存与活动配额恢复及稳定 ledger 写入，提交后才从 MySQL 投影 Redis。
+- 结论：数据库约束必须按 SQL 三值逻辑写出非空前提；异步证据要给真实调度留余量并分离权威状态与投影；“恢复额度”和“保留一次购买资格已使用”必须分别建模和验证。
