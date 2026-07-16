@@ -2,7 +2,7 @@
 
 **Document version:** v0.14\
 **Verification date:** 2026-07-16\
-**Repository phase:** Delayed unpaid cancellation verified; mock payment ready
+**Repository phase:** Mock payment implementation in progress
 
 ## How to use this index
 
@@ -81,7 +81,7 @@ The linked slice name is the canonical detailed specification. Target outcomes a
 | [CB-051 — Seckill reservation, atomic Lua admission, and owner-scoped polling](docs/slices/CB-051.md) | P0 | `VERIFIED` | `CB-050` |
 | [CB-060 — RocketMQ transaction admission and idempotent seckill order creation](docs/slices/CB-060.md) | P0 | `VERIFIED` | `CB-051` |
 | [CB-061 — Delayed unpaid cancellation and ledger restoration](docs/slices/CB-061.md) | P0 | `VERIFIED` | `CB-060` |
-| [CB-070 — Idempotent mock payment, authenticated callback, and payment ledger transitions](docs/slices/CB-070.md) | P0 | `READY` | `CB-061` |
+| [CB-070 — Idempotent mock payment, authenticated callback, and payment ledger transitions](docs/slices/CB-070.md) | P0 | `IN_PROGRESS` | `CB-061` |
 | [CB-071 — Refund state machine and payment/refund reconciliation](docs/slices/CB-071.md) | P0 | `PLANNED` | `CB-070` |
 | [CB-080 — Support conversation, event, and evidence lifecycle](docs/slices/CB-080.md) | P0 | `PLANNED` | `CB-020`, `CB-030`, `CB-040` |
 | `CB-081 — Bounded agent, model routing, and ToolSpec control` | P0 | `PLANNED` | `CB-080` |
