@@ -83,10 +83,10 @@ The linked slice name is the canonical detailed specification. Target outcomes a
 | [CB-060 — RocketMQ transaction admission and idempotent seckill order creation](docs/slices/CB-060.md) | P0 | `VERIFIED` | `CB-051` |
 | [CB-061 — Delayed unpaid cancellation and ledger restoration](docs/slices/CB-061.md) | P0 | `VERIFIED` | `CB-060` |
 | [CB-070 — Idempotent mock payment, authenticated callback, and payment ledger transitions](docs/slices/CB-070.md) | P0 | `VERIFIED` | `CB-061` |
-| [CB-071 — Refund state machine and payment/refund reconciliation](docs/slices/CB-071.md) | P0 | `READY` | `CB-070` |
-| [CB-080 — Support conversation, event, and evidence lifecycle](docs/slices/CB-080.md) | P0 | `PLANNED` | `CB-020`, `CB-030`, `CB-040` |
+| [CB-071 — Refund state machine and payment/refund reconciliation](docs/slices/CB-071.md) | P0 | `VERIFIED` | `CB-070` |
+| [CB-080 — Support conversation, event, and evidence lifecycle](docs/slices/CB-080.md) | P0 | `READY` | `CB-020`, `CB-030`, `CB-040` |
 | [CB-081 — Bounded agent, model routing, and ToolSpec control](docs/slices/CB-081.md) | P0 | `PLANNED` | `CB-080` |
-| `CB-082 — Filtered SSE, feedback, and deterministic support end-to-end evidence` | P0 | `PLANNED` | `CB-081` |
+| [CB-082 — Filtered SSE, feedback, and deterministic support end-to-end evidence](docs/slices/CB-082.md) | P0 | `PLANNED` | `CB-081` |
 | `CB-090 — Versioned hybrid knowledge index and deterministic retrieval fusion` | P0 | `PLANNED` | `CB-014`, `CB-082` |
 | `CB-091 — Rerank, sufficiency calibration, and retrieval evidence` | P0 | `PLANNED` | `CB-090` |
 | `CB-100 — Evaluation identity provisioning and sandbox-bound token lifecycle` | P0 | `PLANNED` | `CB-020`, `CB-040`, `CB-061`, `CB-071`, `CB-082`, `CB-091` |
