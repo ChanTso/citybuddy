@@ -50,6 +50,7 @@
 
 1. Close the slice in the same feature branch and pull request. Do not create a second pull request only for status or Completion-record updates.
 2. When all acceptance criteria, rejection paths, required evidence, review blockers, and required checks are satisfied:
+   - add the slice's factual pitfall record to `docs/LESSONS.md`, or record an explicit `none` when the available pull-request, commit, and test evidence contains no substantive pitfall;
    - fill the real Completion record;
    - mark the completed slice `VERIFIED`;
    - mark the next eligible slice as the only `READY` slice;
@@ -81,5 +82,5 @@
 ## Repository boundaries
 
 1. Root governance Markdown is limited to `README.md`, `AGENTS.md`, `CLAUDE.md`, and `IMPLEMENTATION.md`. Cross-slice contracts live only in `docs/CONTRACTS.md`; detailed slice specifications live only in `docs/slices/CB-*.md`.
-2. Do not create a parallel status source, roadmap, test plan, review log, ticket document, duplicate contract file, or unlinked slice specification.
+2. Do not create a parallel status source, roadmap, test plan, review log, ticket document, duplicate contract file, or unlinked slice specification. `docs/LESSONS.md` is limited to the approved factual pitfall record required at slice closeout and is not a status, contract, test, or review source.
 3. Pure spelling, documentation-only formatting, or comment-only corrections may be committed directly only when they do not change behavior, a frozen contract, or slice state.
