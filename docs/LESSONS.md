@@ -100,8 +100,8 @@ This file records only factual pitfalls supported by merged pull-request, commit
 
 ## CB-070 — Idempotent mock payment, authenticated callback, and payment ledger transitions
 
-- 现象：两个相同回调同时进入事务时，旧实现先对尚不存在或刚写入的 callback 唯一键做共享读，再去更新同一 payment attempt；两个事务都持有共享/间隙锁并同时请求排他锁，真实 MySQL 集成因此稳定出现 error 1213 死锁，重复回调不能可靠收敛。
-- 证据链接：[slice PR #28](https://github.com/ChanTso/citybuddy/pull/28)、[implementation and recovery commit `730c029`](https://github.com/ChanTso/citybuddy/commit/730c029370aab7a1871b1d06ac5db2e13d3fccd1)
-- 根因：这是典型的 S→X 锁升级环：事务 A、B 都先获得兼容的共享/间隙锁，随后都等待对方释放锁以升级为写所需的排他锁，InnoDB 只能选择一个受害者回滚。共享读发生在真正的串行化点之前，使死锁成了常态竞争路径，而不是偶发的多资源锁冲突。
-- 解决：回调事务第一步按唯一 callback correlation 对 payment attempt 执行 `SELECT ... FOR UPDATE`，相同 attempt 的回调从入口就排队；取得排他锁后再普通读取 immutable callback truth，因此不会先共同持有 S 锁再争抢 X 锁。仍保留最多两次总尝试的兜底，但只有异常链明确包含 MySQL error 1213 的 `CannotAcquireLockException` 才重试；受害事务完整回滚后，新事务重新读取已提交 callback/order/attempt/ledger truth并返回同一结果。error 1205 等其他锁错误不重试。两次全新完整集成各执行 20 轮并发重复回调均通过；受控 1213 证明只重试一次并保持一条 payment ledger movement，受控 1205 证明一次失败后原样可见。
+- 现象：两个相同回调同时进入事务时，旧实现先对尚不存在或刚写入的 callback 唯一键做共享读，再去更新同一 payment attempt；两个事务都持有共享/间隙锁并同时请求排他锁，真实 MySQL 集成因此稳定出现 error 1213 死锁，重复回调不能可靠收敛。完整 diff 复核又发现回调包装器把 `DuplicateKeyException` 也放进了两次尝试，超过了“只对 1213 重试”的精确边界。
+- 证据链接：[slice PR #28](https://github.com/ChanTso/citybuddy/pull/28)、[implementation and recovery commit `730c029`](https://github.com/ChanTso/citybuddy/commit/730c029370aab7a1871b1d06ac5db2e13d3fccd1)、[exact retry and rejection evidence commit `d2eb96e`](https://github.com/ChanTso/citybuddy/commit/d2eb96ed8d12c1811238d458532359efb6baeb34)
+- 根因：这是典型的 S→X 锁升级环：事务 A、B 都先获得兼容的共享/间隙锁，随后都等待对方释放锁以升级为写所需的排他锁，InnoDB 只能选择一个受害者回滚。共享读发生在真正的串行化点之前，使死锁成了常态竞争路径；同时，把“唯一约束拒绝”与“InnoDB 死锁受害者”合并成宽泛并发重试，会掩盖不同错误语义。
+- 解决：回调事务第一步按唯一 callback correlation 对 payment attempt 执行 `SELECT ... FOR UPDATE`，相同 attempt 的回调从入口就排队；取得排他锁后再普通读取 immutable callback truth，因此不会先共同持有 S 锁再争抢 X 锁。仍保留最多两次总尝试的兜底，但只有异常链明确包含 MySQL error 1213 的 `CannotAcquireLockException` 才重试；受害事务完整回滚后，新事务重新读取已提交 callback/order/attempt/ledger truth并返回同一结果。error 1205 不重试，`DuplicateKeyException` 也只执行一次并转为稳定 409。五次真实目录运行各执行 20 轮并发重复回调，累计 100 轮均通过；受控 1213 证明只重试一次并保持一条 payment ledger movement，受控 1205 和唯一键冲突都证明一次调用后立即可见。
 - 结论：`FOR UPDATE` 能解决这里的根因，不是因为它“不会死锁”，而是因为它把同一业务实体的并发者在读取派生状态前就按同一排他锁顺序串行化，消除了常见的 S→X 升级环。有限的精确 1213 重试仍需保留，因为真实事务还可能与取消等其他资源形成罕见锁环，InnoDB 的受害者回滚是可恢复并发结果；前提是重试必须从新事务重新读已提交 truth、次数有界、其他错误不伪装成死锁，并由唯一键和条件更新保证绝不产生第二次 ledger movement。
