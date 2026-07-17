@@ -58,6 +58,9 @@ expected=(
   "GRANT SELECT, INSERT ON commerce_db.inventory_ledger TO 'commerce_app'@'%';"
   "GRANT SELECT, INSERT, UPDATE ON commerce_db.mock_refund TO 'commerce_app'@'%';"
   "GRANT SELECT, INSERT ON cs_db.support_session TO 'agent_app'@'%';"
+  "GRANT SELECT, INSERT, UPDATE ON cs_db.support_conversation TO 'agent_app'@'%';"
+  "GRANT SELECT, INSERT, UPDATE ON cs_db.support_turn TO 'agent_app'@'%';"
+  "GRANT SELECT, INSERT ON cs_db.support_event TO 'agent_app'@'%';"
 )
 mapfile -t actual < <(sed -e '/^[[:space:]]*$/d' -e '/^[[:space:]]*--/d' "$manifest")
 
@@ -131,6 +134,7 @@ migration_statement_count=5
 migration_sql="$(printf '%s\n' "${actual[@]:0:$migration_statement_count}")"
 runtime_sql="$(printf '%s\n' "${actual[@]:$migration_statement_count}")"
 support_grant="${actual[23]}"
+support_lifecycle_grants="$(printf '%s\n' "${actual[@]:23:4}")"
 legacy_runtime_sql="$(printf '%s\n' "${actual[@]:5:4}" "$support_grant")"
 
 sql="SET ROLE 'bootstrap_grant_role';
@@ -177,64 +181,109 @@ runtime_table_state="$(mysql "${mysql_args[@]}" --execute="
       'seckill_reservation',
       'seckill_order',
       'inventory_ledger',
-      'support_session'
+      'support_session',
+      'support_conversation',
+      'support_turn',
+      'support_event'
     );
   SET ROLE NONE;")"
 legacy_runtime_table_state="5:commerce_db.auth_login_credential,commerce_db.auth_service_identity,commerce_db.auth_signing_key_metadata,commerce_db.auth_user_principal,cs_db.support_session"
+cb080_legacy_runtime_table_state="8:commerce_db.auth_login_credential,commerce_db.auth_service_identity,commerce_db.auth_signing_key_metadata,commerce_db.auth_user_principal,cs_db.support_conversation,cs_db.support_event,cs_db.support_session,cs_db.support_turn"
 catalog_runtime_table_state="9:commerce_db.auth_login_credential,commerce_db.auth_service_identity,commerce_db.auth_signing_key_metadata,commerce_db.auth_user_principal,commerce_db.catalog_metadata,commerce_db.commerce_outbox,commerce_db.crm_profile,commerce_db.product,cs_db.support_session"
+cb080_catalog_runtime_table_state="12:commerce_db.auth_login_credential,commerce_db.auth_service_identity,commerce_db.auth_signing_key_metadata,commerce_db.auth_user_principal,commerce_db.catalog_metadata,commerce_db.commerce_outbox,commerce_db.crm_profile,commerce_db.product,cs_db.support_conversation,cs_db.support_event,cs_db.support_session,cs_db.support_turn"
 order_runtime_table_state="11:commerce_db.auth_login_credential,commerce_db.auth_service_identity,commerce_db.auth_signing_key_metadata,commerce_db.auth_user_principal,commerce_db.catalog_metadata,commerce_db.commerce_outbox,commerce_db.crm_profile,commerce_db.order_idempotency,commerce_db.product,commerce_db.standard_order,cs_db.support_session"
+cb080_order_runtime_table_state="14:commerce_db.auth_login_credential,commerce_db.auth_service_identity,commerce_db.auth_signing_key_metadata,commerce_db.auth_user_principal,commerce_db.catalog_metadata,commerce_db.commerce_outbox,commerce_db.crm_profile,commerce_db.order_idempotency,commerce_db.product,commerce_db.standard_order,cs_db.support_conversation,cs_db.support_event,cs_db.support_session,cs_db.support_turn"
 seckill_runtime_table_state="12:commerce_db.auth_login_credential,commerce_db.auth_service_identity,commerce_db.auth_signing_key_metadata,commerce_db.auth_user_principal,commerce_db.catalog_metadata,commerce_db.commerce_outbox,commerce_db.crm_profile,commerce_db.order_idempotency,commerce_db.product,commerce_db.seckill_activity,commerce_db.standard_order,cs_db.support_session"
+cb080_seckill_runtime_table_state="15:commerce_db.auth_login_credential,commerce_db.auth_service_identity,commerce_db.auth_signing_key_metadata,commerce_db.auth_user_principal,commerce_db.catalog_metadata,commerce_db.commerce_outbox,commerce_db.crm_profile,commerce_db.order_idempotency,commerce_db.product,commerce_db.seckill_activity,commerce_db.standard_order,cs_db.support_conversation,cs_db.support_event,cs_db.support_session,cs_db.support_turn"
 reservation_runtime_table_state="13:commerce_db.auth_login_credential,commerce_db.auth_service_identity,commerce_db.auth_signing_key_metadata,commerce_db.auth_user_principal,commerce_db.catalog_metadata,commerce_db.commerce_outbox,commerce_db.crm_profile,commerce_db.order_idempotency,commerce_db.product,commerce_db.seckill_activity,commerce_db.seckill_reservation,commerce_db.standard_order,cs_db.support_session"
+cb080_reservation_runtime_table_state="16:commerce_db.auth_login_credential,commerce_db.auth_service_identity,commerce_db.auth_signing_key_metadata,commerce_db.auth_user_principal,commerce_db.catalog_metadata,commerce_db.commerce_outbox,commerce_db.crm_profile,commerce_db.order_idempotency,commerce_db.product,commerce_db.seckill_activity,commerce_db.seckill_reservation,commerce_db.standard_order,cs_db.support_conversation,cs_db.support_event,cs_db.support_session,cs_db.support_turn"
 transaction_runtime_table_state="15:commerce_db.auth_login_credential,commerce_db.auth_service_identity,commerce_db.auth_signing_key_metadata,commerce_db.auth_user_principal,commerce_db.catalog_metadata,commerce_db.commerce_outbox,commerce_db.crm_profile,commerce_db.inventory_ledger,commerce_db.order_idempotency,commerce_db.product,commerce_db.seckill_activity,commerce_db.seckill_order,commerce_db.seckill_reservation,commerce_db.standard_order,cs_db.support_session"
+cb080_transaction_runtime_table_state="18:commerce_db.auth_login_credential,commerce_db.auth_service_identity,commerce_db.auth_signing_key_metadata,commerce_db.auth_user_principal,commerce_db.catalog_metadata,commerce_db.commerce_outbox,commerce_db.crm_profile,commerce_db.inventory_ledger,commerce_db.order_idempotency,commerce_db.product,commerce_db.seckill_activity,commerce_db.seckill_order,commerce_db.seckill_reservation,commerce_db.standard_order,cs_db.support_conversation,cs_db.support_event,cs_db.support_session,cs_db.support_turn"
 payment_runtime_table_state="17:commerce_db.auth_login_credential,commerce_db.auth_service_identity,commerce_db.auth_signing_key_metadata,commerce_db.auth_user_principal,commerce_db.catalog_metadata,commerce_db.commerce_outbox,commerce_db.crm_profile,commerce_db.inventory_ledger,commerce_db.mock_payment_attempt,commerce_db.mock_payment_callback,commerce_db.order_idempotency,commerce_db.product,commerce_db.seckill_activity,commerce_db.seckill_order,commerce_db.seckill_reservation,commerce_db.standard_order,cs_db.support_session"
+cb080_payment_runtime_table_state="20:commerce_db.auth_login_credential,commerce_db.auth_service_identity,commerce_db.auth_signing_key_metadata,commerce_db.auth_user_principal,commerce_db.catalog_metadata,commerce_db.commerce_outbox,commerce_db.crm_profile,commerce_db.inventory_ledger,commerce_db.mock_payment_attempt,commerce_db.mock_payment_callback,commerce_db.order_idempotency,commerce_db.product,commerce_db.seckill_activity,commerce_db.seckill_order,commerce_db.seckill_reservation,commerce_db.standard_order,cs_db.support_conversation,cs_db.support_event,cs_db.support_session,cs_db.support_turn"
 complete_runtime_table_state="18:commerce_db.auth_login_credential,commerce_db.auth_service_identity,commerce_db.auth_signing_key_metadata,commerce_db.auth_user_principal,commerce_db.catalog_metadata,commerce_db.commerce_outbox,commerce_db.crm_profile,commerce_db.inventory_ledger,commerce_db.mock_payment_attempt,commerce_db.mock_payment_callback,commerce_db.mock_refund,commerce_db.order_idempotency,commerce_db.product,commerce_db.seckill_activity,commerce_db.seckill_order,commerce_db.seckill_reservation,commerce_db.standard_order,cs_db.support_session"
+cb080_runtime_table_state="21:commerce_db.auth_login_credential,commerce_db.auth_service_identity,commerce_db.auth_signing_key_metadata,commerce_db.auth_user_principal,commerce_db.catalog_metadata,commerce_db.commerce_outbox,commerce_db.crm_profile,commerce_db.inventory_ledger,commerce_db.mock_payment_attempt,commerce_db.mock_payment_callback,commerce_db.mock_refund,commerce_db.order_idempotency,commerce_db.product,commerce_db.seckill_activity,commerce_db.seckill_order,commerce_db.seckill_reservation,commerce_db.standard_order,cs_db.support_conversation,cs_db.support_event,cs_db.support_session,cs_db.support_turn"
 
-if [[ "$runtime_table_state" == "$complete_runtime_table_state" ]]; then
+if [[ "$runtime_table_state" == "$cb080_runtime_table_state" ]]; then
   mysql "${mysql_args[@]}" --execute="
     SET ROLE 'bootstrap_grant_role';
     $runtime_sql
     SET ROLE NONE;"
   echo "runtime-grants=applied"
-elif [[ "$runtime_table_state" == "$payment_runtime_table_state" ]]; then
+elif [[ "$runtime_table_state" == "$complete_runtime_table_state" ]]; then
   mysql "${mysql_args[@]}" --execute="
     SET ROLE 'bootstrap_grant_role';
-    $(printf '%s\n' "${actual[@]:5:17}" "$support_grant")
+    $(printf '%s\n' "${actual[@]:5:19}")
+    SET ROLE NONE;"
+  echo "runtime-grants=refund-applied-awaiting-support-lifecycle-migration"
+elif [[ "$runtime_table_state" == "$payment_runtime_table_state" || "$runtime_table_state" == "$cb080_payment_runtime_table_state" ]]; then
+  selected_support_grants="$support_grant"
+  if [[ "$runtime_table_state" == "$cb080_payment_runtime_table_state" ]]; then
+    selected_support_grants="$support_lifecycle_grants"
+  fi
+  mysql "${mysql_args[@]}" --execute="
+    SET ROLE 'bootstrap_grant_role';
+    $(printf '%s\n' "${actual[@]:5:17}" "$selected_support_grants")
     SET ROLE NONE;"
   echo "runtime-grants=payment-applied-awaiting-refund-migration"
-elif [[ "$runtime_table_state" == "$transaction_runtime_table_state" ]]; then
+elif [[ "$runtime_table_state" == "$transaction_runtime_table_state" || "$runtime_table_state" == "$cb080_transaction_runtime_table_state" ]]; then
+  selected_support_grants="$support_grant"
+  if [[ "$runtime_table_state" == "$cb080_transaction_runtime_table_state" ]]; then
+    selected_support_grants="$support_lifecycle_grants"
+  fi
   mysql "${mysql_args[@]}" --execute="
     SET ROLE 'bootstrap_grant_role';
-    $(printf '%s\n' "${actual[@]:5:9}" "${actual[@]:17:5}" "$support_grant")
+    $(printf '%s\n' "${actual[@]:5:9}" "${actual[@]:17:5}" "$selected_support_grants")
     SET ROLE NONE;"
   echo "runtime-grants=transaction-applied-awaiting-payment-migration"
-elif [[ "$runtime_table_state" == "$reservation_runtime_table_state" ]]; then
+elif [[ "$runtime_table_state" == "$reservation_runtime_table_state" || "$runtime_table_state" == "$cb080_reservation_runtime_table_state" ]]; then
+  selected_support_grants="$support_grant"
+  if [[ "$runtime_table_state" == "$cb080_reservation_runtime_table_state" ]]; then
+    selected_support_grants="$support_lifecycle_grants"
+  fi
   mysql "${mysql_args[@]}" --execute="
     SET ROLE 'bootstrap_grant_role';
-    $(printf '%s\n' "${actual[@]:5:9}" "${actual[@]:17:3}" "$support_grant")
+    $(printf '%s\n' "${actual[@]:5:9}" "${actual[@]:17:3}" "$selected_support_grants")
     SET ROLE NONE;"
   echo "runtime-grants=reservation-applied-awaiting-transaction-order-migration"
-elif [[ "$runtime_table_state" == "$seckill_runtime_table_state" ]]; then
+elif [[ "$runtime_table_state" == "$seckill_runtime_table_state" || "$runtime_table_state" == "$cb080_seckill_runtime_table_state" ]]; then
+  selected_support_grants="$support_grant"
+  if [[ "$runtime_table_state" == "$cb080_seckill_runtime_table_state" ]]; then
+    selected_support_grants="$support_lifecycle_grants"
+  fi
   mysql "${mysql_args[@]}" --execute="
     SET ROLE 'bootstrap_grant_role';
-    $(printf '%s\n' "${actual[@]:5:9}" "${actual[@]:17:2}" "$support_grant")
+    $(printf '%s\n' "${actual[@]:5:9}" "${actual[@]:17:2}" "$selected_support_grants")
     SET ROLE NONE;"
   echo "runtime-grants=seckill-applied-awaiting-reservation-migration"
-elif [[ "$runtime_table_state" == "$order_runtime_table_state" ]]; then
+elif [[ "$runtime_table_state" == "$order_runtime_table_state" || "$runtime_table_state" == "$cb080_order_runtime_table_state" ]]; then
+  selected_support_grants="$support_grant"
+  if [[ "$runtime_table_state" == "$cb080_order_runtime_table_state" ]]; then
+    selected_support_grants="$support_lifecycle_grants"
+  fi
   mysql "${mysql_args[@]}" --execute="
     SET ROLE 'bootstrap_grant_role';
-    $(printf '%s\n' "${actual[@]:5:9}" "${actual[17]}" "$support_grant")
+    $(printf '%s\n' "${actual[@]:5:9}" "${actual[17]}" "$selected_support_grants")
     SET ROLE NONE;"
   echo "runtime-grants=order-applied-awaiting-seckill-migration"
-elif [[ "$runtime_table_state" == "$catalog_runtime_table_state" ]]; then
+elif [[ "$runtime_table_state" == "$catalog_runtime_table_state" || "$runtime_table_state" == "$cb080_catalog_runtime_table_state" ]]; then
+  selected_support_grants="$support_grant"
+  if [[ "$runtime_table_state" == "$cb080_catalog_runtime_table_state" ]]; then
+    selected_support_grants="$support_lifecycle_grants"
+  fi
   mysql "${mysql_args[@]}" --execute="
     SET ROLE 'bootstrap_grant_role';
-    $(printf '%s\n' "${actual[@]:5:8}" "$support_grant")
+    $(printf '%s\n' "${actual[@]:5:8}" "$selected_support_grants")
     SET ROLE NONE;"
   echo "runtime-grants=catalog-applied-awaiting-order-migration"
-elif [[ "$runtime_table_state" == "$legacy_runtime_table_state" ]]; then
+elif [[ "$runtime_table_state" == "$legacy_runtime_table_state" || "$runtime_table_state" == "$cb080_legacy_runtime_table_state" ]]; then
+  selected_legacy_runtime_sql="$legacy_runtime_sql"
+  if [[ "$runtime_table_state" == "$cb080_legacy_runtime_table_state" ]]; then
+    selected_legacy_runtime_sql="$(printf '%s\n' "${actual[@]:5:4}" "$support_lifecycle_grants")"
+  fi
   mysql "${mysql_args[@]}" --execute="
     SET ROLE 'bootstrap_grant_role';
-    $legacy_runtime_sql
+    $selected_legacy_runtime_sql
     SET ROLE NONE;"
   echo "runtime-grants=legacy-applied-awaiting-migrations"
 elif [[ "$runtime_table_state" == "0:none" ]]; then

@@ -5,6 +5,7 @@ from typing import Any
 
 import httpx
 import jwt
+import pymysql
 import pytest
 from citybuddy_agent.application import (
     AgentSettings,
@@ -13,6 +14,12 @@ from citybuddy_agent.application import (
     OboClient,
     SessionStore,
     create_app,
+)
+from citybuddy_agent.conversation import (
+    ConversationOwnershipError,
+    ConversationResult,
+    ConversationStore,
+    CorrelationConflictError,
 )
 from cryptography.hazmat.primitives.asymmetric import rsa
 from fastapi import HTTPException
@@ -43,6 +50,41 @@ class MemorySessionStore(SessionStore):
     def verify_owner(self, session_id: str, subject: str) -> None:
         if self.owners.get(session_id) != subject:
             raise HTTPException(status_code=403, detail="Forbidden")
+
+
+class MemoryConversationStore(ConversationStore):
+    def __init__(self, sessions: MemorySessionStore) -> None:
+        self.sessions = sessions
+        self.results: dict[tuple[str, str], tuple[str, ConversationResult]] = {}
+        self.calls = 0
+
+    def complete_turn(
+        self,
+        *,
+        session_id: str,
+        subject: str,
+        correlation_key: str,
+        message: str,
+        response_text: str,
+    ) -> ConversationResult:
+        self.calls += 1
+        if self.sessions.owners.get(session_id) != subject:
+            raise ConversationOwnershipError
+        key = (session_id, correlation_key)
+        existing = self.results.get(key)
+        if existing is not None:
+            if existing[0] != message:
+                raise CorrelationConflictError
+            return existing[1]
+        result = ConversationResult(
+            conversation_id=f"server-conversation-{session_id}",
+            trace_id=f"server-trace-{self.calls}",
+            turn_id=f"server-turn-{self.calls}",
+            response_text=response_text,
+            outcome="completed",
+        )
+        self.results[key] = (message, result)
+        return result
 
 
 def settings() -> AgentSettings:
@@ -77,6 +119,7 @@ def direct_token(
     expires_delta: int = 300,
     not_before_delta: int = 0,
     extra: dict[str, Any] | None = None,
+    permissions: list[str] | None = None,
 ) -> str:
     now = int(time.time())
     payload: dict[str, Any] = {
@@ -85,7 +128,7 @@ def direct_token(
         "sub": subject,
         "token_type": token_type,
         "principal_state": "ACTIVE",
-        "permissions": ["support:session:create"],
+        "permissions": permissions or ["support:session:create", "support:chat"],
         "iat": now,
         "nbf": now + not_before_delta,
         "exp": now + expires_delta,
@@ -212,6 +255,15 @@ def test_session_endpoint_uses_token_subject_and_rejects_client_identity_and_eva
         ).status_code
         == 401
     )
+    chat_only = direct_token(private, "current-key", permissions=["support:chat"])
+    assert (
+        client.post(
+            "/api/sessions",
+            headers={"Authorization": f"Bearer {chat_only}"},
+            json={},
+        ).status_code
+        == 403
+    )
 
 
 def test_obo_client_rechecks_owner_and_server_allowlist(
@@ -249,3 +301,178 @@ def test_obo_client_rechecks_owner_and_server_allowlist(
     with pytest.raises(HTTPException) as forged:
         client.exchange("direct-token", principal, "forged-session", "catalog:read")
     assert forged.value.status_code == 403
+
+
+def test_chat_persists_server_owned_result_and_replays_same_intent() -> None:
+    private, public_jwk = key_fixture("current-key")
+    validator = DirectJwtValidator(settings(), CountingJwksSource([public_jwk]))
+    sessions = MemorySessionStore()
+    session_id = sessions.create("user-123")
+    conversations = MemoryConversationStore(sessions)
+    client = TestClient(
+        create_app(
+            settings(),
+            validator=validator,
+            sessions=sessions,
+            conversations=conversations,
+        )
+    )
+    headers = {
+        "Authorization": f"Bearer {direct_token(private, 'current-key')}",
+        "X-Session-Id": session_id,
+        "Idempotency-Key": "turn-request-1",
+    }
+
+    first = client.post("/api/chat", headers=headers, json={"message": "Where is my order?"})
+    replay = client.post("/api/chat", headers=headers, json={"message": "Where is my order?"})
+
+    assert first.status_code == 200
+    assert replay.status_code == 200
+    assert replay.json() == first.json()
+    assert set(first.json()) == {"conversationId", "traceId", "turnId", "reply", "outcome"}
+    assert first.json()["outcome"] == "completed"
+    assert "order" not in first.json()["reply"].lower()
+    assert len(conversations.results) == 1
+
+
+def test_chat_rejects_conflict_identity_substitution_and_private_context() -> None:
+    private, public_jwk = key_fixture("current-key")
+    validator = DirectJwtValidator(settings(), CountingJwksSource([public_jwk]))
+    sessions = MemorySessionStore()
+    session_id = sessions.create("user-123")
+    conversations = MemoryConversationStore(sessions)
+    client = TestClient(
+        create_app(
+            settings(),
+            validator=validator,
+            sessions=sessions,
+            conversations=conversations,
+        )
+    )
+    token = direct_token(private, "current-key")
+    headers = {
+        "Authorization": f"Bearer {token}",
+        "X-Session-Id": session_id,
+        "Idempotency-Key": "turn-request-1",
+    }
+    assert client.post("/api/chat", headers=headers, json={"message": "first"}).status_code == 200
+    assert (
+        client.post("/api/chat", headers=headers, json={"message": "different"}).status_code == 409
+    )
+    malformed = client.post(
+        "/api/chat",
+        headers=headers,
+        json={"message": "private input", "traceId": "client-selected"},
+    )
+    assert malformed.status_code == 422
+    assert malformed.json() == {"detail": "Invalid request"}
+    assert "private input" not in malformed.text
+    calls_before_owner_rejections = conversations.calls
+    assert (
+        client.post(
+            "/api/chat",
+            headers={**headers, "X-Session-Id": "unknown-session"},
+            json={"message": "first"},
+        ).status_code
+        == 403
+    )
+    assert conversations.calls == calls_before_owner_rejections
+    other_token = direct_token(private, "current-key", subject="other-user")
+    assert (
+        client.post(
+            "/api/chat",
+            headers={**headers, "Authorization": f"Bearer {other_token}"},
+            json={"message": "first"},
+        ).status_code
+        == 403
+    )
+    assert conversations.calls == calls_before_owner_rejections
+    assert (
+        client.post(
+            "/api/chat",
+            headers={**headers, "X-Eval-Sandbox-Id": "forbidden"},
+            json={"message": "first"},
+        ).status_code
+        == 401
+    )
+    assert (
+        client.post(
+            "/api/chat",
+            headers={
+                "X-Session-Id": session_id,
+                "Idempotency-Key": "missing-auth",
+            },
+            json={"message": "first"},
+        ).status_code
+        == 401
+    )
+
+
+def test_chat_requires_route_permission_before_conversation_access() -> None:
+    private, public_jwk = key_fixture("current-key")
+    validator = DirectJwtValidator(settings(), CountingJwksSource([public_jwk]))
+    sessions = MemorySessionStore()
+    session_id = sessions.create("user-123")
+    conversations = MemoryConversationStore(sessions)
+    client = TestClient(
+        create_app(
+            settings(),
+            validator=validator,
+            sessions=sessions,
+            conversations=conversations,
+        )
+    )
+    token = direct_token(private, "current-key", permissions=["support:session:create"])
+
+    response = client.post(
+        "/api/chat",
+        headers={
+            "Authorization": f"Bearer {token}",
+            "X-Session-Id": session_id,
+            "Idempotency-Key": "denied",
+        },
+        json={"message": "not authorized"},
+    )
+
+    assert response.status_code == 403
+    assert conversations.calls == 0
+
+
+def test_chat_redacts_mysql_failure() -> None:
+    class FailedConversationStore(ConversationStore):
+        def complete_turn(
+            self,
+            *,
+            session_id: str,
+            subject: str,
+            correlation_key: str,
+            message: str,
+            response_text: str,
+        ) -> ConversationResult:
+            raise pymysql.OperationalError(1142, "private SQL detail")
+
+    private, public_jwk = key_fixture("current-key")
+    validator = DirectJwtValidator(settings(), CountingJwksSource([public_jwk]))
+    sessions = MemorySessionStore()
+    session_id = sessions.create("user-123")
+    client = TestClient(
+        create_app(
+            settings(),
+            validator=validator,
+            sessions=sessions,
+            conversations=FailedConversationStore(),
+        )
+    )
+    response = client.post(
+        "/api/chat",
+        headers={
+            "Authorization": f"Bearer {direct_token(private, 'current-key')}",
+            "X-Session-Id": session_id,
+            "Idempotency-Key": "failed",
+        },
+        json={"message": "hello"},
+    )
+
+    assert response.status_code == 503
+    assert response.json() == {"detail": "Service unavailable"}
+    assert "private SQL detail" not in response.text

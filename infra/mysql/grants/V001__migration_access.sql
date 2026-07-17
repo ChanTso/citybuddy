@@ -22,3 +22,6 @@ GRANT SELECT, INSERT, UPDATE ON commerce_db.seckill_order TO 'commerce_app'@'%';
 GRANT SELECT, INSERT ON commerce_db.inventory_ledger TO 'commerce_app'@'%';
 GRANT SELECT, INSERT, UPDATE ON commerce_db.mock_refund TO 'commerce_app'@'%';
 GRANT SELECT, INSERT ON cs_db.support_session TO 'agent_app'@'%';
+GRANT SELECT, INSERT, UPDATE ON cs_db.support_conversation TO 'agent_app'@'%';
+GRANT SELECT, INSERT, UPDATE ON cs_db.support_turn TO 'agent_app'@'%';
+GRANT SELECT, INSERT ON cs_db.support_event TO 'agent_app'@'%';

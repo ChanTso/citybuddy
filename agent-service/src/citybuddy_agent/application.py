@@ -4,17 +4,29 @@ from __future__ import annotations
 
 import secrets
 import time
+import uuid
 from collections.abc import Mapping
 from typing import Any, Protocol
 
 import httpx
 import jwt
 import pymysql
-from fastapi import FastAPI, Header, HTTPException
+from fastapi import FastAPI, Header, HTTPException, Request
+from fastapi.exceptions import RequestValidationError
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel, ConfigDict, Field
 
+from .conversation import (
+    ConversationOwnershipError,
+    ConversationStore,
+    CorrelationConflictError,
+    MysqlConversationStore,
+)
+
 SESSION_PERMISSION = "support:session:create"
+CHAT_PERMISSION = "support:chat"
 DIRECT_TOKEN_TYPE = "direct_user"
+DETERMINISTIC_RESPONSE = "Your message was recorded. Automated support is not enabled yet."
 
 
 class AgentSettings(BaseModel):
@@ -109,7 +121,6 @@ class DirectJwtValidator:
                 or audience not in (self._settings.user_audience, [self._settings.user_audience])
                 or not isinstance(permissions, list)
                 or not all(isinstance(item, str) for item in permissions)
-                or SESSION_PERMISSION not in permissions
                 or "act" in claims
                 or "session" in claims
                 or "sandbox" in claims
@@ -157,6 +168,12 @@ class MysqlSessionStore:
                 "INSERT INTO support_session (session_id, user_subject) VALUES (%s, %s)",
                 (session_id, subject),
             )
+            cursor.execute(
+                "INSERT INTO support_conversation "
+                "(conversation_id, session_id, user_subject, state, next_turn_sequence) "
+                "VALUES (%s, %s, %s, 'ACTIVE', 0)",
+                (str(uuid.uuid4()), session_id, subject),
+            )
             connection.commit()
         return session_id
 
@@ -189,6 +206,22 @@ class SessionResponse(BaseModel):
     model_config = ConfigDict(frozen=True)
 
     session_id: str = Field(serialization_alias="sessionId")
+
+
+class ChatRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    message: str = Field(min_length=1, max_length=4000)
+
+
+class ChatResponse(BaseModel):
+    model_config = ConfigDict(frozen=True)
+
+    conversation_id: str = Field(serialization_alias="conversationId")
+    trace_id: str = Field(serialization_alias="traceId")
+    turn_id: str = Field(serialization_alias="turnId")
+    reply: str
+    outcome: str
 
 
 class OboClient:
@@ -229,11 +262,18 @@ def create_app(
     *,
     validator: DirectJwtValidator | None = None,
     sessions: SessionStore | None = None,
+    conversations: ConversationStore | None = None,
 ) -> FastAPI:
     """Construct the app, enabling identity routes only with complete runtime configuration."""
     resolved = settings or AgentSettings()
     app = FastAPI(title=resolved.service_name, docs_url=None, redoc_url=None)
     app.state.settings = resolved
+
+    @app.exception_handler(RequestValidationError)
+    async def invalid_request(request: Request, exception: RequestValidationError) -> JSONResponse:
+        del request, exception
+        return JSONResponse(status_code=422, content={"detail": "Invalid request"})
+
     if not resolved.identity_enabled:
         return app
 
@@ -241,20 +281,68 @@ def create_app(
         resolved, HttpJwksSource(resolved.jwks_url)
     )
     resolved_sessions = sessions or MysqlSessionStore(resolved)
+    resolved_conversations = conversations or MysqlConversationStore(resolved)
     app.state.validator = resolved_validator
     app.state.sessions = resolved_sessions
+    app.state.conversations = resolved_conversations
     app.state.obo_client = OboClient(resolved, resolved_sessions)
 
     @app.post("/api/sessions", response_model=SessionResponse, status_code=201)
     def create_session(
         request: SessionCreateRequest,
-        authorization: str = Header(),
+        authorization: str | None = Header(default=None),
         x_eval_sandbox_id: str | None = Header(default=None),
     ) -> SessionResponse:
         del request
-        if x_eval_sandbox_id is not None or not authorization.startswith("Bearer "):
+        if (
+            x_eval_sandbox_id is not None
+            or authorization is None
+            or not authorization.startswith("Bearer ")
+        ):
             raise HTTPException(status_code=401, detail="Unauthorized")
         principal = resolved_validator.validate(authorization[7:])
+        if SESSION_PERMISSION not in principal.permissions:
+            raise HTTPException(status_code=403, detail="Forbidden")
         return SessionResponse(session_id=resolved_sessions.create(principal.subject))
+
+    @app.post("/api/chat", response_model=ChatResponse)
+    def chat(
+        request: ChatRequest,
+        authorization: str | None = Header(default=None),
+        x_session_id: str = Header(min_length=1, max_length=64),
+        idempotency_key: str = Header(min_length=1, max_length=128),
+        x_eval_sandbox_id: str | None = Header(default=None),
+    ) -> ChatResponse:
+        if (
+            x_eval_sandbox_id is not None
+            or authorization is None
+            or not authorization.startswith("Bearer ")
+        ):
+            raise HTTPException(status_code=401, detail="Unauthorized")
+        principal = resolved_validator.validate(authorization[7:])
+        if CHAT_PERMISSION not in principal.permissions:
+            raise HTTPException(status_code=403, detail="Forbidden")
+        try:
+            resolved_sessions.verify_owner(x_session_id, principal.subject)
+            result = resolved_conversations.complete_turn(
+                session_id=x_session_id,
+                subject=principal.subject,
+                correlation_key=idempotency_key,
+                message=request.message,
+                response_text=DETERMINISTIC_RESPONSE,
+            )
+        except ConversationOwnershipError as exception:
+            raise HTTPException(status_code=403, detail="Forbidden") from exception
+        except CorrelationConflictError as exception:
+            raise HTTPException(status_code=409, detail="Idempotency conflict") from exception
+        except pymysql.MySQLError as exception:
+            raise HTTPException(status_code=503, detail="Service unavailable") from exception
+        return ChatResponse(
+            conversation_id=result.conversation_id,
+            trace_id=result.trace_id,
+            turn_id=result.turn_id,
+            reply=result.response_text,
+            outcome=result.outcome,
+        )
 
     return app

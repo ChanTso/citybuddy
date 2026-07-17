@@ -43,15 +43,22 @@ mysql_query() {
   "${compose[@]}" exec -T -e MYSQL_PWD="$password" mysql "${args[@]}" --execute="$statement"
 }
 
-assert_mysql_fails() {
+assert_mysql_rejects() {
   local label="$1"
-  shift
+  local pattern="$2"
+  shift 2
   if "$@" >"$tmp_dir/mysql-rejection.log" 2>&1; then
     echo "Expected MySQL rejection succeeded: $label" >&2
     exit 1
   fi
-  grep -Eq 'Access denied|command denied' "$tmp_dir/mysql-rejection.log"
-  echo "Verified permission rejection: $label"
+  grep -Eq "$pattern" "$tmp_dir/mysql-rejection.log"
+  echo "Verified MySQL rejection: $label"
+}
+
+assert_mysql_fails() {
+  local label="$1"
+  shift
+  assert_mysql_rejects "$label" 'Access denied|command denied' "$@"
 }
 
 request_status() {
@@ -96,6 +103,7 @@ wait_http() {
 ENV_FILE="$env_file" ./scripts/init_local.sh
 auth_app_password="$(read_value MYSQL_AUTH_APP_PASSWORD)"
 agent_app_password="$(read_value MYSQL_AGENT_APP_PASSWORD)"
+agent_migration_password="$(read_value MYSQL_AGENT_MIGRATION_PASSWORD)"
 user_password="$(openssl rand -hex 24)"
 other_password="$(openssl rand -hex 24)"
 disabled_password="$(openssl rand -hex 24)"
@@ -112,9 +120,9 @@ make ENV_FILE="$env_file" COMPOSE_PROJECT_NAME="$project" grant-access
 
 mysql_query auth_app "$auth_app_password" commerce_db "
 INSERT INTO auth_user_principal (principal_id, subject, login_identifier, state, permissions) VALUES
-  ('00000000-0000-0000-0000-000000000020', 'user-integration', 'integration-user', 'ACTIVE', 'support:session:create'),
-  ('00000000-0000-0000-0000-000000000021', 'other-user', 'other-user', 'ACTIVE', 'support:session:create'),
-  ('00000000-0000-0000-0000-000000000022', 'disabled-user', 'disabled-user', 'DISABLED', 'support:session:create');
+  ('00000000-0000-0000-0000-000000000020', 'user-integration', 'integration-user', 'ACTIVE', 'support:session:create support:chat'),
+  ('00000000-0000-0000-0000-000000000021', 'other-user', 'other-user', 'ACTIVE', 'support:session:create support:chat'),
+  ('00000000-0000-0000-0000-000000000022', 'disabled-user', 'disabled-user', 'DISABLED', 'support:session:create support:chat');
 INSERT INTO auth_login_credential (principal_id, password_hash) VALUES
   ('00000000-0000-0000-0000-000000000020', '$user_hash'),
   ('00000000-0000-0000-0000-000000000021', '$other_hash'),
@@ -132,12 +140,19 @@ assert_mysql_fails "auth_app cannot read commerce migration history" \
   mysql_query auth_app "$auth_app_password" commerce_db 'SELECT * FROM commerce_schema_history'
 assert_mysql_fails "auth_app cannot access cs_db" \
   mysql_query auth_app "$auth_app_password" cs_db 'SELECT * FROM support_session'
+assert_mysql_fails "auth_app cannot read support conversation truth" \
+  mysql_query auth_app "$auth_app_password" cs_db 'SELECT * FROM support_conversation'
+assert_mysql_fails "commerce_app cannot read support evidence" \
+  mysql_query commerce_app "$(read_value MYSQL_COMMERCE_APP_PASSWORD)" cs_db 'SELECT * FROM support_event'
 assert_mysql_fails "auth_app cannot execute DDL" \
   mysql_query auth_app "$auth_app_password" commerce_db 'CREATE TABLE forbidden_auth_ddl (id INT)'
 assert_mysql_fails "agent_app cannot access auth tables" \
   mysql_query agent_app "$agent_app_password" commerce_db 'SELECT * FROM auth_user_principal'
 assert_mysql_fails "agent_app cannot execute DDL" \
   mysql_query agent_app "$agent_app_password" cs_db 'CREATE TABLE forbidden_agent_ddl (id INT)'
+assert_mysql_fails "agent_app cannot mutate append-only evidence" \
+  mysql_query agent_app "$agent_app_password" cs_db \
+    "UPDATE support_event SET event_type = 'TURN_FAILED' WHERE 1 = 0"
 
 openssl genpkey -algorithm RSA -pkeyopt rsa_keygen_bits:2048 -out "$tmp_dir/current-private.pem" 2>/dev/null
 openssl pkey -in "$tmp_dir/current-private.pem" -pubout -out "$tmp_dir/current-public.pem" 2>/dev/null
@@ -239,6 +254,142 @@ assert_status 401 "production evaluation header" \
   --header 'Content-Type: application/json' \
   --data '{}'
 
+chat_headers=(
+  --header "Authorization: Bearer $direct_token"
+  --header "X-Session-Id: $session_id"
+  --header 'Content-Type: application/json'
+)
+assert_status 200 "durable deterministic support turn" \
+  --request POST "http://127.0.0.1:$agent_port/api/chat" \
+  "${chat_headers[@]}" \
+  --header 'Idempotency-Key: cb080-first-turn' \
+  --data '{"message":"Where is my order?"}'
+cp "$tmp_dir/http-response.json" "$tmp_dir/first-chat.json"
+conversation_id="$(uv run python scripts/read_json_field.py "$tmp_dir/first-chat.json" conversationId)"
+trace_id="$(uv run python scripts/read_json_field.py "$tmp_dir/first-chat.json" traceId)"
+turn_id="$(uv run python scripts/read_json_field.py "$tmp_dir/first-chat.json" turnId)"
+test "$(uv run python scripts/read_json_field.py "$tmp_dir/first-chat.json" outcome)" = completed
+test "$(mysql_query agent_app "$agent_app_password" cs_db "SELECT COUNT(*) FROM support_conversation WHERE conversation_id = '$conversation_id' AND session_id = '$session_id' AND user_subject = 'user-integration'")" = 1
+test "$(mysql_query agent_app "$agent_app_password" cs_db "SELECT CONCAT(state, ':', turn_sequence) FROM support_turn WHERE turn_id = '$turn_id' AND trace_id = '$trace_id'")" = COMPLETED:1
+test "$(mysql_query agent_app "$agent_app_password" cs_db "SELECT GROUP_CONCAT(CONCAT(sequence, ':', event_type) ORDER BY sequence SEPARATOR ',') FROM support_event WHERE trace_id = '$trace_id'")" = '1:USER_INPUT,2:ASSISTANT_RESPONSE,3:TURN_COMPLETED'
+
+assert_status 200 "same-intent durable replay" \
+  --request POST "http://127.0.0.1:$agent_port/api/chat" \
+  "${chat_headers[@]}" \
+  --header 'Idempotency-Key: cb080-first-turn' \
+  --data '{"message":"Where is my order?"}'
+cmp "$tmp_dir/first-chat.json" "$tmp_dir/http-response.json"
+test "$(mysql_query agent_app "$agent_app_password" cs_db "SELECT COUNT(*) FROM support_turn WHERE session_id = '$session_id'")" = 1
+test "$(mysql_query agent_app "$agent_app_password" cs_db "SELECT COUNT(*) FROM support_event WHERE trace_id = '$trace_id'")" = 3
+
+assert_status 409 "conflicting idempotency reuse" \
+  --request POST "http://127.0.0.1:$agent_port/api/chat" \
+  "${chat_headers[@]}" \
+  --header 'Idempotency-Key: cb080-first-turn' \
+  --data '{"message":"Different intent"}'
+assert_status 422 "client-selected authoritative trace" \
+  --request POST "http://127.0.0.1:$agent_port/api/chat" \
+  "${chat_headers[@]}" \
+  --header 'Idempotency-Key: cb080-client-id' \
+  --data '{"message":"hello","traceId":"client-selected"}'
+assert_status 422 "missing support session header" \
+  --request POST "http://127.0.0.1:$agent_port/api/chat" \
+  --header "Authorization: Bearer $direct_token" \
+  --header 'Idempotency-Key: cb080-missing-session' \
+  --header 'Content-Type: application/json' \
+  --data '{"message":"hello"}'
+assert_status 401 "chat rejects production evaluation header" \
+  --request POST "http://127.0.0.1:$agent_port/api/chat" \
+  "${chat_headers[@]}" \
+  --header 'Idempotency-Key: cb080-eval' \
+  --header 'X-Eval-Sandbox-Id: forbidden-production-context' \
+  --data '{"message":"hello"}'
+
+assert_status 403 "unknown support session does not disclose existence" \
+  --request POST "http://127.0.0.1:$agent_port/api/chat" \
+  --header "Authorization: Bearer $direct_token" \
+  --header 'X-Session-Id: unknown-session' \
+  --header 'Idempotency-Key: cb080-unknown' \
+  --header 'Content-Type: application/json' \
+  --data '{"message":"hello"}'
+cp "$tmp_dir/http-response.json" "$tmp_dir/forbidden-chat.json"
+assert_status 403 "cross-user support session does not disclose existence" \
+  --request POST "http://127.0.0.1:$agent_port/api/chat" \
+  --header "Authorization: Bearer $other_token" \
+  --header "X-Session-Id: $session_id" \
+  --header 'Idempotency-Key: cb080-cross-user' \
+  --header 'Content-Type: application/json' \
+  --data '{"message":"hello"}'
+cmp "$tmp_dir/forbidden-chat.json" "$tmp_dir/http-response.json"
+
+concurrent_pids=()
+for index in 1 2 3 4; do
+  (
+    status="$(curl --silent --show-error \
+      --output "$tmp_dir/concurrent-$index.json" --write-out '%{http_code}' \
+      --request POST "http://127.0.0.1:$agent_port/api/chat" \
+      "${chat_headers[@]}" \
+      --header 'Idempotency-Key: cb080-concurrent' \
+      --data '{"message":"one concurrent intent"}')"
+    test "$status" = 200
+  ) &
+  concurrent_pids+=("$!")
+done
+for concurrent_pid in "${concurrent_pids[@]}"; do
+  wait "$concurrent_pid"
+done
+for index in 2 3 4; do
+  cmp "$tmp_dir/concurrent-1.json" "$tmp_dir/concurrent-$index.json"
+done
+test "$(mysql_query agent_app "$agent_app_password" cs_db "SELECT COUNT(*) FROM support_turn WHERE session_id = '$session_id' AND correlation_key = 'cb080-concurrent'")" = 1
+concurrent_trace="$(uv run python scripts/read_json_field.py "$tmp_dir/concurrent-1.json" traceId)"
+test "$(mysql_query agent_app "$agent_app_password" cs_db "SELECT COUNT(*) FROM support_event WHERE trace_id = '$concurrent_trace'")" = 3
+echo "Verified concurrent same-intent requests converge to one durable turn and sequence."
+
+assert_status 201 "isolated rollback-drill session creation" \
+  --request POST "http://127.0.0.1:$agent_port/api/sessions" \
+  --header "Authorization: Bearer $direct_token" \
+  --header 'Content-Type: application/json' \
+  --data '{}'
+rollback_session_id="$(uv run python scripts/read_json_field.py "$tmp_dir/http-response.json" sessionId)"
+rollback_chat_headers=(
+  --header "Authorization: Bearer $direct_token"
+  --header "X-Session-Id: $rollback_session_id"
+  --header 'Content-Type: application/json'
+)
+before_failure="$(mysql_query agent_app "$agent_app_password" cs_db "SELECT CONCAT((SELECT next_turn_sequence FROM support_conversation WHERE session_id = '$rollback_session_id'), ':', (SELECT COUNT(*) FROM support_turn WHERE session_id = '$rollback_session_id'), ':', (SELECT COUNT(*) FROM support_event WHERE session_id = '$rollback_session_id'))")"
+test "$before_failure" = '0:0:0'
+mysql_query agent_migration "$agent_migration_password" cs_db \
+  "ALTER TABLE support_event ADD CONSTRAINT chk_cb080_controlled_failure CHECK (session_id <> '$rollback_session_id' OR event_type <> 'ASSISTANT_RESPONSE')"
+assert_status 503 "accepted-turn database failure is bounded" \
+  --request POST "http://127.0.0.1:$agent_port/api/chat" \
+  "${rollback_chat_headers[@]}" \
+  --header 'Idempotency-Key: cb080-rollback' \
+  --data '{"message":"must roll back"}'
+if grep -q 'chk_cb080_controlled_failure' "$tmp_dir/http-response.json"; then
+  echo "Database failure detail leaked through the public response." >&2
+  exit 1
+fi
+mysql_query agent_migration "$agent_migration_password" cs_db \
+  'ALTER TABLE support_event DROP CHECK chk_cb080_controlled_failure'
+after_failure="$(mysql_query agent_app "$agent_app_password" cs_db "SELECT CONCAT((SELECT next_turn_sequence FROM support_conversation WHERE session_id = '$rollback_session_id'), ':', (SELECT COUNT(*) FROM support_turn WHERE session_id = '$rollback_session_id'), ':', (SELECT COUNT(*) FROM support_event WHERE session_id = '$rollback_session_id'))")"
+test "$after_failure" = "$before_failure"
+echo "Verified a controlled second-event database failure rolls back turn position, turn, and the first inserted event."
+
+assert_mysql_rejects "duplicate evidence sequence" 'Duplicate entry' \
+  mysql_query agent_app "$agent_app_password" cs_db \
+    "INSERT INTO support_event (event_id, turn_id, trace_id, session_id, user_subject, sequence, event_type, payload_json) VALUES ('00000000-0000-0000-0000-000000000080', '$turn_id', '$trace_id', '$session_id', 'user-integration', 1, 'USER_INPUT', JSON_OBJECT())"
+assert_mysql_rejects "non-monotonic evidence sequence" 'Check constraint.*violated' \
+  mysql_query agent_app "$agent_app_password" cs_db \
+    "INSERT INTO support_event (event_id, turn_id, trace_id, session_id, user_subject, sequence, event_type, payload_json) VALUES ('00000000-0000-0000-0000-000000000081', '$turn_id', '$trace_id', '$session_id', 'user-integration', 4, 'TURN_COMPLETED', JSON_OBJECT())"
+assert_mysql_rejects "cross-session evidence association" 'foreign key constraint fails' \
+  mysql_query agent_app "$agent_app_password" cs_db \
+    "INSERT INTO support_event (event_id, turn_id, trace_id, session_id, user_subject, sequence, event_type, payload_json) VALUES ('00000000-0000-0000-0000-000000000082', '00000000-0000-0000-0000-000000000083', '00000000-0000-0000-0000-000000000084', 'forged-session', 'user-integration', 1, 'USER_INPUT', JSON_OBJECT())"
+assert_mysql_fails "append-only evidence cannot be deleted" \
+  mysql_query agent_app "$agent_app_password" cs_db \
+    "DELETE FROM support_event WHERE event_id = '00000000-0000-0000-0000-000000000080'"
+echo "Verified evidence uniqueness, ordering, association, and append-only grants."
+
 common_probe_env=(
   IDENTITY_ISSUER=https://identity.citybuddy.test
   IDENTITY_USER_AUDIENCE=citybuddy-web
@@ -324,4 +475,4 @@ if rg -l 'BEGIN (RSA )?PRIVATE KEY' auth-service/target commerce-service/target 
   exit 1
 fi
 
-echo "CB-020 login -> session -> JIT exchange -> commerce authorization integration passed."
+echo "CB-020 identity chain and CB-080 durable support lifecycle integration passed."
