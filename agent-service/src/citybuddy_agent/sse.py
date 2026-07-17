@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import re
+import unicodedata
 from collections.abc import AsyncGenerator, Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass
 
@@ -13,13 +14,59 @@ TOKEN_CHUNK_SIZE = 64
 MAX_RESPONSE_TEXT = 256
 MAX_PUBLIC_EVENTS = MAX_RESPONSE_TEXT // TOKEN_CHUNK_SIZE + 1
 
-_ACTION_SUCCESS = re.compile(
-    r"\b(?:order (?:was |is )?(?:placed|confirmed)|"
-    r"refund (?:was |is )?(?:completed|successful|succeeded)|"
-    r"payment (?:was |is )?(?:completed|successful|succeeded)|"
-    r"(?:has been|was|is) refunded|paid successfully|refunded|ordered|paid)\b",
-    re.IGNORECASE,
+_SENSITIVE_ACTION_WORDS = {
+    "cancel",
+    "cancellation",
+    "order",
+    "payment",
+    "purchase",
+    "refund",
+}
+_ACTION_COMPLETION_WORDS = {
+    "approved",
+    "canceled",
+    "cancelled",
+    "complete",
+    "completed",
+    "completion",
+    "confirmed",
+    "done",
+    "executed",
+    "finalized",
+    "ordered",
+    "paid",
+    "placed",
+    "processed",
+    "refunded",
+    "succeeded",
+    "success",
+    "successful",
+    "successfully",
+}
+_SENSITIVE_ACTION_CJK = ("订单", "下单", "退款", "支付", "付款", "取消")
+_ACTION_COMPLETION_CJK = (
+    "成功",
+    "已完成",
+    "已确认",
+    "已下单",
+    "已退款",
+    "已支付",
+    "已付款",
+    "已取消",
 )
+
+
+def _contains_unreceipted_action_claim(text: str) -> bool:
+    normalized = unicodedata.normalize("NFKC", text).casefold()
+    normalized = "".join(
+        character for character in normalized if unicodedata.category(character) != "Cf"
+    )
+    words = set(re.findall(r"[a-z0-9]+", normalized))
+    if words & _SENSITIVE_ACTION_WORDS and words & _ACTION_COMPLETION_WORDS:
+        return True
+    return any(action in normalized for action in _SENSITIVE_ACTION_CJK) and any(
+        completion in normalized for completion in _ACTION_COMPLETION_CJK
+    )
 
 
 class SseProjectionError(Exception):
@@ -88,7 +135,7 @@ class SseEgressFilter:
                     not isinstance(text, str)
                     or not text
                     or len(text) > MAX_RESPONSE_TEXT
-                    or _ACTION_SUCCESS.search(text) is not None
+                    or _contains_unreceipted_action_claim(text)
                 ):
                     raise SseProjectionError("unsafe text source")
                 text_seen = True

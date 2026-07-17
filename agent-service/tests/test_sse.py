@@ -89,6 +89,13 @@ def test_filter_rejects_unknown_private_reordered_duplicate_and_synthetic_source
         "The refund is successful.",
         "Payment succeeded.",
         "The purchase was paid successfully.",
+        "Your cancellation is complete.",
+        "Your order has been processed.",
+        "Your refund—SUCCESSFUL.",
+        "PAYMENT\nAPPROVED.",
+        "Your pay​ment was finalized.",
+        "退款已完成。",
+        "订单取消成功。",
     ],
 )
 def test_filter_withholds_action_success_language_without_receipt_truth(claim: str) -> None:
@@ -96,6 +103,22 @@ def test_filter_withholds_action_success_language_without_receipt_truth(claim: s
 
     with pytest.raises(SseProjectionError):
         SseEgressFilter().project_result(result)
+
+
+@pytest.mark.parametrize(
+    "safe_text",
+    [
+        "I can explain how to request a refund.",
+        "Your order status is still pending.",
+        "Payment options are available.",
+    ],
+)
+def test_filter_preserves_non_success_action_guidance(safe_text: str) -> None:
+    result = completed().__class__("c", "t", "u", safe_text, "completed")
+
+    events = SseEgressFilter().project_result(result)
+
+    assert [event.name for event in events] == ["token", "done"]
 
 
 def test_encoder_revalidates_public_name_and_fields() -> None:
