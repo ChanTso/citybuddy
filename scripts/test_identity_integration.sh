@@ -580,13 +580,25 @@ assert_mysql_rejects "duplicate evidence sequence" 'Duplicate entry' \
 assert_mysql_rejects "non-positive evidence sequence" 'Check constraint.*violated' \
   mysql_query agent_app "$agent_app_password" cs_db \
     "INSERT INTO support_event (event_id, turn_id, trace_id, session_id, user_subject, sequence, event_type, payload_json) VALUES ('00000000-0000-0000-0000-000000000081', '$turn_id', '$trace_id', '$session_id', 'user-integration', 0, 'TURN_COMPLETED', JSON_OBJECT())"
+ordering_turn_id='00000000-0000-0000-0000-000000000085'
+ordering_trace_id='00000000-0000-0000-0000-000000000086'
+mysql_query agent_app "$agent_app_password" cs_db \
+  "INSERT INTO support_turn (turn_id, conversation_id, session_id, user_subject, trace_id, turn_sequence, correlation_key, request_fingerprint, input_text, state, processing_deadline_at) VALUES ('$ordering_turn_id', '$conversation_id', '$session_id', 'user-integration', '$ordering_trace_id', 999, 'cb081-ordering-rejection', '042e57b4fc029d06e20d970d92b4c5bc916c321f9d96561c79843b23b705e496', 'ordering-rejection', 'PROCESSING', DATE_ADD(CURRENT_TIMESTAMP(6), INTERVAL 30 SECOND))"
+assert_mysql_rejects "terminal evidence cannot precede accepted input" 'Check constraint.*violated' \
+  mysql_query agent_app "$agent_app_password" cs_db \
+    "INSERT INTO support_event (event_id, turn_id, trace_id, session_id, user_subject, sequence, event_type, payload_json) VALUES ('00000000-0000-0000-0000-000000000087', '$ordering_turn_id', '$ordering_trace_id', '$session_id', 'user-integration', 1, 'TURN_FAILED', JSON_OBJECT())"
+mysql_query agent_app "$agent_app_password" cs_db \
+  "INSERT INTO support_event (event_id, turn_id, trace_id, session_id, user_subject, sequence, event_type, payload_json) VALUES ('00000000-0000-0000-0000-000000000088', '$ordering_turn_id', '$ordering_trace_id', '$session_id', 'user-integration', 1, 'USER_INPUT', JSON_OBJECT())"
+assert_mysql_rejects "accepted input cannot be repeated after sequence one" 'Check constraint.*violated' \
+  mysql_query agent_app "$agent_app_password" cs_db \
+    "INSERT INTO support_event (event_id, turn_id, trace_id, session_id, user_subject, sequence, event_type, payload_json) VALUES ('00000000-0000-0000-0000-000000000089', '$ordering_turn_id', '$ordering_trace_id', '$session_id', 'user-integration', 2, 'USER_INPUT', JSON_OBJECT())"
 assert_mysql_rejects "cross-session evidence association" 'foreign key constraint fails' \
   mysql_query agent_app "$agent_app_password" cs_db \
     "INSERT INTO support_event (event_id, turn_id, trace_id, session_id, user_subject, sequence, event_type, payload_json) VALUES ('00000000-0000-0000-0000-000000000082', '00000000-0000-0000-0000-000000000083', '00000000-0000-0000-0000-000000000084', 'forged-session', 'user-integration', 1, 'USER_INPUT', JSON_OBJECT())"
 assert_mysql_fails "append-only evidence cannot be deleted" \
   mysql_query agent_app "$agent_app_password" cs_db \
     "DELETE FROM support_event WHERE event_id = '00000000-0000-0000-0000-000000000080'"
-echo "Verified evidence uniqueness, ordering, association, and append-only grants."
+echo "Verified evidence uniqueness, accepted-input-first ordering, association, and append-only grants."
 
 common_probe_env=(
   IDENTITY_ISSUER=https://identity.citybuddy.test

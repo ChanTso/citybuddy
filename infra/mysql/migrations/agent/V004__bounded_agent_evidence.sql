@@ -4,6 +4,10 @@ ALTER TABLE support_event
 ALTER TABLE support_event
   ADD CONSTRAINT chk_support_event_sequence CHECK (
     sequence > 0
+    AND (
+      (sequence = 1 AND event_type = 'USER_INPUT')
+      OR (sequence > 1 AND event_type <> 'USER_INPUT')
+    )
     AND event_type IN (
       'USER_INPUT',
       'ROUTING_DECISION',
