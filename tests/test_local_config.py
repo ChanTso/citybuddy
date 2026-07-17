@@ -222,6 +222,7 @@ def test_local_ci_order_and_parallel_workflow_cover_every_required_target() -> N
         "test-catalog-integration",
         "test-redis-integration",
         "test-elasticsearch-integration",
+        "test-knowledge-search-integration",
         "test-rocketmq-integration",
         "test-knowledge-indexer-rocketmq-spike",
     )

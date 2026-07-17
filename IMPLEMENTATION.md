@@ -1,8 +1,8 @@
 # CityBuddy implementation index
 
-**Document version:** v0.19\
-**Verification date:** 2026-07-17\
-**Repository phase:** Versioned hybrid knowledge index and deterministic retrieval fusion ready
+**Document version:** v0.20\
+**Verification date:** 2026-07-18\
+**Repository phase:** Rerank, sufficiency calibration, and retrieval evidence ready
 
 ## How to use this index
 
@@ -17,13 +17,14 @@
 
 CityBuddy targets local-commerce transactions and text-only AI customer support with independent identity, side-effect, retrieval, and evaluation boundaries.
 
-The repository contains the verified local-runtime foundations, identity vertical slice, product catalog vertical slice, standard-ordering vertical slice, seckill reservation, durable-order, cancellation, mock-payment, refund, and reconciliation mainline, support conversation lifecycle, bounded agent/tool control, filtered SSE, and append-only feedback:
+The repository contains the verified local-runtime foundations, identity vertical slice, product catalog vertical slice, standard-ordering vertical slice, seckill reservation, durable-order, cancellation, mock-payment, refund, and reconciliation mainline, support conversation lifecycle, bounded agent/tool control, filtered SSE, append-only feedback, and versioned hybrid public-knowledge retrieval:
 
 - executable non-business skeletons for `auth-service`, `commerce-service`, `agent-service`, `knowledge-indexer`, and `web`;
 - one Maven reactor and wrapper, one locked `uv` workspace, and one npm lockfile;
 - one pinned, health-gated MySQL instance with isolated migration/runtime identities, separate migration histories, and non-default-role grant delegation;
 - two pinned, authenticated, health-gated Redis instances with distinct URLs, credentials, containers, and named volumes: Commerce uses AOF plus `noeviction`, while Support uses bounded `volatile-lfu` for TTL-bearing cache data;
 - one digest-pinned Elasticsearch 8.19.8 runtime with checksum-verified analysis-ik 8.19.8, analyzer-gated health, and disposable dense-vector, kNN, and atomic-alias evidence;
+- one versioned `knowledge_docs_vN` public-knowledge index behind the stable `knowledge_docs_read` alias, with strict mapping/corpus boundaries and server-owned `knowledge.search` performing separate bounded BM25 and dense recall plus deterministic application-side RRF;
 - one digest-pinned RocketMQ 5.5.0 NameServer and combined Broker/Proxy runtime with behavior-gated readiness, a Java 5.x gRPC client route probe, and a disposable uniquely identified normal-message round trip;
 - one ordered local and CI integration entry point proving clean aggregate startup, seven health gates, three migration histories, repeat-start idempotence, credential preservation, non-destructive shutdown, component probes, and controlled failures;
 - RS256 direct-user login and JWKS publication, server-owned support sessions, independently authenticated exact-scope JIT OBO exchange, and fail-closed commerce authorization with bounded key refresh and overlap handling;
@@ -40,7 +41,7 @@ The repository contains the verified local-runtime foundations, identity vertica
 - owner-scoped idempotent partial and full refunds with cumulative paid-amount bounds, legal terminal transitions, atomic MySQL refund/order/ledger/Outbox truth, and locking current-read reconciliation across payment, refund, and unpaid-timeout state;
 - format, lint, type/compile, unit-test, build, pre-commit, Gitleaks, and GitHub Actions paths through `make ci`.
 
-It does not yet contain production Elasticsearch knowledge indexes; real model-provider access; deployment; or measured performance claims.
+It does not yet contain real model-provider access, deployment, or measured performance claims.
 
 Cross-slice target architecture, preflight conclusions, service/data ownership, interface and security boundaries, sequence diagrams, route outcomes, risks, and change control live in [docs/CONTRACTS.md](docs/CONTRACTS.md).
 
@@ -91,10 +92,10 @@ The linked slice name is the canonical detailed specification. Target outcomes a
 | [CB-080 — Support conversation, event, and evidence lifecycle](docs/slices/CB-080.md) | P0 | `VERIFIED` | `CB-020`, `CB-030`, `CB-040` |
 | [CB-081 — Bounded agent, model routing, and ToolSpec control](docs/slices/CB-081.md) | P0 | `VERIFIED` | `CB-080` |
 | [CB-082 — Filtered SSE, feedback, and deterministic support end-to-end evidence](docs/slices/CB-082.md) | P0 | `VERIFIED` | `CB-081` |
-| [CB-090 — Versioned hybrid knowledge index and deterministic retrieval fusion](docs/slices/CB-090.md) | P0 | `READY` | `CB-014`, `CB-082` |
-| [CB-091 — Rerank, sufficiency calibration, and retrieval evidence](docs/slices/CB-091.md) | P0 | `PLANNED` | `CB-090` |
+| [CB-090 — Versioned hybrid knowledge index and deterministic retrieval fusion](docs/slices/CB-090.md) | P0 | `VERIFIED` | `CB-014`, `CB-082` |
+| [CB-091 — Rerank, sufficiency calibration, and retrieval evidence](docs/slices/CB-091.md) | P0 | `READY` | `CB-090` |
 | [CB-100 — Evaluation identity provisioning and sandbox-bound token lifecycle](docs/slices/CB-100.md) | P0 | `PLANNED` | `CB-020`, `CB-040`, `CB-061`, `CB-071`, `CB-082`, `CB-091` |
-| `CB-101 — Evaluation sandbox lifecycle and fail-closed enforcement` | P0 | `PLANNED` | `CB-100` |
+| [CB-101 — Evaluation sandbox lifecycle and fail-closed enforcement](docs/slices/CB-101.md) | P0 | `PLANNED` | `CB-100` |
 | `CB-102 — Evaluation state, audit, version, evidence, and async liveness guards` | P0 | `PLANNED` | `CB-101` |
 | `CB-110 — FAQ publication truth and transactional Outbox` | P1 | `PLANNED` | `CB-030`, `CB-085`, `CB-091` |
 | `CB-111 — Incremental knowledge sync and versioned two-level cache` | P1 | `PLANNED` | `CB-110` |
