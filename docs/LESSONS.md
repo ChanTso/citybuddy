@@ -113,3 +113,11 @@ This file records only factual pitfalls supported by merged pull-request, commit
 - 根因：InnoDB 的锁等待只负责串行化访问，不会自动刷新事务早先建立的一致性快照；任何后续普通聚合或 ledger 读仍可能看到等待前的历史视图。另一方面，支付阶段“一种 movement 每单最多一条”的旧约束被直接套到退款，但一笔付款允许多次部分退款，二者的基数不相同。
 - 解决：预留金额在持有 payment/order 锁后对该 attempt 的 refund 行执行 `SELECT ... FOR UPDATE` current read，再以受锁行求和；reconcile 锁后的 payment/refund/timeout ledger 查询统一使用 `FOR SHARE` current read。受控测试让 reconcile 先建立旧快照并等待成功事务提交，随后仍返回 `CONSISTENT`。旧唯一键改为 generated conditional singleton key，只对既有下单、取消和支付 movement 保持每单单例，退款 movement 则由稳定的 `mock-refund:{refundId}` business-event key 唯一化。十轮并发超额退款均只接受一笔，两笔合法部分退款可累计成功，同时第二条 `STANDARD_PAYMENT` 仍由数据库拒绝。
 - 结论：`FOR UPDATE`/`FOR SHARE` 不只表示“加锁”，在 InnoDB 中还意味着读取锁定时的当前已提交版本；涉及锁等待后的任何派生总额或关联事实时，必须逐条审计并明确选择 current read，不能只修第一个查询。数据库唯一性也应表达业务事件真实基数：支付可以每单单例，部分退款必须每个稳定 refund identity 单例，不能用一个过宽的旧约束混为一谈。
+
+## CB-071 closeout — Narrative repository truth synchronization
+
+- 现象：CB-071 closeout 已把路线状态更新为 `VERIFIED` 并把 CB-080 标为唯一 `READY`，但 `IMPLEMENTATION.md` 的 phase、能力总述、能力列表和未实现清单仍把退款描述为尚未实现，导致同一规范源自相矛盾并触发持续切片循环停止。
+- 证据链接：[slice PR #29](https://github.com/ChanTso/citybuddy/pull/29)、[post-merge main `6b1b04a`](https://github.com/ChanTso/citybuddy/commit/6b1b04a86d2f9cb5daaa51e63fca39c4533557db)
+- 根因：closeout 只同步了权威状态行、Completion record、下一片规格和既有切片 lessons，没有逐行核对同一文件中的叙述性仓库现状。
+- 解决：通过独立文档维护 lane 全量审计并一次同步 `IMPLEMENTATION.md` 的版本、phase、能力总述、退款/对账能力列表和未实现清单，不改变路线、优先级、状态、合同或产品行为。
+- 结论：切片 closeout 不仅要更新状态表，也要逐行复核同一规范源中的叙述性现状；否则局部正确的状态仍会与旧文本形成必须停止处理的矛盾。
