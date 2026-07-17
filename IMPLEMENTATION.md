@@ -1,8 +1,8 @@
 # CityBuddy implementation index
 
-**Document version:** v0.15\
+**Document version:** v0.16\
 **Verification date:** 2026-07-17\
-**Repository phase:** Mock payment verified; refund ready
+**Repository phase:** Refund and reconciliation verified; support conversation ready
 
 ## How to use this index
 
@@ -17,7 +17,7 @@
 
 CityBuddy targets local-commerce transactions and text-only AI customer support with independent identity, side-effect, retrieval, and evaluation boundaries.
 
-The repository contains the verified local-runtime foundations, identity vertical slice, product catalog vertical slice, standard-ordering vertical slice, and seckill reservation, durable-order, cancellation, and mock-payment mainline:
+The repository contains the verified local-runtime foundations, identity vertical slice, product catalog vertical slice, standard-ordering vertical slice, and seckill reservation, durable-order, cancellation, mock-payment, refund, and reconciliation mainline:
 
 - executable non-business skeletons for `auth-service`, `commerce-service`, `agent-service`, `knowledge-indexer`, and `web`;
 - one Maven reactor and wrapper, one locked `uv` workspace, and one npm lockfile;
@@ -34,9 +34,10 @@ The repository contains the verified local-runtime foundations, identity vertica
 - public owner-scoped seckill reservation submission and polling, half-message-before-Lua transaction admission, durable-marker-only checkback, restart-stable bounded deadline convergence, and idempotent atomic MySQL order/reservation/order-create-ledger/unpaid-timeout creation;
 - durable bounded handoff and delayed-message dispatch for unpaid deadlines, current-state cancellation with atomic inventory/activity-quota restoration ledger, and post-commit or MySQL-rebuilt Redis projection;
 - owner-scoped idempotent mock-payment attempts, separately HMAC-authenticated callbacks, atomic MySQL attempt/order/payment-ledger/callback truth, exclusive-lock-first duplicate convergence, and bounded exact-1213 deadlock recovery;
+- owner-scoped idempotent partial and full refunds with cumulative paid-amount bounds, legal terminal transitions, atomic MySQL refund/order/ledger/Outbox truth, and locking current-read reconciliation across payment, refund, and unpaid-timeout state;
 - format, lint, type/compile, unit-test, build, pre-commit, Gitleaks, and GitHub Actions paths through `make ci`.
 
-It does not yet contain refund or support-agent business behavior; production Elasticsearch knowledge indexes; model-provider access; deployment; or measured performance claims.
+It does not yet contain support-agent business behavior; production Elasticsearch knowledge indexes; model-provider access; deployment; or measured performance claims.
 
 Cross-slice target architecture, preflight conclusions, service/data ownership, interface and security boundaries, sequence diagrams, route outcomes, risks, and change control live in [docs/CONTRACTS.md](docs/CONTRACTS.md).
 
