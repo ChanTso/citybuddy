@@ -105,6 +105,9 @@ jobs:
           - target: test-elasticsearch-integration
             java: false
             python: false
+          - target: test-knowledge-search-integration
+            java: false
+            python: true
           - target: test-rocketmq-integration
             java: false
             python: false

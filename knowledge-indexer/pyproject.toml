@@ -5,7 +5,7 @@ build-backend = "hatchling.build"
 [project]
 name = "citybuddy-knowledge-indexer"
 version = "0.0.1"
-description = "CityBuddy knowledge indexer executable skeleton"
+description = "CityBuddy versioned public-knowledge index bootstrap"
 requires-python = ">=3.11,<3.12"
 dependencies = [
     "rocketmq-python-client==5.1.1",

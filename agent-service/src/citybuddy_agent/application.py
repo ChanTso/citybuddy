@@ -41,6 +41,7 @@ from .feedback import (
     FeedbackStore,
     MysqlFeedbackStore,
 )
+from .knowledge import ElasticsearchKnowledgeSearch
 from .sse import SseEgressFilter, SseProjectionError, stream_events
 
 SESSION_PERMISSION = "support:session:create"
@@ -72,6 +73,8 @@ class AgentSettings(BaseModel):
     fallback_role_alias: str = "support-standard-fallback"
     primary_provider_key: str = "primary"
     fallback_provider_key: str = "fallback"
+    elasticsearch_url: str = ""
+    knowledge_alias: str = "knowledge_docs_read"
     attempt_budget: int = 8
     circuit_minimum_requests: int = 2
     circuit_open_seconds: float = 1.0
@@ -355,7 +358,16 @@ def create_app(
                 half_open_probes=resolved.circuit_half_open_probes,
             ),
         ),
-        ToolAdapter(resolved.commerce_tools_url, resolved_obo),
+        ToolAdapter(
+            resolved.commerce_tools_url,
+            resolved_obo,
+            ElasticsearchKnowledgeSearch(
+                resolved.elasticsearch_url,
+                alias=resolved.knowledge_alias,
+            )
+            if resolved.elasticsearch_url
+            else None,
+        ),
     )
     app.state.obo_client = resolved_obo
     app.state.agent = resolved_agent

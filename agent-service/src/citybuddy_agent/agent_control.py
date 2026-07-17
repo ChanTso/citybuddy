@@ -13,6 +13,13 @@ import httpx
 from fastapi import HTTPException
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
+from .knowledge import (
+    KnowledgeSearch,
+    KnowledgeSearchFailure,
+    KnowledgeSearchInput,
+    KnowledgeSearchOutput,
+)
+
 
 @dataclass(frozen=True)
 class AgentEvent:
@@ -370,7 +377,9 @@ class CatalogProductOutput(BaseModel):
 @dataclass(frozen=True)
 class ToolSpec:
     name: str
-    scope: str
+    description: str
+    authority: Literal["commerce_obo", "elasticsearch"]
+    scope: str | None
     risk: Literal["read"]
     timeout_seconds: float
     idempotency: Literal["read-only"]
@@ -382,7 +391,7 @@ class ToolSpec:
             "type": "function",
             "function": {
                 "name": self.name,
-                "description": "Read one published product through commerce authority.",
+                "description": self.description,
                 "parameters": self.input_schema.model_json_schema(by_alias=True),
             },
         }
@@ -390,12 +399,29 @@ class ToolSpec:
 
 CATALOG_PRODUCT_SPEC = ToolSpec(
     name="catalog.product.get",
+    description="Read one published product through commerce authority.",
+    authority="commerce_obo",
     scope="catalog:read",
     risk="read",
     timeout_seconds=1.0,
     idempotency="read-only",
     input_schema=CatalogProductInput,
     output_schema=CatalogProductOutput,
+)
+
+KNOWLEDGE_SEARCH_SPEC = ToolSpec(
+    name="knowledge.search",
+    description=(
+        "Search the derived public-knowledge index with a required original query and one "
+        "optional rewrite. Results are not live commerce truth."
+    ),
+    authority="elasticsearch",
+    scope=None,
+    risk="read",
+    timeout_seconds=1.5,
+    idempotency="read-only",
+    input_schema=KnowledgeSearchInput,
+    output_schema=KnowledgeSearchOutput,
 )
 
 
@@ -406,10 +432,19 @@ class ToolResult:
 
 
 class ToolAdapter:
-    def __init__(self, base_url: str, obo: OboExchange) -> None:
+    def __init__(
+        self,
+        base_url: str,
+        obo: OboExchange,
+        knowledge: KnowledgeSearch | None = None,
+    ) -> None:
         self._base_url = base_url.rstrip("/")
         self._obo = obo
-        self._specs = {CATALOG_PRODUCT_SPEC.name: CATALOG_PRODUCT_SPEC}
+        self._knowledge = knowledge
+        self._specs = {
+            CATALOG_PRODUCT_SPEC.name: CATALOG_PRODUCT_SPEC,
+            KNOWLEDGE_SEARCH_SPEC.name: KNOWLEDGE_SEARCH_SPEC,
+        }
 
     def schemas(self) -> list[dict[str, object]]:
         return [spec.model_schema() for spec in self._specs.values()]
@@ -434,6 +469,20 @@ class ToolAdapter:
         except (json.JSONDecodeError, ValidationError, TypeError):
             return self._deny(name, "invalid_arguments", events)
         events.append(AgentEvent("TOOL_LIFECYCLE", {"tool": name, "state": "requested"}))
+        if spec.authority == "elasticsearch":
+            if self._knowledge is None or not isinstance(arguments, KnowledgeSearchInput):
+                return self._deny(name, "knowledge_unavailable", events)
+            try:
+                bounded_knowledge = self._knowledge.search(arguments, budget.charge)
+            except KnowledgeSearchFailure as error:
+                return self._deny(name, error.code, events)
+            events.append(AgentEvent("TOOL_LIFECYCLE", {"tool": name, "state": "succeeded"}))
+            return ToolResult(
+                outcome="ok",
+                model_view=bounded_knowledge.model_dump(by_alias=True),
+            )
+        if spec.scope is None:
+            raise RuntimeError("Commerce ToolSpec omitted its exact scope")
         try:
             budget.charge("identity_http", spec.scope)
             obo = self._obo.exchange(direct_token, subject, session_id, spec.scope)
