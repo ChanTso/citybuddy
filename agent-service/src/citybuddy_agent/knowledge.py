@@ -352,6 +352,23 @@ class ElasticsearchKnowledgeSearch:
 
     @staticmethod
     def _parse_candidates(payload: dict[str, Any], index: str) -> list[_RankedCandidate]:
+        shards = payload.get("_shards")
+        if payload.get("timed_out") is not False or not isinstance(shards, dict):
+            raise KnowledgeSearchFailure("recall_incomplete")
+        shard_values = {
+            field: shards.get(field) for field in ("total", "successful", "skipped", "failed")
+        }
+        if any(
+            not isinstance(value, int) or isinstance(value, bool) or value < 0
+            for value in shard_values.values()
+        ):
+            raise KnowledgeSearchFailure("recall_incomplete")
+        total = cast(int, shard_values["total"])
+        successful = cast(int, shard_values["successful"])
+        skipped = cast(int, shard_values["skipped"])
+        failed = cast(int, shard_values["failed"])
+        if total < 1 or successful != total or skipped > total or failed != 0:
+            raise KnowledgeSearchFailure("recall_incomplete")
         hits_wrapper = payload.get("hits")
         hits = hits_wrapper.get("hits") if isinstance(hits_wrapper, dict) else None
         if not isinstance(hits, list) or len(hits) > RECALL_LIMIT:

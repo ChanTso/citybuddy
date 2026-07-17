@@ -48,7 +48,7 @@ bootstrap=(
 assert_exact "first index bootstrap" "$bootstrap_expected" "$("${bootstrap[@]}")"
 assert_exact "idempotent index bootstrap" "$bootstrap_expected" "$("${bootstrap[@]}")"
 
-probe_expected='{"alias":"knowledge_docs_read","denseRecall":"passed","indexVersion":"knowledge_docs_v1","mixedLanguageBm25":"passed","oboCalls":0,"rrfRepeatable":true}'
+probe_expected='{"alias":"knowledge_docs_read","denseRecall":"passed","indexVersion":"knowledge_docs_v1","mixedLanguageBm25":"passed","oboCalls":0,"realBoundedResultCount":5,"realRrfTieOrder":"passed","rrfRepeatable":true}'
 probe_output="$(
   uv run python scripts/check_knowledge_search.py \
     --elasticsearch-url "http://127.0.0.1:$ELASTICSEARCH_PORT"

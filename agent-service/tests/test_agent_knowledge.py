@@ -93,6 +93,8 @@ def source(source_id: str, chunk_id: str, *, title: str | None = None) -> dict[s
 
 def hits(*values: tuple[str, dict[str, object]]) -> dict[str, object]:
     return {
+        "timed_out": False,
+        "_shards": {"total": 1, "successful": 1, "skipped": 0, "failed": 0},
         "hits": {
             "hits": [
                 {
@@ -102,7 +104,7 @@ def hits(*values: tuple[str, dict[str, object]]) -> dict[str, object]:
                 }
                 for document_id, document_source in values
             ]
-        }
+        },
     }
 
 
@@ -417,6 +419,47 @@ def test_mapping_timeout_partial_failure_and_malformed_candidate_are_bounded(
         ]
     )
     monkeypatch.setattr(httpx, "request", lambda *args, **kwargs: next(sequence))
+    with pytest.raises(KnowledgeSearchFailure, match="partial_recall_failed"):
+        ElasticsearchKnowledgeSearch("http://elasticsearch.test").search(
+            KnowledgeSearchInput(query="refund"), lambda *args: None
+        )
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    [
+        lambda payload: payload.update({"timed_out": True}),
+        lambda payload: payload.update(
+            {"_shards": {"total": 1, "successful": 0, "skipped": 0, "failed": 1}}
+        ),
+        lambda payload: payload.pop("_shards"),
+        lambda payload: payload.update(
+            {
+                "_shards": {
+                    "total": 1,
+                    "successful": 1,
+                    "skipped": 0,
+                    "failed": "0",
+                }
+            }
+        ),
+    ],
+)
+def test_http_200_incomplete_or_anomalous_search_response_fails_closed(
+    monkeypatch: pytest.MonkeyPatch,
+    mutation: Any,
+) -> None:
+    incomplete = hits(("faq-refund:answer", source("faq-refund", "answer")))
+    mutation(incomplete)
+    sequence = iter(
+        [
+            response(200, alias()),
+            response(200, mapping()),
+            response(200, incomplete),
+        ]
+    )
+    monkeypatch.setattr(httpx, "request", lambda *args, **kwargs: next(sequence))
+
     with pytest.raises(KnowledgeSearchFailure, match="partial_recall_failed"):
         ElasticsearchKnowledgeSearch("http://elasticsearch.test").search(
             KnowledgeSearchInput(query="refund"), lambda *args: None
