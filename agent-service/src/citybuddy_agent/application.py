@@ -16,17 +16,28 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, ConfigDict, Field
 
+from .agent_control import (
+    AgentRunner,
+    BoundedAgent,
+    LiteLlmClient,
+    ModelRouter,
+    ProviderCircuits,
+    ProviderRoute,
+    RuleRouter,
+    ToolAdapter,
+)
 from .conversation import (
     ConversationOwnershipError,
     ConversationStore,
     CorrelationConflictError,
     MysqlConversationStore,
+    TurnFailedError,
+    TurnInProgressError,
 )
 
 SESSION_PERMISSION = "support:session:create"
 CHAT_PERMISSION = "support:chat"
 DIRECT_TOKEN_TYPE = "direct_user"
-DETERMINISTIC_RESPONSE = "Your message was recorded. Automated support is not enabled yet."
 
 
 class AgentSettings(BaseModel):
@@ -47,6 +58,16 @@ class AgentSettings(BaseModel):
     service_client_id: str = ""
     service_client_secret: str = ""
     exchange_scopes: tuple[str, ...] = ()
+    model_proxy_url: str = ""
+    commerce_tools_url: str = ""
+    primary_role_alias: str = "support-standard-primary"
+    fallback_role_alias: str = "support-standard-fallback"
+    primary_provider_key: str = "primary"
+    fallback_provider_key: str = "fallback"
+    attempt_budget: int = 8
+    circuit_minimum_requests: int = 2
+    circuit_open_seconds: float = 1.0
+    circuit_half_open_probes: int = 1
     clock_skew_seconds: int = 30
     jwks_cache_seconds: int = 60
 
@@ -231,10 +252,8 @@ class OboClient:
         self._settings = settings
         self._sessions = sessions
 
-    def exchange(
-        self, direct_token: str, principal: DirectPrincipal, session_id: str, scope: str
-    ) -> str:
-        self._sessions.verify_owner(session_id, principal.subject)
+    def exchange(self, direct_token: str, subject: str, session_id: str, scope: str) -> str:
+        self._sessions.verify_owner(session_id, subject)
         if scope not in self._settings.exchange_scopes:
             raise HTTPException(status_code=403, detail="Forbidden")
         response = httpx.post(
@@ -243,14 +262,17 @@ class OboClient:
             headers={"X-User-Authorization": f"Bearer {direct_token}"},
             json={
                 "sessionId": session_id,
-                "userSubject": principal.subject,
+                "userSubject": subject,
                 "scope": scope,
             },
             timeout=3.0,
         )
         if response.status_code != 200:
             raise HTTPException(status_code=502, detail="Identity exchange rejected")
-        payload = response.json()
+        try:
+            payload = response.json()
+        except ValueError as exception:
+            raise HTTPException(status_code=502, detail="Identity exchange rejected") from exception
         token = payload.get("accessToken") if isinstance(payload, dict) else None
         if not isinstance(token, str) or not token:
             raise HTTPException(status_code=502, detail="Identity exchange rejected")
@@ -263,6 +285,7 @@ def create_app(
     validator: DirectJwtValidator | None = None,
     sessions: SessionStore | None = None,
     conversations: ConversationStore | None = None,
+    agent: AgentRunner | None = None,
 ) -> FastAPI:
     """Construct the app, enabling identity routes only with complete runtime configuration."""
     resolved = settings or AgentSettings()
@@ -285,7 +308,28 @@ def create_app(
     app.state.validator = resolved_validator
     app.state.sessions = resolved_sessions
     app.state.conversations = resolved_conversations
-    app.state.obo_client = OboClient(resolved, resolved_sessions)
+    resolved_obo = OboClient(resolved, resolved_sessions)
+    resolved_agent = agent or BoundedAgent(
+        RuleRouter(),
+        ModelRouter(
+            (
+                ProviderRoute(resolved.primary_role_alias, resolved.primary_provider_key),
+                ProviderRoute(resolved.fallback_role_alias, resolved.fallback_provider_key),
+            ),
+            resolved.attempt_budget,
+        ),
+        LiteLlmClient(
+            resolved.model_proxy_url,
+            ProviderCircuits(
+                minimum_requests=resolved.circuit_minimum_requests,
+                open_seconds=resolved.circuit_open_seconds,
+                half_open_probes=resolved.circuit_half_open_probes,
+            ),
+        ),
+        ToolAdapter(resolved.commerce_tools_url, resolved_obo),
+    )
+    app.state.obo_client = resolved_obo
+    app.state.agent = resolved_agent
 
     @app.post("/api/sessions", response_model=SessionResponse, status_code=201)
     def create_session(
@@ -324,17 +368,43 @@ def create_app(
             raise HTTPException(status_code=403, detail="Forbidden")
         try:
             resolved_sessions.verify_owner(x_session_id, principal.subject)
-            result = resolved_conversations.complete_turn(
+            start = resolved_conversations.begin_turn(
                 session_id=x_session_id,
                 subject=principal.subject,
                 correlation_key=idempotency_key,
                 message=request.message,
-                response_text=DETERMINISTIC_RESPONSE,
             )
+            if start.replay is not None:
+                result = start.replay
+            else:
+                try:
+                    agent_result = resolved_agent.run(
+                        message=request.message,
+                        direct_token=authorization[7:],
+                        subject=principal.subject,
+                        session_id=x_session_id,
+                        trace_id=start.trace_id,
+                        turn_id=start.turn_id,
+                    )
+                    result = resolved_conversations.complete_turn(
+                        start=start,
+                        response_text=agent_result.response_text,
+                        outcome=agent_result.outcome,
+                        events=agent_result.events,
+                    )
+                except Exception:
+                    resolved_conversations.fail_turn(
+                        start=start, failure_code="agent_execution_failed"
+                    )
+                    raise
         except ConversationOwnershipError as exception:
             raise HTTPException(status_code=403, detail="Forbidden") from exception
         except CorrelationConflictError as exception:
             raise HTTPException(status_code=409, detail="Idempotency conflict") from exception
+        except TurnInProgressError as exception:
+            raise HTTPException(status_code=409, detail="Turn in progress") from exception
+        except TurnFailedError as exception:
+            raise HTTPException(status_code=503, detail="Service unavailable") from exception
         except pymysql.MySQLError as exception:
             raise HTTPException(status_code=503, detail="Service unavailable") from exception
         return ChatResponse(

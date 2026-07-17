@@ -1,6 +1,6 @@
 {
   "openapi": "3.1.0",
-  "info": {"title": "CityBuddy agent API", "version": "CB-080"},
+  "info": {"title": "CityBuddy agent API", "version": "CB-081"},
   "paths": {
     "/api/sessions": {
       "post": {
@@ -67,7 +67,7 @@
         },
         "responses": {
           "200": {
-            "description": "Durable deterministic support turn result",
+            "description": "Durable bounded single-agent support turn result",
             "content": {
               "application/json": {
                 "schema": {
@@ -79,7 +79,10 @@
                     "traceId": {"type": "string", "format": "uuid", "readOnly": true},
                     "turnId": {"type": "string", "format": "uuid", "readOnly": true},
                     "reply": {"type": "string", "maxLength": 256},
-                    "outcome": {"type": "string", "enum": ["completed"]}
+                    "outcome": {
+                      "type": "string",
+                      "enum": ["completed", "budget_exhausted", "provider_denied"]
+                    }
                   }
                 }
               }
@@ -116,7 +119,7 @@
         "content": {"application/json": {"schema": {"$ref": "#/components/schemas/PublicError"}}}
       },
       "Conflict": {
-        "description": "Idempotency key reused for a different request",
+        "description": "Idempotency conflict or a bounded concurrent turn still in progress",
         "content": {"application/json": {"schema": {"$ref": "#/components/schemas/PublicError"}}}
       },
       "InvalidRequest": {
@@ -124,7 +127,7 @@
         "content": {"application/json": {"schema": {"$ref": "#/components/schemas/PublicError"}}}
       },
       "Unavailable": {
-        "description": "Durable support truth is unavailable",
+        "description": "Durable support truth is unavailable or the turn previously failed",
         "content": {"application/json": {"schema": {"$ref": "#/components/schemas/PublicError"}}}
       }
     }

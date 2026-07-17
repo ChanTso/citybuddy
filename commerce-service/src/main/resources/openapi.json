@@ -1,6 +1,6 @@
 {
   "openapi": "3.1.0",
-  "info": {"title": "CityBuddy commerce API", "version": "CB-060"},
+  "info": {"title": "CityBuddy commerce API", "version": "CB-081"},
   "paths": {
     "/api/products": {
       "get": {
@@ -42,6 +42,41 @@
           },
           "401": {"description": "Invalid direct-user identity or production evaluation context"},
           "404": {"description": "Missing or unpublished product"}
+        }
+      }
+    },
+    "/internal/tools/catalog.product.get": {
+      "post": {
+        "operationId": "getPublishedProductForAgent",
+        "security": [{"agentOboBearer": []}],
+        "parameters": [
+          {
+            "name": "X-Support-Session-Id",
+            "in": "header",
+            "required": true,
+            "schema": {"type": "string", "minLength": 1, "maxLength": 64}
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {"$ref": "#/components/schemas/CatalogProductToolInput"}
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "ToolSpec-bounded published product view",
+            "content": {
+              "application/json": {
+                "schema": {"$ref": "#/components/schemas/CatalogProductToolOutput"}
+              }
+            }
+          },
+          "400": {"description": "Unknown or malformed ToolSpec input"},
+          "403": {"description": "Invalid OBO mode, scope, actor, session, or context"},
+          "404": {"description": "Unknown tool or unpublished product"}
         }
       }
     },
@@ -115,7 +150,8 @@
   },
   "components": {
     "securitySchemes": {
-      "directUserBearer": {"type": "http", "scheme": "bearer", "bearerFormat": "JWT"}
+      "directUserBearer": {"type": "http", "scheme": "bearer", "bearerFormat": "JWT"},
+      "agentOboBearer": {"type": "http", "scheme": "bearer", "bearerFormat": "Agent OBO JWT"}
     },
     "schemas": {
       "Product": {
@@ -129,6 +165,27 @@
           "priceMinor": {"type": "integer", "minimum": 0},
           "currency": {"type": "string", "pattern": "^[A-Z]{3}$"},
           "stockQuantity": {"type": "integer", "minimum": 0},
+          "available": {"type": "boolean"},
+          "publicationVersion": {"type": "integer", "minimum": 1}
+        }
+      },
+      "CatalogProductToolInput": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["productId"],
+        "properties": {
+          "productId": {"type": "string", "minLength": 1, "maxLength": 64}
+        }
+      },
+      "CatalogProductToolOutput": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["productId", "name", "priceMinor", "currency", "available", "publicationVersion"],
+        "properties": {
+          "productId": {"type": "string", "minLength": 1, "maxLength": 64},
+          "name": {"type": "string", "minLength": 1, "maxLength": 200},
+          "priceMinor": {"type": "integer", "minimum": 0},
+          "currency": {"type": "string", "pattern": "^[A-Z]{3}$"},
           "available": {"type": "boolean"},
           "publicationVersion": {"type": "integer", "minimum": 1}
         }

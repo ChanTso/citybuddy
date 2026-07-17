@@ -24,6 +24,7 @@ def test_catalog_contract_exposes_only_authenticated_published_reads() -> None:
         "/api/orders",
         "/api/seckill/activities/{activityId}/reservations",
         "/api/reservations/{reservationId}",
+        "/internal/tools/catalog.product.get",
     }
     for path in [
         contract["paths"]["/api/products"],

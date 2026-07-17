@@ -39,6 +39,7 @@ guard-layout:
 	test -x scripts/test_rocketmq_integration.sh
 	test -x scripts/test_knowledge_indexer_rocketmq_spike.sh
 	test -x scripts/test_runtime_integration.sh
+	test -f scripts/fake_litellm_server.py
 	test -f infra/mysql/grants/V001__migration_access.sql
 	test -f infra/elasticsearch/Dockerfile
 	test -f infra/rocketmq/broker.conf

@@ -7,6 +7,7 @@ import httpx
 import jwt
 import pymysql
 import pytest
+from citybuddy_agent.agent_control import AgentEvent, AgentRunner, AgentRunResult
 from citybuddy_agent.application import (
     AgentSettings,
     DirectJwtValidator,
@@ -20,6 +21,7 @@ from citybuddy_agent.conversation import (
     ConversationResult,
     ConversationStore,
     CorrelationConflictError,
+    TurnStart,
 )
 from cryptography.hazmat.primitives.asymmetric import rsa
 from fastapi import HTTPException
@@ -56,17 +58,18 @@ class MemoryConversationStore(ConversationStore):
     def __init__(self, sessions: MemorySessionStore) -> None:
         self.sessions = sessions
         self.results: dict[tuple[str, str], tuple[str, ConversationResult]] = {}
+        self.pending: dict[tuple[str, str], tuple[str, TurnStart]] = {}
+        self.failures: list[tuple[str, str]] = []
         self.calls = 0
 
-    def complete_turn(
+    def begin_turn(
         self,
         *,
         session_id: str,
         subject: str,
         correlation_key: str,
         message: str,
-        response_text: str,
-    ) -> ConversationResult:
+    ) -> TurnStart:
         self.calls += 1
         if self.sessions.owners.get(session_id) != subject:
             raise ConversationOwnershipError
@@ -75,16 +78,63 @@ class MemoryConversationStore(ConversationStore):
         if existing is not None:
             if existing[0] != message:
                 raise CorrelationConflictError
-            return existing[1]
-        result = ConversationResult(
+            result = existing[1]
+            return TurnStart(result.conversation_id, result.trace_id, result.turn_id, result)
+        start = TurnStart(
             conversation_id=f"server-conversation-{session_id}",
             trace_id=f"server-trace-{self.calls}",
             turn_id=f"server-turn-{self.calls}",
-            response_text=response_text,
-            outcome="completed",
         )
-        self.results[key] = (message, result)
+        self.pending[key] = (message, start)
+        return start
+
+    def complete_turn(
+        self,
+        *,
+        start: TurnStart,
+        response_text: str,
+        outcome: str,
+        events: tuple[AgentEvent, ...],
+    ) -> ConversationResult:
+        del events
+        key, pending = next(
+            item for item in self.pending.items() if item[1][1].turn_id == start.turn_id
+        )
+        result = ConversationResult(
+            start.conversation_id, start.trace_id, start.turn_id, response_text, outcome
+        )
+        self.results[key] = (pending[0], result)
+        del self.pending[key]
         return result
+
+    def fail_turn(self, *, start: TurnStart, failure_code: str) -> None:
+        self.failures.append((start.turn_id, failure_code))
+        for key, pending in tuple(self.pending.items()):
+            if pending[1].turn_id == start.turn_id:
+                del self.pending[key]
+
+
+class MemoryAgent(AgentRunner):
+    def __init__(self) -> None:
+        self.calls = 0
+
+    def run(
+        self,
+        *,
+        message: str,
+        direct_token: str,
+        subject: str,
+        session_id: str,
+        trace_id: str,
+        turn_id: str,
+    ) -> AgentRunResult:
+        self.calls += 1
+        del message, direct_token, subject, session_id, trace_id, turn_id
+        return AgentRunResult(
+            "Bounded support response.",
+            "completed",
+            (AgentEvent("AGENT_OUTCOME", {"outcome": "completed"}),),
+        )
 
 
 def settings() -> AgentSettings:
@@ -281,26 +331,48 @@ def test_obo_client_rechecks_owner_and_server_allowlist(
 
     monkeypatch.setattr(httpx, "post", exchange_response)
 
-    assert client.exchange("direct-token", principal, session_id, "catalog:read") == "signed-obo"
+    assert (
+        client.exchange("direct-token", principal.subject, session_id, "catalog:read")
+        == "signed-obo"
+    )
     assert requests[0]["json"] == {
         "sessionId": session_id,
         "userSubject": "user-123",
         "scope": "catalog:read",
     }
     with pytest.raises(HTTPException) as widened:
-        client.exchange("direct-token", principal, session_id, "catalog:write")
+        client.exchange("direct-token", principal.subject, session_id, "catalog:write")
     assert widened.value.status_code == 403
     with pytest.raises(HTTPException) as cross_user:
         client.exchange(
             "direct-token",
-            DirectPrincipal(subject="other-user", permissions=("support:session:create",)),
+            "other-user",
             session_id,
             "catalog:read",
         )
     assert cross_user.value.status_code == 403
     with pytest.raises(HTTPException) as forged:
-        client.exchange("direct-token", principal, "forged-session", "catalog:read")
+        client.exchange("direct-token", principal.subject, "forged-session", "catalog:read")
     assert forged.value.status_code == 403
+
+
+def test_obo_client_rejects_malformed_exchange_response(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    sessions = MemorySessionStore()
+    session_id = sessions.create("user-123")
+    client = OboClient(settings(), sessions)
+    monkeypatch.setattr(
+        httpx,
+        "post",
+        lambda *args, **kwargs: httpx.Response(200, content=b"{"),
+    )
+
+    with pytest.raises(HTTPException) as malformed:
+        client.exchange("direct-token", "user-123", session_id, "catalog:read")
+
+    assert malformed.value.status_code == 502
+    assert malformed.value.detail == "Identity exchange rejected"
 
 
 def test_chat_persists_server_owned_result_and_replays_same_intent() -> None:
@@ -309,12 +381,14 @@ def test_chat_persists_server_owned_result_and_replays_same_intent() -> None:
     sessions = MemorySessionStore()
     session_id = sessions.create("user-123")
     conversations = MemoryConversationStore(sessions)
+    agent = MemoryAgent()
     client = TestClient(
         create_app(
             settings(),
             validator=validator,
             sessions=sessions,
             conversations=conversations,
+            agent=agent,
         )
     )
     headers = {
@@ -333,6 +407,7 @@ def test_chat_persists_server_owned_result_and_replays_same_intent() -> None:
     assert first.json()["outcome"] == "completed"
     assert "order" not in first.json()["reply"].lower()
     assert len(conversations.results) == 1
+    assert agent.calls == 1
 
 
 def test_chat_rejects_conflict_identity_substitution_and_private_context() -> None:
@@ -347,6 +422,7 @@ def test_chat_rejects_conflict_identity_substitution_and_private_context() -> No
             validator=validator,
             sessions=sessions,
             conversations=conversations,
+            agent=MemoryAgent(),
         )
     )
     token = direct_token(private, "current-key")
@@ -420,6 +496,7 @@ def test_chat_requires_route_permission_before_conversation_access() -> None:
             validator=validator,
             sessions=sessions,
             conversations=conversations,
+            agent=MemoryAgent(),
         )
     )
     token = direct_token(private, "current-key", permissions=["support:session:create"])
@@ -440,16 +517,29 @@ def test_chat_requires_route_permission_before_conversation_access() -> None:
 
 def test_chat_redacts_mysql_failure() -> None:
     class FailedConversationStore(ConversationStore):
-        def complete_turn(
+        def begin_turn(
             self,
             *,
             session_id: str,
             subject: str,
             correlation_key: str,
             message: str,
-            response_text: str,
-        ) -> ConversationResult:
+        ) -> TurnStart:
+            del session_id, subject, correlation_key, message
             raise pymysql.OperationalError(1142, "private SQL detail")
+
+        def complete_turn(
+            self,
+            *,
+            start: TurnStart,
+            response_text: str,
+            outcome: str,
+            events: tuple[AgentEvent, ...],
+        ) -> ConversationResult:
+            raise AssertionError("unreachable")
+
+        def fail_turn(self, *, start: TurnStart, failure_code: str) -> None:
+            raise AssertionError("unreachable")
 
     private, public_jwk = key_fixture("current-key")
     validator = DirectJwtValidator(settings(), CountingJwksSource([public_jwk]))
@@ -461,6 +551,7 @@ def test_chat_redacts_mysql_failure() -> None:
             validator=validator,
             sessions=sessions,
             conversations=FailedConversationStore(),
+            agent=MemoryAgent(),
         )
     )
     response = client.post(
@@ -476,3 +567,49 @@ def test_chat_redacts_mysql_failure() -> None:
     assert response.status_code == 503
     assert response.json() == {"detail": "Service unavailable"}
     assert "private SQL detail" not in response.text
+
+
+def test_unexpected_agent_error_is_visible_and_marks_the_reserved_turn_failed() -> None:
+    class FailedAgent(AgentRunner):
+        def run(
+            self,
+            *,
+            message: str,
+            direct_token: str,
+            subject: str,
+            session_id: str,
+            trace_id: str,
+            turn_id: str,
+        ) -> AgentRunResult:
+            del message, direct_token, subject, session_id, trace_id, turn_id
+            raise RuntimeError("private provider configuration detail")
+
+    private, public_jwk = key_fixture("current-key")
+    validator = DirectJwtValidator(settings(), CountingJwksSource([public_jwk]))
+    sessions = MemorySessionStore()
+    session_id = sessions.create("user-123")
+    conversations = MemoryConversationStore(sessions)
+    client = TestClient(
+        create_app(
+            settings(),
+            validator=validator,
+            sessions=sessions,
+            conversations=conversations,
+            agent=FailedAgent(),
+        ),
+        raise_server_exceptions=False,
+    )
+
+    response = client.post(
+        "/api/chat",
+        headers={
+            "Authorization": f"Bearer {direct_token(private, 'current-key')}",
+            "X-Session-Id": session_id,
+            "Idempotency-Key": "unexpected-failure",
+        },
+        json={"message": "hello"},
+    )
+
+    assert response.status_code == 500
+    assert "private provider configuration detail" not in response.text
+    assert conversations.failures == [("server-turn-1", "agent_execution_failed")]

@@ -43,7 +43,7 @@ def main() -> None:
     validator = DirectJwtValidator(settings, HttpJwksSource(settings.jwks_url))
     principal = validator.validate(token)
     obo = OboClient(settings, MysqlSessionStore(settings)).exchange(
-        token, principal, session_id, "catalog:read"
+        token, principal.subject, session_id, "catalog:read"
     )
     args.output.write_text(obo, encoding="utf-8")
 
