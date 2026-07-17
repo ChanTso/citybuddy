@@ -129,3 +129,11 @@ This file records only factual pitfalls supported by merged pull-request, commit
 - 根因：事务先取得可并存的共享锁再升级排他锁，形成与 CB-070 同类的 S→X 竞争环；直接锁 session 又混淆了“读取权威 owner”与“拥有该表更新权限”。测试编排没有把一次性客户端 PID 与长期服务 PID 分开，故障注入也依赖了运行身份不应拥有的管理权限；升级状态机只枚举了旧 agent schema，未组合新增表。最终事务内 owner 复核被误当作入口越权预检，故障约束也只按输入消息命中了第一条 event。
 - 解决：创建 session 时同步创建 conversation；chat 入口先从 `support_session` 校验 owner，事务内再对 conversation 行执行 `SELECT ... FOR UPDATE` 串行化并二次读取不可变 session owner，四个并发请求稳定收敛为同一响应、一条 turn 和三条 event。脚本只等待记录的 curl PID，以 migration-owned `CHECK` 约束在独立无历史会话的第二条 event 注入失败，真实证明第一条 event、turn 和 conversation position 一起回滚；同时逐个显式枚举七种历史 commerce 状态加 CB-080 agent 表的组合，未知表集继续失败关闭。
 - 结论：并发幂等事务应在拥有写权限的同一业务聚合根上尽早串行化，再读取关联权威事实；不能为了加锁扩大无关表权限。入口授权顺序与事务内 TOCTOU 复核是两道不同防线，不能互相替代；事务回滚证据也必须让至少一个受保护写入先成功执行，再在后续写入失败。真实集成的进程等待、故障注入和升级矩阵必须遵守最小权限并精确区分短任务、常驻服务与每个受支持 schema 组合。
+
+## CB-081 — Bounded agent, model routing, and ToolSpec control
+
+- 现象：首轮远端 repository CI 把集成脚本中两个高熵的固定 `Idempotency-Key` 测试值识别为通用 API key；同时，真实链路要求在外部模型/身份/工具调用前先保存已接受 turn，又要求后续数据库失败不能留下部分 agent evidence 或让同一幂等请求重新执行工具。
+- 证据链接：[slice PR #32](https://github.com/ChanTso/citybuddy/pull/32)、[首轮失败 CI](https://github.com/ChanTso/citybuddy/actions/runs/29574307542)、[fail-closed authority evidence `0c7db0c`](https://github.com/ChanTso/citybuddy/commit/0c7db0c)
+- 根因：秘密扫描按字段名和熵启发式工作，不知道字符串只是测试相关键；而把数据库事务跨网络调用保持打开既不能提供可靠原子性，也会放大锁窗口，单次“大事务”无法同时表达“请求已被接受”和“外部执行后的证据必须全成或全败”。
+- 解决：把误报值改成低熵、语义明确的测试占位符并清除含误报的草稿提交历史；turn 采用两阶段持久边界，先提交 `PROCESSING` 与 `USER_INPUT`，外部执行后再在一个事务中提交完整 agent events 与终态。第二阶段受控失败时回滚全部部分 agent evidence，再以独立有界事务把同一已接受 turn 收敛为 `FAILED`；回放只读已存结果，不重跑 agent 或工具。
+- 结论：测试标识也要按秘密扫描规则设计；涉及网络 I/O 的 durable workflow 应显式分开“接受事实”和“完成事实”，并让完成证据具有原子提交、失败收敛和幂等回放边界，而不是把数据库事务悬挂在外部调用上。
