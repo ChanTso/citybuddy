@@ -148,8 +148,8 @@ This file records only factual pitfalls supported by merged pull-request, commit
 
 ## CB-090 — Versioned hybrid knowledge index and deterministic retrieval fusion
 
-- 现象：首轮真实 Elasticsearch bootstrap 创建索引后，立即把同一索引判定为 `incompatible_mapping`；实际 8.19.8 mapping readback 保留了 `public_metadata.properties`，但省略了该嵌套对象默认的 `type: object`。若直接比较请求 JSON 与 readback JSON，应用会拒绝自己刚创建的合法索引。
+- 现象：首轮真实 Elasticsearch bootstrap 创建索引后，立即把同一索引判定为 `incompatible_mapping`；实际 8.19.8 mapping readback 保留了 `public_metadata.properties`，但省略了该嵌套对象默认的 `type: object`。独立完整 diff 复核又发现两个 false-success 窗口：Elasticsearch 搜索即使 HTTP 200 仍可能声明 `timed_out=true` 或 shard 部分失败，而初稿只解析 `hits.hits`；真实探针又只检查融合后的命中，无法排除 dense/rewrite recall 实际为空，也因初始 corpus 只有 4 条而没有真正触发 5 条最终上限。
 - 证据链接：[slice PR #34](https://github.com/ChanTso/citybuddy/pull/34)、[implementation commit `874d1cc`](https://github.com/ChanTso/citybuddy/commit/874d1cc)
-- 根因：Elasticsearch 的 mapping API 返回规范化后的语义表示，不保证逐字回显请求中的默认值；把序列化形式相等误当成 mapping 语义兼容，会制造 false-negative，同时若放宽为任意子集比较又会放过私有字段或错误向量形状。
-- 解决：validator 继续精确校验顶层字段集合、公共 metadata 字段/类型、IK analyzer、dense-vector 维度/index/cosine 和 alias 单目标，只对 Elasticsearch 已证明会规范化掉的嵌套对象默认 `type: object` 接受省略；新增 extra private field 与其他不兼容 mapping 的固定拒绝测试，并在真实 8.19.8 上重复 bootstrap 和搜索。
-- 结论：对外部系统的声明式 schema 应比较经过文档化的语义不变量，而不是要求响应逐字等于请求；允许规范化差异必须逐项、最小化，同时保留字段白名单和所有安全相关形状的精确拒绝证据。
+- 根因：Elasticsearch 的 mapping API 返回规范化后的语义表示，不保证逐字回显请求中的默认值；相反，搜索 HTTP 状态只证明请求得到响应，不证明所有 shard 在时限内完整成功。测试层若只观察融合后的最终集合，一个 lexical 命中还会掩盖 dense leg 为空，两个最终文档也不能证明它们分别来自 original/rewrite，更不能在候选数小于上限时证明截断。
+- 解决：mapping validator 继续精确校验顶层字段集合、公共 metadata 字段/类型、IK analyzer、dense-vector 维度/index/cosine 和 alias 单目标，只对已证明会规范化掉的嵌套对象默认 `type: object` 接受省略。每条 recall 响应现在还必须明确 `timed_out=false`、shard 元数据类型/范围合法、`successful=total` 且 `failed=0`，否则整次搜索收敛为 `partial_recall_failed`；固定测试覆盖超时、failed shard、缺失和异常元数据。真实探针直接观察生产 BM25/kNN 方法：用 lexical 无命中但语义轴命中的查询独立证明 kNN，用分离查询证明 original/rewrite 各自贡献，并临时写入六条严格公开 fixture，真实证明稳定 tie、dedup 和 6→5 截断后逐条清理。
+- 结论：对外部系统的声明式 schema 应比较经过文档化的语义不变量，而不是要求响应逐字等于请求；搜索成功必须同时验证传输、超时和所有 shard 完整性。多阶段检索的证据必须直接观察每条 leg，并构造超过边界的候选集，否则最终结果“看起来正确”仍可能是假绿。
