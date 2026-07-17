@@ -137,3 +137,11 @@ This file records only factual pitfalls supported by merged pull-request, commit
 - 根因：秘密扫描按字段名和熵启发式工作，不知道字符串只是测试相关键；而把数据库事务跨网络调用保持打开既不能提供可靠原子性，也会放大锁窗口，单次“大事务”无法同时表达“请求已被接受”和“外部执行后的证据必须全成或全败”。初稿又只处理仍活着的请求栈异常，没有为已提交的执行所有权持久化截止时间；熔断器只在成功或瞬态失败时清理 half-open 状态，遗漏了非瞬态与意外异常出口。迁移层则把“加入新事件类型”误写成整体替换约束，静态测试仍只证明旧 V003 文本，未验证最终迁移后的不变量。
 - 解决：把误报值改成低熵、语义明确的测试占位符并清除含误报的草稿提交历史；turn 采用两阶段持久边界，先提交 `PROCESSING`、`USER_INPUT` 和按有限尝试预算推导的一次性截止时间，外部执行后再在一个事务中提交完整 agent events 与终态。第二阶段受控失败时回滚全部部分 agent evidence，再以独立有界事务把同一已接受 turn 收敛为 `FAILED`；过期重放在 turn 排他锁下只写一次 durable failure，且完成路径也受同一截止时间 fencing，不重跑 agent 或工具。half-open 探针占位在每次已准入调用的 `finally` 中释放，而成功和瞬态失败仍执行各自状态转换。V004 在扩展白名单的同时显式保留 `sequence = 1 ⇔ USER_INPUT`，并新增静态断言与真实 `agent_app` 写入拒绝，分别证明终态不能先于输入、输入也不能在后续序号重复。
 - 结论：测试标识也要按秘密扫描规则设计；涉及网络 I/O 的 durable workflow 应显式分开“接受事实”和“完成事实”，并为进程消失后的执行所有权设置持久、可 fencing 的终止边界。有限熔断不仅要限制探针入口，还要审计成功、瞬态、非瞬态和意外异常的全部释放出口。增量迁移修改既有约束时，测试必须针对最终迁移定义和真实数据库行为，而不能只证明被替换的历史 DDL。
+
+## CB-082 — Filtered SSE, feedback, and deterministic support end-to-end evidence
+
+- 现象：首轮真实 MySQL migration 因 feedback 外键引用的 support-turn 关联列没有显式复合唯一键而失败；修正后，反馈事务先后尝试锁定 `support_session` 和 `support_feedback`，又被最小权限 `agent_app` 以 1142 拒绝。真实身份集成还发现 SSE 路由把 owner `HTTPException` 吞成 HTTP 200 的公共 error 事件，而旧 crash-window fixture 硬编码的 event sequence 与新增 SSE turn 发生碰撞。
+- 证据链接：[slice PR #33](https://github.com/ChanTso/citybuddy/pull/33)、[implementation and integration recovery `63103c8`](https://github.com/ChanTso/citybuddy/commit/63103c8)
+- 根因：MySQL 外键只认可被引用列的显式索引唯一性，不能从相邻单列约束推断业务复合关联；锁定读取在 InnoDB 中需要目标表的 `UPDATE` 权限，即使代码不执行更新。路由异常边界又把“已验证的授权拒绝”与“流内私有运行失败”合并处理，历史集成 fixture 也把会随新 turn 增长的序号写成常量。
+- 解决：为 support turn 增加明确的 trace/session/user 复合唯一键；反馈同一会话的并发请求只在已有写权限的 `support_conversation` 聚合根上 `FOR UPDATE` 串行化，再普通读取不可变 session/turn 和 append-only feedback truth，因此无需扩大 feedback/session 权限。SSE 保留 `HTTPException` 的真实 401/403/409 等状态，只把未预期的私有执行失败投影为固定公共 error；旧 crash-window sequence 从数据库当前最大值推导。四个并发同意图反馈真实收敛到一个 row，完整身份集成与 `make ci` 随后通过。
+- 结论：外键、锁和最小权限必须在真实数据库上作为一个整体设计：串行化点应选择已有写权限的业务聚合根，不能为方便锁读而扩大 append-only 表权限。HTTP 层的授权拒绝与已开始流后的私有错误也必须分层，历史测试中的顺序值则应从权威状态推导，避免新增合法行为造成假冲突。
