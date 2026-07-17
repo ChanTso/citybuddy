@@ -588,6 +588,35 @@ common_probe_env=(
 env "${common_probe_env[@]}" DIRECT_TOKEN="$direct_token" \
   uv run python scripts/identity_chain_probe.py --output "$tmp_dir/obo.jwt"
 obo_token="$(tr -d '\n' <"$tmp_dir/obo.jwt")"
+assert_status 403 "direct-user token rejected on commerce tool route" \
+  --request POST "http://127.0.0.1:$commerce_port/internal/tools/catalog.product.get" \
+  --header "Authorization: Bearer $direct_token" \
+  --header "X-Support-Session-Id: $session_id" \
+  --header 'Content-Type: application/json' \
+  --data '{"productId":"product-1"}'
+assert_status 403 "OBO support-session substitution rejected" \
+  --request POST "http://127.0.0.1:$commerce_port/internal/tools/catalog.product.get" \
+  --header "Authorization: Bearer $obo_token" \
+  --header 'X-Support-Session-Id: forged-session' \
+  --header 'Content-Type: application/json' \
+  --data '{"productId":"product-1"}'
+assert_status 400 "body identity substitution rejected" \
+  --request POST "http://127.0.0.1:$commerce_port/internal/tools/catalog.product.get" \
+  --header "Authorization: Bearer $obo_token" \
+  --header "X-Support-Session-Id: $session_id" \
+  --header 'Content-Type: application/json' \
+  --data '{"productId":"product-1","userSubject":"other-user"}'
+assert_status 200 "exact OBO tool request returns bounded product view" \
+  --request POST "http://127.0.0.1:$commerce_port/internal/tools/catalog.product.get" \
+  --header "Authorization: Bearer $obo_token" \
+  --header "X-Support-Session-Id: $session_id" \
+  --header 'Content-Type: application/json' \
+  --data '{"productId":"product-1"}'
+test "$(uv run python scripts/read_json_field.py "$tmp_dir/http-response.json" productId)" = product-1
+if grep -Eq '"(description|stockQuantity)"' "$tmp_dir/http-response.json"; then
+  echo "Private product fields leaked through the bounded tool response." >&2
+  exit 1
+fi
 if env "${common_probe_env[@]}" DIRECT_TOKEN="$other_token" \
     uv run python scripts/identity_chain_probe.py --output "$tmp_dir/forged-obo.jwt" \
     >"$tmp_dir/cross-user.log" 2>&1; then

@@ -17,6 +17,7 @@ from citybuddy_agent.agent_control import (
     RuleRouter,
     ToolAdapter,
 )
+from fastapi import HTTPException
 
 
 def plan() -> Any:
@@ -109,6 +110,36 @@ def test_litellm_does_not_retry_non_transient_provider_denial(
     assert budget.used == 1
 
 
+def test_litellm_does_not_retry_invalid_provider_payload(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls = 0
+
+    def post(*args: Any, **kwargs: Any) -> httpx.Response:
+        nonlocal calls
+        del args, kwargs
+        calls += 1
+        return httpx.Response(200, content=b"{")
+
+    monkeypatch.setattr(httpx, "post", post)
+    events: list[AgentEvent] = []
+
+    with pytest.raises(ProviderFailure) as denied:
+        LiteLlmClient(
+            "https://proxy.test",
+            ProviderCircuits(minimum_requests=2, open_seconds=10, half_open_probes=1),
+        ).complete(
+            plan(),
+            [{"role": "user", "content": "hello"}],
+            [],
+            AttemptBudget(8, events),
+            events,
+        )
+
+    assert denied.value.transient is False
+    assert calls == 1
+
+
 def test_provider_circuits_are_isolated_bounded_and_half_open() -> None:
     now = [100.0]
     events: list[AgentEvent] = []
@@ -140,6 +171,18 @@ class RecordingObo:
     def exchange(self, direct_token: str, subject: str, session_id: str, scope: str) -> str:
         self.calls.append((direct_token, subject, session_id, scope))
         return "signed-obo"
+
+
+class DeniedObo:
+    def exchange(self, direct_token: str, subject: str, session_id: str, scope: str) -> str:
+        del direct_token, subject, session_id, scope
+        raise HTTPException(status_code=502, detail="Identity exchange rejected")
+
+
+class UnavailableObo:
+    def exchange(self, direct_token: str, subject: str, session_id: str, scope: str) -> str:
+        del direct_token, subject, session_id, scope
+        raise httpx.ConnectError("identity unavailable")
 
 
 def test_tool_adapter_enforces_server_owned_spec_and_bounded_model_view(
@@ -255,6 +298,40 @@ def test_tool_timeout_is_structured_and_unexpected_failure_remains_visible(
             budget=AttemptBudget(4, []),
             events=[],
         )
+
+
+@pytest.mark.parametrize(
+    ("obo", "reason"),
+    [(DeniedObo(), "identity_denied"), (UnavailableObo(), "identity_unavailable")],
+)
+def test_tool_adapter_fails_closed_when_identity_exchange_rejects_or_is_unavailable(
+    obo: Any, reason: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    tool_calls = 0
+
+    def post(*args: Any, **kwargs: Any) -> httpx.Response:
+        nonlocal tool_calls
+        del args, kwargs
+        tool_calls += 1
+        return completion()
+
+    monkeypatch.setattr(httpx, "post", post)
+    events: list[AgentEvent] = []
+    budget = AttemptBudget(4, events)
+
+    result = ToolAdapter("https://commerce.test", obo).execute(
+        name=CATALOG_PRODUCT_SPEC.name,
+        serialized_arguments='{"productId":"product-1"}',
+        direct_token="direct",
+        subject="user-1",
+        session_id="session-1",
+        budget=budget,
+        events=events,
+    )
+
+    assert result.model_view == {"outcome": "deny_with_feedback", "reason": reason}
+    assert budget.used == 1
+    assert tool_calls == 0
 
 
 def test_toolspec_schema_forbids_unknown_fields() -> None:

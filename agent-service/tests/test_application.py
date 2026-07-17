@@ -356,6 +356,25 @@ def test_obo_client_rechecks_owner_and_server_allowlist(
     assert forged.value.status_code == 403
 
 
+def test_obo_client_rejects_malformed_exchange_response(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    sessions = MemorySessionStore()
+    session_id = sessions.create("user-123")
+    client = OboClient(settings(), sessions)
+    monkeypatch.setattr(
+        httpx,
+        "post",
+        lambda *args, **kwargs: httpx.Response(200, content=b"{"),
+    )
+
+    with pytest.raises(HTTPException) as malformed:
+        client.exchange("direct-token", "user-123", session_id, "catalog:read")
+
+    assert malformed.value.status_code == 502
+    assert malformed.value.detail == "Identity exchange rejected"
+
+
 def test_chat_persists_server_owned_result_and_replays_same_intent() -> None:
     private, public_jwk = key_fixture("current-key")
     validator = DirectJwtValidator(settings(), CountingJwksSource([public_jwk]))

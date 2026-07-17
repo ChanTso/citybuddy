@@ -269,7 +269,10 @@ class OboClient:
         )
         if response.status_code != 200:
             raise HTTPException(status_code=502, detail="Identity exchange rejected")
-        payload = response.json()
+        try:
+            payload = response.json()
+        except ValueError as exception:
+            raise HTTPException(status_code=502, detail="Identity exchange rejected") from exception
         token = payload.get("accessToken") if isinstance(payload, dict) else None
         if not isinstance(token, str) or not token:
             raise HTTPException(status_code=502, detail="Identity exchange rejected")
