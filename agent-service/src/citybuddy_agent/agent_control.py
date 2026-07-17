@@ -19,6 +19,16 @@ from .knowledge import (
     KnowledgeSearchInput,
     KnowledgeSearchOutput,
 )
+from .retrieval import (
+    RerankCandidate,
+    RerankOutput,
+    RerankRequest,
+    RerankValidationError,
+    RetrievalDecision,
+    SufficiencyCalibration,
+    decide_retrieval,
+    insufficient_decision,
+)
 
 
 @dataclass(frozen=True)
@@ -32,6 +42,7 @@ class AgentRunResult:
     response_text: str
     outcome: str
     events: tuple[AgentEvent, ...]
+    retrieval_decision: RetrievalDecision | None = None
 
 
 class AgentRunner(Protocol):
@@ -125,21 +136,45 @@ class ProviderRoute:
 class ModelPlan:
     tier: str
     routes: tuple[ProviderRoute, ...]
+    reranker_route: ProviderRoute
     attempt_limit: int
 
 
 class ModelRouter:
     """Own business-tier, escalation, and budget selection."""
 
-    def __init__(self, routes: tuple[ProviderRoute, ...], attempt_limit: int) -> None:
+    def __init__(
+        self,
+        routes: tuple[ProviderRoute, ...],
+        attempt_limit: int,
+        reranker_route: ProviderRoute | None = None,
+    ) -> None:
         if not routes or attempt_limit < 1:
             raise ValueError("Bounded model policy is incomplete")
         self._routes = routes
         self._attempt_limit = attempt_limit
+        self._reranker_route = reranker_route or ProviderRoute(
+            "support-reranker-standard", "reranker"
+        )
 
     def plan(self, signals: RoutingSignals) -> ModelPlan:
         del signals
-        return ModelPlan(tier="standard", routes=self._routes, attempt_limit=self._attempt_limit)
+        return ModelPlan(
+            tier="standard",
+            routes=self._routes,
+            reranker_route=self._reranker_route,
+            attempt_limit=self._attempt_limit,
+        )
+
+
+class Reranker(Protocol):
+    def rerank(
+        self,
+        plan: ModelPlan,
+        request: RerankRequest,
+        budget: AttemptBudget,
+        events: list[AgentEvent],
+    ) -> RerankOutput: ...
 
 
 @dataclass
@@ -328,6 +363,112 @@ class LiteLlmClient:
             raise RuntimeError("Model policy has no route")
         raise ProviderFailure(transient=isinstance(last_failure, ProviderFailure))
 
+    def rerank(
+        self,
+        plan: ModelPlan,
+        request: RerankRequest,
+        budget: AttemptBudget,
+        events: list[AgentEvent],
+    ) -> RerankOutput:
+        """Use one fixed role alias with one bounded same-route transient retry."""
+        route = plan.reranker_route
+        for attempt in range(2):
+            admitted = False
+            budget.charge("reranker_http", route.provider_key)
+            try:
+                self._circuits.admit(route.provider_key, events)
+                admitted = True
+                response = httpx.post(
+                    f"{self._url}/v1/chat/completions",
+                    json={
+                        "model": route.role_alias,
+                        "messages": [
+                            {
+                                "role": "user",
+                                "content": request.model_dump_json(by_alias=True),
+                            }
+                        ],
+                    },
+                    timeout=2.0,
+                )
+                if response.status_code in {408, 429, 502, 503, 504}:
+                    raise ProviderFailure(transient=True)
+                if response.status_code != 200:
+                    raise ProviderFailure(transient=False)
+                try:
+                    payload = response.json()
+                except ValueError as exception:
+                    raise ProviderFailure(transient=False) from exception
+                output = self._parse_rerank(payload)
+                self._circuits.success(route.provider_key, events)
+                events.append(
+                    AgentEvent(
+                        "MODEL_OUTCOME",
+                        {
+                            "alias": route.role_alias,
+                            "provider": route.provider_key,
+                            "result": "rerank-ok",
+                        },
+                    )
+                )
+                return output
+            except (httpx.TimeoutException, httpx.NetworkError):
+                failure = ProviderFailure(transient=True)
+            except CircuitOpen:
+                failure = ProviderFailure(transient=True)
+            except ProviderFailure as exception:
+                failure = exception
+            finally:
+                if admitted:
+                    self._circuits.release_probe(route.provider_key)
+            if not failure.transient:
+                events.append(
+                    AgentEvent(
+                        "MODEL_OUTCOME",
+                        {
+                            "alias": route.role_alias,
+                            "provider": route.provider_key,
+                            "result": "rerank-denied",
+                        },
+                    )
+                )
+                raise failure
+            self._circuits.transient_failure(route.provider_key, events)
+            events.append(
+                AgentEvent(
+                    "MODEL_OUTCOME",
+                    {
+                        "alias": route.role_alias,
+                        "provider": route.provider_key,
+                        "result": "rerank-transient",
+                    },
+                )
+            )
+            if attempt == 1:
+                raise failure
+        raise RuntimeError("Bounded reranker loop did not terminate")
+
+    @staticmethod
+    def _parse_rerank(payload: object) -> RerankOutput:
+        if not isinstance(payload, dict):
+            raise ProviderFailure(transient=False)
+        choices = payload.get("choices")
+        if not isinstance(choices, list) or len(choices) != 1 or not isinstance(choices[0], dict):
+            raise ProviderFailure(transient=False)
+        message = choices[0].get("message")
+        content = message.get("content") if isinstance(message, dict) else None
+        if (
+            not isinstance(message, dict)
+            or not isinstance(content, str)
+            or len(content) > 4096
+            or "tool_calls" in message
+        ):
+            raise ProviderFailure(transient=False)
+        try:
+            return RerankOutput.model_validate_json(content)
+        except ValidationError as exception:
+            raise ProviderFailure(transient=False) from exception
+
     @staticmethod
     def _parse(payload: object) -> ModelReply:
         if not isinstance(payload, dict):
@@ -429,6 +570,7 @@ KNOWLEDGE_SEARCH_SPEC = ToolSpec(
 class ToolResult:
     outcome: Literal["ok", "deny_with_feedback"]
     model_view: dict[str, object]
+    retrieval_decision: RetrievalDecision | None = None
 
 
 class ToolAdapter:
@@ -437,10 +579,14 @@ class ToolAdapter:
         base_url: str,
         obo: OboExchange,
         knowledge: KnowledgeSearch | None = None,
+        reranker: Reranker | None = None,
+        calibration: SufficiencyCalibration | None = None,
     ) -> None:
         self._base_url = base_url.rstrip("/")
         self._obo = obo
         self._knowledge = knowledge
+        self._reranker = reranker
+        self._calibration = calibration
         self._specs = {
             CATALOG_PRODUCT_SPEC.name: CATALOG_PRODUCT_SPEC,
             KNOWLEDGE_SEARCH_SPEC.name: KNOWLEDGE_SEARCH_SPEC,
@@ -459,6 +605,8 @@ class ToolAdapter:
         session_id: str,
         budget: AttemptBudget,
         events: list[AgentEvent],
+        plan: ModelPlan | None = None,
+        knowledge_allowed: bool = True,
     ) -> ToolResult:
         spec = self._specs.get(name)
         if spec is None:
@@ -470,16 +618,59 @@ class ToolAdapter:
             return self._deny(name, "invalid_arguments", events)
         events.append(AgentEvent("TOOL_LIFECYCLE", {"tool": name, "state": "requested"}))
         if spec.authority == "elasticsearch":
-            if self._knowledge is None or not isinstance(arguments, KnowledgeSearchInput):
+            if not knowledge_allowed:
+                return self._deny(name, "retrieval_already_decided", events)
+            if (
+                self._knowledge is None
+                or self._reranker is None
+                or self._calibration is None
+                or plan is None
+                or not isinstance(arguments, KnowledgeSearchInput)
+            ):
                 return self._deny(name, "knowledge_unavailable", events)
             try:
                 bounded_knowledge = self._knowledge.search(arguments, budget.charge)
             except KnowledgeSearchFailure as error:
                 return self._deny(name, error.code, events)
+            if not bounded_knowledge.results:
+                decision = insufficient_decision(
+                    index_version=bounded_knowledge.index_version,
+                    calibration=self._calibration,
+                    reason="empty_candidates",
+                    candidate_count=0,
+                )
+                return self._retrieval_denial(name, decision, events)
+            try:
+                rerank_request = RerankRequest(
+                    query=arguments.query,
+                    rewrite=arguments.rewrite,
+                    candidates=tuple(
+                        RerankCandidate.from_search_result(result)
+                        for result in bounded_knowledge.results
+                    ),
+                )
+                reranked = self._reranker.rerank(plan, rerank_request, budget, events)
+                decision = decide_retrieval(bounded_knowledge, reranked, self._calibration)
+            except (
+                AttemptBudgetExhausted,
+                ProviderFailure,
+                RerankValidationError,
+                ValidationError,
+            ):
+                decision = insufficient_decision(
+                    index_version=bounded_knowledge.index_version,
+                    calibration=self._calibration,
+                    reason="reranker_denied",
+                    candidate_count=len(bounded_knowledge.results),
+                )
+            self._record_retrieval_decision(decision, events)
+            if decision.outcome != "SUFFICIENT":
+                return self._retrieval_denial(name, decision, events, record=False)
             events.append(AgentEvent("TOOL_LIFECYCLE", {"tool": name, "state": "succeeded"}))
             return ToolResult(
                 outcome="ok",
-                model_view=bounded_knowledge.model_dump(by_alias=True),
+                model_view=decision.model_dump(by_alias=True, mode="json"),
+                retrieval_decision=decision,
             )
         if spec.scope is None:
             raise RuntimeError("Commerce ToolSpec omitted its exact scope")
@@ -530,6 +721,49 @@ class ToolAdapter:
             model_view={"outcome": "deny_with_feedback", "reason": reason},
         )
 
+    @staticmethod
+    def _record_retrieval_decision(decision: RetrievalDecision, events: list[AgentEvent]) -> None:
+        events.append(
+            AgentEvent(
+                "RETRIEVAL_DECISION",
+                {
+                    "indexVersion": decision.index_version,
+                    "calibrationVersion": decision.calibration_version,
+                    "outcome": decision.outcome,
+                    "reason": decision.reason,
+                    "candidateCount": decision.candidate_count,
+                    "evidenceCount": len(decision.evidence),
+                },
+            )
+        )
+
+    @classmethod
+    def _retrieval_denial(
+        cls,
+        name: str,
+        decision: RetrievalDecision,
+        events: list[AgentEvent],
+        *,
+        record: bool = True,
+    ) -> ToolResult:
+        if record:
+            cls._record_retrieval_decision(decision, events)
+        events.append(
+            AgentEvent(
+                "TOOL_DENIED",
+                {
+                    "tool": name,
+                    "reason": decision.reason,
+                    "outcome": "deny_with_feedback",
+                },
+            )
+        )
+        return ToolResult(
+            outcome="deny_with_feedback",
+            model_view={"outcome": "deny_with_feedback", "reason": decision.reason},
+            retrieval_decision=decision,
+        )
+
 
 class BoundedAgent:
     """The one production ReAct agent for this slice."""
@@ -572,12 +806,18 @@ class BoundedAgent:
         )
         budget = AttemptBudget(plan.attempt_limit, events)
         messages = [{"role": "user", "content": message}]
+        retrieval_decision: RetrievalDecision | None = None
         try:
             while True:
                 reply = self._model.complete(plan, messages, self._tools.schemas(), budget, events)
                 if reply.content is not None:
                     events.append(AgentEvent("AGENT_OUTCOME", {"outcome": "completed"}))
-                    return AgentRunResult(reply.content, "completed", tuple(events))
+                    return AgentRunResult(
+                        reply.content,
+                        "completed",
+                        tuple(events),
+                        retrieval_decision,
+                    )
                 if reply.tool_name is None or reply.tool_arguments is None:
                     raise RuntimeError("Invalid model tool request")
                 result = self._tools.execute(
@@ -588,7 +828,30 @@ class BoundedAgent:
                     session_id=session_id,
                     budget=budget,
                     events=events,
+                    plan=plan,
+                    knowledge_allowed=retrieval_decision is None,
                 )
+                if result.retrieval_decision is not None:
+                    retrieval_decision = result.retrieval_decision
+                    if retrieval_decision.outcome != "SUFFICIENT":
+                        events.append(AgentEvent("AGENT_OUTCOME", {"outcome": "retrieval_denied"}))
+                        return AgentRunResult(
+                            "I do not have sufficient grounded evidence to answer that request.",
+                            "retrieval_denied",
+                            tuple(events),
+                            retrieval_decision,
+                        )
+                if (
+                    reply.tool_name == KNOWLEDGE_SEARCH_SPEC.name
+                    and retrieval_decision is None
+                    and result.outcome == "deny_with_feedback"
+                ):
+                    events.append(AgentEvent("AGENT_OUTCOME", {"outcome": "retrieval_denied"}))
+                    return AgentRunResult(
+                        "I do not have sufficient grounded evidence to answer that request.",
+                        "retrieval_denied",
+                        tuple(events),
+                    )
                 messages.append({"role": "assistant", "content": "tool request"})
                 messages.append(
                     {
@@ -602,6 +865,7 @@ class BoundedAgent:
                 "I could not complete this request within the bounded attempt limit.",
                 "budget_exhausted",
                 tuple(events),
+                retrieval_decision,
             )
         except ProviderFailure:
             events.append(AgentEvent("AGENT_OUTCOME", {"outcome": "provider_denied"}))
@@ -609,4 +873,5 @@ class BoundedAgent:
                 "I could not complete this request through the approved model route.",
                 "provider_denied",
                 tuple(events),
+                retrieval_decision,
             )

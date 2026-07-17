@@ -10,7 +10,13 @@ from typing import Any, cast
 from urllib.parse import quote
 
 import httpx
-from citybuddy_agent.agent_control import AgentEvent, AttemptBudget, ToolAdapter
+from citybuddy_agent.agent_control import (
+    AgentEvent,
+    AttemptBudget,
+    ModelPlan,
+    ProviderRoute,
+    ToolAdapter,
+)
 from citybuddy_agent.knowledge import (
     EMBEDDING_DIMS,
     FINAL_RESULT_LIMIT,
@@ -18,6 +24,7 @@ from citybuddy_agent.knowledge import (
     KnowledgeSearchFailure,
     KnowledgeSearchInput,
 )
+from citybuddy_agent.retrieval import RerankOutput, RerankScore, load_calibration
 
 INDEX = "knowledge_docs_v1"
 ALIAS = "knowledge_docs_read"
@@ -31,6 +38,27 @@ class ForbiddenObo:
         del direct_token, subject, session_id, scope
         self.calls += 1
         raise AssertionError("knowledge.search must not acquire OBO authority")
+
+
+class DeterministicReranker:
+    def rerank(
+        self,
+        plan: ModelPlan,
+        request: Any,
+        budget: AttemptBudget,
+        events: list[AgentEvent],
+    ) -> RerankOutput:
+        del events
+        budget.charge("reranker_http", plan.reranker_route.provider_key)
+        return RerankOutput(
+            scores=tuple(
+                RerankScore(
+                    candidate_id=candidate.candidate_id,
+                    score=round(0.95 - candidate.fused_rank * 0.2, 2),
+                )
+                for candidate in request.candidates
+            )
+        )
 
 
 def api(
@@ -206,7 +234,20 @@ def main() -> None:
     obo = ForbiddenObo()
     tool_events: list[AgentEvent] = []
     tool_budget = AttemptBudget(8, tool_events)
-    tool_result = ToolAdapter("http://commerce-must-not-be-used", obo, client).execute(
+    tool_adapter = ToolAdapter(
+        "http://commerce-must-not-be-used",
+        obo,
+        client,
+        DeterministicReranker(),
+        load_calibration(),
+    )
+    model_plan = ModelPlan(
+        tier="standard",
+        routes=(ProviderRoute("support-standard-primary", "primary"),),
+        reranker_route=ProviderRoute("support-reranker-standard", "reranker"),
+        attempt_limit=8,
+    )
+    tool_result = tool_adapter.execute(
         name="knowledge.search",
         serialized_arguments='{"query":"退款 policy"}',
         direct_token="direct-token",
@@ -214,11 +255,12 @@ def main() -> None:
         session_id="support-session",
         budget=tool_budget,
         events=tool_events,
+        plan=model_plan,
     )
-    if tool_result.outcome != "ok" or obo.calls != 0 or tool_budget.used != 4:
+    if tool_result.outcome != "ok" or obo.calls != 0 or tool_budget.used != 5:
         raise AssertionError("knowledge.search crossed the OBO or bounded-I/O boundary")
     denied_budget = AttemptBudget(2, [])
-    denied = ToolAdapter("http://commerce-must-not-be-used", obo, client).execute(
+    denied = tool_adapter.execute(
         name="knowledge.search",
         serialized_arguments='{"query":"refund","index":"private_orders"}',
         direct_token="direct-token",

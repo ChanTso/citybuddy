@@ -10,6 +10,14 @@ from citybuddy_agent.agent_control import (
     KNOWLEDGE_SEARCH_SPEC,
     AgentEvent,
     AttemptBudget,
+    BoundedAgent,
+    LiteLlmClient,
+    ModelPlan,
+    ModelReply,
+    ModelRouter,
+    ProviderCircuits,
+    ProviderRoute,
+    RuleRouter,
     ToolAdapter,
 )
 from citybuddy_agent.knowledge import (
@@ -25,6 +33,7 @@ from citybuddy_agent.knowledge import (
     PublicKnowledgeMetadata,
     deterministic_query_embedding,
 )
+from citybuddy_agent.retrieval import RerankOutput, RerankScore, load_calibration
 from pydantic import ValidationError
 
 
@@ -199,9 +208,35 @@ def test_tool_adapter_uses_elasticsearch_without_obo_or_caller_authority() -> No
                 ),
             )
 
+    class StubReranker:
+        def rerank(
+            self,
+            plan: ModelPlan,
+            request: Any,
+            budget: AttemptBudget,
+            events: list[AgentEvent],
+        ) -> RerankOutput:
+            del events
+            assert plan.reranker_route.role_alias == "support-reranker-standard"
+            assert request.model_dump(by_alias=True)["query"] == "refund"
+            budget.charge("reranker_http", plan.reranker_route.provider_key)
+            return RerankOutput(scores=(RerankScore(candidate_id="faq-refund:answer", score=0.9),))
+
     events: list[AgentEvent] = []
     budget = AttemptBudget(4, events)
-    adapter = ToolAdapter("https://commerce.test", ForbiddenObo(), StubKnowledge())
+    adapter = ToolAdapter(
+        "https://commerce.test",
+        ForbiddenObo(),
+        StubKnowledge(),
+        StubReranker(),
+        load_calibration(),
+    )
+    plan = ModelPlan(
+        tier="standard",
+        routes=(ProviderRoute("support-standard-primary", "primary"),),
+        reranker_route=ProviderRoute("support-reranker-standard", "reranker"),
+        attempt_limit=4,
+    )
 
     result = adapter.execute(
         name="knowledge.search",
@@ -211,11 +246,21 @@ def test_tool_adapter_uses_elasticsearch_without_obo_or_caller_authority() -> No
         session_id="session-must-not-be-forwarded",
         budget=budget,
         events=events,
+        plan=plan,
     )
 
     assert result.outcome == "ok"
-    assert set(result.model_view) == {"indexVersion", "results"}
-    assert budget.used == 2
+    assert set(result.model_view) == {
+        "indexVersion",
+        "calibrationVersion",
+        "outcome",
+        "reason",
+        "candidateCount",
+        "topScore",
+        "topMargin",
+        "evidence",
+    }
+    assert budget.used == 3
     tool_names: set[str] = set()
     for schema in adapter.schemas():
         function = schema.get("function")
@@ -241,6 +286,64 @@ def test_tool_adapter_uses_elasticsearch_without_obo_or_caller_authority() -> No
         "outcome": "deny_with_feedback",
         "reason": "invalid_arguments",
     }
+
+
+def test_unavailable_initial_retrieval_is_terminal_without_model_regeneration(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class ForbiddenObo:
+        def exchange(self, *args: object) -> str:
+            raise AssertionError(args)
+
+    class UnavailableKnowledge:
+        def search(self, request: KnowledgeSearchInput, charge: Any) -> KnowledgeSearchOutput:
+            del request, charge
+            raise KnowledgeSearchFailure("knowledge_unavailable")
+
+    client = LiteLlmClient(
+        "https://proxy.test",
+        ProviderCircuits(minimum_requests=2, open_seconds=1, half_open_probes=1),
+    )
+    calls = 0
+
+    def complete(*args: object, **kwargs: object) -> ModelReply:
+        nonlocal calls
+        del args, kwargs
+        calls += 1
+        if calls > 1:
+            raise AssertionError("unavailable retrieval reached model regeneration")
+        return ModelReply(None, "knowledge.search", '{"query":"public question"}')
+
+    monkeypatch.setattr(client, "complete", complete)
+    agent = BoundedAgent(
+        RuleRouter(),
+        ModelRouter((ProviderRoute("support-standard-primary", "primary"),), 8),
+        client,
+        ToolAdapter(
+            "https://commerce.test",
+            ForbiddenObo(),
+            UnavailableKnowledge(),
+            client,
+            load_calibration(),
+        ),
+    )
+
+    result = agent.run(
+        message="public question",
+        direct_token="not-forwarded",
+        subject="not-forwarded",
+        session_id="not-forwarded",
+        trace_id="trace",
+        turn_id="turn",
+    )
+
+    assert calls == 1
+    assert result.outcome == "retrieval_denied"
+    assert result.retrieval_decision is None
+    assert any(
+        event.event_type == "TOOL_DENIED" and event.payload.get("reason") == "knowledge_unavailable"
+        for event in result.events
+    )
 
 
 def test_separate_recall_and_rrf_are_bounded_deduplicated_and_repeatable(
