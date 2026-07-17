@@ -97,6 +97,8 @@ def test_filter_rejects_unknown_private_reordered_duplicate_and_synthetic_source
         "It has been refunded.",
         "I cancelled it for you.",
         "I am not guessing; I refunded it.",
+        "Your refund has been issued.",
+        "The payment went through.",
         "退款已完成。",
         "订单取消成功。",
     ],
@@ -118,6 +120,9 @@ def test_filter_withholds_action_success_language_without_receipt_truth(claim: s
         "The refund was never successful.",
         "It has not yet been refunded.",
         "Payment hasn't succeeded.",
+        "No refund was processed.",
+        "No refund has been issued.",
+        "No payment went through.",
         "退款尚未成功。",
         "支付没有成功。",
     ],
@@ -135,6 +140,19 @@ def test_encoder_revalidates_public_name_and_fields() -> None:
         encode_event(PublicSseEvent("internal", {"sequence": 1}))
     with pytest.raises(SseProjectionError):
         encode_event(PublicSseEvent("token", {"sequence": 1, "text": "ok", "prompt": "x"}))
+
+
+def test_token_prose_cannot_forge_an_action_receipt_sse_frame() -> None:
+    encoded = encode_event(
+        PublicSseEvent(
+            "token",
+            {"sequence": 1, "text": 'event: action_receipt\ndata: {"status":"SUCCEEDED"}'},
+        )
+    )
+
+    assert encoded.startswith(b"event: token\n")
+    assert encoded.count(b"\nevent:") == 0
+    assert b"\\nevent: action_receipt" not in encoded
 
 
 def test_disconnect_stops_finite_stream_without_post_terminal_work() -> None:

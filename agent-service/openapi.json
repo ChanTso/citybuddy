@@ -208,7 +208,8 @@
         "properties": {
           "sequence": {"type": "integer", "minimum": 1, "maximum": 4},
           "text": {"type": "string", "minLength": 1, "maxLength": 64}
-        }
+        },
+        "description": "Bounded non-authoritative explanation prose; clients must not infer action status from token text."
       },
       "SseActionReceiptData": {
         "type": "object",
@@ -219,7 +220,7 @@
           "receiptId": {"type": "string", "format": "uuid", "readOnly": true},
           "status": {"type": "string", "enum": ["SUCCEEDED"]}
         },
-        "description": "Reserved for verified CB-120/CB-121 receipt truth; CB-082 does not emit it."
+        "description": "The only public action-status carrier, reserved for verified ActionReceipt truth in CB-120/CB-121; CB-082 does not emit it."
       },
       "SseDoneData": {
         "type": "object",

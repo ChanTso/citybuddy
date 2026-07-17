@@ -14,6 +14,8 @@ TOKEN_CHUNK_SIZE = 64
 MAX_RESPONSE_TEXT = 256
 MAX_PUBLIC_EVENTS = MAX_RESPONSE_TEXT // TOKEN_CHUNK_SIZE + 1
 
+# This normalized lexicon is intentionally bounded defense in depth. Token prose
+# is never action truth; only an ActionReceipt-derived event can carry that state.
 _SENSITIVE_ACTION_WORDS = {
     "cancel",
     "cancellation",
@@ -33,6 +35,7 @@ _ACTION_COMPLETION_WORDS = {
     "done",
     "executed",
     "finalized",
+    "issued",
     "ordered",
     "paid",
     "placed",
@@ -43,6 +46,7 @@ _ACTION_COMPLETION_WORDS = {
     "successful",
     "successfully",
 }
+_ACTION_COMPLETION_PHRASES: set[tuple[str, ...]] = {("went", "through")}
 _COMPLETED_ACTION_VERBS = {
     "canceled",
     "cancelled",
@@ -62,6 +66,7 @@ _NEGATION_BRIDGE_WORDS = {
     "successfully",
     "yet",
 }
+_NEGATED_ACTION_AUXILIARIES = {"are", "had", "has", "is", "was", "were"}
 _SENSITIVE_ACTION_CJK = ("订单", "下单", "退款", "支付", "付款", "取消")
 _ACTION_COMPLETION_CJK = (
     "成功",
@@ -80,7 +85,17 @@ def _is_negated(words: list[str], index: int) -> bool:
     for negation_index in range(max(0, index - 4), index):
         if words[negation_index] not in _NEGATION_WORDS:
             continue
-        if all(word in _NEGATION_BRIDGE_WORDS for word in words[negation_index + 1 : index]):
+        bridge = words[negation_index + 1 : index]
+        if all(word in _NEGATION_BRIDGE_WORDS for word in bridge):
+            return True
+        if (
+            words[negation_index] == "no"
+            and bridge
+            and bridge[0] in _SENSITIVE_ACTION_WORDS
+            and all(
+                word in _NEGATION_BRIDGE_WORDS | _NEGATED_ACTION_AUXILIARIES for word in bridge[1:]
+            )
+        ):
             return True
     return False
 
@@ -88,6 +103,14 @@ def _is_negated(words: list[str], index: int) -> bool:
 def _has_unnegated_word(words: list[str], candidates: set[str]) -> bool:
     return any(
         word in candidates and not _is_negated(words, index) for index, word in enumerate(words)
+    )
+
+
+def _has_unnegated_phrase(words: list[str], candidates: set[tuple[str, ...]]) -> bool:
+    return any(
+        tuple(words[index : index + len(candidate)]) == candidate and not _is_negated(words, index)
+        for candidate in candidates
+        for index in range(len(words) - len(candidate) + 1)
     )
 
 
@@ -113,8 +136,9 @@ def _contains_unreceipted_action_claim(text: str) -> bool:
     words = re.findall(r"[a-z0-9]+", normalized)
     if _has_unnegated_word(words, _COMPLETED_ACTION_VERBS):
         return True
-    if set(words) & _SENSITIVE_ACTION_WORDS and _has_unnegated_word(
-        words, _ACTION_COMPLETION_WORDS
+    if set(words) & _SENSITIVE_ACTION_WORDS and (
+        _has_unnegated_word(words, _ACTION_COMPLETION_WORDS)
+        or _has_unnegated_phrase(words, _ACTION_COMPLETION_PHRASES)
     ):
         return True
     return any(action in normalized for action in _SENSITIVE_ACTION_CJK) and (

@@ -76,6 +76,14 @@ def test_stream_contract_fixes_headers_event_names_and_allowlisted_payloads() ->
         assert schema["additionalProperties"] is False
         assert set(schema["properties"]) == fields
         assert set(schema["required"]) == fields
+    assert (
+        "non-authoritative explanation"
+        in payload["components"]["schemas"]["SseTokenData"]["description"]
+    )
+    assert (
+        "only public action-status carrier"
+        in payload["components"]["schemas"]["SseActionReceiptData"]["description"]
+    )
 
     source = (ROOT / "agent-service/src/citybuddy_agent/sse.py").read_text(encoding="utf-8")
     assert "MAX_PUBLIC_EVENTS" in source
