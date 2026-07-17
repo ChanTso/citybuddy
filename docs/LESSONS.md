@@ -145,3 +145,11 @@ This file records only factual pitfalls supported by merged pull-request, commit
 - 根因：MySQL 外键只认可被引用列的显式索引唯一性，锁定读取在 InnoDB 中又需要目标表的 `UPDATE` 权限。路由异常边界混淆了“已验证的授权拒绝”与“流内私有失败”，历史 fixture 也把会增长的序号当成常量。对输出过滤而言，自由自然语言的同义表达、语序、时态、否定范围和上下文无法由有限确定性词表完备分类；每次补一个短语都会留下新绕过或引入新误伤，因此它不能承担动作真值保证。CI 基础设施问题来自共享 Docker Desktop VM 当时仅分配 7.75 GiB，且另一个无关项目容器常驻；资源压力会让最大的 JVM 进程先消失，表面上却只留下任意组件的健康检查失败。
 - 解决：为 support turn 增加明确复合唯一键；feedback 并发只锁已有写权限的 `support_conversation` 聚合根，再读不可变 truth。SSE 保留真实 `HTTPException`，历史 sequence 从数据库权威状态推导。Level 3 修订将真值渠道与散文彻底分离：`token` 只是非权威解释，唯一公共动作状态载体是由 ActionReceipt 派生的 `action_receipt`，后续客户端不得从散文推断状态。归一化 + 文档化有界词表仅作纵深防御：固定回归拦截 `issued` / `went through`，放行 `No refund was processed.`，wire test 证明 token 散文不能伪造第二个 receipt SSE frame，真实 fake-provider 用 `Your refund has been issued.` 取证。宿主机停止无关容器并把 Docker 内存提高到约 14 GB；重跑同时实时记录 7,473 条 `docker events`，全套 `make ci` 通过且没有 `oom` 事件，未修改 Compose、健康检查或切片代码。
 - 结论：外键、锁和最小权限必须在真实数据库上整体设计；HTTP 授权拒绝与流内私有错误必须分层，顺序值应从权威状态推导。对自由文本，确定性词表不能被宣称为完备安全边界；正确结构是“真值渠道分离 + 词表降级为纵深防御”：ActionReceipt/`action_receipt` 决定状态，`token` 只负责可丢弃、不可授权的解释。共享 Docker VM 的内存压力会伪装成任意组件的健康失败；取证应在运行时持续记录容器事件，不能依赖很快被刷掉的事后事件缓冲区。
+
+## CB-090 — Versioned hybrid knowledge index and deterministic retrieval fusion
+
+- 现象：首轮真实 Elasticsearch bootstrap 创建索引后，立即把同一索引判定为 `incompatible_mapping`；实际 8.19.8 mapping readback 保留了 `public_metadata.properties`，但省略了该嵌套对象默认的 `type: object`。若直接比较请求 JSON 与 readback JSON，应用会拒绝自己刚创建的合法索引。
+- 证据链接：[slice PR #34](https://github.com/ChanTso/citybuddy/pull/34)、[implementation commit `874d1cc`](https://github.com/ChanTso/citybuddy/commit/874d1cc)
+- 根因：Elasticsearch 的 mapping API 返回规范化后的语义表示，不保证逐字回显请求中的默认值；把序列化形式相等误当成 mapping 语义兼容，会制造 false-negative，同时若放宽为任意子集比较又会放过私有字段或错误向量形状。
+- 解决：validator 继续精确校验顶层字段集合、公共 metadata 字段/类型、IK analyzer、dense-vector 维度/index/cosine 和 alias 单目标，只对 Elasticsearch 已证明会规范化掉的嵌套对象默认 `type: object` 接受省略；新增 extra private field 与其他不兼容 mapping 的固定拒绝测试，并在真实 8.19.8 上重复 bootstrap 和搜索。
+- 结论：对外部系统的声明式 schema 应比较经过文档化的语义不变量，而不是要求响应逐字等于请求；允许规范化差异必须逐项、最小化，同时保留字段白名单和所有安全相关形状的精确拒绝证据。
