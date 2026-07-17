@@ -323,6 +323,7 @@ def create_app(
         if CHAT_PERMISSION not in principal.permissions:
             raise HTTPException(status_code=403, detail="Forbidden")
         try:
+            resolved_sessions.verify_owner(x_session_id, principal.subject)
             result = resolved_conversations.complete_turn(
                 session_id=x_session_id,
                 subject=principal.subject,

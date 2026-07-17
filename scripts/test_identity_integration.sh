@@ -346,12 +346,24 @@ concurrent_trace="$(uv run python scripts/read_json_field.py "$tmp_dir/concurren
 test "$(mysql_query agent_app "$agent_app_password" cs_db "SELECT COUNT(*) FROM support_event WHERE trace_id = '$concurrent_trace'")" = 3
 echo "Verified concurrent same-intent requests converge to one durable turn and sequence."
 
-before_failure="$(mysql_query agent_app "$agent_app_password" cs_db "SELECT CONCAT((SELECT next_turn_sequence FROM support_conversation WHERE session_id = '$session_id'), ':', (SELECT COUNT(*) FROM support_turn WHERE session_id = '$session_id'), ':', (SELECT COUNT(*) FROM support_event WHERE session_id = '$session_id'))")"
+assert_status 201 "isolated rollback-drill session creation" \
+  --request POST "http://127.0.0.1:$agent_port/api/sessions" \
+  --header "Authorization: Bearer $direct_token" \
+  --header 'Content-Type: application/json' \
+  --data '{}'
+rollback_session_id="$(uv run python scripts/read_json_field.py "$tmp_dir/http-response.json" sessionId)"
+rollback_chat_headers=(
+  --header "Authorization: Bearer $direct_token"
+  --header "X-Session-Id: $rollback_session_id"
+  --header 'Content-Type: application/json'
+)
+before_failure="$(mysql_query agent_app "$agent_app_password" cs_db "SELECT CONCAT((SELECT next_turn_sequence FROM support_conversation WHERE session_id = '$rollback_session_id'), ':', (SELECT COUNT(*) FROM support_turn WHERE session_id = '$rollback_session_id'), ':', (SELECT COUNT(*) FROM support_event WHERE session_id = '$rollback_session_id'))")"
+test "$before_failure" = '0:0:0'
 mysql_query agent_migration "$agent_migration_password" cs_db \
-  "ALTER TABLE support_event ADD CONSTRAINT chk_cb080_controlled_failure CHECK (JSON_UNQUOTE(JSON_EXTRACT(payload_json, '$.message')) <> 'must roll back')"
+  "ALTER TABLE support_event ADD CONSTRAINT chk_cb080_controlled_failure CHECK (session_id <> '$rollback_session_id' OR event_type <> 'ASSISTANT_RESPONSE')"
 assert_status 503 "accepted-turn database failure is bounded" \
   --request POST "http://127.0.0.1:$agent_port/api/chat" \
-  "${chat_headers[@]}" \
+  "${rollback_chat_headers[@]}" \
   --header 'Idempotency-Key: cb080-rollback' \
   --data '{"message":"must roll back"}'
 if grep -q 'chk_cb080_controlled_failure' "$tmp_dir/http-response.json"; then
@@ -360,9 +372,9 @@ if grep -q 'chk_cb080_controlled_failure' "$tmp_dir/http-response.json"; then
 fi
 mysql_query agent_migration "$agent_migration_password" cs_db \
   'ALTER TABLE support_event DROP CHECK chk_cb080_controlled_failure'
-after_failure="$(mysql_query agent_app "$agent_app_password" cs_db "SELECT CONCAT((SELECT next_turn_sequence FROM support_conversation WHERE session_id = '$session_id'), ':', (SELECT COUNT(*) FROM support_turn WHERE session_id = '$session_id'), ':', (SELECT COUNT(*) FROM support_event WHERE session_id = '$session_id'))")"
+after_failure="$(mysql_query agent_app "$agent_app_password" cs_db "SELECT CONCAT((SELECT next_turn_sequence FROM support_conversation WHERE session_id = '$rollback_session_id'), ':', (SELECT COUNT(*) FROM support_turn WHERE session_id = '$rollback_session_id'), ':', (SELECT COUNT(*) FROM support_event WHERE session_id = '$rollback_session_id'))")"
 test "$after_failure" = "$before_failure"
-echo "Verified a controlled database failure rolls back turn position, turn, and evidence truth."
+echo "Verified a controlled second-event database failure rolls back turn position, turn, and the first inserted event."
 
 assert_mysql_rejects "duplicate evidence sequence" 'Duplicate entry' \
   mysql_query agent_app "$agent_app_password" cs_db \

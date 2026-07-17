@@ -367,6 +367,7 @@ def test_chat_rejects_conflict_identity_substitution_and_private_context() -> No
     assert malformed.status_code == 422
     assert malformed.json() == {"detail": "Invalid request"}
     assert "private input" not in malformed.text
+    calls_before_owner_rejections = conversations.calls
     assert (
         client.post(
             "/api/chat",
@@ -375,6 +376,7 @@ def test_chat_rejects_conflict_identity_substitution_and_private_context() -> No
         ).status_code
         == 403
     )
+    assert conversations.calls == calls_before_owner_rejections
     other_token = direct_token(private, "current-key", subject="other-user")
     assert (
         client.post(
@@ -384,6 +386,7 @@ def test_chat_rejects_conflict_identity_substitution_and_private_context() -> No
         ).status_code
         == 403
     )
+    assert conversations.calls == calls_before_owner_rejections
     assert (
         client.post(
             "/api/chat",
