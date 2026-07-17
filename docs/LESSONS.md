@@ -121,3 +121,11 @@ This file records only factual pitfalls supported by merged pull-request, commit
 - 根因：closeout 只同步了权威状态行、Completion record、下一片规格和既有切片 lessons，没有逐行核对同一文件中的叙述性仓库现状。
 - 解决：通过独立文档维护 lane 全量审计并一次同步 `IMPLEMENTATION.md` 的版本、phase、能力总述、退款/对账能力列表和未实现清单，不改变路线、优先级、状态、合同或产品行为。
 - 结论：切片 closeout 不仅要更新状态表，也要逐行复核同一规范源中的叙述性现状；否则局部正确的状态仍会与旧文本形成必须停止处理的矛盾。
+
+## CB-080 — Support conversation, event, and evidence lifecycle
+
+- 现象：四个相同意图请求并发进入时，初稿先共享读取 `support_session`，再争抢 conversation 写锁，真实 MySQL 出现 1213 死锁并返回 503；把 session 读取直接改成 `FOR UPDATE` 后，又因最小权限的 `agent_app` 没有 `support_session.UPDATE` 而被数据库拒绝。集成脚本还因裸 `wait` 等待长期服务进程而假性挂起，trigger 故障注入需要未授权 `SUPER`，完整 CI 最后暴露 grant job 不认识“历史局部 commerce migration + CB-080 全量 agent migration”的精确表组合。
+- 证据链接：[slice PR #31](https://github.com/ChanTso/citybuddy/pull/31)、[implementation commit `1645126`](https://github.com/ChanTso/citybuddy/commit/1645126)
+- 根因：事务先取得可并存的共享锁再升级排他锁，形成与 CB-070 同类的 S→X 竞争环；直接锁 session 又混淆了“读取权威 owner”与“拥有该表更新权限”。测试编排没有把一次性客户端 PID 与长期服务 PID 分开，故障注入也依赖了运行身份不应拥有的管理权限；升级状态机只枚举了旧 agent schema，未组合新增表。
+- 解决：创建 session 时同步创建 conversation，chat 事务从入口对 conversation 行执行 `SELECT ... FOR UPDATE` 串行化，再普通读取不可变 session owner；四个并发请求稳定收敛为同一响应、一条 turn 和三条 event。脚本只等待记录的 curl PID，以临时 migration-owned `CHECK` 约束注入可回滚数据库失败，并逐个显式枚举七种历史 commerce 状态加 CB-080 agent 表的组合，未知表集继续失败关闭。
+- 结论：并发幂等事务应在拥有写权限的同一业务聚合根上尽早串行化，再读取关联权威事实；不能为了加锁扩大无关表权限。真实集成的进程等待、故障注入和升级矩阵也必须遵守最小权限并精确区分短任务、常驻服务与每个受支持 schema 组合。
