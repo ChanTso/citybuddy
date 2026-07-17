@@ -209,6 +209,13 @@ class ProviderCircuits:
                 AgentEvent("CIRCUIT_OUTCOME", {"provider": provider, "state": circuit_state})
             )
 
+    def release_probe(self, provider: str) -> None:
+        """Release a half-open reservation when no circuit outcome consumed it."""
+        with self._lock:
+            state = self._states.setdefault(provider, _CircuitState())
+            if state.opened_until is not None and state.half_open_in_flight > 0:
+                state.half_open_in_flight -= 1
+
 
 @dataclass(frozen=True)
 class ModelReply:
@@ -238,10 +245,12 @@ class LiteLlmClient:
             attempts_for_route = 0
             while True:
                 transient_failure: ProviderFailure | None = None
+                admitted = False
                 budget.charge("model_http", route.provider_key)
                 attempts_for_route += 1
                 try:
                     self._circuits.admit(route.provider_key, events)
+                    admitted = True
                     response = httpx.post(
                         f"{self._url}/v1/chat/completions",
                         json={"model": route.role_alias, "messages": messages, "tools": tools},
@@ -287,6 +296,9 @@ class LiteLlmClient:
                         )
                         raise
                     transient_failure = failure
+                finally:
+                    if admitted:
+                        self._circuits.release_probe(route.provider_key)
                 if transient_failure is None:
                     raise RuntimeError("Transient model failure was not classified")
                 self._circuits.transient_failure(route.provider_key, events)

@@ -18,6 +18,7 @@ class MysqlConnectionSettings(Protocol):
     mysql_host: str
     mysql_port: int
     mysql_password: str
+    attempt_budget: int
 
 
 @dataclass(frozen=True)
@@ -80,6 +81,10 @@ class MysqlConversationStore:
 
     def __init__(self, settings: MysqlConnectionSettings) -> None:
         self._settings = settings
+        # Every charged network attempt is bounded to at most three seconds. Persist
+        # one deadline with enough fixed margin so a crashed owner can be fenced
+        # without ever re-running its agent or tool work.
+        self._processing_timeout_microseconds = (settings.attempt_budget * 3 + 5) * 1_000_000
 
     def begin_turn(
         self,
@@ -138,8 +143,9 @@ class MysqlConversationStore:
                         raise ConversationOwnershipError
                     cursor.execute(
                         "SELECT trace_id, turn_id, request_fingerprint, response_text, "
-                        "state, outcome "
-                        "FROM support_turn WHERE session_id = %s AND correlation_key = %s",
+                        "state, outcome, processing_deadline_at <= CURRENT_TIMESTAMP(6) "
+                        "FROM support_turn WHERE session_id = %s AND correlation_key = %s "
+                        "FOR UPDATE",
                         (session_id, correlation_key),
                     )
                     existing = cursor.fetchone()
@@ -147,7 +153,32 @@ class MysqlConversationStore:
                         if existing[2] != fingerprint:
                             raise CorrelationConflictError
                         if existing[4] == "PROCESSING":
-                            raise TurnInProgressError
+                            if not existing[6]:
+                                raise TurnInProgressError
+                            stale_start = TurnStart(
+                                conversation_id,
+                                str(existing[0]),
+                                str(existing[1]),
+                            )
+                            self._insert_event(
+                                cursor,
+                                start=stale_start,
+                                session_id=session_id,
+                                subject=subject,
+                                sequence=2,
+                                event=AgentEvent(
+                                    "TURN_FAILED", {"code": "processing_deadline_expired"}
+                                ),
+                            )
+                            cursor.execute(
+                                "UPDATE support_turn SET state = 'FAILED', "
+                                "failure_code = 'processing_deadline_expired', "
+                                "processing_deadline_at = NULL, "
+                                "completed_at = CURRENT_TIMESTAMP(6) WHERE turn_id = %s",
+                                (stale_start.turn_id,),
+                            )
+                            connection.commit()
+                            raise TurnFailedError
                         if existing[4] == "FAILED":
                             raise TurnFailedError
                         if existing[3] is None or existing[5] is None:
@@ -177,8 +208,10 @@ class MysqlConversationStore:
                     cursor.execute(
                         "INSERT INTO support_turn "
                         "(turn_id, conversation_id, session_id, user_subject, trace_id, "
-                        "turn_sequence, correlation_key, request_fingerprint, input_text, state) "
-                        "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, 'PROCESSING')",
+                        "turn_sequence, correlation_key, request_fingerprint, input_text, state, "
+                        "processing_deadline_at) "
+                        "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, 'PROCESSING', "
+                        "DATE_ADD(CURRENT_TIMESTAMP(6), INTERVAL %s MICROSECOND))",
                         (
                             turn_id,
                             conversation_id,
@@ -189,6 +222,7 @@ class MysqlConversationStore:
                             correlation_key,
                             fingerprint,
                             message,
+                            self._processing_timeout_microseconds,
                         ),
                     )
                     self._insert_event(
@@ -217,12 +251,13 @@ class MysqlConversationStore:
             try:
                 with connection.cursor() as cursor:
                     cursor.execute(
-                        "SELECT session_id, user_subject, state FROM support_turn "
+                        "SELECT session_id, user_subject, state, "
+                        "processing_deadline_at > CURRENT_TIMESTAMP(6) FROM support_turn "
                         "WHERE turn_id = %s FOR UPDATE",
                         (start.turn_id,),
                     )
                     turn = cursor.fetchone()
-                    if turn is None or turn[2] != "PROCESSING":
+                    if turn is None or turn[2] != "PROCESSING" or not turn[3]:
                         raise RuntimeError("Durable turn is not executable")
                     sequence = 2
                     for event in events:
@@ -253,7 +288,8 @@ class MysqlConversationStore:
                     )
                     cursor.execute(
                         "UPDATE support_turn SET state = 'COMPLETED', response_text = %s, "
-                        "outcome = %s, completed_at = CURRENT_TIMESTAMP(6) WHERE turn_id = %s",
+                        "outcome = %s, processing_deadline_at = NULL, "
+                        "completed_at = CURRENT_TIMESTAMP(6) WHERE turn_id = %s",
                         (response_text, outcome, start.turn_id),
                     )
                 connection.commit()
@@ -286,6 +322,7 @@ class MysqlConversationStore:
                     )
                     cursor.execute(
                         "UPDATE support_turn SET state = 'FAILED', failure_code = %s, "
+                        "processing_deadline_at = NULL, "
                         "completed_at = CURRENT_TIMESTAMP(6) WHERE turn_id = %s",
                         (failure_code, start.turn_id),
                     )

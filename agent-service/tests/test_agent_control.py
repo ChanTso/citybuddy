@@ -164,6 +164,39 @@ def test_provider_circuits_are_isolated_bounded_and_half_open() -> None:
     circuits.admit("provider-a", events)
 
 
+def test_half_open_non_transient_outcome_releases_probe(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    now = [100.0]
+    events: list[AgentEvent] = []
+    circuits = ProviderCircuits(
+        minimum_requests=1,
+        open_seconds=5,
+        half_open_probes=1,
+        clock=lambda: now[0],
+    )
+    circuits.transient_failure("provider-a", events)
+    now[0] = 106.0
+    monkeypatch.setattr(httpx, "post", lambda *args, **kwargs: httpx.Response(400))
+    client = LiteLlmClient("https://proxy.test", circuits)
+
+    with pytest.raises(ProviderFailure) as denied:
+        client.complete(
+            ModelRouter((ProviderRoute("support-standard-primary", "provider-a"),), 2).plan(
+                RuleRouter().signals("hello")
+            ),
+            [{"role": "user", "content": "hello"}],
+            [],
+            AttemptBudget(2, events),
+            events,
+        )
+
+    assert denied.value.transient is False
+    circuits.admit("provider-a", events)
+    with pytest.raises(CircuitOpen):
+        circuits.admit("provider-a", events)
+
+
 class RecordingObo:
     def __init__(self) -> None:
         self.calls: list[tuple[str, str, str, str]] = []

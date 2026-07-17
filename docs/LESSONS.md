@@ -132,8 +132,8 @@ This file records only factual pitfalls supported by merged pull-request, commit
 
 ## CB-081 — Bounded agent, model routing, and ToolSpec control
 
-- 现象：首轮远端 repository CI 把集成脚本中两个高熵的固定 `Idempotency-Key` 测试值识别为通用 API key；同时，真实链路要求在外部模型/身份/工具调用前先保存已接受 turn，又要求后续数据库失败不能留下部分 agent evidence 或让同一幂等请求重新执行工具。
+- 现象：首轮远端 repository CI 把集成脚本中两个高熵的固定 `Idempotency-Key` 测试值识别为通用 API key；同时，真实链路要求在外部模型/身份/工具调用前先保存已接受 turn，又要求后续数据库失败不能留下部分 agent evidence 或让同一幂等请求重新执行工具。独立复核进一步发现，进程若在提交 `PROCESSING + USER_INPUT` 后崩溃，同一幂等请求会永久返回 409；half-open 探针若收到非瞬态 provider/schema 拒绝，也会永久占住默认唯一探针槽。
 - 证据链接：[slice PR #32](https://github.com/ChanTso/citybuddy/pull/32)、[首轮失败 CI](https://github.com/ChanTso/citybuddy/actions/runs/29574307542)、[fail-closed authority evidence `0c7db0c`](https://github.com/ChanTso/citybuddy/commit/0c7db0c)
-- 根因：秘密扫描按字段名和熵启发式工作，不知道字符串只是测试相关键；而把数据库事务跨网络调用保持打开既不能提供可靠原子性，也会放大锁窗口，单次“大事务”无法同时表达“请求已被接受”和“外部执行后的证据必须全成或全败”。
-- 解决：把误报值改成低熵、语义明确的测试占位符并清除含误报的草稿提交历史；turn 采用两阶段持久边界，先提交 `PROCESSING` 与 `USER_INPUT`，外部执行后再在一个事务中提交完整 agent events 与终态。第二阶段受控失败时回滚全部部分 agent evidence，再以独立有界事务把同一已接受 turn 收敛为 `FAILED`；回放只读已存结果，不重跑 agent 或工具。
-- 结论：测试标识也要按秘密扫描规则设计；涉及网络 I/O 的 durable workflow 应显式分开“接受事实”和“完成事实”，并让完成证据具有原子提交、失败收敛和幂等回放边界，而不是把数据库事务悬挂在外部调用上。
+- 根因：秘密扫描按字段名和熵启发式工作，不知道字符串只是测试相关键；而把数据库事务跨网络调用保持打开既不能提供可靠原子性，也会放大锁窗口，单次“大事务”无法同时表达“请求已被接受”和“外部执行后的证据必须全成或全败”。初稿又只处理仍活着的请求栈异常，没有为已提交的执行所有权持久化截止时间；熔断器只在成功或瞬态失败时清理 half-open 状态，遗漏了非瞬态与意外异常出口。
+- 解决：把误报值改成低熵、语义明确的测试占位符并清除含误报的草稿提交历史；turn 采用两阶段持久边界，先提交 `PROCESSING`、`USER_INPUT` 和按有限尝试预算推导的一次性截止时间，外部执行后再在一个事务中提交完整 agent events 与终态。第二阶段受控失败时回滚全部部分 agent evidence，再以独立有界事务把同一已接受 turn 收敛为 `FAILED`；过期重放在 turn 排他锁下只写一次 durable failure，且完成路径也受同一截止时间 fencing，不重跑 agent 或工具。half-open 探针占位在每次已准入调用的 `finally` 中释放，而成功和瞬态失败仍执行各自状态转换。
+- 结论：测试标识也要按秘密扫描规则设计；涉及网络 I/O 的 durable workflow 应显式分开“接受事实”和“完成事实”，并为进程消失后的执行所有权设置持久、可 fencing 的终止边界。有限熔断不仅要限制探针入口，还要审计成功、瞬态、非瞬态和意外异常的全部释放出口。

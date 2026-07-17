@@ -348,6 +348,19 @@ cmp "$tmp_dir/first-chat.json" "$tmp_dir/http-response.json"
 test "$(mysql_query agent_app "$agent_app_password" cs_db "SELECT COUNT(*) FROM support_turn WHERE session_id = '$session_id'")" = 1
 test "$(mysql_query agent_app "$agent_app_password" cs_db "SELECT COUNT(*) FROM support_event WHERE trace_id = '$trace_id'")" = 8
 
+crash_turn_id='00000000-0000-0000-0000-000000000810'
+crash_trace_id='00000000-0000-0000-0000-000000000811'
+mysql_query agent_app "$agent_app_password" cs_db \
+  "START TRANSACTION; UPDATE support_conversation SET next_turn_sequence = 2 WHERE conversation_id = '$conversation_id'; INSERT INTO support_turn (turn_id, conversation_id, session_id, user_subject, trace_id, turn_sequence, correlation_key, request_fingerprint, input_text, state, processing_deadline_at) VALUES ('$crash_turn_id', '$conversation_id', '$session_id', 'user-integration', '$crash_trace_id', 2, 'cb081-crash-window', 'ae2067cc156a9372a6a96c0741e0b1884a23067d63c264e73766e4a25c6a7459', 'crash-window', 'PROCESSING', DATE_SUB(CURRENT_TIMESTAMP(6), INTERVAL 1 SECOND)); INSERT INTO support_event (event_id, turn_id, trace_id, session_id, user_subject, sequence, event_type, payload_json) VALUES ('00000000-0000-0000-0000-000000000812', '$crash_turn_id', '$crash_trace_id', '$session_id', 'user-integration', 1, 'USER_INPUT', JSON_OBJECT('accepted', TRUE)); COMMIT"
+assert_status 503 "expired crash-window turn converges without re-execution" \
+  --request POST "http://127.0.0.1:$agent_port/api/chat" \
+  "${chat_headers[@]}" \
+  --header 'Idempotency-Key: cb081-crash-window' \
+  --data '{"message":"crash-window"}'
+test "$(mysql_query agent_app "$agent_app_password" cs_db "SELECT CONCAT(state, ':', failure_code, ':', processing_deadline_at IS NULL) FROM support_turn WHERE turn_id = '$crash_turn_id'")" = 'FAILED:processing_deadline_expired:1'
+test "$(mysql_query agent_app "$agent_app_password" cs_db "SELECT GROUP_CONCAT(CONCAT(sequence, ':', event_type) ORDER BY sequence SEPARATOR ',') FROM support_event WHERE trace_id = '$crash_trace_id'")" = '1:USER_INPUT,2:TURN_FAILED'
+echo "Verified a committed PROCESSING crash window converges once to durable failure without agent or tool re-execution."
+
 assert_status 409 "conflicting idempotency reuse" \
   --request POST "http://127.0.0.1:$agent_port/api/chat" \
   "${chat_headers[@]}" \

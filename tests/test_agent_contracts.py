@@ -91,6 +91,10 @@ def test_bounded_agent_migration_preserves_terminal_and_append_only_truth() -> N
         assert f"'{event_type}'" in migration
     assert "sequence > 0" in migration
     assert "outcome IN ('completed', 'budget_exhausted', 'provider_denied')" in migration
+    assert "ADD COLUMN processing_deadline_at TIMESTAMP(6) NULL AFTER state" in migration
+    assert "state = 'PROCESSING'" in migration
+    assert "processing_deadline_at IS NOT NULL" in migration
+    assert "processing_deadline_at IS NULL" in migration
 
 
 def test_commerce_tool_contract_is_exact_obo_and_bounded_view() -> None:

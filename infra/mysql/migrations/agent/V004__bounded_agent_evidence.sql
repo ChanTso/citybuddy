@@ -20,7 +20,12 @@ ALTER TABLE support_event
   );
 
 ALTER TABLE support_turn
-  ADD COLUMN outcome VARCHAR(32) NULL AFTER response_text;
+  ADD COLUMN outcome VARCHAR(32) NULL AFTER response_text,
+  ADD COLUMN processing_deadline_at TIMESTAMP(6) NULL AFTER state;
+
+UPDATE support_turn
+SET processing_deadline_at = DATE_ADD(created_at, INTERVAL 30 SECOND)
+WHERE state = 'PROCESSING';
 
 UPDATE support_turn
 SET outcome = 'completed'
@@ -37,6 +42,7 @@ ALTER TABLE support_turn
       AND outcome IS NULL
       AND failure_code IS NULL
       AND completed_at IS NULL
+      AND processing_deadline_at IS NOT NULL
     )
     OR (
       state = 'COMPLETED'
@@ -44,6 +50,7 @@ ALTER TABLE support_turn
       AND outcome IN ('completed', 'budget_exhausted', 'provider_denied')
       AND failure_code IS NULL
       AND completed_at IS NOT NULL
+      AND processing_deadline_at IS NULL
     )
     OR (
       state = 'FAILED'
@@ -51,5 +58,6 @@ ALTER TABLE support_turn
       AND outcome IS NULL
       AND failure_code IS NOT NULL
       AND completed_at IS NOT NULL
+      AND processing_deadline_at IS NULL
     )
   );
