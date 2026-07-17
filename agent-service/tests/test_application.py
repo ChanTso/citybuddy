@@ -1,7 +1,7 @@
 import json
 import time
 from collections.abc import Mapping
-from typing import Any
+from typing import Any, Literal
 
 import httpx
 import jwt
@@ -22,6 +22,12 @@ from citybuddy_agent.conversation import (
     ConversationStore,
     CorrelationConflictError,
     TurnStart,
+)
+from citybuddy_agent.feedback import (
+    FeedbackConflictError,
+    FeedbackOwnershipError,
+    FeedbackRecord,
+    FeedbackStore,
 )
 from cryptography.hazmat.primitives.asymmetric import rsa
 from fastapi import HTTPException
@@ -135,6 +141,39 @@ class MemoryAgent(AgentRunner):
             "completed",
             (AgentEvent("AGENT_OUTCOME", {"outcome": "completed"}),),
         )
+
+
+class MemoryFeedbackStore(FeedbackStore):
+    def __init__(self, sessions: MemorySessionStore, traces: dict[str, tuple[str, str]]) -> None:
+        self.sessions = sessions
+        self.traces = traces
+        self.records: dict[tuple[str, str], tuple[tuple[str, str, str | None], FeedbackRecord]] = {}
+
+    def append(
+        self,
+        *,
+        session_id: str,
+        subject: str,
+        trace_id: str,
+        idempotency_key: str,
+        rating: Literal["POSITIVE", "NEGATIVE"],
+        comment: str | None,
+    ) -> FeedbackRecord:
+        if self.sessions.owners.get(session_id) != subject or self.traces.get(trace_id) != (
+            session_id,
+            subject,
+        ):
+            raise FeedbackOwnershipError
+        key = (session_id, idempotency_key)
+        intent = (trace_id, rating, comment)
+        existing = self.records.get(key)
+        if existing is not None:
+            if existing[0] != intent:
+                raise FeedbackConflictError
+            return existing[1]
+        record = FeedbackRecord(f"server-feedback-{len(self.records) + 1}", trace_id, rating)
+        self.records[key] = (intent, record)
+        return record
 
 
 def settings() -> AgentSettings:
@@ -613,3 +652,243 @@ def test_unexpected_agent_error_is_visible_and_marks_the_reserved_turn_failed() 
     assert response.status_code == 500
     assert "private provider configuration detail" not in response.text
     assert conversations.failures == [("server-turn-1", "agent_execution_failed")]
+
+
+def test_stream_projects_durable_result_and_replay_through_fixed_sse_schema() -> None:
+    private, public_jwk = key_fixture("current-key")
+    sessions = MemorySessionStore()
+    session_id = sessions.create("user-123")
+    conversations = MemoryConversationStore(sessions)
+    agent = MemoryAgent()
+    client = TestClient(
+        create_app(
+            settings(),
+            validator=DirectJwtValidator(settings(), CountingJwksSource([public_jwk])),
+            sessions=sessions,
+            conversations=conversations,
+            agent=agent,
+        )
+    )
+    headers = {
+        "Authorization": f"Bearer {direct_token(private, 'current-key')}",
+        "X-Session-Id": session_id,
+        "Idempotency-Key": "stream-one",
+    }
+
+    first = client.post("/api/chat/stream", headers=headers, json={"message": "hello"})
+    replay = client.post("/api/chat/stream", headers=headers, json={"message": "hello"})
+
+    assert first.status_code == 200
+    assert first.headers["content-type"].startswith("text/event-stream")
+    assert first.headers["cache-control"] == "no-cache, no-store"
+    assert replay.content == first.content
+    assert first.text.count("event: token\n") == 1
+    assert first.text.count("event: done\n") == 1
+    assert "event: error" not in first.text
+    assert '"sequence":1,"text":"Bounded support response."' in first.text
+    assert '"sequence":2' in first.text
+    assert "ROUTING_DECISION" not in first.text
+    assert "tool" not in first.text.lower()
+    assert agent.calls == 1
+    assert len(conversations.results) == 1
+
+    forbidden = client.post(
+        "/api/chat/stream",
+        headers={**headers, "X-Session-Id": "forged-session", "Idempotency-Key": "forged"},
+        json={"message": "hello"},
+    )
+    assert forbidden.status_code == 403
+    assert forbidden.json() == {"detail": "Forbidden"}
+    assert conversations.calls == 2
+
+
+def test_stream_withholds_action_claim_and_private_execution_failure() -> None:
+    class FixedAgent(AgentRunner):
+        def __init__(self, result: AgentRunResult | None = None) -> None:
+            self.result = result
+
+        def run(
+            self,
+            *,
+            message: str,
+            direct_token: str,
+            subject: str,
+            session_id: str,
+            trace_id: str,
+            turn_id: str,
+        ) -> AgentRunResult:
+            del message, direct_token, subject, session_id, trace_id, turn_id
+            if self.result is None:
+                raise RuntimeError("private provider stack and credential detail")
+            return self.result
+
+    private, public_jwk = key_fixture("current-key")
+    sessions = MemorySessionStore()
+    session_id = sessions.create("user-123")
+    headers = {
+        "Authorization": f"Bearer {direct_token(private, 'current-key')}",
+        "X-Session-Id": session_id,
+        "Idempotency-Key": "unsafe-action",
+    }
+    unsafe_conversations = MemoryConversationStore(sessions)
+    unsafe = TestClient(
+        create_app(
+            settings(),
+            validator=DirectJwtValidator(settings(), CountingJwksSource([public_jwk])),
+            sessions=sessions,
+            conversations=unsafe_conversations,
+            agent=FixedAgent(AgentRunResult("I cancelled it for you.", "completed", tuple())),
+        )
+    ).post("/api/chat/stream", headers=headers, json={"message": "refund"})
+
+    assert unsafe.status_code == 200
+    assert unsafe.text.count("event: error\n") == 1
+    assert '"code":"unsafe_output"' in unsafe.text
+    assert "cancelled" not in unsafe.text.lower()
+    assert len(unsafe_conversations.results) == 1
+
+    failed_conversations = MemoryConversationStore(sessions)
+    failed = TestClient(
+        create_app(
+            settings(),
+            validator=DirectJwtValidator(settings(), CountingJwksSource([public_jwk])),
+            sessions=sessions,
+            conversations=failed_conversations,
+            agent=FixedAgent(),
+        ),
+        raise_server_exceptions=False,
+    ).post(
+        "/api/chat/stream",
+        headers={**headers, "Idempotency-Key": "private-failure"},
+        json={"message": "fail"},
+    )
+    assert failed.status_code == 200
+    assert failed.text.count("event: error\n") == 1
+    assert '"code":"stream_unavailable"' in failed.text
+    assert "private provider" not in failed.text
+    assert failed_conversations.failures == [("server-turn-1", "agent_execution_failed")]
+
+
+def test_stream_maps_bounded_non_success_outcomes_to_one_terminal_error() -> None:
+    class DeniedAgent(AgentRunner):
+        def run(
+            self,
+            *,
+            message: str,
+            direct_token: str,
+            subject: str,
+            session_id: str,
+            trace_id: str,
+            turn_id: str,
+        ) -> AgentRunResult:
+            del message, direct_token, subject, session_id, trace_id, turn_id
+            return AgentRunResult("private provider response", "provider_denied", tuple())
+
+    private, public_jwk = key_fixture("current-key")
+    sessions = MemorySessionStore()
+    session_id = sessions.create("user-123")
+    response = TestClient(
+        create_app(
+            settings(),
+            validator=DirectJwtValidator(settings(), CountingJwksSource([public_jwk])),
+            sessions=sessions,
+            conversations=MemoryConversationStore(sessions),
+            agent=DeniedAgent(),
+        )
+    ).post(
+        "/api/chat/stream",
+        headers={
+            "Authorization": f"Bearer {direct_token(private, 'current-key')}",
+            "X-Session-Id": session_id,
+            "Idempotency-Key": "provider-denied",
+        },
+        json={"message": "hello"},
+    )
+
+    assert response.status_code == 200
+    assert response.text.count("event: error\n") == 1
+    assert "event: token" not in response.text
+    assert "event: done" not in response.text
+    assert '"code":"provider_unavailable"' in response.text
+    assert "private provider response" not in response.text
+
+
+def test_feedback_is_owner_scoped_append_only_and_idempotent() -> None:
+    private, public_jwk = key_fixture("current-key")
+    sessions = MemorySessionStore()
+    session_id = sessions.create("user-123")
+    trace_id = "00000000-0000-0000-0000-000000000821"
+    feedback = MemoryFeedbackStore(sessions, {trace_id: (session_id, "user-123")})
+    client = TestClient(
+        create_app(
+            settings(),
+            validator=DirectJwtValidator(settings(), CountingJwksSource([public_jwk])),
+            sessions=sessions,
+            conversations=MemoryConversationStore(sessions),
+            agent=MemoryAgent(),
+            feedback=feedback,
+        )
+    )
+    headers = {
+        "Authorization": f"Bearer {direct_token(private, 'current-key')}",
+        "X-Session-Id": session_id,
+        "Idempotency-Key": "feedback-one",
+    }
+    body = {"traceId": trace_id, "rating": "POSITIVE", "comment": "Helpful"}
+
+    first = client.post("/api/feedback", headers=headers, json=body)
+    replay = client.post("/api/feedback", headers=headers, json=body)
+
+    assert first.status_code == 201
+    assert replay.json() == first.json()
+    assert first.json() == {
+        "feedbackId": "server-feedback-1",
+        "traceId": trace_id,
+        "rating": "POSITIVE",
+    }
+    assert len(feedback.records) == 1
+    assert (
+        client.post(
+            "/api/feedback",
+            headers=headers,
+            json={**body, "rating": "NEGATIVE"},
+        ).status_code
+        == 409
+    )
+    assert (
+        client.post(
+            "/api/feedback",
+            headers={**headers, "Idempotency-Key": "unknown-trace"},
+            json={**body, "traceId": "00000000-0000-0000-0000-000000000999"},
+        ).status_code
+        == 403
+    )
+    assert (
+        client.post(
+            "/api/feedback",
+            headers={**headers, "Idempotency-Key": "client-owner"},
+            json={**body, "userSubject": "other-user"},
+        ).status_code
+        == 422
+    )
+    other_token = direct_token(private, "current-key", subject="other-user")
+    assert (
+        client.post(
+            "/api/feedback",
+            headers={
+                **headers,
+                "Authorization": f"Bearer {other_token}",
+                "Idempotency-Key": "cross-user",
+            },
+            json=body,
+        ).status_code
+        == 403
+    )
+    assert (
+        client.post(
+            "/api/feedback",
+            headers={**headers, "X-Eval-Sandbox-Id": "forbidden"},
+            json=body,
+        ).status_code
+        == 401
+    )

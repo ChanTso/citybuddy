@@ -25,3 +25,4 @@ GRANT SELECT, INSERT ON cs_db.support_session TO 'agent_app'@'%';
 GRANT SELECT, INSERT, UPDATE ON cs_db.support_conversation TO 'agent_app'@'%';
 GRANT SELECT, INSERT, UPDATE ON cs_db.support_turn TO 'agent_app'@'%';
 GRANT SELECT, INSERT ON cs_db.support_event TO 'agent_app'@'%';
+GRANT SELECT, INSERT ON cs_db.support_feedback TO 'agent_app'@'%';

@@ -6,14 +6,14 @@ import secrets
 import time
 import uuid
 from collections.abc import Mapping
-from typing import Any, Protocol
+from typing import Any, Literal, Protocol
 
 import httpx
 import jwt
 import pymysql
 from fastapi import FastAPI, Header, HTTPException, Request
 from fastapi.exceptions import RequestValidationError
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel, ConfigDict, Field
 
 from .agent_control import (
@@ -28,12 +28,20 @@ from .agent_control import (
 )
 from .conversation import (
     ConversationOwnershipError,
+    ConversationResult,
     ConversationStore,
     CorrelationConflictError,
     MysqlConversationStore,
     TurnFailedError,
     TurnInProgressError,
 )
+from .feedback import (
+    FeedbackConflictError,
+    FeedbackOwnershipError,
+    FeedbackStore,
+    MysqlFeedbackStore,
+)
+from .sse import SseEgressFilter, SseProjectionError, stream_events
 
 SESSION_PERMISSION = "support:session:create"
 CHAT_PERMISSION = "support:chat"
@@ -245,6 +253,22 @@ class ChatResponse(BaseModel):
     outcome: str
 
 
+class FeedbackRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid", populate_by_name=True)
+
+    trace_id: uuid.UUID = Field(alias="traceId")
+    rating: Literal["POSITIVE", "NEGATIVE"]
+    comment: str | None = Field(default=None, min_length=1, max_length=1000)
+
+
+class FeedbackResponse(BaseModel):
+    model_config = ConfigDict(frozen=True)
+
+    feedback_id: str = Field(serialization_alias="feedbackId")
+    trace_id: str = Field(serialization_alias="traceId")
+    rating: Literal["POSITIVE", "NEGATIVE"]
+
+
 class OboClient:
     """JIT exchange boundary used by future server-owned ToolSpecs."""
 
@@ -286,6 +310,7 @@ def create_app(
     sessions: SessionStore | None = None,
     conversations: ConversationStore | None = None,
     agent: AgentRunner | None = None,
+    feedback: FeedbackStore | None = None,
 ) -> FastAPI:
     """Construct the app, enabling identity routes only with complete runtime configuration."""
     resolved = settings or AgentSettings()
@@ -305,9 +330,13 @@ def create_app(
     )
     resolved_sessions = sessions or MysqlSessionStore(resolved)
     resolved_conversations = conversations or MysqlConversationStore(resolved)
+    resolved_feedback = feedback or MysqlFeedbackStore(resolved)
+    sse_filter = SseEgressFilter()
     app.state.validator = resolved_validator
     app.state.sessions = resolved_sessions
     app.state.conversations = resolved_conversations
+    app.state.feedback = resolved_feedback
+    app.state.sse_filter = sse_filter
     resolved_obo = OboClient(resolved, resolved_sessions)
     resolved_agent = agent or BoundedAgent(
         RuleRouter(),
@@ -331,6 +360,59 @@ def create_app(
     app.state.obo_client = resolved_obo
     app.state.agent = resolved_agent
 
+    def authorize(
+        authorization: str | None,
+        x_eval_sandbox_id: str | None,
+        permission: str,
+    ) -> tuple[DirectPrincipal, str]:
+        if (
+            x_eval_sandbox_id is not None
+            or authorization is None
+            or not authorization.startswith("Bearer ")
+        ):
+            raise HTTPException(status_code=401, detail="Unauthorized")
+        token = authorization[7:]
+        principal = resolved_validator.validate(token)
+        if permission not in principal.permissions:
+            raise HTTPException(status_code=403, detail="Forbidden")
+        return principal, token
+
+    def execute_turn(
+        request: ChatRequest,
+        *,
+        token: str,
+        principal: DirectPrincipal,
+        session_id: str,
+        correlation_key: str,
+    ) -> ConversationResult:
+        resolved_sessions.verify_owner(session_id, principal.subject)
+        start = resolved_conversations.begin_turn(
+            session_id=session_id,
+            subject=principal.subject,
+            correlation_key=correlation_key,
+            message=request.message,
+        )
+        if start.replay is not None:
+            return start.replay
+        try:
+            agent_result = resolved_agent.run(
+                message=request.message,
+                direct_token=token,
+                subject=principal.subject,
+                session_id=session_id,
+                trace_id=start.trace_id,
+                turn_id=start.turn_id,
+            )
+            return resolved_conversations.complete_turn(
+                start=start,
+                response_text=agent_result.response_text,
+                outcome=agent_result.outcome,
+                events=agent_result.events,
+            )
+        except Exception:
+            resolved_conversations.fail_turn(start=start, failure_code="agent_execution_failed")
+            raise
+
     @app.post("/api/sessions", response_model=SessionResponse, status_code=201)
     def create_session(
         request: SessionCreateRequest,
@@ -338,15 +420,7 @@ def create_app(
         x_eval_sandbox_id: str | None = Header(default=None),
     ) -> SessionResponse:
         del request
-        if (
-            x_eval_sandbox_id is not None
-            or authorization is None
-            or not authorization.startswith("Bearer ")
-        ):
-            raise HTTPException(status_code=401, detail="Unauthorized")
-        principal = resolved_validator.validate(authorization[7:])
-        if SESSION_PERMISSION not in principal.permissions:
-            raise HTTPException(status_code=403, detail="Forbidden")
+        principal, _ = authorize(authorization, x_eval_sandbox_id, SESSION_PERMISSION)
         return SessionResponse(session_id=resolved_sessions.create(principal.subject))
 
     @app.post("/api/chat", response_model=ChatResponse)
@@ -357,46 +431,15 @@ def create_app(
         idempotency_key: str = Header(min_length=1, max_length=128),
         x_eval_sandbox_id: str | None = Header(default=None),
     ) -> ChatResponse:
-        if (
-            x_eval_sandbox_id is not None
-            or authorization is None
-            or not authorization.startswith("Bearer ")
-        ):
-            raise HTTPException(status_code=401, detail="Unauthorized")
-        principal = resolved_validator.validate(authorization[7:])
-        if CHAT_PERMISSION not in principal.permissions:
-            raise HTTPException(status_code=403, detail="Forbidden")
+        principal, token = authorize(authorization, x_eval_sandbox_id, CHAT_PERMISSION)
         try:
-            resolved_sessions.verify_owner(x_session_id, principal.subject)
-            start = resolved_conversations.begin_turn(
+            result = execute_turn(
+                request,
+                token=token,
+                principal=principal,
                 session_id=x_session_id,
-                subject=principal.subject,
                 correlation_key=idempotency_key,
-                message=request.message,
             )
-            if start.replay is not None:
-                result = start.replay
-            else:
-                try:
-                    agent_result = resolved_agent.run(
-                        message=request.message,
-                        direct_token=authorization[7:],
-                        subject=principal.subject,
-                        session_id=x_session_id,
-                        trace_id=start.trace_id,
-                        turn_id=start.turn_id,
-                    )
-                    result = resolved_conversations.complete_turn(
-                        start=start,
-                        response_text=agent_result.response_text,
-                        outcome=agent_result.outcome,
-                        events=agent_result.events,
-                    )
-                except Exception:
-                    resolved_conversations.fail_turn(
-                        start=start, failure_code="agent_execution_failed"
-                    )
-                    raise
         except ConversationOwnershipError as exception:
             raise HTTPException(status_code=403, detail="Forbidden") from exception
         except CorrelationConflictError as exception:
@@ -413,6 +456,83 @@ def create_app(
             turn_id=result.turn_id,
             reply=result.response_text,
             outcome=result.outcome,
+        )
+
+    @app.post("/api/chat/stream")
+    def chat_stream(
+        request: ChatRequest,
+        http_request: Request,
+        authorization: str | None = Header(default=None),
+        x_session_id: str = Header(min_length=1, max_length=64),
+        idempotency_key: str = Header(min_length=1, max_length=128),
+        x_eval_sandbox_id: str | None = Header(default=None),
+    ) -> StreamingResponse:
+        principal, token = authorize(authorization, x_eval_sandbox_id, CHAT_PERMISSION)
+        try:
+            result = execute_turn(
+                request,
+                token=token,
+                principal=principal,
+                session_id=x_session_id,
+                correlation_key=idempotency_key,
+            )
+        except ConversationOwnershipError as exception:
+            raise HTTPException(status_code=403, detail="Forbidden") from exception
+        except CorrelationConflictError as exception:
+            raise HTTPException(status_code=409, detail="Idempotency conflict") from exception
+        except TurnInProgressError as exception:
+            raise HTTPException(status_code=409, detail="Turn in progress") from exception
+        except TurnFailedError as exception:
+            raise HTTPException(status_code=503, detail="Service unavailable") from exception
+        except pymysql.MySQLError as exception:
+            raise HTTPException(status_code=503, detail="Service unavailable") from exception
+        except HTTPException:
+            raise
+        except Exception:
+            events = sse_filter.terminal_error("stream_unavailable")
+        else:
+            try:
+                events = sse_filter.project_result(result)
+            except SseProjectionError:
+                events = sse_filter.terminal_error("unsafe_output")
+        return StreamingResponse(
+            stream_events(events, http_request.is_disconnected),
+            media_type="text/event-stream",
+            headers={
+                "Cache-Control": "no-cache, no-store",
+                "X-Accel-Buffering": "no",
+            },
+        )
+
+    @app.post("/api/feedback", response_model=FeedbackResponse, status_code=201)
+    def append_feedback(
+        request: FeedbackRequest,
+        authorization: str | None = Header(default=None),
+        x_session_id: str = Header(min_length=1, max_length=64),
+        idempotency_key: str = Header(min_length=1, max_length=128),
+        x_eval_sandbox_id: str | None = Header(default=None),
+    ) -> FeedbackResponse:
+        principal, _ = authorize(authorization, x_eval_sandbox_id, CHAT_PERMISSION)
+        try:
+            resolved_sessions.verify_owner(x_session_id, principal.subject)
+            record = resolved_feedback.append(
+                session_id=x_session_id,
+                subject=principal.subject,
+                trace_id=str(request.trace_id),
+                idempotency_key=idempotency_key,
+                rating=request.rating,
+                comment=request.comment,
+            )
+        except FeedbackOwnershipError as exception:
+            raise HTTPException(status_code=403, detail="Forbidden") from exception
+        except FeedbackConflictError as exception:
+            raise HTTPException(status_code=409, detail="Idempotency conflict") from exception
+        except pymysql.MySQLError as exception:
+            raise HTTPException(status_code=503, detail="Service unavailable") from exception
+        return FeedbackResponse(
+            feedback_id=record.feedback_id,
+            trace_id=record.trace_id,
+            rating=record.rating,
         )
 
     return app
