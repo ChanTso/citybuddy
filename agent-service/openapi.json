@@ -1,6 +1,6 @@
 {
   "openapi": "3.1.0",
-  "info": {"title": "CityBuddy agent identity API", "version": "CB-020"},
+  "info": {"title": "CityBuddy agent API", "version": "CB-080"},
   "paths": {
     "/api/sessions": {
       "post": {
@@ -8,17 +8,125 @@
         "security": [{"directUserBearer": []}],
         "requestBody": {
           "required": true,
-          "content": {"application/json": {"schema": {"type": "object", "additionalProperties": false, "maxProperties": 0}}}
+          "content": {
+            "application/json": {
+              "schema": {"type": "object", "additionalProperties": false, "maxProperties": 0}
+            }
+          }
         },
         "responses": {
           "201": {
             "description": "Opaque server-owned support session",
-            "content": {"application/json": {"schema": {"type": "object", "additionalProperties": false, "required": ["sessionId"], "properties": {"sessionId": {"type": "string"}}}}}
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "required": ["sessionId"],
+                  "properties": {"sessionId": {"type": "string", "minLength": 1, "maxLength": 64}}
+                }
+              }
+            }
           },
-          "401": {"description": "Invalid direct-user JWT or production evaluation context"}
+          "401": {"$ref": "#/components/responses/Unauthorized"},
+          "403": {"$ref": "#/components/responses/Forbidden"},
+          "422": {"$ref": "#/components/responses/InvalidRequest"}
+        }
+      }
+    },
+    "/api/chat": {
+      "post": {
+        "operationId": "completeSupportTurn",
+        "security": [{"directUserBearer": []}],
+        "parameters": [
+          {
+            "name": "X-Session-Id",
+            "in": "header",
+            "required": true,
+            "schema": {"type": "string", "minLength": 1, "maxLength": 64}
+          },
+          {
+            "name": "Idempotency-Key",
+            "in": "header",
+            "required": true,
+            "schema": {"type": "string", "minLength": 1, "maxLength": 128}
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": ["message"],
+                "properties": {"message": {"type": "string", "minLength": 1, "maxLength": 4000}}
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Durable deterministic support turn result",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "required": ["conversationId", "traceId", "turnId", "reply", "outcome"],
+                  "properties": {
+                    "conversationId": {"type": "string", "format": "uuid", "readOnly": true},
+                    "traceId": {"type": "string", "format": "uuid", "readOnly": true},
+                    "turnId": {"type": "string", "format": "uuid", "readOnly": true},
+                    "reply": {"type": "string", "maxLength": 256},
+                    "outcome": {"type": "string", "enum": ["completed"]}
+                  }
+                }
+              }
+            }
+          },
+          "401": {"$ref": "#/components/responses/Unauthorized"},
+          "403": {"$ref": "#/components/responses/Forbidden"},
+          "409": {"$ref": "#/components/responses/Conflict"},
+          "422": {"$ref": "#/components/responses/InvalidRequest"},
+          "503": {"$ref": "#/components/responses/Unavailable"}
         }
       }
     }
   },
-  "components": {"securitySchemes": {"directUserBearer": {"type": "http", "scheme": "bearer", "bearerFormat": "RS256 JWT"}}}
+  "components": {
+    "securitySchemes": {
+      "directUserBearer": {"type": "http", "scheme": "bearer", "bearerFormat": "RS256 JWT"}
+    },
+    "schemas": {
+      "PublicError": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["detail"],
+        "properties": {"detail": {"type": "string", "maxLength": 64}}
+      }
+    },
+    "responses": {
+      "Unauthorized": {
+        "description": "Invalid direct-user identity or production evaluation context",
+        "content": {"application/json": {"schema": {"$ref": "#/components/schemas/PublicError"}}}
+      },
+      "Forbidden": {
+        "description": "Permission or persisted session ownership rejected",
+        "content": {"application/json": {"schema": {"$ref": "#/components/schemas/PublicError"}}}
+      },
+      "Conflict": {
+        "description": "Idempotency key reused for a different request",
+        "content": {"application/json": {"schema": {"$ref": "#/components/schemas/PublicError"}}}
+      },
+      "InvalidRequest": {
+        "description": "Malformed or unknown request field",
+        "content": {"application/json": {"schema": {"$ref": "#/components/schemas/PublicError"}}}
+      },
+      "Unavailable": {
+        "description": "Durable support truth is unavailable",
+        "content": {"application/json": {"schema": {"$ref": "#/components/schemas/PublicError"}}}
+      }
+    }
+  }
 }

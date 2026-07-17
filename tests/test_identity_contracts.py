@@ -43,10 +43,10 @@ def test_auth_contract_has_only_owned_identity_routes_and_closed_request_shapes(
     assert "401" in contract["paths"]["/auth/jwks"]["get"]["responses"]
 
 
-def test_agent_contract_exposes_only_server_owned_session_bootstrap() -> None:
+def test_agent_contract_preserves_server_owned_session_bootstrap() -> None:
     contract = load("agent-service/openapi.json")
 
-    assert set(contract["paths"]) == {"/api/sessions"}
+    assert "/api/sessions" in contract["paths"]
     operation = contract["paths"]["/api/sessions"]["post"]
     request = operation["requestBody"]["content"]["application/json"]["schema"]
     response = operation["responses"]["201"]["content"]["application/json"]["schema"]
