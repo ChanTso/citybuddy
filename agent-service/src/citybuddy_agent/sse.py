@@ -43,6 +43,25 @@ _ACTION_COMPLETION_WORDS = {
     "successful",
     "successfully",
 }
+_COMPLETED_ACTION_VERBS = {
+    "canceled",
+    "cancelled",
+    "ordered",
+    "paid",
+    "purchased",
+    "refunded",
+}
+_NEGATION_WORDS = {"cannot", "never", "no", "not"}
+_NEGATION_BRIDGE_WORDS = {
+    "actually",
+    "already",
+    "be",
+    "been",
+    "being",
+    "fully",
+    "successfully",
+    "yet",
+}
 _SENSITIVE_ACTION_CJK = ("订单", "下单", "退款", "支付", "付款", "取消")
 _ACTION_COMPLETION_CJK = (
     "成功",
@@ -54,6 +73,31 @@ _ACTION_COMPLETION_CJK = (
     "已付款",
     "已取消",
 )
+_NEGATION_CJK = ("没有", "尚未", "并未", "还未", "还没", "未", "没", "不")
+
+
+def _is_negated(words: list[str], index: int) -> bool:
+    for negation_index in range(max(0, index - 4), index):
+        if words[negation_index] not in _NEGATION_WORDS:
+            continue
+        if all(word in _NEGATION_BRIDGE_WORDS for word in words[negation_index + 1 : index]):
+            return True
+    return False
+
+
+def _has_unnegated_word(words: list[str], candidates: set[str]) -> bool:
+    return any(
+        word in candidates and not _is_negated(words, index) for index, word in enumerate(words)
+    )
+
+
+def _has_unnegated_cjk_completion(text: str) -> bool:
+    for completion in _ACTION_COMPLETION_CJK:
+        for match in re.finditer(re.escape(completion), text):
+            prefix = text[max(0, match.start() - 4) : match.start()]
+            if not any(prefix.endswith(negation) for negation in _NEGATION_CJK):
+                return True
+    return False
 
 
 def _contains_unreceipted_action_claim(text: str) -> bool:
@@ -61,11 +105,20 @@ def _contains_unreceipted_action_claim(text: str) -> bool:
     normalized = "".join(
         character for character in normalized if unicodedata.category(character) != "Cf"
     )
-    words = set(re.findall(r"[a-z0-9]+", normalized))
-    if words & _SENSITIVE_ACTION_WORDS and words & _ACTION_COMPLETION_WORDS:
+    normalized = re.sub(
+        r"\b(?:are|could|did|does|do|had|has|have|is|should|was|were|would|will)n['’]t\b",
+        " not ",
+        normalized,
+    ).replace("can't", " cannot ")
+    words = re.findall(r"[a-z0-9]+", normalized)
+    if _has_unnegated_word(words, _COMPLETED_ACTION_VERBS):
         return True
-    return any(action in normalized for action in _SENSITIVE_ACTION_CJK) and any(
-        completion in normalized for completion in _ACTION_COMPLETION_CJK
+    if set(words) & _SENSITIVE_ACTION_WORDS and _has_unnegated_word(
+        words, _ACTION_COMPLETION_WORDS
+    ):
+        return True
+    return any(action in normalized for action in _SENSITIVE_ACTION_CJK) and (
+        _has_unnegated_cjk_completion(normalized)
     )
 
 

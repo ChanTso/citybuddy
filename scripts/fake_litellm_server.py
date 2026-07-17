@@ -88,7 +88,7 @@ async def complete(request: Request) -> JSONResponse:
         await asyncio.sleep(0.2)
         return JSONResponse(content=response_message("The bounded response completed safely."))
     if selected == "unsafe-action-claim":
-        return JSONResponse(content=response_message("Your cancellation is complete."))
+        return JSONResponse(content=response_message("It has been refunded."))
     if selected in {"same-tier-fallback", "circuit-fail"} and model.endswith("primary"):
         return JSONResponse(status_code=503, content={"error": "transient"})
     if selected == "budget-exhaustion":

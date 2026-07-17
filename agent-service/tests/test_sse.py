@@ -94,6 +94,9 @@ def test_filter_rejects_unknown_private_reordered_duplicate_and_synthetic_source
         "Your refund—SUCCESSFUL.",
         "PAYMENT\nAPPROVED.",
         "Your pay​ment was finalized.",
+        "It has been refunded.",
+        "I cancelled it for you.",
+        "I am not guessing; I refunded it.",
         "退款已完成。",
         "订单取消成功。",
     ],
@@ -111,6 +114,12 @@ def test_filter_withholds_action_success_language_without_receipt_truth(claim: s
         "I can explain how to request a refund.",
         "Your order status is still pending.",
         "Payment options are available.",
+        "Your order is not complete.",
+        "The refund was never successful.",
+        "It has not yet been refunded.",
+        "Payment hasn't succeeded.",
+        "退款尚未成功。",
+        "支付没有成功。",
     ],
 )
 def test_filter_preserves_non_success_action_guidance(safe_text: str) -> None:

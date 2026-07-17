@@ -737,16 +737,14 @@ def test_stream_withholds_action_claim_and_private_execution_failure() -> None:
             validator=DirectJwtValidator(settings(), CountingJwksSource([public_jwk])),
             sessions=sessions,
             conversations=unsafe_conversations,
-            agent=FixedAgent(
-                AgentRunResult("Your cancellation is complete.", "completed", tuple())
-            ),
+            agent=FixedAgent(AgentRunResult("I cancelled it for you.", "completed", tuple())),
         )
     ).post("/api/chat/stream", headers=headers, json={"message": "refund"})
 
     assert unsafe.status_code == 200
     assert unsafe.text.count("event: error\n") == 1
     assert '"code":"unsafe_output"' in unsafe.text
-    assert "cancellation" not in unsafe.text.lower()
+    assert "cancelled" not in unsafe.text.lower()
     assert len(unsafe_conversations.results) == 1
 
     failed_conversations = MemoryConversationStore(sessions)
