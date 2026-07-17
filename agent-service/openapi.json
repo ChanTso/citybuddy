@@ -1,6 +1,6 @@
 {
   "openapi": "3.1.0",
-  "info": {"title": "CityBuddy agent API", "version": "CB-081"},
+  "info": {"title": "CityBuddy agent API", "version": "CB-082"},
   "paths": {
     "/api/sessions": {
       "post": {
@@ -95,6 +95,99 @@
           "503": {"$ref": "#/components/responses/Unavailable"}
         }
       }
+    },
+    "/api/chat/stream": {
+      "post": {
+        "operationId": "streamSupportTurn",
+        "security": [{"directUserBearer": []}],
+        "parameters": [
+          {
+            "name": "X-Session-Id",
+            "in": "header",
+            "required": true,
+            "schema": {"type": "string", "minLength": 1, "maxLength": 64}
+          },
+          {
+            "name": "Idempotency-Key",
+            "in": "header",
+            "required": true,
+            "schema": {"type": "string", "minLength": 1, "maxLength": 128}
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": ["message"],
+                "properties": {"message": {"type": "string", "minLength": 1, "maxLength": 4000}}
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Bounded filtered projection of one durable support turn",
+            "content": {
+              "text/event-stream": {
+                "schema": {"type": "string"},
+                "x-sse-events": {
+                  "token": {"$ref": "#/components/schemas/SseTokenData"},
+                  "action_receipt": {"$ref": "#/components/schemas/SseActionReceiptData"},
+                  "done": {"$ref": "#/components/schemas/SseDoneData"},
+                  "error": {"$ref": "#/components/schemas/SseErrorData"}
+                }
+              }
+            }
+          },
+          "401": {"$ref": "#/components/responses/Unauthorized"},
+          "403": {"$ref": "#/components/responses/Forbidden"},
+          "409": {"$ref": "#/components/responses/Conflict"},
+          "422": {"$ref": "#/components/responses/InvalidRequest"},
+          "503": {"$ref": "#/components/responses/Unavailable"}
+        }
+      }
+    },
+    "/api/feedback": {
+      "post": {
+        "operationId": "appendSupportFeedback",
+        "security": [{"directUserBearer": []}],
+        "parameters": [
+          {
+            "name": "X-Session-Id",
+            "in": "header",
+            "required": true,
+            "schema": {"type": "string", "minLength": 1, "maxLength": 64}
+          },
+          {
+            "name": "Idempotency-Key",
+            "in": "header",
+            "required": true,
+            "schema": {"type": "string", "minLength": 1, "maxLength": 128}
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {"schema": {"$ref": "#/components/schemas/FeedbackRequest"}}
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "One immutable owner-authorized feedback signal",
+            "content": {
+              "application/json": {"schema": {"$ref": "#/components/schemas/FeedbackResponse"}}
+            }
+          },
+          "401": {"$ref": "#/components/responses/Unauthorized"},
+          "403": {"$ref": "#/components/responses/Forbidden"},
+          "409": {"$ref": "#/components/responses/Conflict"},
+          "422": {"$ref": "#/components/responses/InvalidRequest"},
+          "503": {"$ref": "#/components/responses/Unavailable"}
+        }
+      }
     }
   },
   "components": {
@@ -107,6 +200,75 @@
         "additionalProperties": false,
         "required": ["detail"],
         "properties": {"detail": {"type": "string", "maxLength": 64}}
+      },
+      "SseTokenData": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["sequence", "text"],
+        "properties": {
+          "sequence": {"type": "integer", "minimum": 1, "maximum": 4},
+          "text": {"type": "string", "minLength": 1, "maxLength": 64}
+        }
+      },
+      "SseActionReceiptData": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["sequence", "receiptId", "status"],
+        "properties": {
+          "sequence": {"type": "integer", "minimum": 1, "maximum": 5},
+          "receiptId": {"type": "string", "format": "uuid", "readOnly": true},
+          "status": {"type": "string", "enum": ["SUCCEEDED"]}
+        },
+        "description": "Reserved for verified CB-120/CB-121 receipt truth; CB-082 does not emit it."
+      },
+      "SseDoneData": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["sequence", "conversationId", "traceId", "turnId", "outcome"],
+        "properties": {
+          "sequence": {"type": "integer", "minimum": 1, "maximum": 5},
+          "conversationId": {"type": "string", "format": "uuid", "readOnly": true},
+          "traceId": {"type": "string", "format": "uuid", "readOnly": true},
+          "turnId": {"type": "string", "format": "uuid", "readOnly": true},
+          "outcome": {"type": "string", "enum": ["completed"]}
+        }
+      },
+      "SseErrorData": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["sequence", "code"],
+        "properties": {
+          "sequence": {"type": "integer", "const": 1},
+          "code": {
+            "type": "string",
+            "enum": [
+              "attempt_budget_exhausted",
+              "provider_unavailable",
+              "stream_unavailable",
+              "unsafe_output"
+            ]
+          }
+        }
+      },
+      "FeedbackRequest": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["traceId", "rating"],
+        "properties": {
+          "traceId": {"type": "string", "format": "uuid"},
+          "rating": {"type": "string", "enum": ["POSITIVE", "NEGATIVE"]},
+          "comment": {"type": "string", "minLength": 1, "maxLength": 1000}
+        }
+      },
+      "FeedbackResponse": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["feedbackId", "traceId", "rating"],
+        "properties": {
+          "feedbackId": {"type": "string", "format": "uuid", "readOnly": true},
+          "traceId": {"type": "string", "format": "uuid", "readOnly": true},
+          "rating": {"type": "string", "enum": ["POSITIVE", "NEGATIVE"]}
+        }
       }
     },
     "responses": {

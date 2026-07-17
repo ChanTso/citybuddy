@@ -1,4 +1,4 @@
-"""Deterministic LiteLLM-compatible and timeout-tool fixture for CB-081 evidence."""
+"""Deterministic LiteLLM-compatible fixture for CB-081 and CB-082 evidence."""
 
 from __future__ import annotations
 
@@ -27,6 +27,9 @@ def scenario(message: str) -> str:
         "circuit-fail",
         "circuit-open",
         "circuit-recover",
+        "provider-failure",
+        "unsafe-action-claim",
+        "disconnect-slow",
     ):
         if value in message:
             return value
@@ -79,6 +82,13 @@ async def complete(request: Request) -> JSONResponse:
 
     if selected == "transient-retry" and counts[f"{selected}:{model}"] == 1:
         return JSONResponse(status_code=503, content={"error": "transient"})
+    if selected == "provider-failure":
+        return JSONResponse(status_code=400, content={"error": "terminal"})
+    if selected == "disconnect-slow":
+        await asyncio.sleep(0.2)
+        return JSONResponse(content=response_message("The bounded response completed safely."))
+    if selected == "unsafe-action-claim":
+        return JSONResponse(content=response_message("Your refund was successful."))
     if selected in {"same-tier-fallback", "circuit-fail"} and model.endswith("primary"):
         return JSONResponse(status_code=503, content={"error": "transient"})
     if selected == "budget-exhaustion":
@@ -99,7 +109,7 @@ async def complete(request: Request) -> JSONResponse:
         return JSONResponse(content=tool_message("model.selected.tool", "{}"))
     if has_tool_feedback:
         counts[f"{selected}:feedback"] += 1
-        return JSONResponse(content=response_message("The bounded tool path completed safely."))
+        return JSONResponse(content=response_message("The requested information is available."))
     return JSONResponse(content=response_message("The bounded support route completed safely."))
 
 

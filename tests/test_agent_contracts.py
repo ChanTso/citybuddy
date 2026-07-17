@@ -51,6 +51,59 @@ def test_chat_response_is_allowlisted_and_server_ids_are_read_only() -> None:
     assert set(operation["responses"]) == {"200", "401", "403", "409", "422", "503"}
 
 
+def test_stream_contract_fixes_headers_event_names_and_allowlisted_payloads() -> None:
+    payload = contract()
+    operation = payload["paths"]["/api/chat/stream"]["post"]
+
+    assert operation["security"] == [{"directUserBearer": []}]
+    assert {item["name"] for item in operation["parameters"]} == {
+        "X-Session-Id",
+        "Idempotency-Key",
+    }
+    request = operation["requestBody"]["content"]["application/json"]["schema"]
+    assert request["additionalProperties"] is False
+    assert request["required"] == ["message"]
+    stream = operation["responses"]["200"]["content"]["text/event-stream"]
+    assert set(stream["x-sse-events"]) == {"token", "action_receipt", "done", "error"}
+    expected_fields = {
+        "SseTokenData": {"sequence", "text"},
+        "SseActionReceiptData": {"sequence", "receiptId", "status"},
+        "SseDoneData": {"sequence", "conversationId", "traceId", "turnId", "outcome"},
+        "SseErrorData": {"sequence", "code"},
+    }
+    for schema_name, fields in expected_fields.items():
+        schema = payload["components"]["schemas"][schema_name]
+        assert schema["additionalProperties"] is False
+        assert set(schema["properties"]) == fields
+        assert set(schema["required"]) == fields
+
+    source = (ROOT / "agent-service/src/citybuddy_agent/sse.py").read_text(encoding="utf-8")
+    assert "MAX_PUBLIC_EVENTS" in source
+    assert "is_disconnected" in source
+    assert "create_task" not in source
+    assert "Thread" not in source
+
+
+def test_feedback_contract_has_no_body_owner_and_returns_server_identity() -> None:
+    payload = contract()
+    operation = payload["paths"]["/api/feedback"]["post"]
+    request = payload["components"]["schemas"]["FeedbackRequest"]
+    response = payload["components"]["schemas"]["FeedbackResponse"]
+
+    assert operation["security"] == [{"directUserBearer": []}]
+    assert {item["name"] for item in operation["parameters"]} == {
+        "X-Session-Id",
+        "Idempotency-Key",
+    }
+    assert request["additionalProperties"] is False
+    assert set(request["properties"]) == {"traceId", "rating", "comment"}
+    assert "userSubject" not in request["properties"]
+    assert "sessionId" not in request["properties"]
+    assert response["additionalProperties"] is False
+    assert set(response["properties"]) == {"feedbackId", "traceId", "rating"}
+    assert response["properties"]["feedbackId"]["readOnly"] is True
+
+
 def test_support_truth_schema_and_runtime_grants_fix_order_and_append_only_evidence() -> None:
     migration = (
         ROOT / "infra/mysql/migrations/agent/V003__support_conversation_lifecycle.sql"
@@ -97,6 +150,34 @@ def test_bounded_agent_migration_preserves_terminal_and_append_only_truth() -> N
     assert "state = 'PROCESSING'" in migration
     assert "processing_deadline_at IS NOT NULL" in migration
     assert "processing_deadline_at IS NULL" in migration
+
+
+def test_feedback_schema_and_grants_are_owner_bound_and_append_only() -> None:
+    migration = (ROOT / "infra/mysql/migrations/agent/V005__support_feedback.sql").read_text(
+        encoding="utf-8"
+    )
+    grants = (ROOT / "infra/mysql/grants/V001__migration_access.sql").read_text(encoding="utf-8")
+
+    assert "UNIQUE KEY uq_support_feedback_intent (session_id, idempotency_key)" in migration
+    assert (
+        "UNIQUE KEY uq_support_turn_feedback_binding (trace_id, session_id, user_subject)"
+        in migration
+    )
+    assert "FOREIGN KEY (trace_id, session_id, user_subject)" in migration
+    assert "REFERENCES support_turn (trace_id, session_id, user_subject)" in migration
+    assert "rating IN ('POSITIVE', 'NEGATIVE')" in migration
+    assert "GRANT SELECT, INSERT ON cs_db.support_feedback TO 'agent_app'@'%';" in grants
+    assert "UPDATE ON cs_db.support_feedback" not in grants
+    assert "DELETE ON cs_db.support_feedback" not in grants
+
+    source = (ROOT / "agent-service/src/citybuddy_agent/feedback.py").read_text(encoding="utf-8")
+    assert "FROM support_conversation " in source
+    assert '"WHERE session_id = %s FOR UPDATE"' in source
+    assert '"SELECT user_subject, sandbox_id FROM support_session "' in source
+    assert (
+        'support_session "\n                        "WHERE session_id = %s FOR UPDATE' not in source
+    )
+    assert '"AND idempotency_key = %s FOR UPDATE"' not in source
 
 
 def test_commerce_tool_contract_is_exact_obo_and_bounded_view() -> None:
