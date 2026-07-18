@@ -188,8 +188,8 @@ This file records only factual pitfalls supported by merged pull-request, commit
 
 ## CB-103 — Agent evaluation evidence API
 
-- 现象：首次真实集成尝试通过现有评测沙箱 session 写入 feedback fixture，生产边界按既有规则正确返回 403；这说明证据脚本为了制造可读数据，意外要求了本切片明确禁止新增的评测 feedback 写行为。随后自查又发现，`support_event` 与 `retrieval_decision` 各自格式合法时仍可能对同一 trace 的 outcome 或 index version 给出不同说法，初稿会把矛盾事实一起投影为成功响应。
-- 证据链接：[slice PR #39](https://github.com/ChanTso/citybuddy/pull/39)、[implementation commit `088e9d2`](https://github.com/ChanTso/citybuddy/commit/088e9d2)
-- 根因：只读投影的集成 fixture 混淆了“读取既有权威事实”与“扩张生产写入入口以便造数”；另一方面，逐表验证结构和关联只能证明每一行单独有效，不能证明多个权威记录之间重叠的公开事实一致。
-- 解决：保留既有 chat/feedback 行为不变，由真实 MySQL 管理 fixture 写入一条已存在 feedback truth，再证明 API 仅投影 rating/time 且隐藏 comment。证据读取同时把 retrieval event 的 outcome/index version 与同 trace 的 `retrieval_decision` 逐项交叉校验，任何不一致返回固定 409；真实 MySQL 篡改后拒绝、恢复后成功以及重启稳定性均成为固定证据。专属集成重复通过，随后完整本地 `make ci` 通过。
-- 结论：只读评测切片不能为了制造证据而扩张业务写行为；fixture 应从拥有真值的持久边界布置。跨表证据视图不仅要验证标识关联和单行 schema，还必须校验所有重叠事实，否则“每张表都合法”仍可能组成自相矛盾的假绿响应。
+- 现象：首次真实集成尝试通过现有评测沙箱 session 写入 feedback fixture，生产边界按既有规则正确返回 403；这说明证据脚本为了制造可读数据，意外要求了本切片明确禁止新增的评测 feedback 写行为。随后自查又发现，`support_event` 与 `retrieval_decision` 各自格式合法时仍可能对同一 trace 的 outcome 或 index version 给出不同说法。独立终审进一步证明初稿只校验首尾事件，会放行中间 `TURN_FAILED` 或与 turn truth 冲突的 `AGENT_OUTCOME`；PyMySQL 返回的无时区时间会被序列化为不满足 OpenAPI `date-time` 的字符串，而真实 checker 只查字段存在；所谓日志脱敏证据也只扫描了凭据，没有扫描注入的用户文本、feedback comment、provider 输入和 retrieval 私有字段标记。
+- 证据链接：[slice PR #39](https://github.com/ChanTso/citybuddy/pull/39)、[implementation commit `088e9d2`](https://github.com/ChanTso/citybuddy/commit/088e9d2)、[review recovery `fab6689`](https://github.com/ChanTso/citybuddy/commit/fab6689)
+- 根因：只读投影的集成 fixture 混淆了“读取既有权威事实”与“扩张生产写入入口以便造数”；逐表、逐行和首尾验证只能证明局部结构有效，不能证明跨记录生命周期或重叠事实一致。数据库时间类型还丢失了会话时区语义，测试使用的 aware fixture 掩盖了真实驱动行为；响应脱敏断言也被误当成了服务日志脱敏证据。
+- 解决：保留既有 chat/feedback 行为不变，由真实 MySQL 管理 fixture 写入一条已存在 feedback truth，再证明 API 仅投影 rating/time 且隐藏 comment。证据读取把 retrieval event 与 `retrieval_decision` 的重叠事实交叉校验，并要求 completed 记录以一致的 `AGENT_OUTCOME → ASSISTANT_RESPONSE → TURN_COMPLETED` 收敛、failed 记录只保留合法 accepted-to-failed 序列，任何中间或冲突终态返回 409。MySQL 连接固定 UTC 会话，naive 驱动值显式转换为 aware UTC，wire checker 要求 RFC 3339 offset；真实集成分别篡改冲突 outcome 和中间 terminal，并扫描所有相关服务日志中的每个 CB-103 私密 marker。专属集成、190 项 Python CI 和包构建均通过。
+- 结论：只读评测切片不能为了制造证据而扩张业务写行为；fixture 应从拥有真值的持久边界布置。跨表证据视图不仅要验证标识关联和单行 schema，还必须校验所有重叠事实与完整生命周期。数据库 timestamp 必须同时固定会话时区和 wire offset，aware 单元 fixture 不能替代真实驱动证据；响应与日志是两个不同泄漏面，必须分别注入标记并分别扫描。
