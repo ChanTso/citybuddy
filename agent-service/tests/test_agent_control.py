@@ -201,20 +201,42 @@ class RecordingObo:
     def __init__(self) -> None:
         self.calls: list[tuple[str, str, str, str]] = []
 
-    def exchange(self, direct_token: str, subject: str, session_id: str, scope: str) -> str:
+    def exchange(
+        self,
+        direct_token: str,
+        subject: str,
+        session_id: str,
+        scope: str,
+        sandbox_id: str | None = None,
+    ) -> str:
+        del sandbox_id
         self.calls.append((direct_token, subject, session_id, scope))
         return "signed-obo"
 
 
 class DeniedObo:
-    def exchange(self, direct_token: str, subject: str, session_id: str, scope: str) -> str:
-        del direct_token, subject, session_id, scope
+    def exchange(
+        self,
+        direct_token: str,
+        subject: str,
+        session_id: str,
+        scope: str,
+        sandbox_id: str | None = None,
+    ) -> str:
+        del direct_token, subject, session_id, scope, sandbox_id
         raise HTTPException(status_code=502, detail="Identity exchange rejected")
 
 
 class UnavailableObo:
-    def exchange(self, direct_token: str, subject: str, session_id: str, scope: str) -> str:
-        del direct_token, subject, session_id, scope
+    def exchange(
+        self,
+        direct_token: str,
+        subject: str,
+        session_id: str,
+        scope: str,
+        sandbox_id: str | None = None,
+    ) -> str:
+        del direct_token, subject, session_id, scope, sandbox_id
         raise httpx.ConnectError("identity unavailable")
 
 

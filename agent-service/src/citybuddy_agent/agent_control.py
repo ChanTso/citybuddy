@@ -55,11 +55,19 @@ class AgentRunner(Protocol):
         session_id: str,
         trace_id: str,
         turn_id: str,
+        sandbox_id: str | None = None,
     ) -> AgentRunResult: ...
 
 
 class OboExchange(Protocol):
-    def exchange(self, direct_token: str, subject: str, session_id: str, scope: str) -> str: ...
+    def exchange(
+        self,
+        direct_token: str,
+        subject: str,
+        session_id: str,
+        scope: str,
+        sandbox_id: str | None = None,
+    ) -> str: ...
 
 
 class AttemptBudgetExhausted(Exception):
@@ -607,6 +615,7 @@ class ToolAdapter:
         events: list[AgentEvent],
         plan: ModelPlan | None = None,
         knowledge_allowed: bool = True,
+        sandbox_id: str | None = None,
     ) -> ToolResult:
         spec = self._specs.get(name)
         if spec is None:
@@ -676,19 +685,25 @@ class ToolAdapter:
             raise RuntimeError("Commerce ToolSpec omitted its exact scope")
         try:
             budget.charge("identity_http", spec.scope)
-            obo = self._obo.exchange(direct_token, subject, session_id, spec.scope)
+            if sandbox_id is None:
+                obo = self._obo.exchange(direct_token, subject, session_id, spec.scope)
+            else:
+                obo = self._obo.exchange(direct_token, subject, session_id, spec.scope, sandbox_id)
         except HTTPException:
             return self._deny(name, "identity_denied", events)
         except (httpx.TimeoutException, httpx.NetworkError):
             return self._deny(name, "identity_unavailable", events)
         budget.charge("tool_http", name)
         try:
+            headers = {
+                "Authorization": f"Bearer {obo}",
+                "X-Support-Session-Id": session_id,
+            }
+            if sandbox_id is not None:
+                headers["X-Eval-Sandbox-Id"] = sandbox_id
             response = httpx.post(
                 f"{self._base_url}/internal/tools/{name}",
-                headers={
-                    "Authorization": f"Bearer {obo}",
-                    "X-Support-Session-Id": session_id,
-                },
+                headers=headers,
                 json=arguments.model_dump(by_alias=True),
                 timeout=spec.timeout_seconds,
             )
@@ -789,6 +804,7 @@ class BoundedAgent:
         session_id: str,
         trace_id: str,
         turn_id: str,
+        sandbox_id: str | None = None,
     ) -> AgentRunResult:
         del trace_id, turn_id
         events: list[AgentEvent] = []
@@ -830,6 +846,7 @@ class BoundedAgent:
                     events=events,
                     plan=plan,
                     knowledge_allowed=retrieval_decision is None,
+                    sandbox_id=sandbox_id,
                 )
                 if result.retrieval_decision is not None:
                     retrieval_decision = result.retrieval_decision

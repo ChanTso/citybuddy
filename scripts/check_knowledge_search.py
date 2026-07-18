@@ -34,8 +34,15 @@ class ForbiddenObo:
     def __init__(self) -> None:
         self.calls = 0
 
-    def exchange(self, direct_token: str, subject: str, session_id: str, scope: str) -> str:
-        del direct_token, subject, session_id, scope
+    def exchange(
+        self,
+        direct_token: str,
+        subject: str,
+        session_id: str,
+        scope: str,
+        sandbox_id: str | None = None,
+    ) -> str:
+        del direct_token, subject, session_id, scope, sandbox_id
         self.calls += 1
         raise AssertionError("knowledge.search must not acquire OBO authority")
 

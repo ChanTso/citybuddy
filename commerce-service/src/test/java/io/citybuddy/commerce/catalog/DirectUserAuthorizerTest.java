@@ -116,6 +116,36 @@ class DirectUserAuthorizerTest {
     assertEquals(2, loads.get());
   }
 
+  @Test
+  void evaluationModeRequiresExactTokenAndHeaderSandbox() throws Exception {
+    DirectUserAuthorizer evaluation =
+        new DirectUserAuthorizer(
+            properties.issuer(),
+            properties.userAudience(),
+            properties.jwksCacheTtl(),
+            properties.clockSkew(),
+            properties.requiredPermission(),
+            () -> jwks(signingKey),
+            Clock.fixed(NOW, ZoneOffset.UTC),
+            true);
+    String token =
+        token(
+            signingKey, "eval_direct_user", "citybuddy-web", List.of("support:chat"), "sandbox-1");
+
+    assertEquals(
+        "sandbox-1",
+        evaluation.authorizeEvaluation("Bearer " + token, "sandbox-1", "support:chat").sandboxId());
+    assertThrows(
+        CatalogException.class,
+        () -> evaluation.authorizeEvaluation("Bearer " + token, "sandbox-2", "support:chat"));
+    assertThrows(
+        CatalogException.class,
+        () -> evaluation.authorize("Bearer " + token, "sandbox-1", "support:chat"));
+    assertThrows(
+        CatalogException.class,
+        () -> authorizer(() -> jwks(signingKey)).authorize("Bearer " + token, "sandbox-1"));
+  }
+
   private DirectUserAuthorizer authorizer(io.citybuddy.commerce.identity.JwksLoader loader) {
     return new DirectUserAuthorizer(properties, loader, Clock.fixed(NOW, ZoneOffset.UTC));
   }
@@ -126,7 +156,13 @@ class DirectUserAuthorizerTest {
 
   private String token(RSAKey key, String type, String audience, List<String> permissions)
       throws Exception {
-    JWTClaimsSet claims =
+    return token(key, type, audience, permissions, null);
+  }
+
+  private String token(
+      RSAKey key, String type, String audience, List<String> permissions, String sandboxId)
+      throws Exception {
+    JWTClaimsSet.Builder claims =
         new JWTClaimsSet.Builder()
             .issuer("https://identity.citybuddy.test")
             .audience(audience)
@@ -137,11 +173,14 @@ class DirectUserAuthorizerTest {
             .issueTime(Date.from(NOW))
             .notBeforeTime(Date.from(NOW))
             .expirationTime(Date.from(NOW.plusSeconds(300)))
-            .jwtID(UUID.randomUUID().toString())
-            .build();
+            .jwtID(UUID.randomUUID().toString());
+    if (sandboxId != null) {
+      claims.claim("sandbox", sandboxId);
+    }
     SignedJWT jwt =
         new SignedJWT(
-            new JWSHeader.Builder(JWSAlgorithm.RS256).keyID(key.getKeyID()).build(), claims);
+            new JWSHeader.Builder(JWSAlgorithm.RS256).keyID(key.getKeyID()).build(),
+            claims.build());
     jwt.sign(new RSASSASigner(key.toPrivateKey()));
     return jwt.serialize();
   }

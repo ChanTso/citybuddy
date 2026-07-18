@@ -36,7 +36,7 @@ fi
 expected=(
   "GRANT CREATE, REFERENCES ON commerce_db.* TO 'auth_migration'@'%';"
   "GRANT SELECT, INSERT, UPDATE, DELETE, CREATE, ALTER, DROP, INDEX, REFERENCES, TRIGGER ON commerce_db.auth_schema_history TO 'auth_migration'@'%';"
-  "GRANT CREATE, ALTER ON commerce_db.* TO 'commerce_migration'@'%';"
+  "GRANT CREATE, ALTER, REFERENCES ON commerce_db.* TO 'commerce_migration'@'%';"
   "GRANT SELECT, INSERT, UPDATE, DELETE, CREATE, ALTER, DROP, INDEX, REFERENCES, TRIGGER ON commerce_db.commerce_schema_history TO 'commerce_migration'@'%';"
   "GRANT SELECT, INSERT, UPDATE, DELETE, CREATE, ALTER, DROP, INDEX, REFERENCES, CREATE VIEW, SHOW VIEW, TRIGGER ON cs_db.* TO 'agent_migration'@'%';"
   "GRANT SELECT, INSERT, UPDATE ON commerce_db.auth_user_principal TO 'auth_app'@'%';"
@@ -65,6 +65,9 @@ expected=(
   "GRANT SELECT, INSERT ON cs_db.retrieval_decision TO 'agent_app'@'%';"
   "GRANT SELECT, INSERT ON cs_db.retrieval_evidence TO 'agent_app'@'%';"
   "GRANT SELECT, INSERT, UPDATE ON commerce_db.auth_eval_test_principal TO 'auth_app'@'%';"
+  "GRANT SELECT, INSERT, UPDATE ON commerce_db.eval_sandbox TO 'commerce_app'@'%';"
+  "GRANT SELECT, INSERT, UPDATE, DELETE ON commerce_db.eval_sandbox_product_fixture TO 'commerce_app'@'%';"
+  "GRANT SELECT, INSERT ON commerce_db.eval_sandbox_effect_stub TO 'commerce_app'@'%';"
 )
 mapfile -t actual < <(sed -e '/^[[:space:]]*$/d' -e '/^[[:space:]]*--/d' "$manifest")
 
@@ -142,6 +145,7 @@ support_lifecycle_grants="$(printf '%s\n' "${actual[@]:23:4}")"
 support_feedback_grants="$(printf '%s\n' "${actual[@]:23:5}")"
 legacy_runtime_sql="$(printf '%s\n' "${actual[@]:5:4}" "$support_grant")"
 evaluation_grant="${actual[30]}"
+sandbox_grants="$(printf '%s\n' "${actual[@]:31:3}")"
 
 sql="SET ROLE 'bootstrap_grant_role';
 SELECT CONCAT('role-active=', CURRENT_ROLE());
@@ -175,6 +179,9 @@ runtime_table_state="$(mysql "${mysql_args[@]}" --execute="
       'auth_service_identity',
       'auth_signing_key_metadata',
       'auth_eval_test_principal',
+      'eval_sandbox',
+      'eval_sandbox_product_fixture',
+      'eval_sandbox_effect_stub',
       'crm_profile',
       'product',
       'catalog_metadata',
@@ -199,6 +206,7 @@ runtime_table_state="$(mysql "${mysql_args[@]}" --execute="
   SET ROLE NONE;")"
 normalized_runtime_table_state="$runtime_table_state"
 evaluation_table_present=false
+sandbox_tables_present=false
 feedback_table_present=false
 retrieval_tables_present=false
 retrieval_decision_present=false
@@ -209,6 +217,27 @@ if [[ "$normalized_runtime_table_state" == *"commerce_db.auth_eval_test_principa
   runtime_table_list="${runtime_table_list/commerce_db.auth_eval_test_principal,/}"
   normalized_runtime_table_state="$((runtime_table_count - 1)):$runtime_table_list"
   evaluation_table_present=true
+fi
+sandbox_table_count=0
+for sandbox_table in \
+  commerce_db.eval_sandbox \
+  commerce_db.eval_sandbox_effect_stub \
+  commerce_db.eval_sandbox_product_fixture; do
+  if [[ ",$normalized_runtime_table_state," == *",$sandbox_table,"* ]]; then
+    sandbox_table_count=$((sandbox_table_count + 1))
+  fi
+done
+if (( sandbox_table_count != 0 && sandbox_table_count != 3 )); then
+  echo "Grant job found a partial evaluation-sandbox schema." >&2
+  exit 1
+elif (( sandbox_table_count == 3 )); then
+  runtime_table_count="${normalized_runtime_table_state%%:*}"
+  runtime_table_list="${normalized_runtime_table_state#*:}"
+  runtime_table_list="${runtime_table_list/commerce_db.eval_sandbox,/}"
+  runtime_table_list="${runtime_table_list/commerce_db.eval_sandbox_effect_stub,/}"
+  runtime_table_list="${runtime_table_list/commerce_db.eval_sandbox_product_fixture,/}"
+  normalized_runtime_table_state="$((runtime_table_count - 3)):$runtime_table_list"
+  sandbox_tables_present=true
 fi
 if [[ "$runtime_table_state" == *"cs_db.retrieval_decision"* ]]; then
   retrieval_decision_present=true
@@ -250,6 +279,13 @@ payment_runtime_table_state="17:commerce_db.auth_login_credential,commerce_db.au
 cb080_payment_runtime_table_state="20:commerce_db.auth_login_credential,commerce_db.auth_service_identity,commerce_db.auth_signing_key_metadata,commerce_db.auth_user_principal,commerce_db.catalog_metadata,commerce_db.commerce_outbox,commerce_db.crm_profile,commerce_db.inventory_ledger,commerce_db.mock_payment_attempt,commerce_db.mock_payment_callback,commerce_db.order_idempotency,commerce_db.product,commerce_db.seckill_activity,commerce_db.seckill_order,commerce_db.seckill_reservation,commerce_db.standard_order,cs_db.support_conversation,cs_db.support_event,cs_db.support_session,cs_db.support_turn"
 complete_runtime_table_state="18:commerce_db.auth_login_credential,commerce_db.auth_service_identity,commerce_db.auth_signing_key_metadata,commerce_db.auth_user_principal,commerce_db.catalog_metadata,commerce_db.commerce_outbox,commerce_db.crm_profile,commerce_db.inventory_ledger,commerce_db.mock_payment_attempt,commerce_db.mock_payment_callback,commerce_db.mock_refund,commerce_db.order_idempotency,commerce_db.product,commerce_db.seckill_activity,commerce_db.seckill_order,commerce_db.seckill_reservation,commerce_db.standard_order,cs_db.support_session"
 cb080_runtime_table_state="21:commerce_db.auth_login_credential,commerce_db.auth_service_identity,commerce_db.auth_signing_key_metadata,commerce_db.auth_user_principal,commerce_db.catalog_metadata,commerce_db.commerce_outbox,commerce_db.crm_profile,commerce_db.inventory_ledger,commerce_db.mock_payment_attempt,commerce_db.mock_payment_callback,commerce_db.mock_refund,commerce_db.order_idempotency,commerce_db.product,commerce_db.seckill_activity,commerce_db.seckill_order,commerce_db.seckill_reservation,commerce_db.standard_order,cs_db.support_conversation,cs_db.support_event,cs_db.support_session,cs_db.support_turn"
+optional_evaluation_grants=""
+if [[ "$evaluation_table_present" == true ]]; then
+  optional_evaluation_grants="$evaluation_grant"
+fi
+if [[ "$sandbox_tables_present" == true ]]; then
+  optional_evaluation_grants="$(printf '%s\n' "$optional_evaluation_grants" "$sandbox_grants")"
+fi
 if [[ "$normalized_runtime_table_state" == "$cb080_runtime_table_state" ]]; then
   selected_runtime_sql="$(printf '%s\n' "${actual[@]:5:22}")"
   if [[ "$retrieval_tables_present" == true ]]; then
@@ -261,8 +297,8 @@ if [[ "$normalized_runtime_table_state" == "$cb080_runtime_table_state" ]]; then
   elif [[ "$feedback_table_present" == true ]]; then
     selected_runtime_sql="$(printf '%s\n' "${actual[@]:5:23}")"
   fi
-  if [[ "$evaluation_table_present" == true ]]; then
-    selected_runtime_sql="$(printf '%s\n' "$selected_runtime_sql" "$evaluation_grant")"
+  if [[ -n "$optional_evaluation_grants" ]]; then
+    selected_runtime_sql="$(printf '%s\n' "$selected_runtime_sql" "$optional_evaluation_grants")"
   fi
   mysql "${mysql_args[@]}" --execute="
     SET ROLE 'bootstrap_grant_role';
@@ -271,8 +307,8 @@ if [[ "$normalized_runtime_table_state" == "$cb080_runtime_table_state" ]]; then
   echo "runtime-grants=applied"
 elif [[ "$normalized_runtime_table_state" == "$complete_runtime_table_state" ]]; then
   selected_runtime_sql="$(printf '%s\n' "${actual[@]:5:19}")"
-  if [[ "$evaluation_table_present" == true ]]; then
-    selected_runtime_sql="$(printf '%s\n' "$selected_runtime_sql" "$evaluation_grant")"
+  if [[ -n "$optional_evaluation_grants" ]]; then
+    selected_runtime_sql="$(printf '%s\n' "$selected_runtime_sql" "$optional_evaluation_grants")"
   fi
   mysql "${mysql_args[@]}" --execute="
     SET ROLE 'bootstrap_grant_role';
@@ -286,8 +322,8 @@ elif [[ "$normalized_runtime_table_state" == "$payment_runtime_table_state" || "
   elif [[ "$normalized_runtime_table_state" == "$cb080_payment_runtime_table_state" ]]; then
     selected_support_grants="$support_lifecycle_grants"
   fi
-  if [[ "$evaluation_table_present" == true ]]; then
-    selected_support_grants="$(printf '%s\n' "$selected_support_grants" "$evaluation_grant")"
+  if [[ -n "$optional_evaluation_grants" ]]; then
+    selected_support_grants="$(printf '%s\n' "$selected_support_grants" "$optional_evaluation_grants")"
   fi
   mysql "${mysql_args[@]}" --execute="
     SET ROLE 'bootstrap_grant_role';
@@ -301,8 +337,8 @@ elif [[ "$normalized_runtime_table_state" == "$transaction_runtime_table_state" 
   elif [[ "$normalized_runtime_table_state" == "$cb080_transaction_runtime_table_state" ]]; then
     selected_support_grants="$support_lifecycle_grants"
   fi
-  if [[ "$evaluation_table_present" == true ]]; then
-    selected_support_grants="$(printf '%s\n' "$selected_support_grants" "$evaluation_grant")"
+  if [[ -n "$optional_evaluation_grants" ]]; then
+    selected_support_grants="$(printf '%s\n' "$selected_support_grants" "$optional_evaluation_grants")"
   fi
   mysql "${mysql_args[@]}" --execute="
     SET ROLE 'bootstrap_grant_role';
@@ -316,8 +352,8 @@ elif [[ "$normalized_runtime_table_state" == "$reservation_runtime_table_state" 
   elif [[ "$normalized_runtime_table_state" == "$cb080_reservation_runtime_table_state" ]]; then
     selected_support_grants="$support_lifecycle_grants"
   fi
-  if [[ "$evaluation_table_present" == true ]]; then
-    selected_support_grants="$(printf '%s\n' "$selected_support_grants" "$evaluation_grant")"
+  if [[ -n "$optional_evaluation_grants" ]]; then
+    selected_support_grants="$(printf '%s\n' "$selected_support_grants" "$optional_evaluation_grants")"
   fi
   mysql "${mysql_args[@]}" --execute="
     SET ROLE 'bootstrap_grant_role';
@@ -331,8 +367,8 @@ elif [[ "$normalized_runtime_table_state" == "$seckill_runtime_table_state" || "
   elif [[ "$normalized_runtime_table_state" == "$cb080_seckill_runtime_table_state" ]]; then
     selected_support_grants="$support_lifecycle_grants"
   fi
-  if [[ "$evaluation_table_present" == true ]]; then
-    selected_support_grants="$(printf '%s\n' "$selected_support_grants" "$evaluation_grant")"
+  if [[ -n "$optional_evaluation_grants" ]]; then
+    selected_support_grants="$(printf '%s\n' "$selected_support_grants" "$optional_evaluation_grants")"
   fi
   mysql "${mysql_args[@]}" --execute="
     SET ROLE 'bootstrap_grant_role';
@@ -346,8 +382,8 @@ elif [[ "$normalized_runtime_table_state" == "$order_runtime_table_state" || "$n
   elif [[ "$normalized_runtime_table_state" == "$cb080_order_runtime_table_state" ]]; then
     selected_support_grants="$support_lifecycle_grants"
   fi
-  if [[ "$evaluation_table_present" == true ]]; then
-    selected_support_grants="$(printf '%s\n' "$selected_support_grants" "$evaluation_grant")"
+  if [[ -n "$optional_evaluation_grants" ]]; then
+    selected_support_grants="$(printf '%s\n' "$selected_support_grants" "$optional_evaluation_grants")"
   fi
   mysql "${mysql_args[@]}" --execute="
     SET ROLE 'bootstrap_grant_role';
@@ -361,8 +397,8 @@ elif [[ "$normalized_runtime_table_state" == "$catalog_runtime_table_state" || "
   elif [[ "$normalized_runtime_table_state" == "$cb080_catalog_runtime_table_state" ]]; then
     selected_support_grants="$support_lifecycle_grants"
   fi
-  if [[ "$evaluation_table_present" == true ]]; then
-    selected_support_grants="$(printf '%s\n' "$selected_support_grants" "$evaluation_grant")"
+  if [[ -n "$optional_evaluation_grants" ]]; then
+    selected_support_grants="$(printf '%s\n' "$selected_support_grants" "$optional_evaluation_grants")"
   fi
   mysql "${mysql_args[@]}" --execute="
     SET ROLE 'bootstrap_grant_role';
@@ -376,8 +412,8 @@ elif [[ "$normalized_runtime_table_state" == "$legacy_runtime_table_state" || "$
   elif [[ "$normalized_runtime_table_state" == "$cb080_legacy_runtime_table_state" ]]; then
     selected_legacy_runtime_sql="$(printf '%s\n' "${actual[@]:5:4}" "$support_lifecycle_grants")"
   fi
-  if [[ "$evaluation_table_present" == true ]]; then
-    selected_legacy_runtime_sql="$(printf '%s\n' "$selected_legacy_runtime_sql" "$evaluation_grant")"
+  if [[ -n "$optional_evaluation_grants" ]]; then
+    selected_legacy_runtime_sql="$(printf '%s\n' "$selected_legacy_runtime_sql" "$optional_evaluation_grants")"
   fi
   mysql "${mysql_args[@]}" --execute="
     SET ROLE 'bootstrap_grant_role';

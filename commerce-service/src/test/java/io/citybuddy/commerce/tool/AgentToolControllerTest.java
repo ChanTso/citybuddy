@@ -39,6 +39,8 @@ class AgentToolControllerTest {
   @Test
   @SuppressWarnings("unchecked")
   void returnsOnlyTheBoundedPublishedProductView() throws Exception {
+    when(authorizer.authorize(anyString(), any(OboAuthorizer.AuthorizationRequest.class)))
+        .thenReturn(new OboAuthorizer.OboPrincipal("user-1", "session-1", "catalog:read", null));
     when(jdbc.query(anyString(), any(RowMapper.class), eq("product-1")))
         .thenReturn(
             List.of(

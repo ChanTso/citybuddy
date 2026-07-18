@@ -19,12 +19,15 @@ def test_catalog_contract_exposes_only_authenticated_published_reads() -> None:
 
     assert contract["openapi"] == "3.1.0"
     assert set(contract["paths"]) == {
+        "/api/eval/reset",
+        "/api/eval/sandboxes/{sandboxId}/complete",
         "/api/products",
         "/api/products/{productId}",
         "/api/orders",
         "/api/seckill/activities/{activityId}/reservations",
         "/api/reservations/{reservationId}",
         "/internal/tools/catalog.product.get",
+        "/internal/eval/sandboxes/{sandboxId}/liveness",
     }
     for path in [
         contract["paths"]["/api/products"],

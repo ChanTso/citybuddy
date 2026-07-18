@@ -48,6 +48,7 @@ from .sse import SseEgressFilter, SseProjectionError, stream_events
 SESSION_PERMISSION = "support:session:create"
 CHAT_PERMISSION = "support:chat"
 DIRECT_TOKEN_TYPE = "direct_user"
+EVALUATION_DIRECT_TOKEN_TYPE = "eval_direct_user"
 
 
 class AgentSettings(BaseModel):
@@ -58,6 +59,7 @@ class AgentSettings(BaseModel):
     service_name: str = "agent-service"
     environment: str = "development"
     identity_enabled: bool = False
+    evaluation_enabled: bool = False
     issuer: str = ""
     user_audience: str = ""
     jwks_url: str = ""
@@ -70,6 +72,7 @@ class AgentSettings(BaseModel):
     exchange_scopes: tuple[str, ...] = ()
     model_proxy_url: str = ""
     commerce_tools_url: str = ""
+    commerce_liveness_url: str = ""
     primary_role_alias: str = "support-standard-primary"
     fallback_role_alias: str = "support-standard-fallback"
     primary_provider_key: str = "primary"
@@ -91,6 +94,7 @@ class DirectPrincipal(BaseModel):
 
     subject: str
     permissions: tuple[str, ...]
+    sandbox_id: str | None = None
 
 
 class JwksSource(Protocol):
@@ -119,7 +123,7 @@ class DirectJwtValidator:
         self._keys: dict[str, jwt.PyJWK] = {}
         self._loaded_at: float | None = None
 
-    def validate(self, token: str) -> DirectPrincipal:
+    def validate(self, token: str, eval_sandbox_header: str | None = None) -> DirectPrincipal:
         try:
             header = jwt.get_unverified_header(token)
             kid = header.get("kid")
@@ -150,22 +154,39 @@ class DirectJwtValidator:
             )
             permissions = claims.get("permissions")
             audience = claims.get("aud")
+            token_type = claims.get("token_type")
+            sandbox_claim = claims.get("sandbox")
             if (
-                claims.get("token_type") != DIRECT_TOKEN_TYPE
-                or claims.get("principal_state") != "ACTIVE"
+                claims.get("principal_state") != "ACTIVE"
                 or audience not in (self._settings.user_audience, [self._settings.user_audience])
                 or not isinstance(permissions, list)
                 or not all(isinstance(item, str) for item in permissions)
                 or "act" in claims
                 or "session" in claims
-                or "sandbox" in claims
                 or "eval_sandbox" in claims
             ):
                 raise ValueError("Invalid direct token claims")
+            if token_type == DIRECT_TOKEN_TYPE:
+                if sandbox_claim is not None or eval_sandbox_header is not None:
+                    raise ValueError("Production token cannot use evaluation context")
+                sandbox_id = None
+            elif token_type == EVALUATION_DIRECT_TOKEN_TYPE:
+                if (
+                    not self._settings.evaluation_enabled
+                    or not isinstance(sandbox_claim, str)
+                    or not sandbox_claim
+                    or sandbox_claim != eval_sandbox_header
+                ):
+                    raise ValueError("Invalid evaluation token claims")
+                sandbox_id = sandbox_claim
+            else:
+                raise ValueError("Invalid direct token type")
             subject = claims["sub"]
             if not isinstance(subject, str) or not subject:
                 raise ValueError("Invalid token subject")
-            return DirectPrincipal(subject=subject, permissions=tuple(permissions))
+            return DirectPrincipal(
+                subject=subject, permissions=tuple(permissions), sandbox_id=sandbox_id
+            )
         except (jwt.PyJWTError, ValueError, TypeError, httpx.HTTPError) as exception:
             raise HTTPException(status_code=401, detail="Unauthorized") from exception
 
@@ -187,21 +208,24 @@ class DirectJwtValidator:
 
 
 class SessionStore(Protocol):
-    def create(self, subject: str) -> str: ...
+    def create(self, subject: str, sandbox_id: str | None = None) -> str: ...
 
-    def verify_owner(self, session_id: str, subject: str) -> None: ...
+    def verify_owner(
+        self, session_id: str, subject: str, sandbox_id: str | None = None
+    ) -> None: ...
 
 
 class MysqlSessionStore:
     def __init__(self, settings: AgentSettings) -> None:
         self._settings = settings
 
-    def create(self, subject: str) -> str:
+    def create(self, subject: str, sandbox_id: str | None = None) -> str:
         session_id = secrets.token_urlsafe(32)
         with self._connect() as connection, connection.cursor() as cursor:
             cursor.execute(
-                "INSERT INTO support_session (session_id, user_subject) VALUES (%s, %s)",
-                (session_id, subject),
+                "INSERT INTO support_session (session_id, user_subject, sandbox_id) "
+                "VALUES (%s, %s, %s)",
+                (session_id, subject, sandbox_id),
             )
             cursor.execute(
                 "INSERT INTO support_conversation "
@@ -212,14 +236,14 @@ class MysqlSessionStore:
             connection.commit()
         return session_id
 
-    def verify_owner(self, session_id: str, subject: str) -> None:
+    def verify_owner(self, session_id: str, subject: str, sandbox_id: str | None = None) -> None:
         with self._connect() as connection, connection.cursor() as cursor:
             cursor.execute(
                 "SELECT user_subject, sandbox_id FROM support_session WHERE session_id = %s",
                 (session_id,),
             )
             row = cursor.fetchone()
-        if row is None or row[0] != subject or row[1] is not None:
+        if row is None or row[0] != subject or row[1] != sandbox_id:
             raise HTTPException(status_code=403, detail="Forbidden")
 
     def _connect(self) -> pymysql.Connection[pymysql.cursors.Cursor]:
@@ -286,6 +310,33 @@ class FeedbackResponse(BaseModel):
     rating: Literal["POSITIVE", "NEGATIVE"]
 
 
+class SandboxLiveness(Protocol):
+    def require_active(self, direct_token: str, sandbox_id: str) -> None: ...
+
+
+class HttpSandboxLiveness:
+    def __init__(self, base_url: str) -> None:
+        self._base_url = base_url.rstrip("/")
+
+    def require_active(self, direct_token: str, sandbox_id: str) -> None:
+        try:
+            response = httpx.post(
+                f"{self._base_url}/internal/eval/sandboxes/{sandbox_id}/liveness",
+                headers={
+                    "Authorization": f"Bearer {direct_token}",
+                    "X-Eval-Sandbox-Id": sandbox_id,
+                },
+                timeout=3.0,
+            )
+        except (httpx.TimeoutException, httpx.NetworkError) as exception:
+            raise HTTPException(status_code=503, detail="Service unavailable") from exception
+        if response.status_code == 204:
+            return
+        if response.status_code in {400, 401, 403, 404, 409, 422}:
+            raise HTTPException(status_code=403, detail="Forbidden")
+        raise HTTPException(status_code=503, detail="Service unavailable")
+
+
 class OboClient:
     """JIT exchange boundary used by future server-owned ToolSpecs."""
 
@@ -293,14 +344,27 @@ class OboClient:
         self._settings = settings
         self._sessions = sessions
 
-    def exchange(self, direct_token: str, subject: str, session_id: str, scope: str) -> str:
-        self._sessions.verify_owner(session_id, subject)
+    def exchange(
+        self,
+        direct_token: str,
+        subject: str,
+        session_id: str,
+        scope: str,
+        sandbox_id: str | None = None,
+    ) -> str:
+        if sandbox_id is None:
+            self._sessions.verify_owner(session_id, subject)
+        else:
+            self._sessions.verify_owner(session_id, subject, sandbox_id)
         if scope not in self._settings.exchange_scopes:
             raise HTTPException(status_code=403, detail="Forbidden")
+        headers = {"X-User-Authorization": f"Bearer {direct_token}"}
+        if sandbox_id is not None:
+            headers["X-Eval-Sandbox-Id"] = sandbox_id
         response = httpx.post(
             self._settings.auth_exchange_url,
             auth=(self._settings.service_client_id, self._settings.service_client_secret),
-            headers={"X-User-Authorization": f"Bearer {direct_token}"},
+            headers=headers,
             json={
                 "sessionId": session_id,
                 "userSubject": subject,
@@ -328,6 +392,7 @@ def create_app(
     conversations: ConversationStore | None = None,
     agent: AgentRunner | None = None,
     feedback: FeedbackStore | None = None,
+    liveness: SandboxLiveness | None = None,
 ) -> FastAPI:
     """Construct the app, enabling identity routes only with complete runtime configuration."""
     resolved = settings or AgentSettings()
@@ -348,11 +413,17 @@ def create_app(
     resolved_sessions = sessions or MysqlSessionStore(resolved)
     resolved_conversations = conversations or MysqlConversationStore(resolved)
     resolved_feedback = feedback or MysqlFeedbackStore(resolved)
+    resolved_liveness = liveness
+    if resolved.evaluation_enabled and resolved_liveness is None:
+        if not resolved.commerce_liveness_url:
+            raise ValueError("Evaluation liveness URL is required")
+        resolved_liveness = HttpSandboxLiveness(resolved.commerce_liveness_url)
     sse_filter = SseEgressFilter()
     app.state.validator = resolved_validator
     app.state.sessions = resolved_sessions
     app.state.conversations = resolved_conversations
     app.state.feedback = resolved_feedback
+    app.state.liveness = resolved_liveness
     app.state.sse_filter = sse_filter
     resolved_obo = OboClient(resolved, resolved_sessions)
     resolved_agent: AgentRunner
@@ -400,16 +471,32 @@ def create_app(
         permission: str,
     ) -> tuple[DirectPrincipal, str]:
         if (
-            x_eval_sandbox_id is not None
-            or authorization is None
+            authorization is None
             or not authorization.startswith("Bearer ")
+            or (x_eval_sandbox_id is not None and not resolved.evaluation_enabled)
         ):
             raise HTTPException(status_code=401, detail="Unauthorized")
         token = authorization[7:]
-        principal = resolved_validator.validate(token)
+        if x_eval_sandbox_id is None:
+            principal = resolved_validator.validate(token)
+        else:
+            principal = resolved_validator.validate(token, x_eval_sandbox_id)
         if permission not in principal.permissions:
             raise HTTPException(status_code=403, detail="Forbidden")
         return principal, token
+
+    def require_liveness(principal: DirectPrincipal, token: str) -> None:
+        if principal.sandbox_id is None:
+            return
+        if resolved_liveness is None:
+            raise HTTPException(status_code=503, detail="Service unavailable")
+        resolved_liveness.require_active(token, principal.sandbox_id)
+
+    def verify_session(session_id: str, principal: DirectPrincipal) -> None:
+        if principal.sandbox_id is None:
+            resolved_sessions.verify_owner(session_id, principal.subject)
+        else:
+            resolved_sessions.verify_owner(session_id, principal.subject, principal.sandbox_id)
 
     def execute_turn(
         request: ChatRequest,
@@ -419,24 +506,37 @@ def create_app(
         session_id: str,
         correlation_key: str,
     ) -> ConversationResult:
-        resolved_sessions.verify_owner(session_id, principal.subject)
+        require_liveness(principal, token)
+        verify_session(session_id, principal)
         start = resolved_conversations.begin_turn(
             session_id=session_id,
             subject=principal.subject,
+            sandbox_id=principal.sandbox_id,
             correlation_key=correlation_key,
             message=request.message,
         )
         if start.replay is not None:
             return start.replay
         try:
-            agent_result = resolved_agent.run(
-                message=request.message,
-                direct_token=token,
-                subject=principal.subject,
-                session_id=session_id,
-                trace_id=start.trace_id,
-                turn_id=start.turn_id,
-            )
+            if principal.sandbox_id is None:
+                agent_result = resolved_agent.run(
+                    message=request.message,
+                    direct_token=token,
+                    subject=principal.subject,
+                    session_id=session_id,
+                    trace_id=start.trace_id,
+                    turn_id=start.turn_id,
+                )
+            else:
+                agent_result = resolved_agent.run(
+                    message=request.message,
+                    direct_token=token,
+                    subject=principal.subject,
+                    session_id=session_id,
+                    trace_id=start.trace_id,
+                    turn_id=start.turn_id,
+                    sandbox_id=principal.sandbox_id,
+                )
             return resolved_conversations.complete_turn(
                 start=start,
                 response_text=agent_result.response_text,
@@ -455,8 +555,13 @@ def create_app(
         x_eval_sandbox_id: str | None = Header(default=None),
     ) -> SessionResponse:
         del request
-        principal, _ = authorize(authorization, x_eval_sandbox_id, SESSION_PERMISSION)
-        return SessionResponse(session_id=resolved_sessions.create(principal.subject))
+        principal, token = authorize(authorization, x_eval_sandbox_id, SESSION_PERMISSION)
+        require_liveness(principal, token)
+        if principal.sandbox_id is None:
+            session_id = resolved_sessions.create(principal.subject)
+        else:
+            session_id = resolved_sessions.create(principal.subject, principal.sandbox_id)
+        return SessionResponse(session_id=session_id)
 
     @app.post("/api/chat", response_model=ChatResponse)
     def chat(
@@ -557,9 +662,10 @@ def create_app(
         idempotency_key: str = Header(min_length=1, max_length=128),
         x_eval_sandbox_id: str | None = Header(default=None),
     ) -> FeedbackResponse:
-        principal, _ = authorize(authorization, x_eval_sandbox_id, CHAT_PERMISSION)
+        principal, token = authorize(authorization, x_eval_sandbox_id, CHAT_PERMISSION)
         try:
-            resolved_sessions.verify_owner(x_session_id, principal.subject)
+            require_liveness(principal, token)
+            verify_session(x_session_id, principal)
             record = resolved_feedback.append(
                 session_id=x_session_id,
                 subject=principal.subject,

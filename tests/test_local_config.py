@@ -220,6 +220,7 @@ def test_local_ci_order_and_parallel_workflow_cover_every_required_target() -> N
         "test-mysql-integration",
         "test-identity-integration",
         "test-evaluation-identity-integration",
+        "test-evaluation-sandbox-integration",
         "test-catalog-integration",
         "test-redis-integration",
         "test-elasticsearch-integration",

@@ -5,6 +5,8 @@ import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.boot.context.properties.EnableConfigurationProperties;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
+import org.springframework.core.env.Environment;
+import org.springframework.core.env.Profiles;
 import org.springframework.web.client.RestClient;
 
 @Configuration(proxyBeanMethods = false)
@@ -24,7 +26,12 @@ public class OboIdentityConfiguration {
   }
 
   @Bean
-  OboAuthorizer oboAuthorizer(OboProperties properties, JwksLoader oboJwksLoader, Clock oboClock) {
-    return new OboAuthorizer(properties, oboJwksLoader, oboClock);
+  OboAuthorizer oboAuthorizer(
+      OboProperties properties, JwksLoader oboJwksLoader, Clock oboClock, Environment environment) {
+    return new OboAuthorizer(
+        properties,
+        oboJwksLoader,
+        oboClock,
+        environment.acceptsProfiles(Profiles.of("evaluation")));
   }
 }

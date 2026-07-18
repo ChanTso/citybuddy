@@ -10,7 +10,7 @@ COMPOSE_BUILD ?= --build
 COMPOSE := docker compose --project-name "$(COMPOSE_PROJECT_NAME)" --env-file "$(ENV_FILE)" --file compose.yaml
 
 .DEFAULT_GOAL := ci
-.PHONY: setup setup-java setup-python setup-web setup-repo format lint typecheck test build docs-check secret-scan java-ci python-ci web-ci repo-ci ci guard-layout init-local up down reset-local grant-access migrate-auth migrate-commerce migrate-agent rocketmq-store-init rocketmq-init test-integration test-runtime-integration test-mysql-integration test-identity-integration test-evaluation-identity-integration test-catalog-integration test-redis-integration test-elasticsearch-integration test-knowledge-search-integration test-retrieval-evidence-integration test-rocketmq-integration test-knowledge-indexer-rocketmq-spike
+.PHONY: setup setup-java setup-python setup-web setup-repo format lint typecheck test build docs-check secret-scan java-ci python-ci web-ci repo-ci ci guard-layout init-local up down reset-local grant-access migrate-auth migrate-commerce migrate-agent rocketmq-store-init rocketmq-init test-integration test-runtime-integration test-mysql-integration test-identity-integration test-evaluation-identity-integration test-evaluation-sandbox-integration test-catalog-integration test-redis-integration test-elasticsearch-integration test-knowledge-search-integration test-retrieval-evidence-integration test-rocketmq-integration test-knowledge-indexer-rocketmq-spike
 
 guard-layout:
 	test -x ./mvnw
@@ -34,6 +34,8 @@ guard-layout:
 	test -x scripts/test_mysql_integration.sh
 	test -x scripts/test_identity_integration.sh
 	test -x scripts/test_evaluation_identity_integration.sh
+	test -x scripts/test_evaluation_sandbox_integration.sh
+	test -f scripts/drop_response_proxy.py
 	test -x scripts/test_catalog_integration.sh
 	test -x scripts/test_redis_integration.sh
 	test -x scripts/test_elasticsearch_integration.sh
@@ -122,6 +124,9 @@ test-identity-integration:
 test-evaluation-identity-integration:
 	./scripts/test_evaluation_identity_integration.sh
 
+test-evaluation-sandbox-integration:
+	./scripts/test_evaluation_sandbox_integration.sh
+
 test-catalog-integration:
 	./scripts/test_catalog_integration.sh
 
@@ -151,6 +156,7 @@ test-integration:
 	$(MAKE) test-mysql-integration
 	$(MAKE) test-identity-integration
 	$(MAKE) test-evaluation-identity-integration
+	$(MAKE) test-evaluation-sandbox-integration
 	$(MAKE) test-catalog-integration
 	$(MAKE) test-redis-integration
 	$(MAKE) test-elasticsearch-integration

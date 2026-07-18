@@ -62,6 +62,7 @@ class ConversationStore(Protocol):
         *,
         session_id: str,
         subject: str,
+        sandbox_id: str | None,
         correlation_key: str,
         message: str,
     ) -> TurnStart: ...
@@ -94,6 +95,7 @@ class MysqlConversationStore:
         *,
         session_id: str,
         subject: str,
+        sandbox_id: str | None,
         correlation_key: str,
         message: str,
     ) -> TurnStart:
@@ -102,6 +104,7 @@ class MysqlConversationStore:
                 return self._begin_turn_once(
                     session_id=session_id,
                     subject=subject,
+                    sandbox_id=sandbox_id,
                     correlation_key=correlation_key,
                     message=message,
                 )
@@ -116,6 +119,7 @@ class MysqlConversationStore:
         *,
         session_id: str,
         subject: str,
+        sandbox_id: str | None,
         correlation_key: str,
         message: str,
     ) -> TurnStart:
@@ -142,7 +146,7 @@ class MysqlConversationStore:
                         (session_id,),
                     )
                     session = cursor.fetchone()
-                    if session is None or session[0] != subject or session[1] is not None:
+                    if session is None or session[0] != subject or session[1] != sandbox_id:
                         raise ConversationOwnershipError
                     cursor.execute(
                         "SELECT trace_id, turn_id, request_fingerprint, response_text, "

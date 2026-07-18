@@ -48,16 +48,18 @@ class CountingJwksSource:
 class MemorySessionStore(SessionStore):
     def __init__(self) -> None:
         self.owners: dict[str, str] = {}
+        self.sandboxes: dict[str, str | None] = {}
         self.counter = 0
 
-    def create(self, subject: str) -> str:
+    def create(self, subject: str, sandbox_id: str | None = None) -> str:
         self.counter += 1
         session_id = f"opaque-server-session-{self.counter}"
         self.owners[session_id] = subject
+        self.sandboxes[session_id] = sandbox_id
         return session_id
 
-    def verify_owner(self, session_id: str, subject: str) -> None:
-        if self.owners.get(session_id) != subject:
+    def verify_owner(self, session_id: str, subject: str, sandbox_id: str | None = None) -> None:
+        if self.owners.get(session_id) != subject or self.sandboxes.get(session_id) != sandbox_id:
             raise HTTPException(status_code=403, detail="Forbidden")
 
 
@@ -74,11 +76,15 @@ class MemoryConversationStore(ConversationStore):
         *,
         session_id: str,
         subject: str,
+        sandbox_id: str | None,
         correlation_key: str,
         message: str,
     ) -> TurnStart:
         self.calls += 1
-        if self.sessions.owners.get(session_id) != subject:
+        if (
+            self.sessions.owners.get(session_id) != subject
+            or self.sessions.sandboxes.get(session_id) != sandbox_id
+        ):
             raise ConversationOwnershipError
         key = (session_id, correlation_key)
         existing = self.results.get(key)
@@ -130,6 +136,7 @@ class MemoryConversationStore(ConversationStore):
 class MemoryAgent(AgentRunner):
     def __init__(self) -> None:
         self.calls = 0
+        self.sandbox_ids: list[str | None] = []
 
     def run(
         self,
@@ -140,8 +147,10 @@ class MemoryAgent(AgentRunner):
         session_id: str,
         trace_id: str,
         turn_id: str,
+        sandbox_id: str | None = None,
     ) -> AgentRunResult:
         self.calls += 1
+        self.sandbox_ids.append(sandbox_id)
         del message, direct_token, subject, session_id, trace_id, turn_id
         return AgentRunResult(
             "Bounded support response.",
@@ -183,6 +192,17 @@ class MemoryFeedbackStore(FeedbackStore):
         return record
 
 
+class MemoryLiveness:
+    def __init__(self) -> None:
+        self.active = True
+        self.calls: list[tuple[str, str]] = []
+
+    def require_active(self, direct_token: str, sandbox_id: str) -> None:
+        self.calls.append((direct_token, sandbox_id))
+        if not self.active:
+            raise HTTPException(status_code=403, detail="Forbidden")
+
+
 def settings() -> AgentSettings:
     return AgentSettings(
         environment="test",
@@ -194,6 +214,15 @@ def settings() -> AgentSettings:
         service_client_id="agent-service",
         service_client_secret="runtime-only-secret",
         exchange_scopes=("catalog:read",),
+    )
+
+
+def evaluation_settings() -> AgentSettings:
+    return settings().model_copy(
+        update={
+            "evaluation_enabled": True,
+            "commerce_liveness_url": "https://commerce.test",
+        }
     )
 
 
@@ -362,6 +391,76 @@ def test_session_endpoint_uses_token_subject_and_rejects_client_identity_and_eva
     )
 
 
+def test_evaluation_session_and_chat_require_liveness_and_exact_sandbox() -> None:
+    private, public_jwk = key_fixture("current-key")
+    resolved = evaluation_settings()
+    validator = DirectJwtValidator(resolved, CountingJwksSource([public_jwk]))
+    sessions = MemorySessionStore()
+    conversations = MemoryConversationStore(sessions)
+    agent = MemoryAgent()
+    liveness = MemoryLiveness()
+    app = create_app(
+        resolved,
+        validator=validator,
+        sessions=sessions,
+        conversations=conversations,
+        agent=agent,
+        feedback=MemoryFeedbackStore(sessions, {}),
+        liveness=liveness,
+    )
+    client = TestClient(app)
+    token = direct_token(
+        private,
+        "current-key",
+        token_type="eval_direct_user",
+        extra={"sandbox": "sandbox-1"},
+    )
+    headers = {
+        "Authorization": f"Bearer {token}",
+        "X-Eval-Sandbox-Id": "sandbox-1",
+    }
+
+    created = client.post("/api/sessions", headers=headers, json={})
+    assert created.status_code == 201
+    session_id = created.json()["sessionId"]
+    assert sessions.sandboxes[session_id] == "sandbox-1"
+    assert (
+        client.post(
+            "/api/sessions",
+            headers={**headers, "X-Eval-Sandbox-Id": "sandbox-2"},
+            json={},
+        ).status_code
+        == 401
+    )
+
+    chat = client.post(
+        "/api/chat",
+        headers={
+            **headers,
+            "X-Session-Id": session_id,
+            "Idempotency-Key": "eval-turn-1",
+        },
+        json={"message": "Show product-1"},
+    )
+    assert chat.status_code == 200
+    assert agent.sandbox_ids == ["sandbox-1"]
+    assert len(liveness.calls) == 2
+
+    liveness.active = False
+    blocked = client.post(
+        "/api/chat",
+        headers={
+            **headers,
+            "X-Session-Id": session_id,
+            "Idempotency-Key": "eval-turn-2",
+        },
+        json={"message": "Show product-1"},
+    )
+    assert blocked.status_code == 403
+    assert conversations.calls == 1
+    assert agent.calls == 1
+
+
 def test_obo_client_rechecks_owner_and_server_allowlist(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -400,6 +499,45 @@ def test_obo_client_rechecks_owner_and_server_allowlist(
     with pytest.raises(HTTPException) as forged:
         client.exchange("direct-token", principal.subject, "forged-session", "catalog:read")
     assert forged.value.status_code == 403
+
+
+def test_evaluation_obo_preserves_exact_sandbox_header(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    sessions = MemorySessionStore()
+    session_id = sessions.create("user-123", "sandbox-1")
+    client = OboClient(evaluation_settings(), sessions)
+    requests: list[dict[str, Any]] = []
+
+    def exchange_response(*args: Any, **kwargs: Any) -> httpx.Response:
+        requests.append(kwargs)
+        return httpx.Response(200, json={"accessToken": "signed-eval-obo"})
+
+    monkeypatch.setattr(httpx, "post", exchange_response)
+
+    assert (
+        client.exchange(
+            "eval-direct-token",
+            "user-123",
+            session_id,
+            "catalog:read",
+            "sandbox-1",
+        )
+        == "signed-eval-obo"
+    )
+    assert requests[0]["headers"] == {
+        "X-User-Authorization": "Bearer eval-direct-token",
+        "X-Eval-Sandbox-Id": "sandbox-1",
+    }
+    with pytest.raises(HTTPException) as mismatch:
+        client.exchange(
+            "eval-direct-token",
+            "user-123",
+            session_id,
+            "catalog:read",
+            "sandbox-2",
+        )
+    assert mismatch.value.status_code == 403
 
 
 def test_obo_client_rejects_malformed_exchange_response(
@@ -576,10 +714,11 @@ def test_chat_redacts_mysql_failure() -> None:
             *,
             session_id: str,
             subject: str,
+            sandbox_id: str | None,
             correlation_key: str,
             message: str,
         ) -> TurnStart:
-            del session_id, subject, correlation_key, message
+            del session_id, subject, sandbox_id, correlation_key, message
             raise pymysql.OperationalError(1142, "private SQL detail")
 
         def complete_turn(
@@ -636,8 +775,9 @@ def test_unexpected_agent_error_is_visible_and_marks_the_reserved_turn_failed() 
             session_id: str,
             trace_id: str,
             turn_id: str,
+            sandbox_id: str | None = None,
         ) -> AgentRunResult:
-            del message, direct_token, subject, session_id, trace_id, turn_id
+            del message, direct_token, subject, session_id, trace_id, turn_id, sandbox_id
             raise RuntimeError("private provider configuration detail")
 
     private, public_jwk = key_fixture("current-key")
@@ -733,8 +873,9 @@ def test_stream_withholds_action_claim_and_private_execution_failure() -> None:
             session_id: str,
             trace_id: str,
             turn_id: str,
+            sandbox_id: str | None = None,
         ) -> AgentRunResult:
-            del message, direct_token, subject, session_id, trace_id, turn_id
+            del message, direct_token, subject, session_id, trace_id, turn_id, sandbox_id
             if self.result is None:
                 raise RuntimeError("private provider stack and credential detail")
             return self.result
@@ -797,8 +938,9 @@ def test_stream_maps_bounded_non_success_outcomes_to_one_terminal_error() -> Non
             session_id: str,
             trace_id: str,
             turn_id: str,
+            sandbox_id: str | None = None,
         ) -> AgentRunResult:
-            del message, direct_token, subject, session_id, trace_id, turn_id
+            del message, direct_token, subject, session_id, trace_id, turn_id, sandbox_id
             return AgentRunResult("private provider response", "provider_denied", tuple())
 
     private, public_jwk = key_fixture("current-key")
