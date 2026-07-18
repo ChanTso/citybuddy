@@ -1,6 +1,6 @@
 {
   "openapi": "3.1.0",
-  "info": {"title": "CityBuddy commerce API", "version": "CB-101"},
+  "info": {"title": "CityBuddy commerce API", "version": "CB-102"},
   "paths": {
     "/api/products": {
       "get": {
@@ -61,6 +61,18 @@
             "in": "header",
             "required": false,
             "schema": {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,63}$"}
+          },
+          {
+            "name": "X-Agent-Trace-Id",
+            "in": "header",
+            "required": false,
+            "schema": {"type": "string", "maxLength": 64}
+          },
+          {
+            "name": "X-Agent-Operation-Id",
+            "in": "header",
+            "required": false,
+            "schema": {"type": "string", "pattern": "^[0-9a-f]{64}$"}
           }
         ],
         "requestBody": {
@@ -82,7 +94,8 @@
           },
           "400": {"description": "Unknown or malformed ToolSpec input"},
           "403": {"description": "Invalid OBO mode, scope, actor, session, or context"},
-          "404": {"description": "Unknown tool or unpublished product"}
+          "404": {"description": "Unknown tool or unpublished product"},
+          "503": {"description": "Authoritative product or audit persistence unavailable"}
         }
       }
     },
@@ -127,6 +140,58 @@
           "404": {"description": "Unknown or cross-case sandbox"},
           "409": {"description": "Conflicting, provisioning, or inconsistent completion"},
           "503": {"description": "Revocation not yet safely closed"}
+        }
+      }
+    },
+    "/api/eval/state": {
+      "get": {
+        "operationId": "getEvaluationCommerceState",
+        "x-citybuddy-profile": "evaluation",
+        "security": [{"evaluationManagementBasic": []}],
+        "parameters": [
+          {"name": "X-Eval-Sandbox-Id", "in": "header", "required": true, "schema": {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,63}$"}}
+        ],
+        "responses": {
+          "200": {"description": "Bounded authoritative commerce sandbox state", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/EvaluationStateResponse"}}}},
+          "400": {"description": "Malformed or widened request", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/EvaluationError"}}}},
+          "401": {"description": "Invalid independent management credential", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/EvaluationError"}}}},
+          "404": {"description": "Unknown sandbox", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/EvaluationError"}}}},
+          "409": {"description": "Inconsistent or unobservable sandbox truth", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/EvaluationError"}}}},
+          "503": {"description": "Authoritative commerce state unavailable", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/EvaluationError"}}}}
+        }
+      }
+    },
+    "/api/eval/audit/{sessionId}": {
+      "get": {
+        "operationId": "getEvaluationCommerceAuditReferences",
+        "x-citybuddy-profile": "evaluation",
+        "security": [{"evaluationManagementBasic": []}],
+        "parameters": [
+          {"name": "sessionId", "in": "path", "required": true, "schema": {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,63}$"}},
+          {"name": "X-Eval-Sandbox-Id", "in": "header", "required": true, "schema": {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,63}$"}},
+          {"name": "after", "in": "query", "required": false, "schema": {"type": "integer", "minimum": 1}},
+          {"name": "limit", "in": "query", "required": false, "schema": {"type": "integer", "minimum": 1, "maximum": 50, "default": 20}}
+        ],
+        "responses": {
+          "200": {"description": "Bounded session-associated commerce audit references", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/EvaluationAuditPage"}}}},
+          "400": {"description": "Malformed, unbounded, or widened request", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/EvaluationError"}}}},
+          "401": {"description": "Invalid independent management credential", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/EvaluationError"}}}},
+          "404": {"description": "Unknown or unassociated sandbox/session", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/EvaluationError"}}}},
+          "409": {"description": "Referenced commerce truth is inconsistent", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/EvaluationError"}}}},
+          "503": {"description": "Authoritative commerce audit unavailable", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/EvaluationError"}}}}
+        }
+      }
+    },
+    "/api/eval/version": {
+      "get": {
+        "operationId": "getEvaluationCommerceVersion",
+        "x-citybuddy-profile": "evaluation",
+        "security": [{"evaluationManagementBasic": []}],
+        "responses": {
+          "200": {"description": "Fixed server-owned evaluation compatibility identifiers", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/EvaluationVersionResponse"}}}},
+          "400": {"description": "Caller-selected version or capability rejected", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/EvaluationError"}}}},
+          "401": {"description": "Invalid independent management credential", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/EvaluationError"}}}},
+          "503": {"description": "Startup-validated schema compatibility unavailable", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/EvaluationError"}}}}
         }
       }
     },
@@ -270,6 +335,103 @@
         "properties": {
           "sandboxId": {"type": "string", "maxLength": 64},
           "state": {"type": "string", "enum": ["DEAD"]}
+        }
+      },
+      "EvaluationSandboxState": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["sandboxId", "lifecycleState", "authInvalidationState", "deathReason", "fixtureCount", "expiresAt", "activatedAt", "deadAt", "closedAt", "version"],
+        "properties": {
+          "sandboxId": {"type": "string", "maxLength": 64},
+          "lifecycleState": {"type": "string", "enum": ["ACTIVE", "DEAD"]},
+          "authInvalidationState": {"type": "string", "enum": ["UNPROVISIONED", "PROVISIONED", "REVOKED", "EXPIRY_PROVEN"]},
+          "deathReason": {"type": ["string", "null"], "enum": ["RESET_FAILED", "COMPLETED", "EXPIRED", "ABANDONED", null]},
+          "fixtureCount": {"type": "integer", "minimum": 1, "maximum": 16},
+          "expiresAt": {"type": ["string", "null"], "format": "date-time"},
+          "activatedAt": {"type": ["string", "null"], "format": "date-time"},
+          "deadAt": {"type": ["string", "null"], "format": "date-time"},
+          "closedAt": {"type": ["string", "null"], "format": "date-time"},
+          "version": {"type": "integer", "minimum": 1}
+        }
+      },
+      "EvaluationStateProduct": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["productId", "name", "description", "priceMinor", "currency", "stockQuantity", "available", "publicationVersion"],
+        "properties": {
+          "productId": {"type": "string", "maxLength": 64},
+          "name": {"type": "string", "maxLength": 200},
+          "description": {"type": "string", "maxLength": 1000},
+          "priceMinor": {"type": "integer", "minimum": 1},
+          "currency": {"type": "string", "pattern": "^[A-Z]{3}$"},
+          "stockQuantity": {"type": "integer", "minimum": 0, "maximum": 1000000},
+          "available": {"type": "boolean"},
+          "publicationVersion": {"type": "integer", "minimum": 1}
+        }
+      },
+      "EvaluationStateEffect": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["effectType", "outcome", "createdAt"],
+        "properties": {
+          "effectType": {"type": "string", "enum": ["SMS"]},
+          "outcome": {"type": "string", "enum": ["SUPPRESSED"]},
+          "createdAt": {"type": "string", "format": "date-time"}
+        }
+      },
+      "EvaluationStateResponse": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["sandbox", "products", "effects"],
+        "properties": {
+          "sandbox": {"$ref": "#/components/schemas/EvaluationSandboxState"},
+          "products": {"type": "array", "maxItems": 16, "items": {"$ref": "#/components/schemas/EvaluationStateProduct"}},
+          "effects": {"type": "array", "maxItems": 8, "description": "Global ascending order by createdAt, then effectType, then the internal stable correlation key", "items": {"$ref": "#/components/schemas/EvaluationStateEffect"}}
+        }
+      },
+      "EvaluationAuditReference": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["sequence", "auditReferenceId", "sandboxId", "supportSessionId", "traceId", "operationId", "entityType", "entityId", "entityVersion", "outcome", "createdAt"],
+        "properties": {
+          "sequence": {"type": "integer", "minimum": 1},
+          "auditReferenceId": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+          "sandboxId": {"type": "string", "maxLength": 64},
+          "supportSessionId": {"type": "string", "maxLength": 64},
+          "traceId": {"type": "string", "maxLength": 64},
+          "operationId": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+          "entityType": {"type": "string", "enum": ["PRODUCT_FIXTURE"]},
+          "entityId": {"type": "string", "maxLength": 64},
+          "entityVersion": {"type": "integer", "minimum": 1},
+          "outcome": {"type": "string", "enum": ["OBSERVED"]},
+          "createdAt": {"type": "string", "format": "date-time"}
+        }
+      },
+      "EvaluationAuditPage": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["entries", "nextCursor"],
+        "properties": {
+          "entries": {"type": "array", "minItems": 1, "maxItems": 50, "items": {"$ref": "#/components/schemas/EvaluationAuditReference"}},
+          "nextCursor": {"type": ["integer", "null"], "minimum": 1}
+        }
+      },
+      "EvaluationVersionResponse": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["buildId", "schemaCompatibility", "capabilities"],
+        "properties": {
+          "buildId": {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,63}$"},
+          "schemaCompatibility": {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,63}$"},
+          "capabilities": {"type": "array", "minItems": 3, "maxItems": 3, "items": {"type": "string", "enum": ["commerce-audit-v1", "commerce-state-v1", "commerce-version-v1"]}}
+        }
+      },
+      "EvaluationError": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["error"],
+        "properties": {
+          "error": {"type": "string", "minLength": 1, "maxLength": 128}
         }
       },
       "Product": {

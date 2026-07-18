@@ -57,8 +57,10 @@ def test_registry_cleanup_and_fixture_sql_are_sandbox_scoped() -> None:
         / "commerce-service/src/main/java/io/citybuddy/commerce/evaluation"
         / "EvaluationSandboxRepository.java"
     ).read_text(encoding="utf-8")
-    tool = (
-        ROOT / "commerce-service/src/main/java/io/citybuddy/commerce/tool/AgentToolController.java"
+    audit = (
+        ROOT
+        / "commerce-service/src/main/java/io/citybuddy/commerce/evaluation"
+        / "EvaluationCommerceAuditService.java"
     ).read_text(encoding="utf-8")
 
     assert "PRIMARY KEY (sandbox_id)" in migration
@@ -69,7 +71,7 @@ def test_registry_cleanup_and_fixture_sql_are_sandbox_scoped() -> None:
     assert "requested_ttl_seconds BETWEEN 60 AND 3600" in migration
     assert "LIMIT ? FOR UPDATE SKIP LOCKED" in repository
     assert "DELETE FROM eval_sandbox_product_fixture WHERE sandbox_id = ?" in repository
-    assert "WHERE sandbox_id = ? AND product_id = ?" in tool
+    assert "WHERE sandbox_id = ? AND product_id = ?" in audit
 
 
 def test_evaluation_paths_are_explicitly_profile_gated_and_do_not_enable_later_slices() -> None:
@@ -99,8 +101,6 @@ def test_evaluation_paths_are_explicitly_profile_gated_and_do_not_enable_later_s
     assert "authorizeEvaluation" in controller
     assert "evaluationProfile && evaluationAllowed" in authorizer
     for forbidden in (
-        "/api/eval/state",
-        "/api/eval/audit",
         "/api/eval/evidence",
         "ServiceEval",
         "sandbox callback",

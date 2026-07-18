@@ -59,6 +59,25 @@ public class EvaluationSandboxConfiguration {
   }
 
   @Bean
+  EvaluationViewRepository evaluationViewRepository(JdbcTemplate jdbcTemplate) {
+    return new EvaluationViewRepository(jdbcTemplate);
+  }
+
+  @Bean
+  EvaluationViewService evaluationViewService(
+      EvaluationViewRepository repository,
+      EvaluationSandboxProperties properties,
+      Clock evaluationSandboxClock) {
+    return new EvaluationViewService(repository, properties, evaluationSandboxClock);
+  }
+
+  @Bean
+  EvaluationCommerceAuditService evaluationCommerceAuditService(
+      JdbcTemplate jdbcTemplate, Clock evaluationSandboxClock) {
+    return new EvaluationCommerceAuditService(jdbcTemplate, evaluationSandboxClock);
+  }
+
+  @Bean
   EvaluationSandboxCleanupWorker evaluationSandboxCleanupWorker(
       EvaluationSandboxRepository repository,
       EvaluationIdentityClient identity,

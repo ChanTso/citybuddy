@@ -1,6 +1,7 @@
 package io.citybuddy.commerce.tool;
 
 import com.fasterxml.jackson.databind.JsonNode;
+import io.citybuddy.commerce.evaluation.EvaluationCommerceAuditService;
 import io.citybuddy.commerce.evaluation.EvaluationSandboxAccess;
 import io.citybuddy.commerce.evaluation.EvaluationSandboxException;
 import io.citybuddy.commerce.identity.OboAuthorizationException;
@@ -10,6 +11,7 @@ import java.util.Set;
 import org.springframework.beans.factory.ObjectProvider;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
+import org.springframework.dao.DataAccessException;
 import org.springframework.http.ResponseEntity;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.web.bind.annotation.ExceptionHandler;
@@ -29,19 +31,22 @@ public final class AgentToolController {
   private final OboAuthorizer authorizer;
   private final JdbcTemplate jdbc;
   private final ObjectProvider<EvaluationSandboxAccess> sandboxAccess;
+  private final ObjectProvider<EvaluationCommerceAuditService> evaluationAudit;
 
   public AgentToolController(OboAuthorizer authorizer, JdbcTemplate jdbc) {
-    this(authorizer, jdbc, null);
+    this(authorizer, jdbc, null, null);
   }
 
   @Autowired
   public AgentToolController(
       OboAuthorizer authorizer,
       JdbcTemplate jdbc,
-      ObjectProvider<EvaluationSandboxAccess> sandboxAccess) {
+      ObjectProvider<EvaluationSandboxAccess> sandboxAccess,
+      ObjectProvider<EvaluationCommerceAuditService> evaluationAudit) {
     this.authorizer = authorizer;
     this.jdbc = jdbc;
     this.sandboxAccess = sandboxAccess;
+    this.evaluationAudit = evaluationAudit;
   }
 
   @PostMapping("/internal/tools/{toolName}")
@@ -50,6 +55,8 @@ public final class AgentToolController {
       @RequestHeader(value = "Authorization", required = false) String authorization,
       @RequestHeader("X-Support-Session-Id") String supportSession,
       @RequestHeader(value = "X-Eval-Sandbox-Id", required = false) String evalSandbox,
+      @RequestHeader(value = "X-Agent-Trace-Id", required = false) String traceId,
+      @RequestHeader(value = "X-Agent-Operation-Id", required = false) String operationId,
       @RequestBody JsonNode request) {
     if (!CATALOG_TOOL.equals(toolName)) {
       throw new AgentToolException(404, "Unknown tool");
@@ -77,30 +84,33 @@ public final class AgentToolController {
         || productNode.textValue().length() > 64) {
       throw new AgentToolException(400, "Invalid tool input");
     }
-    var products = product(principal.sandboxId(), productNode.textValue());
+    var products =
+        product(
+            principal.sandboxId(), supportSession, traceId, operationId, productNode.textValue());
     if (products.size() != 1) {
       throw new AgentToolException(404, "Product not found");
     }
     return products.getFirst();
   }
 
-  private java.util.List<Map<String, Object>> product(String sandboxId, String productId) {
+  private java.util.List<Map<String, Object>> product(
+      String sandboxId,
+      String supportSession,
+      String traceId,
+      String operationId,
+      String productId) {
     if (sandboxId != null) {
       EvaluationSandboxAccess access =
           sandboxAccess == null ? null : sandboxAccess.getIfAvailable();
-      if (access == null) {
+      EvaluationCommerceAuditService audit =
+          evaluationAudit == null ? null : evaluationAudit.getIfAvailable();
+      if (access == null || audit == null) {
         throw new EvaluationSandboxException(403, "Evaluation sandbox is unavailable");
       }
       access.requireActive(sandboxId);
-      return jdbc.query(
-          """
-          SELECT product_id, name, price_minor, currency, available, publication_version
-          FROM eval_sandbox_product_fixture
-          WHERE sandbox_id = ? AND product_id = ?
-          """,
-          AgentToolController::mapProduct,
-          sandboxId,
-          productId);
+      EvaluationCommerceAuditService.ProductObservation product =
+          audit.observeProduct(sandboxId, supportSession, traceId, operationId, productId);
+      return java.util.List.of(productMap(product));
     }
     return jdbc.query(
         """
@@ -109,6 +119,17 @@ public final class AgentToolController {
         """,
         AgentToolController::mapProduct,
         productId);
+  }
+
+  private static Map<String, Object> productMap(
+      EvaluationCommerceAuditService.ProductObservation product) {
+    return Map.<String, Object>of(
+        "productId", product.productId(),
+        "name", product.name(),
+        "priceMinor", product.priceMinor(),
+        "currency", product.currency(),
+        "available", product.available(),
+        "publicationVersion", product.publicationVersion());
   }
 
   private static Map<String, Object> mapProduct(java.sql.ResultSet result, int row)
@@ -142,6 +163,11 @@ public final class AgentToolController {
   @ExceptionHandler(AgentToolException.class)
   ResponseEntity<Map<String, String>> rejected(AgentToolException exception) {
     return ResponseEntity.status(exception.status()).body(Map.of("error", exception.getMessage()));
+  }
+
+  @ExceptionHandler(DataAccessException.class)
+  ResponseEntity<Map<String, String>> unavailable() {
+    return ResponseEntity.status(503).body(Map.of("error", "Service unavailable"));
   }
 
   private static final class AgentToolException extends RuntimeException {

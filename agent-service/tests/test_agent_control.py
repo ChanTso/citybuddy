@@ -290,6 +290,51 @@ def test_tool_adapter_enforces_server_owned_spec_and_bounded_model_view(
     assert requests[0]["json"] == {"productId": "product-1"}
 
 
+def test_evaluation_tool_propagates_server_correlation_and_deterministic_operation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    requests: list[dict[str, Any]] = []
+
+    def post(*args: Any, **kwargs: Any) -> httpx.Response:
+        del args
+        requests.append(kwargs)
+        return httpx.Response(
+            200,
+            json={
+                "productId": "product-1",
+                "name": "Tea",
+                "priceMinor": 500,
+                "currency": "CNY",
+                "available": True,
+                "publicationVersion": 1,
+            },
+        )
+
+    monkeypatch.setattr(httpx, "post", post)
+    adapter = ToolAdapter("https://commerce.test", RecordingObo())
+    arguments = '{"productId":"product-1"}'
+    for _ in range(2):
+        adapter.execute(
+            name=CATALOG_PRODUCT_SPEC.name,
+            serialized_arguments=arguments,
+            direct_token="direct",
+            subject="user-1",
+            session_id="session-1",
+            sandbox_id="sandbox-1",
+            trace_id="trace-1",
+            turn_id="turn-1",
+            budget=AttemptBudget(4, []),
+            events=[],
+        )
+
+    first = requests[0]["headers"]
+    second = requests[1]["headers"]
+    assert first["X-Eval-Sandbox-Id"] == "sandbox-1"
+    assert first["X-Agent-Trace-Id"] == "trace-1"
+    assert len(first["X-Agent-Operation-Id"]) == 64
+    assert first["X-Agent-Operation-Id"] == second["X-Agent-Operation-Id"]
+
+
 @pytest.mark.parametrize(
     ("name", "arguments", "reason"),
     [

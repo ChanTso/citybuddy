@@ -20,7 +20,9 @@ public record EvaluationSandboxProperties(
     Duration cleanupRetry,
     Duration janitorInterval,
     int maxCleanupAttempts,
-    int janitorBatchSize) {
+    int janitorBatchSize,
+    String buildId,
+    String schemaCompatibility) {
 
   public EvaluationSandboxProperties {
     provisioningTimeout = defaultDuration(provisioningTimeout, Duration.ofSeconds(30));
@@ -31,6 +33,8 @@ public record EvaluationSandboxProperties(
     janitorInterval = defaultDuration(janitorInterval, Duration.ofSeconds(5));
     maxCleanupAttempts = maxCleanupAttempts == 0 ? 3 : maxCleanupAttempts;
     janitorBatchSize = janitorBatchSize == 0 ? 10 : janitorBatchSize;
+    buildId = defaultText(buildId, "commerce-service-local");
+    schemaCompatibility = defaultText(schemaCompatibility, "commerce-evaluation-v1");
     requireText(managementClientId, "managementClientId");
     requireText(managementClientSecret, "managementClientSecret");
     requireText(authBaseUrl, "authBaseUrl");
@@ -53,15 +57,27 @@ public record EvaluationSandboxProperties(
     if (janitorBatchSize < 1 || janitorBatchSize > 50) {
       throw new IllegalArgumentException("janitorBatchSize must be between 1 and 50");
     }
+    requireIdentifier(buildId, "buildId");
+    requireIdentifier(schemaCompatibility, "schemaCompatibility");
   }
 
   private static Duration defaultDuration(Duration value, Duration fallback) {
     return value == null ? fallback : value;
   }
 
+  private static String defaultText(String value, String fallback) {
+    return value == null || value.isBlank() ? fallback : value;
+  }
+
   private static void requireText(String value, String name) {
     if (value == null || value.isBlank()) {
       throw new IllegalArgumentException(name + " is required");
+    }
+  }
+
+  private static void requireIdentifier(String value, String name) {
+    if (value.length() > 64 || !value.matches("[A-Za-z0-9][A-Za-z0-9._:-]*")) {
+      throw new IllegalArgumentException(name + " is invalid");
     }
   }
 
