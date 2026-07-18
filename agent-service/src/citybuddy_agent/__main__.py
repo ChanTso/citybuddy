@@ -12,6 +12,7 @@ def _settings() -> AgentSettings:
     return AgentSettings(
         environment=os.environ.get("CITYBUDDY_ENVIRONMENT", "development"),
         identity_enabled=os.environ.get("AGENT_IDENTITY_ENABLED", "false").lower() == "true",
+        evaluation_enabled=os.environ.get("AGENT_EVALUATION_ENABLED", "false").lower() == "true",
         issuer=os.environ.get("IDENTITY_ISSUER", ""),
         user_audience=os.environ.get("IDENTITY_USER_AUDIENCE", ""),
         jwks_url=os.environ.get("IDENTITY_JWKS_URL", ""),
@@ -24,6 +25,7 @@ def _settings() -> AgentSettings:
         exchange_scopes=scopes,
         model_proxy_url=os.environ.get("AGENT_MODEL_PROXY_URL", ""),
         commerce_tools_url=os.environ.get("AGENT_COMMERCE_TOOLS_URL", ""),
+        commerce_liveness_url=os.environ.get("AGENT_COMMERCE_LIVENESS_URL", ""),
         elasticsearch_url=os.environ.get("AGENT_ELASTICSEARCH_URL", ""),
         knowledge_alias=os.environ.get("AGENT_KNOWLEDGE_ALIAS", "knowledge_docs_read"),
         primary_role_alias=os.environ.get("AGENT_PRIMARY_ROLE_ALIAS", "support-standard-primary"),

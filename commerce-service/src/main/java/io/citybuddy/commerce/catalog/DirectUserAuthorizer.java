@@ -19,34 +19,75 @@ import java.util.List;
 import java.util.Map;
 
 public final class DirectUserAuthorizer {
-  private final CatalogProperties properties;
+  private final String issuer;
+  private final String userAudience;
+  private final Duration jwksCacheTtl;
+  private final Duration clockSkew;
+  private final String defaultPermission;
   private final JwksLoader loader;
   private final Clock clock;
+  private final boolean evaluationProfile;
   private volatile Map<String, RSAKey> keys = Map.of();
   private volatile Instant loadedAt;
 
   public DirectUserAuthorizer(CatalogProperties properties, JwksLoader loader, Clock clock) {
-    this.properties = properties;
+    this(
+        properties.issuer(),
+        properties.userAudience(),
+        properties.jwksCacheTtl(),
+        properties.clockSkew(),
+        properties.requiredPermission(),
+        loader,
+        clock,
+        false);
+  }
+
+  public DirectUserAuthorizer(
+      String issuer,
+      String userAudience,
+      Duration jwksCacheTtl,
+      Duration clockSkew,
+      String defaultPermission,
+      JwksLoader loader,
+      Clock clock,
+      boolean evaluationProfile) {
+    this.issuer = issuer;
+    this.userAudience = userAudience;
+    this.jwksCacheTtl = jwksCacheTtl;
+    this.clockSkew = clockSkew;
+    this.defaultPermission = defaultPermission;
     this.loader = loader;
     this.clock = clock;
+    this.evaluationProfile = evaluationProfile;
   }
 
   public DirectPrincipal authorize(String authorization, String evalSandboxHeader) {
-    return authorize(authorization, evalSandboxHeader, properties.requiredPermission());
+    return authorize(authorization, evalSandboxHeader, defaultPermission);
   }
 
   public DirectPrincipal authorize(
       String authorization, String evalSandboxHeader, String requiredPermission) {
+    return authorize(authorization, evalSandboxHeader, requiredPermission, false);
+  }
+
+  public DirectPrincipal authorizeEvaluation(
+      String authorization, String evalSandboxHeader, String requiredPermission) {
+    return authorize(authorization, evalSandboxHeader, requiredPermission, true);
+  }
+
+  private DirectPrincipal authorize(
+      String authorization,
+      String evalSandboxHeader,
+      String requiredPermission,
+      boolean evaluationAllowed) {
     try {
-      require(evalSandboxHeader == null, "Evaluation context is not enabled");
       require(authorization != null && authorization.startsWith("Bearer "), "Invalid bearer token");
       SignedJWT jwt = SignedJWT.parse(authorization.substring(7));
       require(JWSAlgorithm.RS256.equals(jwt.getHeader().getAlgorithm()), "Wrong algorithm");
       String kid = jwt.getHeader().getKeyID();
       boolean refreshed = false;
       Instant now = clock.instant();
-      if (loadedAt == null
-          || Duration.between(loadedAt, now).compareTo(properties.jwksCacheTtl()) >= 0) {
+      if (loadedAt == null || Duration.between(loadedAt, now).compareTo(jwksCacheTtl) >= 0) {
         refresh();
         refreshed = true;
       }
@@ -58,8 +99,9 @@ public final class DirectUserAuthorizer {
       require(key != null, "Unknown signing key");
       require(jwt.verify(new RSASSAVerifier(key.toRSAPublicKey())), "Invalid signature");
       JWTClaimsSet claims = jwt.getJWTClaimsSet();
-      validateClaims(claims, requiredPermission);
-      return new DirectPrincipal(claims.getSubject());
+      String sandboxId =
+          validateClaims(claims, requiredPermission, evalSandboxHeader, evaluationAllowed);
+      return new DirectPrincipal(claims.getSubject(), sandboxId);
     } catch (ParseException | JOSEException | RuntimeException exception) {
       if (exception instanceof CatalogException catalogException) {
         throw catalogException;
@@ -68,16 +110,30 @@ public final class DirectUserAuthorizer {
     }
   }
 
-  private void validateClaims(JWTClaimsSet claims, String requiredPermission)
+  private String validateClaims(
+      JWTClaimsSet claims,
+      String requiredPermission,
+      String evalSandboxHeader,
+      boolean evaluationAllowed)
       throws ParseException {
-    require(properties.issuer().equals(claims.getIssuer()), "Wrong issuer");
-    require(claims.getAudience().equals(List.of(properties.userAudience())), "Wrong audience");
-    require("direct_user".equals(claims.getClaimAsString("token_type")), "Wrong token type");
+    require(issuer.equals(claims.getIssuer()), "Wrong issuer");
+    require(claims.getAudience().equals(List.of(userAudience)), "Wrong audience");
+    String tokenType = claims.getClaimAsString("token_type");
+    String sandboxId = claims.getClaimAsString("sandbox");
+    if ("direct_user".equals(tokenType)) {
+      require(sandboxId == null, "Production token carries evaluation sandbox");
+      require(evalSandboxHeader == null, "Production token cannot use evaluation header");
+    } else if ("eval_direct_user".equals(tokenType)) {
+      require(evaluationProfile && evaluationAllowed, "Evaluation token is not enabled");
+      require(hasText(sandboxId), "Missing evaluation sandbox");
+      require(sandboxId.equals(evalSandboxHeader), "Evaluation sandbox mismatch");
+    } else {
+      throw new CatalogException(401, "Wrong token type");
+    }
     require("ACTIVE".equals(claims.getClaimAsString("principal_state")), "Inactive principal");
     require(hasText(claims.getSubject()), "Missing subject");
     require(claims.getClaim("act") == null, "Direct token carries actor");
     require(claims.getClaim("session") == null, "Direct token carries session");
-    require(claims.getClaim("sandbox") == null, "Evaluation context is not enabled");
     require(claims.getClaim("eval_sandbox") == null, "Evaluation context is not enabled");
     require(hasText(claims.getJWTID()), "Missing token identifier");
     List<String> permissions = claims.getStringListClaim("permissions");
@@ -88,12 +144,13 @@ public final class DirectUserAuthorizer {
       throw new CatalogException(403, "Missing permission");
     }
     validateTime(claims);
+    return sandboxId;
   }
 
   private void validateTime(JWTClaimsSet claims) {
     Instant now = clock.instant();
-    Instant lower = now.minus(properties.clockSkew());
-    Instant upper = now.plus(properties.clockSkew());
+    Instant lower = now.minus(clockSkew);
+    Instant upper = now.plus(clockSkew);
     Date expiration = claims.getExpirationTime();
     Date notBefore = claims.getNotBeforeTime();
     Date issuedAt = claims.getIssueTime();
@@ -127,5 +184,5 @@ public final class DirectUserAuthorizer {
     return value != null && !value.isBlank();
   }
 
-  public record DirectPrincipal(String subject) {}
+  public record DirectPrincipal(String subject, String sandboxId) {}
 }

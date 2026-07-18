@@ -99,6 +99,9 @@ jobs:
           - target: test-evaluation-identity-integration
             java: true
             python: true
+          - target: test-evaluation-sandbox-integration
+            java: true
+            python: true
           - target: test-catalog-integration
             java: true
             python: true

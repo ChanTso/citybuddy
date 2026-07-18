@@ -97,7 +97,7 @@ The linked slice name is the canonical detailed specification. Target outcomes a
 | [CB-090 — Versioned hybrid knowledge index and deterministic retrieval fusion](docs/slices/CB-090.md) | P0 | `VERIFIED` | `CB-014`, `CB-082` |
 | [CB-091 — Rerank, sufficiency calibration, and retrieval evidence](docs/slices/CB-091.md) | P0 | `VERIFIED` | `CB-090` |
 | [CB-100 — Evaluation identity provisioning and sandbox-bound token lifecycle](docs/slices/CB-100.md) | P0 | `VERIFIED` | `CB-020`, `CB-040`, `CB-061`, `CB-071`, `CB-082`, `CB-091` |
-| [CB-101 — Evaluation sandbox lifecycle and fail-closed enforcement](docs/slices/CB-101.md) | P0 | `READY` | `CB-100` |
+| [CB-101 — Evaluation sandbox lifecycle and fail-closed enforcement](docs/slices/CB-101.md) | P0 | `IN_PROGRESS` | `CB-100` |
 | [CB-102 — Commerce evaluation state, audit, and version APIs](docs/slices/CB-102.md) | P0 | `PLANNED` | `CB-101` |
 | [CB-103 — Agent evaluation evidence API](docs/slices/CB-103.md) | P0 | `PLANNED` | `CB-102` |
 | `CB-104 — Asynchronous sandbox liveness guards` | P0 | `PLANNED` | `CB-103` |

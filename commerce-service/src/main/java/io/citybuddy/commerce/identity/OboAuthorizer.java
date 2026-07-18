@@ -21,13 +21,20 @@ public final class OboAuthorizer {
   private final OboProperties properties;
   private final JwksLoader loader;
   private final Clock clock;
+  private final boolean evaluationProfile;
   private volatile Map<String, RSAKey> keys = Map.of();
   private volatile Instant loadedAt;
 
   public OboAuthorizer(OboProperties properties, JwksLoader loader, Clock clock) {
+    this(properties, loader, clock, false);
+  }
+
+  public OboAuthorizer(
+      OboProperties properties, JwksLoader loader, Clock clock, boolean evaluationProfile) {
     this.properties = properties;
     this.loader = loader;
     this.clock = clock;
+    this.evaluationProfile = evaluationProfile;
   }
 
   public OboPrincipal authorize(String serialized, AuthorizationRequest request) {
@@ -54,7 +61,8 @@ public final class OboAuthorizer {
       return new OboPrincipal(
           claims.getSubject(),
           claims.getClaimAsString("session"),
-          claims.getClaimAsString("scope"));
+          claims.getClaimAsString("scope"),
+          claims.getClaimAsString("sandbox"));
     } catch (ParseException | JOSEException | RuntimeException exception) {
       if (exception instanceof OboAuthorizationException authorizationException) {
         throw authorizationException;
@@ -77,9 +85,15 @@ public final class OboAuthorizer {
         "Scope must be exact");
     Map<String, Object> actor = claims.getJSONObjectClaim("act");
     require(actor != null && "agent-service".equals(actor.get("azp")), "Wrong actor");
-    require(claims.getClaim("sandbox") == null, "Evaluation context is not enabled");
+    String sandboxId = claims.getClaimAsString("sandbox");
+    if (sandboxId == null) {
+      require(request.evalSandboxHeader() == null, "Production token cannot use Evaluation header");
+    } else {
+      require(evaluationProfile, "Evaluation context is not enabled");
+      require(hasText(sandboxId), "Missing evaluation sandbox");
+      require(sandboxId.equals(request.evalSandboxHeader()), "Evaluation sandbox mismatch");
+    }
     require(claims.getClaim("eval_sandbox") == null, "Evaluation context is not enabled");
-    require(request.evalSandboxHeader() == null, "Evaluation context is not enabled");
     require(hasText(claims.getJWTID()), "Missing token identifier");
     validateTime(claims);
     require(
@@ -143,5 +157,5 @@ public final class OboAuthorizer {
       String bodySession,
       String evalSandboxHeader) {}
 
-  public record OboPrincipal(String subject, String sessionId, String scope) {}
+  public record OboPrincipal(String subject, String sessionId, String scope, String sandboxId) {}
 }
