@@ -1,9 +1,10 @@
-"""Deterministic LiteLLM-compatible fixture for CB-081 and CB-082 evidence."""
+"""Deterministic LiteLLM-compatible fixture for agent boundary evidence."""
 
 from __future__ import annotations
 
 import argparse
 import asyncio
+import json
 from collections import Counter
 from typing import Any
 
@@ -30,6 +31,12 @@ def scenario(message: str) -> str:
         "provider-failure",
         "unsafe-action-claim",
         "disconnect-slow",
+        "retrieval-sufficient",
+        "retrieval-insufficient",
+        "retrieval-ambiguous",
+        "retrieval-malformed",
+        "retrieval-timeout",
+        "retrieval-transient",
     ):
         if value in message:
             return value
@@ -80,6 +87,39 @@ async def complete(request: Request) -> JSONResponse:
         isinstance(item, dict) and item.get("role") == "tool" for item in messages
     )
 
+    if model == "support-reranker-standard":
+        try:
+            rerank_request = json.loads(user_messages[0])
+        except json.JSONDecodeError:
+            return JSONResponse(status_code=400, content={"error": "invalid rerank input"})
+        candidates = rerank_request.get("candidates") if isinstance(rerank_request, dict) else None
+        if not isinstance(candidates, list) or not candidates:
+            return JSONResponse(status_code=400, content={"error": "invalid candidates"})
+        selected = scenario(str(rerank_request.get("query", "")))
+        counts[f"{selected}:reranker"] += 1
+        if selected == "retrieval-timeout":
+            await asyncio.sleep(2.2)
+        if selected == "retrieval-transient" and counts[f"{selected}:reranker"] == 1:
+            return JSONResponse(status_code=503, content={"error": "transient"})
+        if selected == "retrieval-malformed":
+            scores: list[dict[str, object]] = [
+                {"candidate_id": "not-in-the-fused-set", "score": 0.99}
+            ]
+        else:
+            scores = []
+            for rank, candidate in enumerate(candidates):
+                candidate_id = candidate.get("candidateId") if isinstance(candidate, dict) else None
+                if not isinstance(candidate_id, str):
+                    return JSONResponse(status_code=400, content={"error": "invalid identity"})
+                if selected == "retrieval-insufficient":
+                    score = 0.7 - rank * 0.1
+                elif selected == "retrieval-ambiguous":
+                    score = 0.9 - rank * 0.1
+                else:
+                    score = max(0.1, 0.95 - rank * 0.25)
+                scores.append({"candidate_id": candidate_id, "score": score})
+        return JSONResponse(content=response_message(json.dumps({"scores": scores})))
+
     if selected == "transient-retry" and counts[f"{selected}:{model}"] == 1:
         return JSONResponse(status_code=503, content={"error": "transient"})
     if selected == "provider-failure":
@@ -93,6 +133,16 @@ async def complete(request: Request) -> JSONResponse:
         return JSONResponse(status_code=503, content={"error": "transient"})
     if selected == "budget-exhaustion":
         return JSONResponse(content=tool_message("unknown.tool", "{}"))
+    if selected.startswith("retrieval-") and not has_tool_feedback:
+        tool_arguments: dict[str, str] = {"query": user_messages[0]}
+        if selected == "retrieval-sufficient":
+            tool_arguments["rewrite"] = "delivery guide"
+        return JSONResponse(
+            content=tool_message(
+                "knowledge.search",
+                json.dumps(tool_arguments, separators=(",", ":")),
+            )
+        )
     if selected in {"tool-success", "tool-timeout"} and not has_tool_feedback:
         product_id = "timeout-product" if selected == "tool-timeout" else "product-1"
         return JSONResponse(

@@ -29,6 +29,7 @@ from citybuddy_agent.feedback import (
     FeedbackRecord,
     FeedbackStore,
 )
+from citybuddy_agent.retrieval import RetrievalDecision
 from cryptography.hazmat.primitives.asymmetric import rsa
 from fastapi import HTTPException
 from fastapi.testclient import TestClient
@@ -101,13 +102,19 @@ class MemoryConversationStore(ConversationStore):
         response_text: str,
         outcome: str,
         events: tuple[AgentEvent, ...],
+        retrieval_decision: RetrievalDecision | None = None,
     ) -> ConversationResult:
         del events
         key, pending = next(
             item for item in self.pending.items() if item[1][1].turn_id == start.turn_id
         )
         result = ConversationResult(
-            start.conversation_id, start.trace_id, start.turn_id, response_text, outcome
+            start.conversation_id,
+            start.trace_id,
+            start.turn_id,
+            response_text,
+            outcome,
+            retrieval_decision.evidence if retrieval_decision is not None else (),
         )
         self.results[key] = (pending[0], result)
         del self.pending[key]
@@ -442,7 +449,15 @@ def test_chat_persists_server_owned_result_and_replays_same_intent() -> None:
     assert first.status_code == 200
     assert replay.status_code == 200
     assert replay.json() == first.json()
-    assert set(first.json()) == {"conversationId", "traceId", "turnId", "reply", "outcome"}
+    assert set(first.json()) == {
+        "conversationId",
+        "traceId",
+        "turnId",
+        "reply",
+        "outcome",
+        "citations",
+    }
+    assert first.json()["citations"] == []
     assert first.json()["outcome"] == "completed"
     assert "order" not in first.json()["reply"].lower()
     assert len(conversations.results) == 1
@@ -574,7 +589,9 @@ def test_chat_redacts_mysql_failure() -> None:
             response_text: str,
             outcome: str,
             events: tuple[AgentEvent, ...],
+            retrieval_decision: RetrievalDecision | None = None,
         ) -> ConversationResult:
+            del start, response_text, outcome, events, retrieval_decision
             raise AssertionError("unreachable")
 
         def fail_turn(self, *, start: TurnStart, failure_code: str) -> None:

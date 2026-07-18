@@ -1,0 +1,42 @@
+{
+  "calibration_version": "cb091-calibration-v1",
+  "fixture_version": "cb091-dev-v1",
+  "score_threshold": 0.75,
+  "top_result_margin": 0.15,
+  "max_evidence": 3,
+  "threshold_candidates": [0.7, 0.75, 0.8],
+  "margin_candidates": [0.1, 0.15, 0.2],
+  "derivation_command": "uv run python scripts/check_retrieval_calibration.py",
+  "cases": [
+    {
+      "case_id": "clear-public-answer",
+      "query": "synthetic public return policy",
+      "scores": [0.91, 0.7],
+      "expected": "SUFFICIENT"
+    },
+    {
+      "case_id": "threshold-boundary",
+      "query": "synthetic public delivery coverage",
+      "scores": [0.75, 0.6],
+      "expected": "SUFFICIENT"
+    },
+    {
+      "case_id": "below-threshold",
+      "query": "synthetic public unsupported question",
+      "scores": [0.74, 0.2],
+      "expected": "INSUFFICIENT"
+    },
+    {
+      "case_id": "ambiguous-margin",
+      "query": "synthetic public ambiguous products",
+      "scores": [0.9, 0.76],
+      "expected": "INSUFFICIENT"
+    },
+    {
+      "case_id": "margin-boundary",
+      "query": "synthetic public opening hours",
+      "scores": [0.9, 0.75],
+      "expected": "SUFFICIENT"
+    }
+  ]
+}

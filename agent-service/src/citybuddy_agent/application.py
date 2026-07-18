@@ -42,6 +42,7 @@ from .feedback import (
     MysqlFeedbackStore,
 )
 from .knowledge import ElasticsearchKnowledgeSearch
+from .retrieval import load_calibration
 from .sse import SseEgressFilter, SseProjectionError, stream_events
 
 SESSION_PERMISSION = "support:session:create"
@@ -73,6 +74,8 @@ class AgentSettings(BaseModel):
     fallback_role_alias: str = "support-standard-fallback"
     primary_provider_key: str = "primary"
     fallback_provider_key: str = "fallback"
+    reranker_role_alias: str = "support-reranker-standard"
+    reranker_provider_key: str = "reranker"
     elasticsearch_url: str = ""
     knowledge_alias: str = "knowledge_docs_read"
     attempt_budget: int = 8
@@ -246,6 +249,16 @@ class ChatRequest(BaseModel):
     message: str = Field(min_length=1, max_length=4000)
 
 
+class CitationResponse(BaseModel):
+    model_config = ConfigDict(frozen=True)
+
+    source_id: str = Field(serialization_alias="sourceId")
+    chunk_id: str = Field(serialization_alias="chunkId")
+    source_version: int = Field(serialization_alias="sourceVersion")
+    doc_type: Literal["faq", "product"] = Field(serialization_alias="docType")
+    title: str
+
+
 class ChatResponse(BaseModel):
     model_config = ConfigDict(frozen=True)
 
@@ -254,6 +267,7 @@ class ChatResponse(BaseModel):
     turn_id: str = Field(serialization_alias="turnId")
     reply: str
     outcome: str
+    citations: tuple[CitationResponse, ...] = ()
 
 
 class FeedbackRequest(BaseModel):
@@ -341,34 +355,42 @@ def create_app(
     app.state.feedback = resolved_feedback
     app.state.sse_filter = sse_filter
     resolved_obo = OboClient(resolved, resolved_sessions)
-    resolved_agent = agent or BoundedAgent(
-        RuleRouter(),
-        ModelRouter(
-            (
-                ProviderRoute(resolved.primary_role_alias, resolved.primary_provider_key),
-                ProviderRoute(resolved.fallback_role_alias, resolved.fallback_provider_key),
-            ),
-            resolved.attempt_budget,
-        ),
-        LiteLlmClient(
+    resolved_agent: AgentRunner
+    if agent is None:
+        model_client = LiteLlmClient(
             resolved.model_proxy_url,
             ProviderCircuits(
                 minimum_requests=resolved.circuit_minimum_requests,
                 open_seconds=resolved.circuit_open_seconds,
                 half_open_probes=resolved.circuit_half_open_probes,
             ),
-        ),
-        ToolAdapter(
-            resolved.commerce_tools_url,
-            resolved_obo,
-            ElasticsearchKnowledgeSearch(
-                resolved.elasticsearch_url,
-                alias=resolved.knowledge_alias,
-            )
-            if resolved.elasticsearch_url
-            else None,
-        ),
-    )
+        )
+        resolved_agent = BoundedAgent(
+            RuleRouter(),
+            ModelRouter(
+                (
+                    ProviderRoute(resolved.primary_role_alias, resolved.primary_provider_key),
+                    ProviderRoute(resolved.fallback_role_alias, resolved.fallback_provider_key),
+                ),
+                resolved.attempt_budget,
+                ProviderRoute(resolved.reranker_role_alias, resolved.reranker_provider_key),
+            ),
+            model_client,
+            ToolAdapter(
+                resolved.commerce_tools_url,
+                resolved_obo,
+                ElasticsearchKnowledgeSearch(
+                    resolved.elasticsearch_url,
+                    alias=resolved.knowledge_alias,
+                )
+                if resolved.elasticsearch_url
+                else None,
+                model_client,
+                load_calibration(),
+            ),
+        )
+    else:
+        resolved_agent = agent
     app.state.obo_client = resolved_obo
     app.state.agent = resolved_agent
 
@@ -420,6 +442,7 @@ def create_app(
                 response_text=agent_result.response_text,
                 outcome=agent_result.outcome,
                 events=agent_result.events,
+                retrieval_decision=agent_result.retrieval_decision,
             )
         except Exception:
             resolved_conversations.fail_turn(start=start, failure_code="agent_execution_failed")
@@ -468,6 +491,16 @@ def create_app(
             turn_id=result.turn_id,
             reply=result.response_text,
             outcome=result.outcome,
+            citations=tuple(
+                CitationResponse(
+                    source_id=evidence.source_id,
+                    chunk_id=evidence.chunk_id,
+                    source_version=evidence.source_version,
+                    doc_type=evidence.doc_type,
+                    title=evidence.title,
+                )
+                for evidence in result.retrieval_evidence
+            ),
         )
 
     @app.post("/api/chat/stream")

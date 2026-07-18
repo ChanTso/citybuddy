@@ -1,6 +1,6 @@
 {
   "openapi": "3.1.0",
-  "info": {"title": "CityBuddy agent API", "version": "CB-082"},
+  "info": {"title": "CityBuddy agent API", "version": "CB-091"},
   "paths": {
     "/api/sessions": {
       "post": {
@@ -73,7 +73,14 @@
                 "schema": {
                   "type": "object",
                   "additionalProperties": false,
-                  "required": ["conversationId", "traceId", "turnId", "reply", "outcome"],
+                  "required": [
+                    "conversationId",
+                    "traceId",
+                    "turnId",
+                    "reply",
+                    "outcome",
+                    "citations"
+                  ],
                   "properties": {
                     "conversationId": {"type": "string", "format": "uuid", "readOnly": true},
                     "traceId": {"type": "string", "format": "uuid", "readOnly": true},
@@ -81,7 +88,18 @@
                     "reply": {"type": "string", "maxLength": 256},
                     "outcome": {
                       "type": "string",
-                      "enum": ["completed", "budget_exhausted", "provider_denied"]
+                      "enum": [
+                        "completed",
+                        "budget_exhausted",
+                        "provider_denied",
+                        "retrieval_denied"
+                      ]
+                    },
+                    "citations": {
+                      "type": "array",
+                      "maxItems": 3,
+                      "items": {"$ref": "#/components/schemas/RetrievalCitation"},
+                      "description": "Source references projected only from sufficient retrieval evidence committed with this turn."
                     }
                   }
                 }
@@ -200,6 +218,18 @@
         "additionalProperties": false,
         "required": ["detail"],
         "properties": {"detail": {"type": "string", "maxLength": 64}}
+      },
+      "RetrievalCitation": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["sourceId", "chunkId", "sourceVersion", "docType", "title"],
+        "properties": {
+          "sourceId": {"type": "string", "minLength": 1, "maxLength": 128},
+          "chunkId": {"type": "string", "minLength": 1, "maxLength": 128},
+          "sourceVersion": {"type": "integer", "minimum": 1},
+          "docType": {"type": "string", "enum": ["faq", "product"]},
+          "title": {"type": "string", "minLength": 1, "maxLength": 200}
+        }
       },
       "SseTokenData": {
         "type": "object",

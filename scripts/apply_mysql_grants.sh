@@ -62,6 +62,8 @@ expected=(
   "GRANT SELECT, INSERT, UPDATE ON cs_db.support_turn TO 'agent_app'@'%';"
   "GRANT SELECT, INSERT ON cs_db.support_event TO 'agent_app'@'%';"
   "GRANT SELECT, INSERT ON cs_db.support_feedback TO 'agent_app'@'%';"
+  "GRANT SELECT, INSERT ON cs_db.retrieval_decision TO 'agent_app'@'%';"
+  "GRANT SELECT, INSERT ON cs_db.retrieval_evidence TO 'agent_app'@'%';"
 )
 mapfile -t actual < <(sed -e '/^[[:space:]]*$/d' -e '/^[[:space:]]*--/d' "$manifest")
 
@@ -187,14 +189,36 @@ runtime_table_state="$(mysql "${mysql_args[@]}" --execute="
       'support_conversation',
       'support_turn',
       'support_event',
-      'support_feedback'
+      'support_feedback',
+      'retrieval_decision',
+      'retrieval_evidence'
     );
   SET ROLE NONE;")"
 normalized_runtime_table_state="$runtime_table_state"
 feedback_table_present=false
-if [[ ",$runtime_table_state," == *",cs_db.support_feedback,"* ]]; then
-  runtime_table_count="${runtime_table_state%%:*}"
-  runtime_table_list="${runtime_table_state#*:}"
+retrieval_tables_present=false
+retrieval_decision_present=false
+retrieval_evidence_present=false
+if [[ "$runtime_table_state" == *"cs_db.retrieval_decision"* ]]; then
+  retrieval_decision_present=true
+fi
+if [[ "$runtime_table_state" == *"cs_db.retrieval_evidence"* ]]; then
+  retrieval_evidence_present=true
+fi
+if [[ "$retrieval_decision_present" != "$retrieval_evidence_present" ]]; then
+  echo "Grant job found a partial retrieval-evidence schema." >&2
+  exit 1
+elif [[ "$retrieval_decision_present" == true ]]; then
+  runtime_table_count="${normalized_runtime_table_state%%:*}"
+  runtime_table_list="${normalized_runtime_table_state#*:}"
+  runtime_table_list="${runtime_table_list/,cs_db.retrieval_decision/}"
+  runtime_table_list="${runtime_table_list/,cs_db.retrieval_evidence/}"
+  normalized_runtime_table_state="$((runtime_table_count - 2)):$runtime_table_list"
+  retrieval_tables_present=true
+fi
+if [[ ",$normalized_runtime_table_state," == *",cs_db.support_feedback,"* ]]; then
+  runtime_table_count="${normalized_runtime_table_state%%:*}"
+  runtime_table_list="${normalized_runtime_table_state#*:}"
   runtime_table_list="${runtime_table_list/,cs_db.support_feedback/}"
   normalized_runtime_table_state="$((runtime_table_count - 1)):$runtime_table_list"
   feedback_table_present=true
@@ -217,8 +241,14 @@ complete_runtime_table_state="18:commerce_db.auth_login_credential,commerce_db.a
 cb080_runtime_table_state="21:commerce_db.auth_login_credential,commerce_db.auth_service_identity,commerce_db.auth_signing_key_metadata,commerce_db.auth_user_principal,commerce_db.catalog_metadata,commerce_db.commerce_outbox,commerce_db.crm_profile,commerce_db.inventory_ledger,commerce_db.mock_payment_attempt,commerce_db.mock_payment_callback,commerce_db.mock_refund,commerce_db.order_idempotency,commerce_db.product,commerce_db.seckill_activity,commerce_db.seckill_order,commerce_db.seckill_reservation,commerce_db.standard_order,cs_db.support_conversation,cs_db.support_event,cs_db.support_session,cs_db.support_turn"
 if [[ "$normalized_runtime_table_state" == "$cb080_runtime_table_state" ]]; then
   selected_runtime_sql="$(printf '%s\n' "${actual[@]:5:22}")"
-  if [[ "$feedback_table_present" == true ]]; then
-    selected_runtime_sql="$runtime_sql"
+  if [[ "$retrieval_tables_present" == true ]]; then
+    if [[ "$feedback_table_present" != true ]]; then
+      echo "Grant job found retrieval tables without the prerequisite feedback schema." >&2
+      exit 1
+    fi
+    selected_runtime_sql="$(printf '%s\n' "${actual[@]:5:25}")"
+  elif [[ "$feedback_table_present" == true ]]; then
+    selected_runtime_sql="$(printf '%s\n' "${actual[@]:5:23}")"
   fi
   mysql "${mysql_args[@]}" --execute="
     SET ROLE 'bootstrap_grant_role';

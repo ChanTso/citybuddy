@@ -40,6 +40,7 @@ def test_chat_response_is_allowlisted_and_server_ids_are_read_only() -> None:
         "turnId",
         "reply",
         "outcome",
+        "citations",
     }
     for name in ("conversationId", "traceId", "turnId"):
         assert response["properties"][name]["readOnly"] is True
@@ -47,7 +48,18 @@ def test_chat_response_is_allowlisted_and_server_ids_are_read_only() -> None:
         "completed",
         "budget_exhausted",
         "provider_denied",
+        "retrieval_denied",
     ]
+    citation = contract()["components"]["schemas"]["RetrievalCitation"]
+    assert citation["additionalProperties"] is False
+    assert set(citation["properties"]) == {
+        "sourceId",
+        "chunkId",
+        "sourceVersion",
+        "docType",
+        "title",
+    }
+    assert response["properties"]["citations"]["maxItems"] == 3
     assert set(operation["responses"]) == {"200", "401", "403", "409", "422", "503"}
 
 
@@ -186,6 +198,32 @@ def test_feedback_schema_and_grants_are_owner_bound_and_append_only() -> None:
         'support_session "\n                        "WHERE session_id = %s FOR UPDATE' not in source
     )
     assert '"AND idempotency_key = %s FOR UPDATE"' not in source
+
+
+def test_retrieval_evidence_schema_is_turn_bound_atomic_and_append_only() -> None:
+    migration = (ROOT / "infra/mysql/migrations/agent/V006__retrieval_evidence.sql").read_text(
+        encoding="utf-8"
+    )
+    grants = (ROOT / "infra/mysql/grants/V001__migration_access.sql").read_text(encoding="utf-8")
+    source = (ROOT / "agent-service/src/citybuddy_agent/conversation.py").read_text(
+        encoding="utf-8"
+    )
+
+    assert "UNIQUE KEY uq_retrieval_decision_turn (turn_id)" in migration
+    assert "FOREIGN KEY (turn_id, trace_id, session_id, user_subject)" in migration
+    assert "UNIQUE KEY uq_retrieval_evidence_rank (decision_id, evidence_rank)" in migration
+    assert "sufficiency_outcome IN ('SUFFICIENT', 'INSUFFICIENT')" in migration
+    assert "'retrieval_denied'" in migration
+    assert "'RETRIEVAL_DECISION'" in migration
+    for table in ("retrieval_decision", "retrieval_evidence"):
+        assert f"GRANT SELECT, INSERT ON cs_db.{table} TO 'agent_app'@'%';" in grants
+        assert f"UPDATE ON cs_db.{table}" not in grants
+        assert f"DELETE ON cs_db.{table}" not in grants
+    assert (
+        source.index("for event in events:")
+        < source.index("self._insert_retrieval_decision(")
+        < source.index("UPDATE support_turn SET state = 'COMPLETED'")
+    )
 
 
 def test_commerce_tool_contract_is_exact_obo_and_bounded_view() -> None:
