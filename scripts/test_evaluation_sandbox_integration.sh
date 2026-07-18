@@ -64,6 +64,18 @@ assert_mysql_fails() {
   echo "Verified MySQL rejection: $label"
 }
 
+assert_mysql_integrity_fails() {
+  local label="$1"
+  shift
+  if "$@" >"$tmp_dir/mysql-integrity-rejection.log" 2>&1; then
+    echo "Expected MySQL integrity rejection succeeded: $label" >&2
+    exit 1
+  fi
+  grep -Eqi 'Duplicate entry|foreign key constraint fails|check constraint' \
+    "$tmp_dir/mysql-integrity-rejection.log"
+  echo "Verified MySQL integrity rejection: $label"
+}
+
 assert_equal() {
   local expected="$1"
   local actual="$2"
@@ -201,9 +213,12 @@ start_commerce() {
 }
 
 start_agent() {
+  local evaluation_enabled="$1"
   AGENT_PORT="$agent_port" \
   AGENT_IDENTITY_ENABLED=true \
-  AGENT_EVALUATION_ENABLED=true \
+  AGENT_EVALUATION_ENABLED="$evaluation_enabled" \
+  AGENT_EVALUATION_CLIENT_ID=evaluation-manager \
+  AGENT_EVALUATION_CLIENT_SECRET="$management_password" \
   CITYBUDDY_ENVIRONMENT=integration \
   IDENTITY_ISSUER=https://identity.citybuddy.test \
   IDENTITY_USER_AUDIENCE=citybuddy-web \
@@ -283,10 +298,25 @@ assert_mysql_fails "auth runtime cannot read commerce evaluation audit" \
 assert_mysql_fails "agent runtime cannot read commerce evaluation audit" \
   mysql_query agent_app "$agent_app_password" commerce_db \
   'SELECT * FROM eval_commerce_audit_reference'
+assert_mysql_fails "auth runtime cannot read agent evidence truth" \
+  mysql_query auth_app "$auth_app_password" cs_db 'SELECT * FROM support_event'
+assert_mysql_fails "commerce runtime cannot read agent evidence truth" \
+  mysql_query commerce_app "$commerce_app_password" cs_db 'SELECT * FROM support_event'
 assert_mysql_fails "commerce runtime cannot read auth provisioning truth" \
   mysql_query commerce_app "$commerce_app_password" commerce_db 'SELECT * FROM auth_eval_test_principal'
 assert_mysql_fails "commerce runtime cannot execute DDL" \
   mysql_query commerce_app "$commerce_app_password" commerce_db 'CREATE TABLE forbidden_cb101 (id INT)'
+assert_mysql_fails "agent runtime cannot execute DDL" \
+  mysql_query agent_app "$agent_app_password" cs_db 'CREATE TABLE forbidden_cb103 (id INT)'
+agent_grants="$(mysql_query agent_app "$agent_app_password" '' 'SHOW GRANTS FOR CURRENT_USER')"
+for table in support_session support_conversation support_turn support_event support_feedback \
+  retrieval_decision retrieval_evidence; do
+  grep -Fq "\`cs_db\`.\`$table\`" <<<"$agent_grants"
+done
+if grep -Fq 'commerce_db' <<<"$agent_grants"; then
+  echo "Agent runtime gained forbidden commerce_db access." >&2
+  exit 1
+fi
 commerce_grants="$(mysql_query commerce_app "$commerce_app_password" '' 'SHOW GRANTS FOR CURRENT_USER')"
 evaluation_grants="$(grep -F 'eval_' <<<"$commerce_grants")"
 printf '%s\n' "$evaluation_grants"
@@ -320,6 +350,12 @@ openssl pkey -in "$tmp_dir/overlap-private.pem" -pubout -out "$tmp_dir/overlap-p
 
 start_auth production
 start_commerce production "http://127.0.0.1:$auth_port"
+start_agent false
+assert_status 404 "production profile omits agent evaluation evidence" \
+  --request GET "http://127.0.0.1:$agent_port/api/eval/evidence/00000000-0000-0000-0000-000000000103" \
+  --user "evaluation-manager:$management_password" \
+  --header 'X-Eval-Sandbox-Id: sandbox-production'
+stop_process agent_pid "$agent_pid"
 assert_status 404 "production profile omits reset" \
   --request POST "http://127.0.0.1:$commerce_port/api/eval/reset" \
   --user "evaluation-manager:$management_password" \
@@ -468,7 +504,7 @@ assert_status 204 "token header path and registry liveness agree" \
 uv run python scripts/fake_litellm_server.py --port "$proxy_port" >>"$tmp_dir/model.log" 2>&1 &
 model_pid=$!
 wait_http "http://127.0.0.1:$proxy_port/fixture/counts" "$model_pid" "$tmp_dir/model.log"
-start_agent
+start_agent true
 assert_status 201 "evaluation support session binds subject and sandbox" \
   --request POST "http://127.0.0.1:$agent_port/api/sessions" \
   --header "Authorization: Bearer $direct_token" \
@@ -550,12 +586,223 @@ assert_status 200 "evaluation chat executes sandbox-bound OBO tool" \
   --header "X-Session-Id: $session_id" \
   --header 'Idempotency-Key: cb101-tool-turn' \
   --header 'Content-Type: application/json' \
-  --data '{"message":"tool-success"}'
+  --data '{"message":"tool-success cb103-private-user-text"}'
 trace_id="$(uv run python scripts/read_json_field.py "$tmp_dir/http-response.json" traceId)"
+mysql_query root "$root_password" cs_db \
+  "INSERT INTO support_feedback (feedback_id, session_id, user_subject, trace_id, idempotency_key, request_fingerprint, rating, comment_text) VALUES (UUID(), '$session_id', '$direct_subject', '$trace_id', 'cb103-feedback-fixture', REPEAT('f', 64), 'POSITIVE', 'cb103-private-feedback-comment')"
 test "$(mysql_query agent_app "$agent_app_password" cs_db \
   "SELECT GROUP_CONCAT(JSON_UNQUOTE(JSON_EXTRACT(payload_json, '$.state')) ORDER BY sequence SEPARATOR ',') FROM support_event WHERE trace_id = '$trace_id' AND event_type = 'TOOL_LIFECYCLE'")" = 'requested,succeeded'
 test "$(mysql_query commerce_app "$commerce_app_password" commerce_db \
   "SELECT COUNT(*) FROM eval_commerce_audit_reference WHERE sandbox_id = 'sandbox-main' AND support_session_id = '$session_id'")" = 2
+assert_status 401 "agent evidence rejects missing management credential" \
+  --request GET "http://127.0.0.1:$agent_port/api/eval/evidence/$trace_id" \
+  --header 'X-Eval-Sandbox-Id: sandbox-main'
+assert_status 401 "direct-user token is not agent evidence authentication" \
+  --request GET "http://127.0.0.1:$agent_port/api/eval/evidence/$trace_id" \
+  --header "Authorization: Bearer $direct_token" \
+  --header 'X-Eval-Sandbox-Id: sandbox-main'
+assert_status 401 "agent evidence rejects substituted management credential" \
+  --request GET "http://127.0.0.1:$agent_port/api/eval/evidence/$trace_id" \
+  --user "evaluation-manager:$invalid_management_password" \
+  --header 'X-Eval-Sandbox-Id: sandbox-main'
+
+assert_agent_evidence_credential_401() {
+  local description="$1"
+  local authorization_value="$2"
+  assert_status 401 "$description" \
+    --request GET "http://127.0.0.1:$agent_port/api/eval/evidence/$trace_id" \
+    --header "Authorization: $authorization_value" \
+    --header 'X-Eval-Sandbox-Id: sandbox-main'
+  if ! grep -Fxq '{"detail":"Unauthorized"}' "$tmp_dir/http-response.json"; then
+    echo "Malformed evaluation credential exposed a non-public response." >&2
+    exit 1
+  fi
+}
+
+assert_agent_evidence_credential_401 \
+  "agent evidence rejects a raw non-ASCII Basic token" 'Basic é'
+assert_agent_evidence_credential_401 \
+  "agent evidence rejects invalid Base64" 'Basic !!!'
+invalid_utf8_basic="$(printf '\377:x' | openssl base64 -A)"
+assert_agent_evidence_credential_401 \
+  "agent evidence rejects decoded non-UTF-8 bytes" "Basic $invalid_utf8_basic"
+missing_colon_basic="$(printf 'missing-colon' | openssl base64 -A)"
+assert_agent_evidence_credential_401 \
+  "agent evidence rejects Basic credentials without a colon" "Basic $missing_colon_basic"
+empty_basic="$(printf ':' | openssl base64 -A)"
+assert_agent_evidence_credential_401 \
+  "agent evidence rejects empty Basic credentials" "Basic $empty_basic"
+assert_agent_evidence_credential_401 \
+  "agent evidence rejects a non-Basic scheme" 'Bearer evaluator-token'
+oversized_basic="$(printf '%2048s' '' | tr ' ' A)"
+assert_agent_evidence_credential_401 \
+  "agent evidence rejects an oversized Basic header" "Basic $oversized_basic"
+control_basic="$(printf 'evaluation-manager:x\001' | openssl base64 -A)"
+assert_agent_evidence_credential_401 \
+  "agent evidence rejects decoded control characters" "Basic $control_basic"
+nul_basic="$(printf 'evaluation-manager:x\000' | openssl base64 -A)"
+assert_agent_evidence_credential_401 \
+  "agent evidence rejects decoded NUL bytes" "Basic $nul_basic"
+non_ascii_client_basic="$(printf '\303\251valuation-manager:x' | openssl base64 -A)"
+assert_agent_evidence_credential_401 \
+  "agent evidence rejects non-ASCII management client id" "Basic $non_ascii_client_basic"
+non_ascii_secret_basic="$(printf 'evaluation-manager:x\303\251' | openssl base64 -A)"
+assert_agent_evidence_credential_401 \
+  "agent evidence rejects non-ASCII management secret" "Basic $non_ascii_secret_basic"
+assert_status 422 "agent evidence rejects caller-selected fields" \
+  --request GET "http://127.0.0.1:$agent_port/api/eval/evidence/$trace_id?fields=all" \
+  --user "evaluation-manager:$management_password" \
+  --header 'X-Eval-Sandbox-Id: sandbox-main'
+assert_status 422 "agent evidence rejects malformed trace" \
+  --request GET "http://127.0.0.1:$agent_port/api/eval/evidence/not-a-trace" \
+  --user "evaluation-manager:$management_password" \
+  --header 'X-Eval-Sandbox-Id: sandbox-main'
+assert_status 422 "agent evidence rejects a request body" \
+  --request GET "http://127.0.0.1:$agent_port/api/eval/evidence/$trace_id" \
+  --user "evaluation-manager:$management_password" \
+  --header 'X-Eval-Sandbox-Id: sandbox-main' \
+  --header 'Content-Type: application/json' \
+  --data '{}'
+assert_status 404 "agent evidence conceals cross-sandbox trace ownership" \
+  --request GET "http://127.0.0.1:$agent_port/api/eval/evidence/$trace_id" \
+  --user "evaluation-manager:$management_password" \
+  --header 'X-Eval-Sandbox-Id: sandbox-other'
+agent_truth_before="$(mysql_query agent_app "$agent_app_password" cs_db \
+  "SELECT CONCAT((SELECT state FROM support_turn WHERE trace_id = '$trace_id'), ':', (SELECT COUNT(*) FROM support_event WHERE trace_id = '$trace_id'), ':', (SELECT COUNT(*) FROM support_feedback WHERE trace_id = '$trace_id'))")"
+curl --silent --show-error "http://127.0.0.1:$proxy_port/fixture/counts" >"$tmp_dir/model-counts-before-evidence.json"
+assert_status 200 "agent evidence projects complete bounded durable truth" \
+  --request GET "http://127.0.0.1:$agent_port/api/eval/evidence/$trace_id" \
+  --user "evaluation-manager:$management_password" \
+  --header 'X-Eval-Sandbox-Id: sandbox-main'
+cp "$tmp_dir/http-response.json" "$tmp_dir/agent-evidence.json"
+uv run python scripts/check_agent_evaluation_evidence.py "$tmp_dir/agent-evidence.json" \
+  --trace "$trace_id" --session "$session_id" --outcome completed \
+  --require-event ROUTING_DECISION --require-event TOOL_LIFECYCLE \
+  --require-event BUDGET_CHARGED --feedback-count 1 \
+  --forbid-marker cb103-private-user-text \
+  --forbid-marker cb103-private-feedback-comment \
+  --forbid-marker support-standard-primary \
+  --forbid-marker sandbox-product
+assert_status 200 "repeated agent evidence read is byte-for-byte deterministic" \
+  --request GET "http://127.0.0.1:$agent_port/api/eval/evidence/$trace_id" \
+  --user "evaluation-manager:$management_password" \
+  --header 'X-Eval-Sandbox-Id: sandbox-main'
+cmp "$tmp_dir/agent-evidence.json" "$tmp_dir/http-response.json"
+assert_equal "$agent_truth_before" "$(mysql_query agent_app "$agent_app_password" cs_db \
+  "SELECT CONCAT((SELECT state FROM support_turn WHERE trace_id = '$trace_id'), ':', (SELECT COUNT(*) FROM support_event WHERE trace_id = '$trace_id'), ':', (SELECT COUNT(*) FROM support_feedback WHERE trace_id = '$trace_id'))")" \
+  "agent evidence reads do not mutate durable support truth"
+curl --silent --show-error "http://127.0.0.1:$proxy_port/fixture/counts" >"$tmp_dir/model-counts-after-evidence.json"
+cmp "$tmp_dir/model-counts-before-evidence.json" "$tmp_dir/model-counts-after-evidence.json"
+mysql_query root "$root_password" cs_db \
+  "UPDATE support_event SET payload_json = JSON_SET(payload_json, '$.outcome', 'provider_denied') WHERE trace_id = '$trace_id' AND event_type = 'AGENT_OUTCOME'"
+assert_status 409 "agent evidence rejects a terminal outcome conflicting with turn truth" \
+  --request GET "http://127.0.0.1:$agent_port/api/eval/evidence/$trace_id" \
+  --user "evaluation-manager:$management_password" \
+  --header 'X-Eval-Sandbox-Id: sandbox-main'
+mysql_query root "$root_password" cs_db \
+  "UPDATE support_event SET payload_json = JSON_SET(payload_json, '$.outcome', 'completed') WHERE trace_id = '$trace_id' AND event_type = 'AGENT_OUTCOME'"
+mysql_query root "$root_password" cs_db \
+  "UPDATE support_event SET event_type = 'TURN_FAILED', payload_json = JSON_OBJECT('code', 'tampered_intermediate_terminal') WHERE trace_id = '$trace_id' AND event_type = 'AGENT_OUTCOME'"
+assert_status 409 "agent evidence rejects an intermediate terminal boundary" \
+  --request GET "http://127.0.0.1:$agent_port/api/eval/evidence/$trace_id" \
+  --user "evaluation-manager:$management_password" \
+  --header 'X-Eval-Sandbox-Id: sandbox-main'
+mysql_query root "$root_password" cs_db \
+  "UPDATE support_event SET event_type = 'AGENT_OUTCOME', payload_json = JSON_OBJECT('outcome', 'completed') WHERE trace_id = '$trace_id' AND event_type = 'TURN_FAILED' AND JSON_UNQUOTE(JSON_EXTRACT(payload_json, '$.code')) = 'tampered_intermediate_terminal'"
+turn_id="$(mysql_query agent_app "$agent_app_password" cs_db \
+  "SELECT turn_id FROM support_turn WHERE trace_id = '$trace_id'")"
+turn_last_sequence="$(mysql_query agent_app "$agent_app_password" cs_db \
+  "SELECT MAX(sequence) FROM support_event WHERE trace_id = '$trace_id'")"
+assert_mysql_integrity_fails "duplicate trace sequence is rejected by MySQL" \
+  mysql_query agent_app "$agent_app_password" cs_db \
+  "INSERT INTO support_event (event_id, turn_id, trace_id, session_id, user_subject, sequence, event_type, payload_json) VALUES (UUID(), '$turn_id', '$trace_id', '$session_id', '$direct_subject', 1, 'USER_INPUT', JSON_OBJECT('accepted', true))"
+assert_mysql_integrity_fails "conflicting turn and session association is rejected by MySQL" \
+  mysql_query agent_app "$agent_app_password" cs_db \
+  "INSERT INTO support_event (event_id, turn_id, trace_id, session_id, user_subject, sequence, event_type, payload_json) VALUES (UUID(), '$turn_id', '$trace_id', 'cross-session', '$direct_subject', $((turn_last_sequence + 1)), 'AGENT_OUTCOME', JSON_OBJECT('outcome', 'completed'))"
+
+conversation_id="$(mysql_query agent_app "$agent_app_password" cs_db \
+  "SELECT conversation_id FROM support_conversation WHERE session_id = '$session_id'")"
+partial_trace='00000000-0000-0000-0000-000000000131'
+partial_turn='00000000-0000-0000-0000-000000000132'
+mysql_query agent_app "$agent_app_password" cs_db \
+  "INSERT INTO support_turn (turn_id, conversation_id, session_id, user_subject, trace_id, turn_sequence, correlation_key, request_fingerprint, input_text, response_text, outcome, state, processing_deadline_at, completed_at) VALUES ('$partial_turn', '$conversation_id', '$session_id', '$direct_subject', '$partial_trace', 131, 'cb103-partial', REPEAT('1', 64), 'cb103-private-partial-input', 'partial response', 'completed', 'COMPLETED', NULL, CURRENT_TIMESTAMP(6)); INSERT INTO support_event (event_id, turn_id, trace_id, session_id, user_subject, sequence, event_type, payload_json) VALUES (UUID(), '$partial_turn', '$partial_trace', '$session_id', '$direct_subject', 1, 'USER_INPUT', JSON_OBJECT('accepted', true));"
+assert_status 409 "agent evidence rejects partial history without terminal boundary" \
+  --request GET "http://127.0.0.1:$agent_port/api/eval/evidence/$partial_trace" \
+  --user "evaluation-manager:$management_password" \
+  --header 'X-Eval-Sandbox-Id: sandbox-main'
+
+retrieval_trace='00000000-0000-0000-0000-000000000133'
+retrieval_turn='00000000-0000-0000-0000-000000000134'
+retrieval_decision='00000000-0000-0000-0000-000000000135'
+mysql_query agent_app "$agent_app_password" cs_db \
+  "INSERT INTO support_turn (turn_id, conversation_id, session_id, user_subject, trace_id, turn_sequence, correlation_key, request_fingerprint, input_text, response_text, outcome, state, processing_deadline_at, completed_at) VALUES ('$retrieval_turn', '$conversation_id', '$session_id', '$direct_subject', '$retrieval_trace', 133, 'cb103-retrieval', REPEAT('2', 64), 'cb103-private-retrieval-input', 'retrieval denied', 'retrieval_denied', 'COMPLETED', NULL, CURRENT_TIMESTAMP(6)); INSERT INTO support_event (event_id, turn_id, trace_id, session_id, user_subject, sequence, event_type, payload_json) VALUES (UUID(), '$retrieval_turn', '$retrieval_trace', '$session_id', '$direct_subject', 1, 'USER_INPUT', JSON_OBJECT('accepted', true)), (UUID(), '$retrieval_turn', '$retrieval_trace', '$session_id', '$direct_subject', 2, 'RETRIEVAL_DECISION', JSON_OBJECT('indexVersion', 'knowledge_docs_v1', 'calibrationVersion', 'cb091-calibration-v1', 'outcome', 'INSUFFICIENT', 'reason', 'below_threshold', 'candidateCount', 2, 'evidenceCount', 0)), (UUID(), '$retrieval_turn', '$retrieval_trace', '$session_id', '$direct_subject', 3, 'AGENT_OUTCOME', JSON_OBJECT('outcome', 'retrieval_denied')), (UUID(), '$retrieval_turn', '$retrieval_trace', '$session_id', '$direct_subject', 4, 'ASSISTANT_RESPONSE', JSON_OBJECT('outcome', 'retrieval_denied')), (UUID(), '$retrieval_turn', '$retrieval_trace', '$session_id', '$direct_subject', 5, 'TURN_COMPLETED', JSON_OBJECT('outcome', 'retrieval_denied')); INSERT INTO retrieval_decision (decision_id, turn_id, trace_id, session_id, user_subject, index_version, calibration_version, sufficiency_outcome, reason_code, candidate_count, evidence_count, top_score, top_margin) VALUES ('$retrieval_decision', '$retrieval_turn', '$retrieval_trace', '$session_id', '$direct_subject', 'knowledge_docs_v1', 'cb091-calibration-v1', 'INSUFFICIENT', 'below_threshold', 2, 0, 0.40, 0.05);"
+assert_status 200 "agent evidence projects persisted insufficient retrieval decision" \
+  --request GET "http://127.0.0.1:$agent_port/api/eval/evidence/$retrieval_trace" \
+  --user "evaluation-manager:$management_password" \
+  --header 'X-Eval-Sandbox-Id: sandbox-main'
+uv run python scripts/check_agent_evaluation_evidence.py "$tmp_dir/http-response.json" \
+  --trace "$retrieval_trace" --session "$session_id" --outcome retrieval_denied \
+  --require-event RETRIEVAL_DECISION --retrieval-outcome INSUFFICIENT \
+  --forbid-marker cb103-private-retrieval-input
+mysql_query root "$root_password" cs_db \
+  "UPDATE support_event SET payload_json = JSON_SET(payload_json, '$.outcome', 'SUFFICIENT') WHERE trace_id = '$retrieval_trace' AND event_type = 'RETRIEVAL_DECISION'"
+assert_status 409 "agent evidence rejects conflicting retrieval facts" \
+  --request GET "http://127.0.0.1:$agent_port/api/eval/evidence/$retrieval_trace" \
+  --user "evaluation-manager:$management_password" \
+  --header 'X-Eval-Sandbox-Id: sandbox-main'
+mysql_query root "$root_password" cs_db \
+  "UPDATE support_event SET payload_json = JSON_SET(payload_json, '$.outcome', 'INSUFFICIENT') WHERE trace_id = '$retrieval_trace' AND event_type = 'RETRIEVAL_DECISION'"
+
+sufficient_trace='00000000-0000-0000-0000-000000000138'
+sufficient_turn='00000000-0000-0000-0000-000000000139'
+sufficient_decision='00000000-0000-0000-0000-000000000140'
+mysql_query agent_app "$agent_app_password" cs_db \
+  "INSERT INTO support_turn (turn_id, conversation_id, session_id, user_subject, trace_id, turn_sequence, correlation_key, request_fingerprint, input_text, response_text, outcome, state, processing_deadline_at, completed_at) VALUES ('$sufficient_turn', '$conversation_id', '$session_id', '$direct_subject', '$sufficient_trace', 138, 'cb103-sufficient', REPEAT('4', 64), 'cb103-private-sufficient-input', 'grounded answer', 'completed', 'COMPLETED', NULL, CURRENT_TIMESTAMP(6)); INSERT INTO support_event (event_id, turn_id, trace_id, session_id, user_subject, sequence, event_type, payload_json) VALUES (UUID(), '$sufficient_turn', '$sufficient_trace', '$session_id', '$direct_subject', 1, 'USER_INPUT', JSON_OBJECT('accepted', true)), (UUID(), '$sufficient_turn', '$sufficient_trace', '$session_id', '$direct_subject', 2, 'RETRIEVAL_DECISION', JSON_OBJECT('indexVersion', 'knowledge_docs_v2', 'calibrationVersion', 'cb091-calibration-v1', 'outcome', 'SUFFICIENT', 'reason', 'sufficient', 'candidateCount', 1, 'evidenceCount', 1)), (UUID(), '$sufficient_turn', '$sufficient_trace', '$session_id', '$direct_subject', 3, 'AGENT_OUTCOME', JSON_OBJECT('outcome', 'completed')), (UUID(), '$sufficient_turn', '$sufficient_trace', '$session_id', '$direct_subject', 4, 'ASSISTANT_RESPONSE', JSON_OBJECT('outcome', 'completed')), (UUID(), '$sufficient_turn', '$sufficient_trace', '$session_id', '$direct_subject', 5, 'TURN_COMPLETED', JSON_OBJECT('outcome', 'completed')); INSERT INTO retrieval_decision (decision_id, turn_id, trace_id, session_id, user_subject, index_version, calibration_version, sufficiency_outcome, reason_code, candidate_count, evidence_count, top_score, top_margin) VALUES ('$sufficient_decision', '$sufficient_turn', '$sufficient_trace', '$session_id', '$direct_subject', 'knowledge_docs_v2', 'cb091-calibration-v1', 'SUFFICIENT', 'sufficient', 1, 1, 0.90, 0.80); INSERT INTO retrieval_evidence (evidence_id, decision_id, evidence_rank, source_id, chunk_id, source_version, doc_type, title, excerpt, rerank_score) VALUES (UUID(), '$sufficient_decision', 1, 'public-source-1', 'public-chunk-1', 7, 'faq', 'cb103-private-source-title', 'cb103-private-source-excerpt', 0.90);"
+assert_status 200 "agent evidence projects only safe public retrieval references" \
+  --request GET "http://127.0.0.1:$agent_port/api/eval/evidence/$sufficient_trace" \
+  --user "evaluation-manager:$management_password" \
+  --header 'X-Eval-Sandbox-Id: sandbox-main'
+uv run python scripts/check_agent_evaluation_evidence.py "$tmp_dir/http-response.json" \
+  --trace "$sufficient_trace" --session "$session_id" --outcome completed \
+  --require-event RETRIEVAL_DECISION --retrieval-outcome SUFFICIENT \
+  --forbid-marker cb103-private-sufficient-input \
+  --forbid-marker cb103-private-source-title \
+  --forbid-marker cb103-private-source-excerpt
+
+assert_status 200 "evaluation chat persists bounded provider denial" \
+  --request POST "http://127.0.0.1:$agent_port/api/chat" \
+  --header "Authorization: Bearer $direct_token" \
+  --header 'X-Eval-Sandbox-Id: sandbox-main' \
+  --header "X-Session-Id: $session_id" \
+  --header 'Idempotency-Key: cb103-provider-denied' \
+  --header 'Content-Type: application/json' \
+  --data '{"message":"provider-failure cb103-private-provider-input"}'
+provider_trace="$(uv run python scripts/read_json_field.py "$tmp_dir/http-response.json" traceId)"
+assert_status 200 "agent evidence projects bounded provider denial without provider identity" \
+  --request GET "http://127.0.0.1:$agent_port/api/eval/evidence/$provider_trace" \
+  --user "evaluation-manager:$management_password" \
+  --header 'X-Eval-Sandbox-Id: sandbox-main'
+uv run python scripts/check_agent_evaluation_evidence.py "$tmp_dir/http-response.json" \
+  --trace "$provider_trace" --session "$session_id" --outcome provider_denied \
+  --require-event MODEL_OUTCOME --require-event AGENT_OUTCOME \
+  --forbid-marker cb103-private-provider-input \
+  --forbid-marker support-standard-primary
+
+oversized_trace='00000000-0000-0000-0000-000000000136'
+oversized_turn='00000000-0000-0000-0000-000000000137'
+mysql_query agent_app "$agent_app_password" cs_db \
+  "INSERT INTO support_turn (turn_id, conversation_id, session_id, user_subject, trace_id, turn_sequence, correlation_key, request_fingerprint, input_text, response_text, outcome, state, processing_deadline_at, completed_at) VALUES ('$oversized_turn', '$conversation_id', '$session_id', '$direct_subject', '$oversized_trace', 136, 'cb103-oversized', REPEAT('3', 64), 'oversized input', 'oversized response', 'completed', 'COMPLETED', NULL, CURRENT_TIMESTAMP(6))"
+oversized_values="(UUID(), '$oversized_turn', '$oversized_trace', '$session_id', '$direct_subject', 1, 'USER_INPUT', JSON_OBJECT('accepted', true))"
+for sequence in $(seq 2 48); do
+  oversized_values+=", (UUID(), '$oversized_turn', '$oversized_trace', '$session_id', '$direct_subject', $sequence, 'BUDGET_CHARGED', JSON_OBJECT('attempt', 1, 'limit', 8, 'kind', 'model_http', 'target', 'private-provider'))"
+done
+oversized_values+=", (UUID(), '$oversized_turn', '$oversized_trace', '$session_id', '$direct_subject', 49, 'TURN_COMPLETED', JSON_OBJECT('outcome', 'completed'))"
+mysql_query agent_app "$agent_app_password" cs_db \
+  "INSERT INTO support_event (event_id, turn_id, trace_id, session_id, user_subject, sequence, event_type, payload_json) VALUES $oversized_values"
+assert_status 409 "agent evidence rejects histories beyond the server event bound" \
+  --request GET "http://127.0.0.1:$agent_port/api/eval/evidence/$oversized_trace" \
+  --user "evaluation-manager:$management_password" \
+  --header 'X-Eval-Sandbox-Id: sandbox-main'
 assert_status 200 "audit returns only the exact sandbox and support session" \
   --request GET "http://127.0.0.1:$commerce_port/api/eval/audit/$session_id" \
   --user "evaluation-manager:$management_password" \
@@ -590,7 +837,15 @@ assert_status 404 "audit rejects cross-sandbox lookup" \
   --user "evaluation-manager:$management_password" \
   --header 'X-Eval-Sandbox-Id: sandbox-other'
 
+stop_process model_pid "$model_pid"
 stop_process commerce_pid "$commerce_pid"
+stop_process agent_pid "$agent_pid"
+start_agent true
+assert_status 200 "agent evidence survives restart without model or commerce availability" \
+  --request GET "http://127.0.0.1:$agent_port/api/eval/evidence/$trace_id" \
+  --user "evaluation-manager:$management_password" \
+  --header 'X-Eval-Sandbox-Id: sandbox-main'
+cmp "$tmp_dir/agent-evidence.json" "$tmp_dir/http-response.json"
 start_commerce evaluation "http://127.0.0.1:$auth_port"
 assert_status 200 "state persists across commerce restart" \
   --request GET "http://127.0.0.1:$commerce_port/api/eval/state" \
@@ -779,5 +1034,20 @@ for private_value in \
     exit 1
   fi
 done
+for private_marker in \
+  cb103-private-user-text cb103-private-feedback-comment cb103-private-partial-input \
+  cb103-private-retrieval-input cb103-private-sufficient-input cb103-private-source-title \
+  cb103-private-source-excerpt cb103-private-provider-input private-provider; do
+  if grep -Fq "$private_marker" \
+    "$tmp_dir/auth.log" "$tmp_dir/commerce.log" "$tmp_dir/agent.log" "$tmp_dir/model.log"; then
+    echo "Private CB-103 evidence marker leaked into service logs." >&2
+    exit 1
+  fi
+done
+if grep -Eq 'string argument should contain only ASCII|Traceback.*authorize_evaluator' \
+  "$tmp_dir/agent.log"; then
+  echo "Basic credential parser leaked internal exception text into service logs." >&2
+  exit 1
+fi
 
-echo "CB-101/CB-102 evaluation lifecycle, state, audit, version, profile, grant, restart, liveness, and redaction integration passed."
+echo "CB-101/CB-102/CB-103 evaluation lifecycle, state, audit, version, evidence, profile, grant, restart, liveness, and redaction integration passed."
