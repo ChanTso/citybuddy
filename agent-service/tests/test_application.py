@@ -30,6 +30,7 @@ from citybuddy_agent.evaluation import (
     EvaluationEvidenceResponse,
     EvaluationEvidenceStore,
     EvidenceEventResponse,
+    MysqlEvaluationEvidenceStore,
 )
 from citybuddy_agent.feedback import (
     FeedbackConflictError,
@@ -245,6 +246,57 @@ class MemoryEvidenceStore(EvaluationEvidenceStore):
             ),
             feedback=(),
         )
+
+
+def test_evaluation_evidence_rejects_conflicting_or_intermediate_terminal_lifecycle() -> None:
+    now = datetime(2026, 7, 18, 12, 0, tzinfo=UTC)
+    events = [
+        EvidenceEventResponse(
+            sequence=1,
+            event_kind="USER_INPUT",
+            outcome="accepted",
+            occurred_at=now,
+        ),
+        EvidenceEventResponse(
+            sequence=2,
+            event_kind="AGENT_OUTCOME",
+            outcome="completed",
+            occurred_at=now,
+        ),
+        EvidenceEventResponse(
+            sequence=3,
+            event_kind="ASSISTANT_RESPONSE",
+            outcome="completed",
+            occurred_at=now,
+        ),
+        EvidenceEventResponse(
+            sequence=4,
+            event_kind="TURN_COMPLETED",
+            outcome="completed",
+            occurred_at=now,
+        ),
+    ]
+
+    MysqlEvaluationEvidenceStore._validate_lifecycle(events, "completed")
+    conflicting = [*events]
+    conflicting[1] = conflicting[1].model_copy(update={"outcome": "provider_denied"})
+    with pytest.raises(EvaluationEvidenceInvalid):
+        MysqlEvaluationEvidenceStore._validate_lifecycle(conflicting, "completed")
+    intermediate = [*events]
+    intermediate[1] = intermediate[1].model_copy(
+        update={"event_kind": "TURN_FAILED", "outcome": "failed"}
+    )
+    with pytest.raises(EvaluationEvidenceInvalid):
+        MysqlEvaluationEvidenceStore._validate_lifecycle(intermediate, "completed")
+
+
+def test_evaluation_evidence_normalizes_mysql_timestamps_to_utc() -> None:
+    naive = datetime(2026, 7, 18, 12, 0)
+
+    normalized = MysqlEvaluationEvidenceStore._utc_timestamp(naive)
+
+    assert normalized.isoformat() == "2026-07-18T12:00:00+00:00"
+    assert normalized.tzinfo is UTC
 
 
 def settings() -> AgentSettings:

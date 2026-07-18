@@ -649,6 +649,22 @@ assert_equal "$agent_truth_before" "$(mysql_query agent_app "$agent_app_password
   "agent evidence reads do not mutate durable support truth"
 curl --silent --show-error "http://127.0.0.1:$proxy_port/fixture/counts" >"$tmp_dir/model-counts-after-evidence.json"
 cmp "$tmp_dir/model-counts-before-evidence.json" "$tmp_dir/model-counts-after-evidence.json"
+mysql_query root "$root_password" cs_db \
+  "UPDATE support_event SET payload_json = JSON_SET(payload_json, '$.outcome', 'provider_denied') WHERE trace_id = '$trace_id' AND event_type = 'AGENT_OUTCOME'"
+assert_status 409 "agent evidence rejects a terminal outcome conflicting with turn truth" \
+  --request GET "http://127.0.0.1:$agent_port/api/eval/evidence/$trace_id" \
+  --user "evaluation-manager:$management_password" \
+  --header 'X-Eval-Sandbox-Id: sandbox-main'
+mysql_query root "$root_password" cs_db \
+  "UPDATE support_event SET payload_json = JSON_SET(payload_json, '$.outcome', 'completed') WHERE trace_id = '$trace_id' AND event_type = 'AGENT_OUTCOME'"
+mysql_query root "$root_password" cs_db \
+  "UPDATE support_event SET event_type = 'TURN_FAILED', payload_json = JSON_OBJECT('code', 'tampered_intermediate_terminal') WHERE trace_id = '$trace_id' AND event_type = 'AGENT_OUTCOME'"
+assert_status 409 "agent evidence rejects an intermediate terminal boundary" \
+  --request GET "http://127.0.0.1:$agent_port/api/eval/evidence/$trace_id" \
+  --user "evaluation-manager:$management_password" \
+  --header 'X-Eval-Sandbox-Id: sandbox-main'
+mysql_query root "$root_password" cs_db \
+  "UPDATE support_event SET event_type = 'AGENT_OUTCOME', payload_json = JSON_OBJECT('outcome', 'completed') WHERE trace_id = '$trace_id' AND event_type = 'TURN_FAILED' AND JSON_UNQUOTE(JSON_EXTRACT(payload_json, '$.code')) = 'tampered_intermediate_terminal'"
 turn_id="$(mysql_query agent_app "$agent_app_password" cs_db \
   "SELECT turn_id FROM support_turn WHERE trace_id = '$trace_id'")"
 turn_last_sequence="$(mysql_query agent_app "$agent_app_password" cs_db \
@@ -974,5 +990,15 @@ for private_value in \
     exit 1
   fi
 done
+for private_marker in \
+  cb103-private-user-text cb103-private-feedback-comment cb103-private-partial-input \
+  cb103-private-retrieval-input cb103-private-sufficient-input cb103-private-source-title \
+  cb103-private-source-excerpt cb103-private-provider-input private-provider; do
+  if grep -Fq "$private_marker" \
+    "$tmp_dir/auth.log" "$tmp_dir/commerce.log" "$tmp_dir/agent.log" "$tmp_dir/model.log"; then
+    echo "Private CB-103 evidence marker leaked into service logs." >&2
+    exit 1
+  fi
+done
 
-echo "CB-101/CB-102 evaluation lifecycle, state, audit, version, profile, grant, restart, liveness, and redaction integration passed."
+echo "CB-101/CB-102/CB-103 evaluation lifecycle, state, audit, version, evidence, profile, grant, restart, liveness, and redaction integration passed."

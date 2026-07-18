@@ -3,11 +3,11 @@
 from __future__ import annotations
 
 import json
-from datetime import datetime
+from datetime import UTC, datetime
 from typing import Literal, Protocol, cast
 
 import pymysql
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import AwareDatetime, BaseModel, ConfigDict, Field
 
 MAX_EVIDENCE_EVENTS = 48
 MAX_FEEDBACK_RECORDS = 8
@@ -84,7 +84,7 @@ class EvidenceEventResponse(BaseModel):
     reference: str | None = Field(default=None, min_length=1, max_length=128)
     attempt: int | None = Field(default=None, ge=1, le=32)
     attempt_limit: int | None = Field(default=None, serialization_alias="attemptLimit", ge=1, le=32)
-    occurred_at: datetime = Field(serialization_alias="occurredAt")
+    occurred_at: AwareDatetime = Field(serialization_alias="occurredAt")
 
 
 class RetrievalSourceResponse(BaseModel):
@@ -121,7 +121,7 @@ class FeedbackEvidenceResponse(BaseModel):
     model_config = ConfigDict(frozen=True)
 
     rating: Literal["POSITIVE", "NEGATIVE"]
-    occurred_at: datetime = Field(serialization_alias="occurredAt")
+    occurred_at: AwareDatetime = Field(serialization_alias="occurredAt")
 
 
 class EvaluationEvidenceResponse(BaseModel):
@@ -253,7 +253,14 @@ class MysqlEvaluationEvidenceStore:
                 or not isinstance(row[3], datetime)
             ):
                 raise EvaluationEvidenceInvalid
-            events.append(self._project_event(expected, str(row[1]), row[2], row[3]))
+            events.append(
+                self._project_event(
+                    expected,
+                    str(row[1]),
+                    row[2],
+                    self._utc_timestamp(row[3]),
+                )
+            )
         if events[0].event_kind != "USER_INPUT" or events[0].outcome != "accepted":
             raise EvaluationEvidenceInvalid
         expected_terminal = "TURN_FAILED" if terminal_outcome == "failed" else "TURN_COMPLETED"
@@ -261,7 +268,29 @@ class MysqlEvaluationEvidenceStore:
             raise EvaluationEvidenceInvalid
         if terminal_outcome != "failed" and events[-1].outcome != terminal_outcome:
             raise EvaluationEvidenceInvalid
+        self._validate_lifecycle(events, terminal_outcome)
         return tuple(events)
+
+    @staticmethod
+    def _validate_lifecycle(
+        events: list[EvidenceEventResponse], terminal_outcome: TerminalOutcome
+    ) -> None:
+        if any(event.event_kind in {"TURN_COMPLETED", "TURN_FAILED"} for event in events[:-1]):
+            raise EvaluationEvidenceInvalid
+        if terminal_outcome == "failed":
+            if [event.event_kind for event in events] != ["USER_INPUT", "TURN_FAILED"]:
+                raise EvaluationEvidenceInvalid
+            return
+        if [event.event_kind for event in events[-3:]] != [
+            "AGENT_OUTCOME",
+            "ASSISTANT_RESPONSE",
+            "TURN_COMPLETED",
+        ]:
+            raise EvaluationEvidenceInvalid
+        for event in events:
+            if event.event_kind in {"AGENT_OUTCOME", "ASSISTANT_RESPONSE", "TURN_COMPLETED"}:
+                if event.outcome != terminal_outcome:
+                    raise EvaluationEvidenceInvalid
 
     @staticmethod
     def _payload(value: object) -> dict[str, object]:
@@ -461,8 +490,19 @@ class MysqlEvaluationEvidenceStore:
                 or row[3] != subject
             ):
                 raise EvaluationEvidenceInvalid
-            feedback.append(FeedbackEvidenceResponse(rating=row[0], occurred_at=row[1]))
+            feedback.append(
+                FeedbackEvidenceResponse(
+                    rating=row[0],
+                    occurred_at=self._utc_timestamp(row[1]),
+                )
+            )
         return tuple(feedback)
+
+    @staticmethod
+    def _utc_timestamp(value: datetime) -> datetime:
+        if value.tzinfo is None:
+            return value.replace(tzinfo=UTC)
+        return value.astimezone(UTC)
 
     @staticmethod
     def _bounded_int(value: object, minimum: int, maximum: int) -> bool:
@@ -482,4 +522,5 @@ class MysqlEvaluationEvidenceStore:
             password=self._settings.mysql_password,
             database="cs_db",
             autocommit=False,
+            init_command="SET time_zone = '+00:00'",
         )
