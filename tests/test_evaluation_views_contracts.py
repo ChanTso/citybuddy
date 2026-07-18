@@ -70,9 +70,7 @@ def test_evaluation_views_are_profile_bound_authenticated_and_bounded() -> None:
         "type": "object",
         "additionalProperties": False,
         "required": ["error"],
-        "properties": {
-            "error": {"type": "string", "minLength": 1, "maxLength": 128}
-        },
+        "properties": {"error": {"type": "string", "minLength": 1, "maxLength": 128}},
     }
 
 
