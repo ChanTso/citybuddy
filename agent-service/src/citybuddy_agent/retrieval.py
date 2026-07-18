@@ -6,7 +6,7 @@ import math
 from importlib.resources import files
 from typing import Literal
 
-from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_validator
+from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator, model_validator
 
 from .knowledge import FINAL_RESULT_LIMIT, KnowledgeSearchOutput, KnowledgeSearchResult
 
@@ -116,6 +116,13 @@ class RerankScore(BaseModel):
 
     candidate_id: str = Field(serialization_alias="candidateId", min_length=1, max_length=300)
     score: float = Field(ge=0, le=1, allow_inf_nan=False)
+
+    @field_validator("score", mode="before")
+    @classmethod
+    def require_json_number(cls, value: object) -> object:
+        if isinstance(value, bool) or not isinstance(value, int | float):
+            raise ValueError("Reranker score must be a JSON number")
+        return value
 
 
 class RerankOutput(BaseModel):

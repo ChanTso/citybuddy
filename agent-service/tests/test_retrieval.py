@@ -155,6 +155,61 @@ def test_rerank_scores_reject_non_finite_or_out_of_bounds(score: float) -> None:
         RerankScore(candidate_id="source-a:chunk", score=score)
 
 
+@pytest.mark.parametrize("score", [True, False, "0.9"])
+def test_reranker_json_score_type_confusion_converges_to_denial(score: object) -> None:
+    raw_output = json.dumps(
+        {
+            "scores": [
+                {"candidate_id": "source-a:chunk", "score": score},
+                {"candidate_id": "source-b:chunk", "score": 0.2},
+            ]
+        }
+    )
+
+    with pytest.raises(ValidationError):
+        RerankOutput.model_validate_json(raw_output)
+
+    class ForbiddenObo:
+        def exchange(self, *args: object) -> str:
+            raise AssertionError(args)
+
+    class Knowledge:
+        def search(self, request: KnowledgeSearchInput, charge: Any) -> KnowledgeSearchOutput:
+            del request
+            charge("knowledge_http", "bounded-fixture")
+            return search_output()
+
+    class MalformedReranker:
+        def rerank(self, *args: object) -> RerankOutput:
+            del args
+            return RerankOutput.model_validate_json(raw_output)
+
+    events: list[AgentEvent] = []
+    adapter = ToolAdapter(
+        "https://commerce.test",
+        ForbiddenObo(),
+        Knowledge(),
+        MalformedReranker(),
+        load_calibration(),
+    )
+    denied = adapter.execute(
+        name="knowledge.search",
+        serialized_arguments='{"query":"public question"}',
+        direct_token="not-forwarded",
+        subject="not-forwarded",
+        session_id="not-forwarded",
+        budget=AttemptBudget(4, events),
+        events=events,
+        plan=plan(),
+    )
+
+    assert denied.outcome == "deny_with_feedback"
+    assert denied.retrieval_decision is not None
+    assert denied.retrieval_decision.outcome == "INSUFFICIENT"
+    assert denied.retrieval_decision.reason == "reranker_denied"
+    assert denied.retrieval_decision.evidence == ()
+
+
 def test_normalization_is_deterministic_and_gate_is_fail_closed() -> None:
     calibration = load_calibration()
     sufficient = decide_retrieval(
