@@ -6,7 +6,6 @@ import secrets
 import time
 import uuid
 from base64 import b64decode
-from binascii import Error as Base64Error
 from collections.abc import Mapping
 from typing import Any, Literal, Protocol
 
@@ -58,6 +57,7 @@ SESSION_PERMISSION = "support:session:create"
 CHAT_PERMISSION = "support:chat"
 DIRECT_TOKEN_TYPE = "direct_user"
 EVALUATION_DIRECT_TOKEN_TYPE = "eval_direct_user"
+MAX_EVALUATION_AUTHORIZATION_LENGTH = 1024
 
 
 class AgentSettings(BaseModel):
@@ -504,11 +504,16 @@ def create_app(
         return principal, token
 
     def authorize_evaluator(authorization: str | None) -> None:
-        if authorization is None or not authorization.startswith("Basic "):
+        if (
+            authorization is None
+            or len(authorization) > MAX_EVALUATION_AUTHORIZATION_LENGTH
+            or not authorization.startswith("Basic ")
+        ):
             raise HTTPException(status_code=401, detail="Unauthorized")
         try:
-            decoded = b64decode(authorization[6:], validate=True)
-        except Base64Error:
+            encoded = authorization[6:].encode("ascii")
+            decoded = b64decode(encoded, validate=True)
+        except ValueError:
             raise HTTPException(status_code=401, detail="Unauthorized") from None
         client_id, separator, client_secret = decoded.partition(b":")
         if (

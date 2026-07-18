@@ -605,16 +605,50 @@ assert_status 401 "agent evidence rejects substituted management credential" \
   --request GET "http://127.0.0.1:$agent_port/api/eval/evidence/$trace_id" \
   --user "evaluation-manager:$invalid_management_password" \
   --header 'X-Eval-Sandbox-Id: sandbox-main'
+
+assert_agent_evidence_credential_401() {
+  local description="$1"
+  local authorization_value="$2"
+  assert_status 401 "$description" \
+    --request GET "http://127.0.0.1:$agent_port/api/eval/evidence/$trace_id" \
+    --header "Authorization: $authorization_value" \
+    --header 'X-Eval-Sandbox-Id: sandbox-main'
+  if ! grep -Fxq '{"detail":"Unauthorized"}' "$tmp_dir/http-response.json"; then
+    echo "Malformed evaluation credential exposed a non-public response." >&2
+    exit 1
+  fi
+}
+
+assert_agent_evidence_credential_401 \
+  "agent evidence rejects a raw non-ASCII Basic token" 'Basic é'
+assert_agent_evidence_credential_401 \
+  "agent evidence rejects invalid Base64" 'Basic !!!'
+invalid_utf8_basic="$(printf '\377:x' | openssl base64 -A)"
+assert_agent_evidence_credential_401 \
+  "agent evidence rejects decoded non-UTF-8 bytes" "Basic $invalid_utf8_basic"
+missing_colon_basic="$(printf 'missing-colon' | openssl base64 -A)"
+assert_agent_evidence_credential_401 \
+  "agent evidence rejects Basic credentials without a colon" "Basic $missing_colon_basic"
+empty_basic="$(printf ':' | openssl base64 -A)"
+assert_agent_evidence_credential_401 \
+  "agent evidence rejects empty Basic credentials" "Basic $empty_basic"
+assert_agent_evidence_credential_401 \
+  "agent evidence rejects a non-Basic scheme" 'Bearer evaluator-token'
+oversized_basic="$(printf '%2048s' '' | tr ' ' A)"
+assert_agent_evidence_credential_401 \
+  "agent evidence rejects an oversized Basic header" "Basic $oversized_basic"
+control_basic="$(printf 'evaluation-manager:x\001' | openssl base64 -A)"
+assert_agent_evidence_credential_401 \
+  "agent evidence rejects decoded control characters" "Basic $control_basic"
+nul_basic="$(printf 'evaluation-manager:x\000' | openssl base64 -A)"
+assert_agent_evidence_credential_401 \
+  "agent evidence rejects decoded NUL bytes" "Basic $nul_basic"
 non_ascii_client_basic="$(printf '\303\251valuation-manager:x' | openssl base64 -A)"
-assert_status 401 "agent evidence rejects non-ASCII management client id" \
-  --request GET "http://127.0.0.1:$agent_port/api/eval/evidence/$trace_id" \
-  --header "Authorization: Basic $non_ascii_client_basic" \
-  --header 'X-Eval-Sandbox-Id: sandbox-main'
+assert_agent_evidence_credential_401 \
+  "agent evidence rejects non-ASCII management client id" "Basic $non_ascii_client_basic"
 non_ascii_secret_basic="$(printf 'evaluation-manager:x\303\251' | openssl base64 -A)"
-assert_status 401 "agent evidence rejects non-ASCII management secret" \
-  --request GET "http://127.0.0.1:$agent_port/api/eval/evidence/$trace_id" \
-  --header "Authorization: Basic $non_ascii_secret_basic" \
-  --header 'X-Eval-Sandbox-Id: sandbox-main'
+assert_agent_evidence_credential_401 \
+  "agent evidence rejects non-ASCII management secret" "Basic $non_ascii_secret_basic"
 assert_status 422 "agent evidence rejects caller-selected fields" \
   --request GET "http://127.0.0.1:$agent_port/api/eval/evidence/$trace_id?fields=all" \
   --user "evaluation-manager:$management_password" \
@@ -1010,5 +1044,10 @@ for private_marker in \
     exit 1
   fi
 done
+if grep -Eq 'string argument should contain only ASCII|Traceback.*authorize_evaluator' \
+  "$tmp_dir/agent.log"; then
+  echo "Basic credential parser leaked internal exception text into service logs." >&2
+  exit 1
+fi
 
 echo "CB-101/CB-102/CB-103 evaluation lifecycle, state, audit, version, evidence, profile, grant, restart, liveness, and redaction integration passed."

@@ -1,3 +1,4 @@
+import base64
 import json
 import time
 from collections.abc import Mapping
@@ -327,8 +328,6 @@ def evaluation_settings() -> AgentSettings:
 def evaluation_basic(
     secret: str = "evaluation-runtime-secret", client_id: str = "evaluation-manager"
 ) -> str:
-    import base64
-
     encoded = base64.b64encode(f"{client_id}:{secret}".encode()).decode()
     return f"Basic {encoded}"
 
@@ -397,6 +396,27 @@ def test_evaluation_evidence_route_is_profile_bound_and_independently_authentica
             ).status_code
             == 401
         )
+    malicious_credentials = (
+        b"Basic \xc3\xa9",
+        b"Basic !!!",
+        b"Basic " + base64.b64encode(b"\xff:x"),
+        b"Basic " + base64.b64encode(b"missing-colon"),
+        b"Basic " + base64.b64encode(b":"),
+        b"Bearer evaluator-token",
+        b"Basic " + (b"A" * 2048),
+        b"Basic " + base64.b64encode(b"evaluation-manager:x\x01"),
+        b"Basic " + base64.b64encode(b"evaluation-manager:x\x00"),
+    )
+    for malicious_credential in malicious_credentials:
+        malformed = client.get(
+            url,
+            headers=[
+                (b"authorization", malicious_credential),
+                (b"x-eval-sandbox-id", b"sandbox-1"),
+            ],
+        )
+        assert malformed.status_code == 401
+        assert malformed.json() == {"detail": "Unauthorized"}
     assert (
         client.get(
             url,

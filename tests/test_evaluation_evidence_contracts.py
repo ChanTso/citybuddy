@@ -148,6 +148,9 @@ def test_evaluation_store_uses_only_exact_agent_truth_and_persisted_sequence() -
     assert "if resolved.evaluation_enabled:" in application
     assert '"/api/eval/evidence/{trace_id}"' in application
     assert "secrets.compare_digest" in application
+    assert "MAX_EVALUATION_AUTHORIZATION_LENGTH = 1024" in application
+    assert 'authorization[6:].encode("ascii")' in application
+    assert "except ValueError:" in application
     assert 'decoded.partition(b":")' in application
     assert 'resolved.evaluation_client_id.encode("utf-8")' in application
     assert 'resolved.evaluation_client_secret.encode("utf-8")' in application
