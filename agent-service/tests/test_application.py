@@ -1,6 +1,7 @@
 import json
 import time
 from collections.abc import Mapping
+from datetime import UTC, datetime
 from typing import Any, Literal
 
 import httpx
@@ -22,6 +23,13 @@ from citybuddy_agent.conversation import (
     ConversationStore,
     CorrelationConflictError,
     TurnStart,
+)
+from citybuddy_agent.evaluation import (
+    EvaluationEvidenceInvalid,
+    EvaluationEvidenceNotFound,
+    EvaluationEvidenceResponse,
+    EvaluationEvidenceStore,
+    EvidenceEventResponse,
 )
 from citybuddy_agent.feedback import (
     FeedbackConflictError,
@@ -203,6 +211,42 @@ class MemoryLiveness:
             raise HTTPException(status_code=403, detail="Forbidden")
 
 
+class MemoryEvidenceStore(EvaluationEvidenceStore):
+    def __init__(self) -> None:
+        self.calls: list[tuple[str, str]] = []
+        self.mode = "ok"
+
+    def load(self, trace_id: str, sandbox_id: str) -> EvaluationEvidenceResponse:
+        self.calls.append((trace_id, sandbox_id))
+        if self.mode == "missing":
+            raise EvaluationEvidenceNotFound
+        if self.mode == "invalid":
+            raise EvaluationEvidenceInvalid
+        now = datetime(2026, 7, 18, 12, 0, tzinfo=UTC)
+        return EvaluationEvidenceResponse(
+            schema_version="agent-evidence-v1",
+            trace_id=trace_id,
+            session_id="sandbox-session",
+            turn_id="00000000-0000-0000-0000-000000000002",
+            terminal_outcome="completed",
+            events=(
+                EvidenceEventResponse(
+                    sequence=1,
+                    event_kind="USER_INPUT",
+                    outcome="accepted",
+                    occurred_at=now,
+                ),
+                EvidenceEventResponse(
+                    sequence=2,
+                    event_kind="TURN_COMPLETED",
+                    outcome="completed",
+                    occurred_at=now,
+                ),
+            ),
+            feedback=(),
+        )
+
+
 def settings() -> AgentSettings:
     return AgentSettings(
         environment="test",
@@ -221,9 +265,146 @@ def evaluation_settings() -> AgentSettings:
     return settings().model_copy(
         update={
             "evaluation_enabled": True,
+            "evaluation_client_id": "evaluation-manager",
+            "evaluation_client_secret": "evaluation-runtime-secret",
             "commerce_liveness_url": "https://commerce.test",
         }
     )
+
+
+def evaluation_basic(secret: str = "evaluation-runtime-secret") -> str:
+    import base64
+
+    encoded = base64.b64encode(f"evaluation-manager:{secret}".encode()).decode()
+    return f"Basic {encoded}"
+
+
+def test_evaluation_evidence_route_is_profile_bound_and_independently_authenticated() -> None:
+    trace_id = "00000000-0000-0000-0000-000000000001"
+    evidence = MemoryEvidenceStore()
+    production = TestClient(
+        create_app(
+            settings(),
+            validator=object(),  # type: ignore[arg-type]
+            sessions=MemorySessionStore(),
+            conversations=object(),  # type: ignore[arg-type]
+            agent=MemoryAgent(),
+            feedback=object(),  # type: ignore[arg-type]
+            evidence=evidence,
+        )
+    )
+    assert (
+        production.get(
+            f"/api/eval/evidence/{trace_id}",
+            headers={
+                "Authorization": evaluation_basic(),
+                "X-Eval-Sandbox-Id": "sandbox-1",
+            },
+        ).status_code
+        == 404
+    )
+
+    sessions = MemorySessionStore()
+    client = TestClient(
+        create_app(
+            evaluation_settings(),
+            validator=object(),  # type: ignore[arg-type]
+            sessions=sessions,
+            conversations=object(),  # type: ignore[arg-type]
+            agent=MemoryAgent(),
+            feedback=object(),  # type: ignore[arg-type]
+            evidence=evidence,
+            liveness=MemoryLiveness(),
+        )
+    )
+    url = f"/api/eval/evidence/{trace_id}"
+    assert client.get(url, headers={"X-Eval-Sandbox-Id": "sandbox-1"}).status_code == 401
+    assert (
+        client.get(
+            url,
+            headers={
+                "Authorization": "Bearer direct-user-token",
+                "X-Eval-Sandbox-Id": "sandbox-1",
+            },
+        ).status_code
+        == 401
+    )
+    assert (
+        client.get(
+            url,
+            headers={
+                "Authorization": evaluation_basic("wrong-secret"),
+                "X-Eval-Sandbox-Id": "sandbox-1",
+            },
+        ).status_code
+        == 401
+    )
+    response = client.get(
+        url,
+        headers={
+            "Authorization": evaluation_basic(),
+            "X-Eval-Sandbox-Id": "sandbox-1",
+        },
+    )
+    assert response.status_code == 200
+    assert response.json() == {
+        "schemaVersion": "agent-evidence-v1",
+        "traceId": trace_id,
+        "sessionId": "sandbox-session",
+        "turnId": "00000000-0000-0000-0000-000000000002",
+        "terminalOutcome": "completed",
+        "events": [
+            {
+                "sequence": 1,
+                "eventKind": "USER_INPUT",
+                "outcome": "accepted",
+                "occurredAt": "2026-07-18T12:00:00Z",
+            },
+            {
+                "sequence": 2,
+                "eventKind": "TURN_COMPLETED",
+                "outcome": "completed",
+                "occurredAt": "2026-07-18T12:00:00Z",
+            },
+        ],
+        "feedback": [],
+    }
+
+
+def test_evaluation_evidence_rejects_invalid_input_and_conceals_association_failures() -> None:
+    trace_id = "00000000-0000-0000-0000-000000000001"
+    evidence = MemoryEvidenceStore()
+    client = TestClient(
+        create_app(
+            evaluation_settings(),
+            validator=object(),  # type: ignore[arg-type]
+            sessions=MemorySessionStore(),
+            conversations=object(),  # type: ignore[arg-type]
+            agent=MemoryAgent(),
+            feedback=object(),  # type: ignore[arg-type]
+            evidence=evidence,
+            liveness=MemoryLiveness(),
+        )
+    )
+    headers = {
+        "Authorization": evaluation_basic(),
+        "X-Eval-Sandbox-Id": "sandbox-1",
+    }
+    assert client.get("/api/eval/evidence/not-a-uuid", headers=headers).status_code == 422
+    assert (
+        client.get(f"/api/eval/evidence/{trace_id}?owner=user", headers=headers).status_code == 422
+    )
+    assert evidence.calls == []
+
+    evidence.mode = "missing"
+    missing = client.get(f"/api/eval/evidence/{trace_id}", headers=headers)
+    assert missing.status_code == 404
+    assert missing.json() == {"detail": "Evidence not found"}
+
+    evidence.mode = "invalid"
+    invalid = client.get(f"/api/eval/evidence/{trace_id}", headers=headers)
+    assert invalid.status_code == 409
+    assert invalid.json() == {"detail": "Evidence unavailable"}
 
 
 def key_fixture(kid: str) -> tuple[rsa.RSAPrivateKey, dict[str, Any]]:

@@ -5,6 +5,8 @@ from __future__ import annotations
 import secrets
 import time
 import uuid
+from base64 import b64decode
+from binascii import Error as Base64Error
 from collections.abc import Mapping
 from typing import Any, Literal, Protocol
 
@@ -35,6 +37,13 @@ from .conversation import (
     TurnFailedError,
     TurnInProgressError,
 )
+from .evaluation import (
+    EvaluationEvidenceInvalid,
+    EvaluationEvidenceNotFound,
+    EvaluationEvidenceResponse,
+    EvaluationEvidenceStore,
+    MysqlEvaluationEvidenceStore,
+)
 from .feedback import (
     FeedbackConflictError,
     FeedbackOwnershipError,
@@ -60,6 +69,8 @@ class AgentSettings(BaseModel):
     environment: str = "development"
     identity_enabled: bool = False
     evaluation_enabled: bool = False
+    evaluation_client_id: str = ""
+    evaluation_client_secret: str = ""
     issuer: str = ""
     user_audience: str = ""
     jwks_url: str = ""
@@ -392,6 +403,7 @@ def create_app(
     conversations: ConversationStore | None = None,
     agent: AgentRunner | None = None,
     feedback: FeedbackStore | None = None,
+    evidence: EvaluationEvidenceStore | None = None,
     liveness: SandboxLiveness | None = None,
 ) -> FastAPI:
     """Construct the app, enabling identity routes only with complete runtime configuration."""
@@ -413,7 +425,12 @@ def create_app(
     resolved_sessions = sessions or MysqlSessionStore(resolved)
     resolved_conversations = conversations or MysqlConversationStore(resolved)
     resolved_feedback = feedback or MysqlFeedbackStore(resolved)
+    resolved_evidence = evidence or MysqlEvaluationEvidenceStore(resolved)
     resolved_liveness = liveness
+    if resolved.evaluation_enabled and (
+        not resolved.evaluation_client_id or not resolved.evaluation_client_secret
+    ):
+        raise ValueError("Evaluation API credential is required")
     if resolved.evaluation_enabled and resolved_liveness is None:
         if not resolved.commerce_liveness_url:
             raise ValueError("Evaluation liveness URL is required")
@@ -423,6 +440,7 @@ def create_app(
     app.state.sessions = resolved_sessions
     app.state.conversations = resolved_conversations
     app.state.feedback = resolved_feedback
+    app.state.evidence = resolved_evidence
     app.state.liveness = resolved_liveness
     app.state.sse_filter = sse_filter
     resolved_obo = OboClient(resolved, resolved_sessions)
@@ -484,6 +502,21 @@ def create_app(
         if permission not in principal.permissions:
             raise HTTPException(status_code=403, detail="Forbidden")
         return principal, token
+
+    def authorize_evaluator(authorization: str | None) -> None:
+        if authorization is None or not authorization.startswith("Basic "):
+            raise HTTPException(status_code=401, detail="Unauthorized")
+        try:
+            decoded = b64decode(authorization[6:], validate=True).decode("utf-8")
+        except (Base64Error, UnicodeDecodeError):
+            raise HTTPException(status_code=401, detail="Unauthorized") from None
+        client_id, separator, client_secret = decoded.partition(":")
+        if (
+            separator != ":"
+            or not secrets.compare_digest(client_id, resolved.evaluation_client_id)
+            or not secrets.compare_digest(client_secret, resolved.evaluation_client_secret)
+        ):
+            raise HTTPException(status_code=401, detail="Unauthorized")
 
     def require_liveness(principal: DirectPrincipal, token: str) -> None:
         if principal.sandbox_id is None:
@@ -685,5 +718,38 @@ def create_app(
             trace_id=record.trace_id,
             rating=record.rating,
         )
+
+    if resolved.evaluation_enabled:
+
+        @app.get(
+            "/api/eval/evidence/{trace_id}",
+            response_model=EvaluationEvidenceResponse,
+            response_model_exclude_none=True,
+        )
+        def evaluation_evidence(
+            trace_id: uuid.UUID,
+            request: Request,
+            authorization: str | None = Header(default=None),
+            x_eval_sandbox_id: str = Header(
+                min_length=1,
+                max_length=64,
+                pattern=r"^[A-Za-z0-9][A-Za-z0-9._-]*$",
+            ),
+        ) -> EvaluationEvidenceResponse:
+            if (
+                request.query_params
+                or request.headers.get("content-length") not in {None, "0"}
+                or request.headers.get("transfer-encoding") is not None
+            ):
+                raise HTTPException(status_code=422, detail="Invalid request")
+            authorize_evaluator(authorization)
+            try:
+                return resolved_evidence.load(str(trace_id), x_eval_sandbox_id)
+            except EvaluationEvidenceNotFound as exception:
+                raise HTTPException(status_code=404, detail="Evidence not found") from exception
+            except EvaluationEvidenceInvalid as exception:
+                raise HTTPException(status_code=409, detail="Evidence unavailable") from exception
+            except pymysql.MySQLError as exception:
+                raise HTTPException(status_code=503, detail="Service unavailable") from exception
 
     return app

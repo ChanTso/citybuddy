@@ -13,6 +13,8 @@ def _settings() -> AgentSettings:
         environment=os.environ.get("CITYBUDDY_ENVIRONMENT", "development"),
         identity_enabled=os.environ.get("AGENT_IDENTITY_ENABLED", "false").lower() == "true",
         evaluation_enabled=os.environ.get("AGENT_EVALUATION_ENABLED", "false").lower() == "true",
+        evaluation_client_id=os.environ.get("AGENT_EVALUATION_CLIENT_ID", ""),
+        evaluation_client_secret=os.environ.get("AGENT_EVALUATION_CLIENT_SECRET", ""),
         issuer=os.environ.get("IDENTITY_ISSUER", ""),
         user_audience=os.environ.get("IDENTITY_USER_AUDIENCE", ""),
         jwks_url=os.environ.get("IDENTITY_JWKS_URL", ""),

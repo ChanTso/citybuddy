@@ -1,6 +1,6 @@
 {
   "openapi": "3.1.0",
-  "info": {"title": "CityBuddy agent API", "version": "CB-091"},
+  "info": {"title": "CityBuddy agent API", "version": "CB-103"},
   "paths": {
     "/api/sessions": {
       "post": {
@@ -206,11 +206,57 @@
           "503": {"$ref": "#/components/responses/Unavailable"}
         }
       }
+    },
+    "/api/eval/evidence/{traceId}": {
+      "get": {
+        "operationId": "getAgentEvaluationEvidence",
+        "x-citybuddy-profile": "evaluation",
+        "security": [{"evaluationManagementBasic": []}],
+        "parameters": [
+          {
+            "name": "traceId",
+            "in": "path",
+            "required": true,
+            "schema": {"type": "string", "format": "uuid", "minLength": 36, "maxLength": 36}
+          },
+          {
+            "name": "X-Eval-Sandbox-Id",
+            "in": "header",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 64,
+              "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]*$"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Bounded read-only projection of complete authoritative cs_db evidence in persisted sequence order",
+            "content": {
+              "application/json": {
+                "schema": {"$ref": "#/components/schemas/AgentEvaluationEvidence"}
+              }
+            }
+          },
+          "401": {"$ref": "#/components/responses/Unauthorized"},
+          "404": {"$ref": "#/components/responses/EvaluationEvidenceNotFound"},
+          "409": {"$ref": "#/components/responses/EvaluationEvidenceUnavailable"},
+          "422": {"$ref": "#/components/responses/InvalidRequest"},
+          "503": {"$ref": "#/components/responses/Unavailable"}
+        }
+      }
     }
   },
   "components": {
     "securitySchemes": {
-      "directUserBearer": {"type": "http", "scheme": "bearer", "bearerFormat": "RS256 JWT"}
+      "directUserBearer": {"type": "http", "scheme": "bearer", "bearerFormat": "RS256 JWT"},
+      "evaluationManagementBasic": {
+        "type": "http",
+        "scheme": "basic",
+        "description": "Independent evaluation API credential; never a direct-user or service-token fallback."
+      }
     },
     "schemas": {
       "PublicError": {
@@ -300,6 +346,136 @@
           "traceId": {"type": "string", "format": "uuid", "readOnly": true},
           "rating": {"type": "string", "enum": ["POSITIVE", "NEGATIVE"]}
         }
+      },
+      "AgentEvaluationEvidence": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "schemaVersion",
+          "traceId",
+          "sessionId",
+          "turnId",
+          "terminalOutcome",
+          "events",
+          "feedback"
+        ],
+        "properties": {
+          "schemaVersion": {"type": "string", "const": "agent-evidence-v1"},
+          "traceId": {"type": "string", "format": "uuid", "readOnly": true},
+          "sessionId": {"type": "string", "minLength": 1, "maxLength": 64, "readOnly": true},
+          "turnId": {"type": "string", "format": "uuid", "readOnly": true},
+          "terminalOutcome": {
+            "type": "string",
+            "enum": [
+              "completed",
+              "budget_exhausted",
+              "provider_denied",
+              "retrieval_denied",
+              "failed"
+            ]
+          },
+          "events": {
+            "type": "array",
+            "minItems": 2,
+            "maxItems": 48,
+            "items": {"$ref": "#/components/schemas/AgentEvaluationEvent"},
+            "description": "Complete accepted-to-terminal sequence ordered only by persisted support_event.sequence."
+          },
+          "retrieval": {"$ref": "#/components/schemas/AgentEvaluationRetrieval"},
+          "feedback": {
+            "type": "array",
+            "maxItems": 8,
+            "items": {"$ref": "#/components/schemas/AgentEvaluationFeedback"}
+          }
+        },
+        "description": "Fixed safe projection. It excludes user text, prompts, model/reasoning payloads, providers and aliases, credentials, raw tool or retrieval payloads, PII maps, commerce data, SQL, and internal errors."
+      },
+      "AgentEvaluationEvent": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["sequence", "eventKind", "occurredAt"],
+        "properties": {
+          "sequence": {"type": "integer", "minimum": 1, "maximum": 48},
+          "eventKind": {
+            "type": "string",
+            "enum": [
+              "USER_INPUT",
+              "ROUTING_DECISION",
+              "BUDGET_CHARGED",
+              "CIRCUIT_OUTCOME",
+              "MODEL_OUTCOME",
+              "TOOL_LIFECYCLE",
+              "TOOL_DENIED",
+              "RETRIEVAL_DECISION",
+              "AGENT_OUTCOME",
+              "ASSISTANT_RESPONSE",
+              "TURN_COMPLETED",
+              "TURN_FAILED"
+            ]
+          },
+          "outcome": {"type": "string", "minLength": 1, "maxLength": 32},
+          "reference": {"type": "string", "minLength": 1, "maxLength": 128},
+          "attempt": {"type": "integer", "minimum": 1, "maximum": 32},
+          "attemptLimit": {"type": "integer", "minimum": 1, "maximum": 32},
+          "occurredAt": {"type": "string", "format": "date-time", "readOnly": true}
+        }
+      },
+      "AgentEvaluationRetrieval": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "outcome",
+          "reason",
+          "indexVersion",
+          "calibrationVersion",
+          "candidateCount",
+          "evidenceCount",
+          "sources"
+        ],
+        "properties": {
+          "outcome": {"type": "string", "enum": ["SUFFICIENT", "INSUFFICIENT"]},
+          "reason": {
+            "type": "string",
+            "enum": [
+              "sufficient",
+              "empty_candidates",
+              "below_threshold",
+              "ambiguous_margin",
+              "reranker_denied"
+            ]
+          },
+          "indexVersion": {"type": "string", "minLength": 1, "maxLength": 64},
+          "calibrationVersion": {"type": "string", "minLength": 1, "maxLength": 64},
+          "candidateCount": {"type": "integer", "minimum": 0, "maximum": 5},
+          "evidenceCount": {"type": "integer", "minimum": 0, "maximum": 3},
+          "sources": {
+            "type": "array",
+            "maxItems": 3,
+            "items": {"$ref": "#/components/schemas/AgentEvaluationSource"}
+          }
+        }
+      },
+      "AgentEvaluationSource": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["rank", "sourceId", "chunkId", "sourceVersion", "docType"],
+        "properties": {
+          "rank": {"type": "integer", "minimum": 1, "maximum": 3},
+          "sourceId": {"type": "string", "minLength": 1, "maxLength": 128},
+          "chunkId": {"type": "string", "minLength": 1, "maxLength": 128},
+          "sourceVersion": {"type": "integer", "minimum": 1},
+          "docType": {"type": "string", "enum": ["faq", "product"]}
+        }
+      },
+      "AgentEvaluationFeedback": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["rating", "occurredAt"],
+        "properties": {
+          "rating": {"type": "string", "enum": ["POSITIVE", "NEGATIVE"]},
+          "occurredAt": {"type": "string", "format": "date-time", "readOnly": true}
+        },
+        "description": "Safe append-only rating projection; private feedback comment text is excluded."
       }
     },
     "responses": {
@@ -321,6 +497,14 @@
       },
       "Unavailable": {
         "description": "Durable support truth is unavailable or the turn previously failed",
+        "content": {"application/json": {"schema": {"$ref": "#/components/schemas/PublicError"}}}
+      },
+      "EvaluationEvidenceNotFound": {
+        "description": "Unknown and cross-sandbox traces share the same concealed result",
+        "content": {"application/json": {"schema": {"$ref": "#/components/schemas/PublicError"}}}
+      },
+      "EvaluationEvidenceUnavailable": {
+        "description": "Persisted evidence is incomplete, conflicting, oversized, or not safely projectable",
         "content": {"application/json": {"schema": {"$ref": "#/components/schemas/PublicError"}}}
       }
     }
