@@ -1,12 +1,16 @@
 package io.citybuddy.auth.identity;
 
 import io.citybuddy.auth.identity.AuthKeySet.DirectPrincipal;
+import io.citybuddy.auth.identity.AuthKeySet.IssuedToken;
 import java.nio.charset.StandardCharsets;
+import java.time.Clock;
 import java.util.Base64;
 import java.util.HashSet;
 import java.util.Map;
 import java.util.Set;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
+import org.springframework.core.env.Environment;
+import org.springframework.core.env.Profiles;
 import org.springframework.security.crypto.password.PasswordEncoder;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PostMapping;
@@ -24,16 +28,22 @@ public final class AuthController {
   private final AuthKeySet keys;
   private final PasswordEncoder passwordEncoder;
   private final IdentityProperties properties;
+  private final Clock clock;
+  private final boolean evaluationProfile;
 
   public AuthController(
       AuthRepository repository,
       AuthKeySet keys,
       PasswordEncoder passwordEncoder,
-      IdentityProperties properties) {
+      IdentityProperties properties,
+      Environment environment,
+      Clock clock) {
     this.repository = repository;
     this.keys = keys;
     this.passwordEncoder = passwordEncoder;
     this.properties = properties;
+    this.clock = clock;
+    this.evaluationProfile = environment.acceptsProfiles(Profiles.of("evaluation"));
   }
 
   @PostMapping("/auth/login")
@@ -72,7 +82,6 @@ public final class AuthController {
       @RequestHeader("X-User-Authorization") String userAuthorization,
       @RequestHeader(value = "X-Eval-Sandbox-Id", required = false) String evalSandbox,
       @RequestBody ExchangeRequest request) {
-    rejectEvaluationHeader(evalSandbox);
     BasicCredential basic = parseBasic(authorization);
     AuthRepository.ServiceCredential service =
         repository
@@ -96,18 +105,32 @@ public final class AuthController {
     var signingMetadata = repository.publicKeyMetadata();
     DirectPrincipal principal =
         keys.validateDirect(
-            parseBearer(userAuthorization), SESSION_PERMISSION, activeSigningKids(signingMetadata));
+            parseBearer(userAuthorization),
+            SESSION_PERMISSION,
+            activeSigningKids(signingMetadata),
+            evalSandbox,
+            evaluationProfile);
     if (!principal.subject().equals(request.userSubject())) {
       throw new IdentityException(403, "Session binding does not match direct user");
     }
-    if (!repository.isActiveSubject(principal.subject())) {
+    boolean active =
+        principal.sandboxId() == null
+            ? repository.isActiveSubject(principal.subject())
+            : repository.isActiveEvaluationSubject(
+                principal.subject(), principal.sandboxId(), clock.instant());
+    if (!active) {
       throw new IdentityException(403, "Principal is not active");
     }
     requireCurrentSigningKey(signingMetadata);
-    String obo =
+    IssuedToken obo =
         keys.oboToken(
-            principal.subject(), request.sessionId(), request.scope(), service.clientId());
-    return new TokenResponse(obo, "Bearer", properties.oboTtl().toSeconds());
+            principal.subject(),
+            request.sessionId(),
+            request.scope(),
+            service.clientId(),
+            principal.sandboxId(),
+            principal.expiresAt());
+    return new TokenResponse(obo.value(), "Bearer", obo.expiresIn());
   }
 
   private static BasicCredential parseBasic(String authorization) {

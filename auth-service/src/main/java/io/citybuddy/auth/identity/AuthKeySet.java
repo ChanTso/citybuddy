@@ -30,6 +30,7 @@ import java.util.UUID;
 
 public final class AuthKeySet {
   public static final String DIRECT_TYPE = "direct_user";
+  public static final String EVALUATION_DIRECT_TYPE = "eval_direct_user";
   public static final String OBO_TYPE = "agent_obo";
 
   private final IdentityProperties properties;
@@ -52,24 +53,28 @@ public final class AuthKeySet {
   public String directToken(String subject, List<String> permissions) {
     Instant now = clock.instant();
     JWTClaimsSet claims =
-        new JWTClaimsSet.Builder()
-            .issuer(properties.issuer())
-            .audience(properties.userAudience())
-            .subject(subject)
-            .claim("token_type", DIRECT_TYPE)
-            .claim("principal_state", "ACTIVE")
-            .claim("permissions", permissions)
-            .issueTime(Date.from(now))
-            .notBeforeTime(Date.from(now))
-            .expirationTime(Date.from(now.plus(properties.directTtl())))
-            .jwtID(UUID.randomUUID().toString())
-            .build();
+        directClaims(subject, permissions, DIRECT_TYPE, null, now.plus(properties.directTtl()));
     return sign(claims);
   }
 
-  public String oboToken(String subject, String sessionId, String scope, String actor) {
+  public String evaluationDirectToken(
+      String subject, List<String> permissions, String sandboxId, Instant expiresAt) {
+    return sign(directClaims(subject, permissions, EVALUATION_DIRECT_TYPE, sandboxId, expiresAt));
+  }
+
+  public IssuedToken oboToken(
+      String subject,
+      String sessionId,
+      String scope,
+      String actor,
+      String sandboxId,
+      Instant sourceExpiresAt) {
     Instant now = clock.instant();
-    JWTClaimsSet claims =
+    Instant configuredExpiry = now.plus(properties.oboTtl());
+    Instant expiresAt =
+        sourceExpiresAt.isBefore(configuredExpiry) ? sourceExpiresAt : configuredExpiry;
+    requireClaim(expiresAt.isAfter(now), "Source token is already expired");
+    JWTClaimsSet.Builder builder =
         new JWTClaimsSet.Builder()
             .issuer(properties.issuer())
             .audience("commerce-service")
@@ -81,23 +86,49 @@ public final class AuthKeySet {
             .claim("act", Map.of("azp", actor))
             .issueTime(Date.from(now))
             .notBeforeTime(Date.from(now))
-            .expirationTime(Date.from(now.plus(properties.oboTtl())))
-            .jwtID(UUID.randomUUID().toString())
-            .build();
-    return sign(claims);
+            .expirationTime(Date.from(expiresAt))
+            .jwtID(UUID.randomUUID().toString());
+    if (hasText(sandboxId)) {
+      builder.claim("sandbox", sandboxId);
+    }
+    JWTClaimsSet claims = builder.build();
+    return new IssuedToken(
+        sign(claims), Math.max(1, expiresAt.getEpochSecond() - now.getEpochSecond()));
   }
 
   public DirectPrincipal validateDirect(
       String token, String requiredPermission, Set<String> acceptedKids) {
+    return validateDirect(token, requiredPermission, acceptedKids, null, false);
+  }
+
+  public DirectPrincipal validateDirect(
+      String token,
+      String requiredPermission,
+      Set<String> acceptedKids,
+      String sandboxHeader,
+      boolean evaluationProfile) {
     JWTClaimsSet claims = verifiedClaims(token, acceptedKids);
-    requireClaim(DIRECT_TYPE.equals(claims.getClaim("token_type")), "Wrong token type");
+    Object tokenType = claims.getClaim("token_type");
+    Object sandboxClaim = claims.getClaim("sandbox");
+    String sandbox = sandboxClaim instanceof String string ? string : null;
+    if (DIRECT_TYPE.equals(tokenType)) {
+      requireClaim(sandboxClaim == null, "Production token carries evaluation sandbox");
+      requireClaim(sandboxHeader == null, "Production token cannot use Evaluation header");
+    } else if (EVALUATION_DIRECT_TYPE.equals(tokenType)) {
+      requireClaim(evaluationProfile, "Evaluation token is not enabled");
+      requireClaim(
+          sandboxClaim instanceof String && hasText(sandbox), "Missing evaluation sandbox");
+      requireClaim(sandbox.equals(sandboxHeader), "Evaluation sandbox mismatch");
+    } else {
+      throw new IdentityException(401, "Wrong token type");
+    }
     requireClaim("ACTIVE".equals(claims.getClaim("principal_state")), "Inactive principal");
     requireClaim(properties.issuer().equals(claims.getIssuer()), "Wrong issuer");
     requireClaim(claims.getAudience().equals(List.of(properties.userAudience())), "Wrong audience");
     requireClaim(hasText(claims.getSubject()), "Missing subject");
     requireClaim(claims.getClaim("act") == null, "Direct token carries actor");
     requireClaim(claims.getClaim("session") == null, "Direct token carries session");
-    requireClaim(claims.getClaim("sandbox") == null, "Evaluation token is not enabled");
+    requireClaim(claims.getClaim("eval_sandbox") == null, "Unexpected evaluation claim");
     validateTime(claims);
     List<String> permissions;
     try {
@@ -107,7 +138,37 @@ public final class AuthKeySet {
     }
     requireClaim(
         permissions != null && permissions.contains(requiredPermission), "Missing permission");
-    return new DirectPrincipal(claims.getSubject(), List.copyOf(permissions));
+    return new DirectPrincipal(
+        claims.getSubject(),
+        List.copyOf(permissions),
+        sandbox,
+        claims.getExpirationTime().toInstant());
+  }
+
+  private JWTClaimsSet directClaims(
+      String subject,
+      List<String> permissions,
+      String tokenType,
+      String sandboxId,
+      Instant expiresAt) {
+    Instant now = clock.instant();
+    requireClaim(expiresAt.isAfter(now), "Evaluation token is already expired");
+    JWTClaimsSet.Builder builder =
+        new JWTClaimsSet.Builder()
+            .issuer(properties.issuer())
+            .audience(properties.userAudience())
+            .subject(subject)
+            .claim("token_type", tokenType)
+            .claim("principal_state", "ACTIVE")
+            .claim("permissions", permissions)
+            .issueTime(Date.from(now))
+            .notBeforeTime(Date.from(now))
+            .expirationTime(Date.from(expiresAt))
+            .jwtID(UUID.randomUUID().toString());
+    if (hasText(sandboxId)) {
+      builder.claim("sandbox", sandboxId);
+    }
+    return builder.build();
   }
 
   public Map<String, Object> jwks(Set<String> publishedKids) {
@@ -209,5 +270,8 @@ public final class AuthKeySet {
     return value != null && !value.isBlank();
   }
 
-  public record DirectPrincipal(String subject, List<String> permissions) {}
+  public record DirectPrincipal(
+      String subject, List<String> permissions, String sandboxId, Instant expiresAt) {}
+
+  public record IssuedToken(String value, long expiresIn) {}
 }

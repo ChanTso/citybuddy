@@ -1,6 +1,6 @@
 {
   "openapi": "3.1.0",
-  "info": {"title": "CityBuddy auth identity API", "version": "CB-020"},
+  "info": {"title": "CityBuddy auth identity API", "version": "CB-100"},
   "paths": {
     "/auth/login": {
       "post": {
@@ -23,18 +23,56 @@
       "post": {
         "operationId": "exchangeAgentObo",
         "security": [{"serviceBasic": []}],
-        "parameters": [{"name": "X-User-Authorization", "in": "header", "required": true, "schema": {"type": "string"}}],
+        "parameters": [{"name": "X-User-Authorization", "in": "header", "required": true, "schema": {"type": "string"}}, {"name": "X-Eval-Sandbox-Id", "in": "header", "required": false, "schema": {"$ref": "#/components/schemas/SandboxId"}, "description": "Required only for an evaluation direct-user token; must equal its signed sandbox claim."}],
         "requestBody": {
           "required": true,
           "content": {"application/json": {"schema": {"$ref": "#/components/schemas/ExchangeRequest"}}}
         },
         "responses": {"200": {"description": "Short-lived exact-scope agent OBO", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/TokenResponse"}}}}, "401": {"description": "Invalid direct user, service credential, or production evaluation context"}, "403": {"description": "Invalid session assertion, principal state, or scope"}}
       }
+    },
+    "/internal/eval/test-principals/provision": {
+      "post": {
+        "operationId": "provisionEvaluationTestPrincipal",
+        "x-citybuddy-profile": "evaluation",
+        "security": [{"commerceEvaluationBasic": []}],
+        "parameters": [{"name": "Idempotency-Key", "in": "header", "required": true, "schema": {"$ref": "#/components/schemas/BoundedIdentifier128"}}],
+        "requestBody": {"required": true, "content": {"application/json": {"schema": {"$ref": "#/components/schemas/EvaluationProvisionRequest"}}}},
+        "responses": {"200": {"description": "Opaque TTL-bound evaluation test-principal handle", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/EvaluationProvisionResponse"}}}}, "400": {"description": "Malformed or out-of-bounds provisioning intent"}, "401": {"description": "Invalid dedicated commerce-service credential"}, "409": {"description": "Conflicting idempotency or sandbox/case reuse"}}
+      }
+    },
+    "/internal/eval/test-principals/{handle}/revoke": {
+      "post": {
+        "operationId": "revokeEvaluationTestPrincipal",
+        "x-citybuddy-profile": "evaluation",
+        "security": [{"commerceEvaluationBasic": []}],
+        "parameters": [{"name": "handle", "in": "path", "required": true, "schema": {"$ref": "#/components/schemas/OpaqueEvaluationHandle"}}, {"name": "Idempotency-Key", "in": "header", "required": true, "schema": {"$ref": "#/components/schemas/BoundedIdentifier128"}}],
+        "requestBody": {"required": true, "content": {"application/json": {"schema": {"$ref": "#/components/schemas/EvaluationRevokeRequest"}}}},
+        "responses": {"200": {"description": "Idempotent revoked state", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/EvaluationRevokeResponse"}}}}, "400": {"description": "Malformed revocation intent"}, "401": {"description": "Invalid dedicated commerce-service credential"}, "404": {"description": "Unknown or mismatched private binding"}, "409": {"description": "Conflicting revocation idempotency reuse"}}
+      }
+    },
+    "/auth/eval/test-token": {
+      "post": {
+        "operationId": "issueEvaluationTestToken",
+        "x-citybuddy-profile": "evaluation",
+        "security": [{"evaluatorBasic": []}],
+        "parameters": [{"name": "X-Eval-Sandbox-Id", "in": "header", "required": true, "schema": {"$ref": "#/components/schemas/SandboxId"}}],
+        "requestBody": {"required": true, "content": {"application/json": {"schema": {"$ref": "#/components/schemas/EvaluationTestTokenRequest"}}}},
+        "responses": {"200": {"description": "RS256 sandbox-bound direct-user evaluation token", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/TokenResponse"}}}}, "400": {"description": "Malformed handle or sandbox"}, "401": {"description": "Invalid independent evaluator credential, handle, lifecycle state, or sandbox binding"}}
+      }
     }
   },
   "components": {
-    "securitySchemes": {"serviceBasic": {"type": "http", "scheme": "basic"}},
+    "securitySchemes": {"serviceBasic": {"type": "http", "scheme": "basic"}, "commerceEvaluationBasic": {"type": "http", "scheme": "basic", "description": "Dedicated commerce-service evaluation management identity"}, "evaluatorBasic": {"type": "http", "scheme": "basic", "description": "Independent evaluation test-token issuer identity"}},
     "schemas": {
+      "SandboxId": {"type": "string", "minLength": 1, "maxLength": 64, "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$"},
+      "BoundedIdentifier128": {"type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$"},
+      "OpaqueEvaluationHandle": {"type": "string", "minLength": 43, "maxLength": 43, "pattern": "^[A-Za-z0-9_-]{43}$"},
+      "EvaluationProvisionRequest": {"type": "object", "additionalProperties": false, "required": ["sandboxId", "caseCorrelation", "testUserLabel", "ttlSeconds"], "properties": {"sandboxId": {"$ref": "#/components/schemas/SandboxId"}, "caseCorrelation": {"$ref": "#/components/schemas/BoundedIdentifier128"}, "testUserLabel": {"$ref": "#/components/schemas/BoundedIdentifier128"}, "ttlSeconds": {"type": "integer", "minimum": 60, "maximum": 3600}}},
+      "EvaluationProvisionResponse": {"type": "object", "additionalProperties": false, "required": ["handle", "expiresAt"], "properties": {"handle": {"$ref": "#/components/schemas/OpaqueEvaluationHandle"}, "expiresAt": {"type": "string", "format": "date-time", "readOnly": true}}},
+      "EvaluationRevokeRequest": {"type": "object", "additionalProperties": false, "required": ["sandboxId", "caseCorrelation"], "properties": {"sandboxId": {"$ref": "#/components/schemas/SandboxId"}, "caseCorrelation": {"$ref": "#/components/schemas/BoundedIdentifier128"}}},
+      "EvaluationRevokeResponse": {"type": "object", "additionalProperties": false, "required": ["handle", "state"], "properties": {"handle": {"$ref": "#/components/schemas/OpaqueEvaluationHandle"}, "state": {"const": "REVOKED", "readOnly": true}}},
+      "EvaluationTestTokenRequest": {"type": "object", "additionalProperties": false, "required": ["handle"], "properties": {"handle": {"$ref": "#/components/schemas/OpaqueEvaluationHandle"}}},
       "LoginRequest": {
         "type": "object",
         "additionalProperties": false,

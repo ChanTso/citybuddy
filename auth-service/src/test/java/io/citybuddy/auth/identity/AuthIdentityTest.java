@@ -27,6 +27,7 @@ import java.util.Set;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
+import org.springframework.mock.env.MockEnvironment;
 import org.springframework.security.crypto.bcrypt.BCryptPasswordEncoder;
 
 class AuthIdentityTest {
@@ -70,8 +71,11 @@ class AuthIdentityTest {
                     "current-key", "CURRENT", Instant.parse("2026-07-15T00:00:00Z"), null)));
     when(repository.isActiveSubject("user-123")).thenReturn(true);
     passwordEncoder = new BCryptPasswordEncoder(4);
-    keys = new AuthKeySet(properties, Clock.systemUTC());
-    controller = new AuthController(repository, keys, passwordEncoder, properties);
+    Clock clock = Clock.systemUTC();
+    keys = new AuthKeySet(properties, clock);
+    controller =
+        new AuthController(
+            repository, keys, passwordEncoder, properties, new MockEnvironment(), clock);
   }
 
   @Test
@@ -241,6 +245,28 @@ class AuthIdentityTest {
                     Set.of("current-key")))
         .isInstanceOf(IdentityException.class)
         .hasMessage("Inactive principal");
+  }
+
+  @Test
+  void directValidationRejectsNonStringSandboxInsteadOfTreatingItAsAbsent() throws Exception {
+    assertThatThrownBy(
+            () ->
+                keys.validateDirect(
+                    signedSandboxToken("direct_user", List.of("sandbox-1")),
+                    "support:session:create",
+                    Set.of("current-key")))
+        .isInstanceOf(IdentityException.class)
+        .hasMessage("Production token carries evaluation sandbox");
+    assertThatThrownBy(
+            () ->
+                keys.validateDirect(
+                    signedSandboxToken("eval_direct_user", List.of("sandbox-1")),
+                    "support:session:create",
+                    Set.of("current-key"),
+                    "sandbox-1",
+                    true))
+        .isInstanceOf(IdentityException.class)
+        .hasMessage("Missing evaluation sandbox");
   }
 
   @Test
@@ -491,6 +517,28 @@ class AuthIdentityTest {
     SignedJWT jwt =
         new SignedJWT(new JWSHeader.Builder(JWSAlgorithm.RS256).keyID(kid).build(), claims);
     jwt.sign(new RSASSASigner((RSAPrivateKey) keyPair.getPrivate()));
+    return jwt.serialize();
+  }
+
+  private String signedSandboxToken(String tokenType, Object sandbox) throws Exception {
+    Instant now = Instant.now();
+    JWTClaimsSet claims =
+        new JWTClaimsSet.Builder()
+            .issuer("https://identity.citybuddy.test")
+            .audience("citybuddy-web")
+            .subject("user-123")
+            .claim("token_type", tokenType)
+            .claim("principal_state", "ACTIVE")
+            .claim("permissions", List.of("support:session:create"))
+            .claim("sandbox", sandbox)
+            .issueTime(Date.from(now))
+            .notBeforeTime(Date.from(now))
+            .expirationTime(Date.from(now.plusSeconds(60)))
+            .build();
+    SignedJWT jwt =
+        new SignedJWT(
+            new JWSHeader.Builder(JWSAlgorithm.RS256).keyID("current-key").build(), claims);
+    jwt.sign(new RSASSASigner((RSAPrivateKey) currentKeyPair.getPrivate()));
     return jwt.serialize();
   }
 
