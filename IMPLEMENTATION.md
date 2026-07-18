@@ -1,8 +1,8 @@
 # CityBuddy implementation index
 
-**Document version:** v0.20\
+**Document version:** v0.21\
 **Verification date:** 2026-07-18\
-**Repository phase:** Rerank, sufficiency calibration, and retrieval evidence ready
+**Repository phase:** Evaluation identity provisioning and sandbox-bound token lifecycle ready
 
 ## How to use this index
 
@@ -17,7 +17,7 @@
 
 CityBuddy targets local-commerce transactions and text-only AI customer support with independent identity, side-effect, retrieval, and evaluation boundaries.
 
-The repository contains the verified local-runtime foundations, identity vertical slice, product catalog vertical slice, standard-ordering vertical slice, seckill reservation, durable-order, cancellation, mock-payment, refund, and reconciliation mainline, support conversation lifecycle, bounded agent/tool control, filtered SSE, append-only feedback, and versioned hybrid public-knowledge retrieval:
+The repository contains the verified local-runtime foundations, identity vertical slice, product catalog vertical slice, standard-ordering vertical slice, seckill reservation, durable-order, cancellation, mock-payment, refund, and reconciliation mainline, support conversation lifecycle, bounded agent/tool control, filtered SSE, append-only feedback, versioned hybrid public-knowledge retrieval, and calibrated durable retrieval evidence:
 
 - executable non-business skeletons for `auth-service`, `commerce-service`, `agent-service`, `knowledge-indexer`, and `web`;
 - one Maven reactor and wrapper, one locked `uv` workspace, and one npm lockfile;
@@ -25,6 +25,7 @@ The repository contains the verified local-runtime foundations, identity vertica
 - two pinned, authenticated, health-gated Redis instances with distinct URLs, credentials, containers, and named volumes: Commerce uses AOF plus `noeviction`, while Support uses bounded `volatile-lfu` for TTL-bearing cache data;
 - one digest-pinned Elasticsearch 8.19.8 runtime with checksum-verified analysis-ik 8.19.8, analyzer-gated health, and disposable dense-vector, kNN, and atomic-alias evidence;
 - one versioned `knowledge_docs_vN` public-knowledge index behind the stable `knowledge_docs_read` alias, with strict mapping/corpus boundaries and server-owned `knowledge.search` performing separate bounded BM25 and dense recall plus deterministic application-side RRF;
+- one server-owned reranker role behind the shared model-policy budget, with bounded candidate normalization, versioned synthetic sufficiency calibration, atomic `cs_db` retrieval decisions/evidence, stored-evidence-only replay, and citations projected only from sufficient public evidence;
 - one digest-pinned RocketMQ 5.5.0 NameServer and combined Broker/Proxy runtime with behavior-gated readiness, a Java 5.x gRPC client route probe, and a disposable uniquely identified normal-message round trip;
 - one ordered local and CI integration entry point proving clean aggregate startup, seven health gates, three migration histories, repeat-start idempotence, credential preservation, non-destructive shutdown, component probes, and controlled failures;
 - RS256 direct-user login and JWKS publication, server-owned support sessions, independently authenticated exact-scope JIT OBO exchange, and fail-closed commerce authorization with bounded key refresh and overlap handling;
@@ -93,10 +94,13 @@ The linked slice name is the canonical detailed specification. Target outcomes a
 | [CB-081 — Bounded agent, model routing, and ToolSpec control](docs/slices/CB-081.md) | P0 | `VERIFIED` | `CB-080` |
 | [CB-082 — Filtered SSE, feedback, and deterministic support end-to-end evidence](docs/slices/CB-082.md) | P0 | `VERIFIED` | `CB-081` |
 | [CB-090 — Versioned hybrid knowledge index and deterministic retrieval fusion](docs/slices/CB-090.md) | P0 | `VERIFIED` | `CB-014`, `CB-082` |
-| [CB-091 — Rerank, sufficiency calibration, and retrieval evidence](docs/slices/CB-091.md) | P0 | `IN_PROGRESS` | `CB-090` |
-| [CB-100 — Evaluation identity provisioning and sandbox-bound token lifecycle](docs/slices/CB-100.md) | P0 | `PLANNED` | `CB-020`, `CB-040`, `CB-061`, `CB-071`, `CB-082`, `CB-091` |
+| [CB-091 — Rerank, sufficiency calibration, and retrieval evidence](docs/slices/CB-091.md) | P0 | `VERIFIED` | `CB-090` |
+| [CB-100 — Evaluation identity provisioning and sandbox-bound token lifecycle](docs/slices/CB-100.md) | P0 | `READY` | `CB-020`, `CB-040`, `CB-061`, `CB-071`, `CB-082`, `CB-091` |
 | [CB-101 — Evaluation sandbox lifecycle and fail-closed enforcement](docs/slices/CB-101.md) | P0 | `PLANNED` | `CB-100` |
-| `CB-102 — Evaluation state, audit, version, evidence, and async liveness guards` | P0 | `PLANNED` | `CB-101` |
+| [CB-102 — Commerce evaluation state, audit, and version APIs](docs/slices/CB-102.md) | P0 | `PLANNED` | `CB-101` |
+| `CB-103 — Agent evaluation evidence API` | P0 | `PLANNED` | `CB-102` |
+| `CB-104 — Asynchronous sandbox liveness guards` | P0 | `PLANNED` | `CB-103` |
+| `CB-105 — Sandbox-bound idempotent mock-payment callbacks` | P0 | `PLANNED` | `CB-104` |
 | `CB-110 — FAQ publication truth and transactional Outbox` | P1 | `PLANNED` | `CB-030`, `CB-085`, `CB-091` |
 | `CB-111 — Incremental knowledge sync and versioned two-level cache` | P1 | `PLANNED` | `CB-110` |
 | `CB-112 — Knowledge rebuild validation and atomic alias switch` | P1 | `PLANNED` | `CB-111` |
@@ -106,7 +110,7 @@ The linked slice name is the canonical detailed specification. Target outcomes a
 | `CB-131 — Authoritative handoff tickets and agent projection` | P1 | `PLANNED` | `CB-130` |
 | `CB-132 — Reviewed failure-candidate capture and authenticated export` | P1 | `PLANNED` | `CB-131` |
 | `CB-140 — Minimal web demonstration` | P1 | `PLANNED` | `CB-020`, `CB-030`, `CB-061`, `CB-082`, `CB-091`, `CB-121` |
-| `CB-150 — Metrics and optional no-op trace sink` | P1 | `PLANNED` | `CB-102`, `CB-132`, `CB-140` |
+| `CB-150 — Metrics and optional no-op trace sink` | P1 | `PLANNED` | `CB-105`, `CB-132`, `CB-140` |
 | `CB-151 — Scripted reset/demo and repeatable fault drills` | P1 | `PLANNED` | `CB-150` |
 | `CB-152 — Load, latency, and quality evidence` | P1 | `PLANNED` | `CB-151` |
 | `CB-900 — Multimodal intake and object storage outline` | P2 | `DEFERRED` | Explicit promotion only |
