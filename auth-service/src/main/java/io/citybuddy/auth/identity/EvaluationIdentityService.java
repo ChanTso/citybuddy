@@ -12,6 +12,7 @@ import org.springframework.transaction.annotation.Transactional;
 
 public class EvaluationIdentityService {
   private static final Pattern BOUNDED_ID = Pattern.compile("^[A-Za-z0-9][A-Za-z0-9._:-]*$");
+  private static final Pattern OPAQUE_HANDLE = Pattern.compile("^[A-Za-z0-9_-]{43}$");
   private static final List<String> TEST_PERMISSIONS =
       List.of("support:session:create", "support:chat");
 
@@ -87,7 +88,7 @@ public class EvaluationIdentityService {
   @Transactional
   public RevokedPrincipal revoke(
       String handle, String sandboxId, String caseCorrelation, String idempotencyKey) {
-    requireBounded(handle, 64, "Invalid evaluation handle");
+    requireOpaqueHandle(handle);
     requireBounded(sandboxId, 64, "Invalid sandbox");
     requireBounded(caseCorrelation, 128, "Invalid case correlation");
     requireBounded(idempotencyKey, 128, "Invalid idempotency key");
@@ -120,7 +121,7 @@ public class EvaluationIdentityService {
 
   @Transactional(readOnly = true)
   public AuthController.TokenResponse issueToken(String handle, String sandboxId) {
-    requireBounded(handle, 64, "Invalid evaluation handle");
+    requireOpaqueHandle(handle);
     requireBounded(sandboxId, 64, "Invalid sandbox");
     Instant now = clock.instant();
     EvaluationPrincipal principal =
@@ -182,6 +183,12 @@ public class EvaluationIdentityService {
         || value.length() > maximum
         || !BOUNDED_ID.matcher(value).matches()) {
       throw new IdentityException(400, message);
+    }
+  }
+
+  private static void requireOpaqueHandle(String handle) {
+    if (handle == null || !OPAQUE_HANDLE.matcher(handle).matches()) {
+      throw new IdentityException(400, "Invalid evaluation handle");
     }
   }
 

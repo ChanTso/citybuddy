@@ -31,6 +31,10 @@ import org.junit.jupiter.api.io.TempDir;
 
 class EvaluationIdentityTest {
   private static final Instant NOW = Instant.parse("2026-07-18T06:00:00Z");
+  private static final String HANDLE = "A".repeat(43);
+  private static final String DASH_HANDLE = "-" + "B".repeat(42);
+  private static final String UNDERSCORE_HANDLE = "_" + "C".repeat(42);
+  private static final String OTHER_HANDLE = "D".repeat(43);
 
   @TempDir Path tempDirectory;
 
@@ -115,11 +119,10 @@ class EvaluationIdentityTest {
 
   @Test
   void tokenAndOboAreSignedSandboxBoundRedactedAndCappedByProvisioningExpiry() throws Exception {
-    EvaluationPrincipal principal =
-        principal("opaque-handle", "provision-key", "PROVISIONED", null, null);
-    when(repository.findEvaluationByHandle("opaque-handle")).thenReturn(Optional.of(principal));
+    EvaluationPrincipal principal = principal(HANDLE, "provision-key", "PROVISIONED", null, null);
+    when(repository.findEvaluationByHandle(HANDLE)).thenReturn(Optional.of(principal));
 
-    AuthController.TokenResponse response = service.issueToken("opaque-handle", "sandbox-1");
+    AuthController.TokenResponse response = service.issueToken(HANDLE, "sandbox-1");
     SignedJWT direct = SignedJWT.parse(response.accessToken());
 
     assertThat(direct.getJWTClaimsSet().getClaim("token_type"))
@@ -165,42 +168,57 @@ class EvaluationIdentityTest {
 
   @Test
   void revokeIsBindingPrivateIdempotentAndPreventsIssuance() {
-    EvaluationPrincipal provisioned =
-        principal("opaque-handle", "provision-key", "PROVISIONED", null, null);
-    EvaluationPrincipal revoked =
-        principal("opaque-handle", "provision-key", "REVOKED", "revoke-1", NOW);
-    when(repository.findEvaluationByHandleForUpdate("opaque-handle"))
+    EvaluationPrincipal provisioned = principal(HANDLE, "provision-key", "PROVISIONED", null, null);
+    EvaluationPrincipal revoked = principal(HANDLE, "provision-key", "REVOKED", "revoke-1", NOW);
+    when(repository.findEvaluationByHandleForUpdate(HANDLE))
         .thenReturn(Optional.of(provisioned), Optional.of(revoked));
-    when(repository.findEvaluationByHandle("opaque-handle")).thenReturn(Optional.of(revoked));
-    when(repository.revokeEvaluationPrincipal(
-            "opaque-handle", "sandbox-1", "case-1", "revoke-1", NOW))
+    when(repository.findEvaluationByHandle(HANDLE)).thenReturn(Optional.of(revoked));
+    when(repository.revokeEvaluationPrincipal(HANDLE, "sandbox-1", "case-1", "revoke-1", NOW))
         .thenReturn(1);
 
-    assertThat(service.revoke("opaque-handle", "sandbox-1", "case-1", "revoke-1").state())
+    assertThat(service.revoke(HANDLE, "sandbox-1", "case-1", "revoke-1").state())
         .isEqualTo("REVOKED");
-    assertThat(service.revoke("opaque-handle", "sandbox-1", "case-1", "revoke-1").state())
+    assertThat(service.revoke(HANDLE, "sandbox-1", "case-1", "revoke-1").state())
         .isEqualTo("REVOKED");
-    assertThatThrownBy(() -> service.issueToken("opaque-handle", "sandbox-1"))
+    assertThatThrownBy(() -> service.issueToken(HANDLE, "sandbox-1"))
         .isInstanceOf(IdentityException.class)
         .hasMessage("Invalid evaluation handle");
 
-    when(repository.findEvaluationByHandleForUpdate("other-handle"))
+    when(repository.findEvaluationByHandleForUpdate(OTHER_HANDLE))
         .thenReturn(Optional.of(provisioned));
-    assertThatThrownBy(() -> service.revoke("other-handle", "sandbox-2", "case-1", "revoke-2"))
+    assertThatThrownBy(() -> service.revoke(OTHER_HANDLE, "sandbox-2", "case-1", "revoke-2"))
         .isInstanceOf(IdentityException.class)
         .hasMessage("Evaluation principal not found");
     verify(repository, never())
-        .revokeEvaluationPrincipal("other-handle", "sandbox-2", "case-1", "revoke-2", NOW);
+        .revokeEvaluationPrincipal(OTHER_HANDLE, "sandbox-2", "case-1", "revoke-2", NOW);
+  }
+
+  @Test
+  void base64UrlLeadingCharactersRemainValidForHandleLifecycle() {
+    EvaluationPrincipal dashPrincipal =
+        principal(DASH_HANDLE, "dash-provision", "PROVISIONED", null, null);
+    EvaluationPrincipal underscorePrincipal =
+        principal(UNDERSCORE_HANDLE, "underscore-provision", "PROVISIONED", null, null);
+    when(repository.findEvaluationByHandle(DASH_HANDLE)).thenReturn(Optional.of(dashPrincipal));
+    when(repository.findEvaluationByHandleForUpdate(UNDERSCORE_HANDLE))
+        .thenReturn(Optional.of(underscorePrincipal));
+    when(repository.revokeEvaluationPrincipal(
+            UNDERSCORE_HANDLE, "sandbox-1", "case-1", "underscore-revoke", NOW))
+        .thenReturn(1);
+
+    assertThat(service.issueToken(DASH_HANDLE, "sandbox-1").accessToken()).isNotBlank();
+    assertThat(
+            service.revoke(UNDERSCORE_HANDLE, "sandbox-1", "case-1", "underscore-revoke").state())
+        .isEqualTo("REVOKED");
   }
 
   @Test
   void tokenIssuanceRequiresCurrentSigningMetadata() {
-    EvaluationPrincipal principal =
-        principal("opaque-handle", "provision-key", "PROVISIONED", null, null);
-    when(repository.findEvaluationByHandle("opaque-handle")).thenReturn(Optional.of(principal));
+    EvaluationPrincipal principal = principal(HANDLE, "provision-key", "PROVISIONED", null, null);
+    when(repository.findEvaluationByHandle(HANDLE)).thenReturn(Optional.of(principal));
     when(repository.publicKeyMetadata()).thenReturn(List.of());
 
-    assertThatThrownBy(() -> service.issueToken("opaque-handle", "sandbox-1"))
+    assertThatThrownBy(() -> service.issueToken(HANDLE, "sandbox-1"))
         .isInstanceOf(IllegalStateException.class)
         .hasMessage("Current signing key is not published");
   }

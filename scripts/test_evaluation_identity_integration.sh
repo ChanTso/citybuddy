@@ -265,6 +265,42 @@ assert_status 409 "sandbox and case cannot bind a second handle" \
   --header 'Idempotency-Key: provision-2' \
   --header 'Content-Type: application/json' \
   --data "$provision_request"
+
+leading_dash_handle="-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+leading_underscore_handle="_BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB"
+test "${#leading_dash_handle}" = 43
+test "${#leading_underscore_handle}" = 43
+assert_status 200 "leading dash handle fixture provision" \
+  --request POST "http://127.0.0.1:$auth_port/internal/eval/test-principals/provision" \
+  --user "commerce-service:$commerce_service_password" \
+  --header 'Idempotency-Key: provision-leading-dash' \
+  --header 'Content-Type: application/json' \
+  --data '{"sandboxId":"sandbox-leading-dash","caseCorrelation":"case-leading-dash","testUserLabel":"user-leading-dash","ttlSeconds":300}'
+mysql_query auth_app "$auth_app_password" commerce_db \
+  "UPDATE auth_eval_test_principal SET opaque_handle = '$leading_dash_handle' WHERE provision_idempotency_key = 'provision-leading-dash'"
+assert_status 200 "leading underscore handle fixture provision" \
+  --request POST "http://127.0.0.1:$auth_port/internal/eval/test-principals/provision" \
+  --user "commerce-service:$commerce_service_password" \
+  --header 'Idempotency-Key: provision-leading-underscore' \
+  --header 'Content-Type: application/json' \
+  --data '{"sandboxId":"sandbox-leading-underscore","caseCorrelation":"case-leading-underscore","testUserLabel":"user-leading-underscore","ttlSeconds":300}'
+mysql_query auth_app "$auth_app_password" commerce_db \
+  "UPDATE auth_eval_test_principal SET opaque_handle = '$leading_underscore_handle' WHERE provision_idempotency_key = 'provision-leading-underscore'"
+test "$(mysql_query auth_app "$auth_app_password" commerce_db "SELECT COUNT(*) FROM auth_eval_test_principal WHERE opaque_handle IN ('$leading_dash_handle', '$leading_underscore_handle') AND state = 'PROVISIONED' AND expires_at > CURRENT_TIMESTAMP(6)")" = 2
+assert_status 200 "leading dash Base64URL handle token issuance" \
+  --request POST "http://127.0.0.1:$auth_port/auth/eval/test-token" \
+  --user "evaluation-client:$evaluator_password" \
+  --header 'X-Eval-Sandbox-Id: sandbox-leading-dash' \
+  --header 'Content-Type: application/json' \
+  --data "{\"handle\":\"$leading_dash_handle\"}"
+assert_status 200 "leading underscore Base64URL handle revocation" \
+  --request POST "http://127.0.0.1:$auth_port/internal/eval/test-principals/$leading_underscore_handle/revoke" \
+  --user "commerce-service:$commerce_service_password" \
+  --header 'Idempotency-Key: revoke-leading-underscore' \
+  --header 'Content-Type: application/json' \
+  --data '{"sandboxId":"sandbox-leading-underscore","caseCorrelation":"case-leading-underscore"}'
+test "$(mysql_query auth_app "$auth_app_password" commerce_db "SELECT COUNT(*) FROM auth_eval_test_principal WHERE opaque_handle = '$leading_underscore_handle' AND state = 'REVOKED' AND revoke_idempotency_key = 'revoke-leading-underscore'")" = 1
+
 assert_status 400 "unbounded evaluation TTL" \
   --request POST "http://127.0.0.1:$auth_port/internal/eval/test-principals/provision" \
   --user "commerce-service:$commerce_service_password" \
