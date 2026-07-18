@@ -507,14 +507,16 @@ def create_app(
         if authorization is None or not authorization.startswith("Basic "):
             raise HTTPException(status_code=401, detail="Unauthorized")
         try:
-            decoded = b64decode(authorization[6:], validate=True).decode("utf-8")
-        except (Base64Error, UnicodeDecodeError):
+            decoded = b64decode(authorization[6:], validate=True)
+        except Base64Error:
             raise HTTPException(status_code=401, detail="Unauthorized") from None
-        client_id, separator, client_secret = decoded.partition(":")
+        client_id, separator, client_secret = decoded.partition(b":")
         if (
-            separator != ":"
-            or not secrets.compare_digest(client_id, resolved.evaluation_client_id)
-            or not secrets.compare_digest(client_secret, resolved.evaluation_client_secret)
+            separator != b":"
+            or not secrets.compare_digest(client_id, resolved.evaluation_client_id.encode("utf-8"))
+            or not secrets.compare_digest(
+                client_secret, resolved.evaluation_client_secret.encode("utf-8")
+            )
         ):
             raise HTTPException(status_code=401, detail="Unauthorized")
 

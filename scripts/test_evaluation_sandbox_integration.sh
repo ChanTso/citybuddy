@@ -605,6 +605,16 @@ assert_status 401 "agent evidence rejects substituted management credential" \
   --request GET "http://127.0.0.1:$agent_port/api/eval/evidence/$trace_id" \
   --user "evaluation-manager:$invalid_management_password" \
   --header 'X-Eval-Sandbox-Id: sandbox-main'
+non_ascii_client_basic="$(printf '\303\251valuation-manager:x' | openssl base64 -A)"
+assert_status 401 "agent evidence rejects non-ASCII management client id" \
+  --request GET "http://127.0.0.1:$agent_port/api/eval/evidence/$trace_id" \
+  --header "Authorization: Basic $non_ascii_client_basic" \
+  --header 'X-Eval-Sandbox-Id: sandbox-main'
+non_ascii_secret_basic="$(printf 'evaluation-manager:x\303\251' | openssl base64 -A)"
+assert_status 401 "agent evidence rejects non-ASCII management secret" \
+  --request GET "http://127.0.0.1:$agent_port/api/eval/evidence/$trace_id" \
+  --header "Authorization: Basic $non_ascii_secret_basic" \
+  --header 'X-Eval-Sandbox-Id: sandbox-main'
 assert_status 422 "agent evidence rejects caller-selected fields" \
   --request GET "http://127.0.0.1:$agent_port/api/eval/evidence/$trace_id?fields=all" \
   --user "evaluation-manager:$management_password" \

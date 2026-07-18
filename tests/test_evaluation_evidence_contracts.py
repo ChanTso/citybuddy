@@ -148,6 +148,9 @@ def test_evaluation_store_uses_only_exact_agent_truth_and_persisted_sequence() -
     assert "if resolved.evaluation_enabled:" in application
     assert '"/api/eval/evidence/{trace_id}"' in application
     assert "secrets.compare_digest" in application
+    assert 'decoded.partition(b":")' in application
+    assert 'resolved.evaluation_client_id.encode("utf-8")' in application
+    assert 'resolved.evaluation_client_secret.encode("utf-8")' in application
     assert "request.query_params" in application
     assert "resolved_evidence.load(str(trace_id), x_eval_sandbox_id)" in application
     for table in (

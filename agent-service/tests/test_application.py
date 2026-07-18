@@ -324,10 +324,12 @@ def evaluation_settings() -> AgentSettings:
     )
 
 
-def evaluation_basic(secret: str = "evaluation-runtime-secret") -> str:
+def evaluation_basic(
+    secret: str = "evaluation-runtime-secret", client_id: str = "evaluation-manager"
+) -> str:
     import base64
 
-    encoded = base64.b64encode(f"evaluation-manager:{secret}".encode()).decode()
+    encoded = base64.b64encode(f"{client_id}:{secret}".encode()).decode()
     return f"Basic {encoded}"
 
 
@@ -381,6 +383,20 @@ def test_evaluation_evidence_route_is_profile_bound_and_independently_authentica
         ).status_code
         == 401
     )
+    for non_ascii_credential in (
+        evaluation_basic("wrong-secret", client_id="évaluation-manager"),
+        evaluation_basic("wrong-sécret"),
+    ):
+        assert (
+            client.get(
+                url,
+                headers={
+                    "Authorization": non_ascii_credential,
+                    "X-Eval-Sandbox-Id": "sandbox-1",
+                },
+            ).status_code
+            == 401
+        )
     assert (
         client.get(
             url,
