@@ -5,6 +5,7 @@ import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.boot.context.properties.EnableConfigurationProperties;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
+import org.springframework.context.annotation.Profile;
 import org.springframework.jdbc.core.simple.JdbcClient;
 import org.springframework.security.crypto.bcrypt.BCryptPasswordEncoder;
 import org.springframework.security.crypto.password.PasswordEncoder;
@@ -32,5 +33,15 @@ public class IdentityConfiguration {
   @Bean
   AuthKeySet authKeySet(IdentityProperties properties, Clock identityClock) {
     return new AuthKeySet(properties, identityClock);
+  }
+
+  @Bean
+  @Profile("evaluation")
+  EvaluationIdentityService evaluationIdentityService(
+      AuthRepository repository,
+      AuthKeySet keys,
+      IdentityProperties properties,
+      Clock identityClock) {
+    return new EvaluationIdentityService(repository, keys, properties, identityClock);
   }
 }

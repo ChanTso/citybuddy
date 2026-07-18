@@ -1,8 +1,8 @@
 # CityBuddy implementation index
 
-**Document version:** v0.21\
+**Document version:** v0.22\
 **Verification date:** 2026-07-18\
-**Repository phase:** Evaluation identity provisioning and sandbox-bound token lifecycle ready
+**Repository phase:** Evaluation sandbox lifecycle and fail-closed enforcement ready
 
 ## How to use this index
 
@@ -17,7 +17,7 @@
 
 CityBuddy targets local-commerce transactions and text-only AI customer support with independent identity, side-effect, retrieval, and evaluation boundaries.
 
-The repository contains the verified local-runtime foundations, identity vertical slice, product catalog vertical slice, standard-ordering vertical slice, seckill reservation, durable-order, cancellation, mock-payment, refund, and reconciliation mainline, support conversation lifecycle, bounded agent/tool control, filtered SSE, append-only feedback, versioned hybrid public-knowledge retrieval, and calibrated durable retrieval evidence:
+The repository contains the verified local-runtime foundations, identity vertical slice, product catalog vertical slice, standard-ordering vertical slice, seckill reservation, durable-order, cancellation, mock-payment, refund, and reconciliation mainline, support conversation lifecycle, bounded agent/tool control, filtered SSE, append-only feedback, versioned hybrid public-knowledge retrieval, calibrated durable retrieval evidence, and evaluation identity lifecycle:
 
 - executable non-business skeletons for `auth-service`, `commerce-service`, `agent-service`, `knowledge-indexer`, and `web`;
 - one Maven reactor and wrapper, one locked `uv` workspace, and one npm lockfile;
@@ -29,6 +29,7 @@ The repository contains the verified local-runtime foundations, identity vertica
 - one digest-pinned RocketMQ 5.5.0 NameServer and combined Broker/Proxy runtime with behavior-gated readiness, a Java 5.x gRPC client route probe, and a disposable uniquely identified normal-message round trip;
 - one ordered local and CI integration entry point proving clean aggregate startup, seven health gates, three migration histories, repeat-start idempotence, credential preservation, non-destructive shutdown, component probes, and controlled failures;
 - RS256 direct-user login and JWKS publication, server-owned support sessions, independently authenticated exact-scope JIT OBO exchange, and fail-closed commerce authorization with bounded key refresh and overlap handling;
+- evaluation-profile-only, service-authenticated test-principal provisioning and revocation with opaque TTL-bound handles, independent test-token issuance, auth-owned durable lifecycle truth, and unchanged sandbox propagation into exact-scope OBO tokens;
 - direct-user durable support chat over server-owned sessions, with owner isolation, deterministic idempotent replay, atomic conversation/turn truth, and ordered append-only event evidence in `cs_db`;
 - one bounded ReAct agent with deterministic routing signals, server-owned business-tier selection, one shared attempt budget, provider-isolated finite circuit breakers, role-alias-only fake-provider routing, executable fixed ToolSpec mediation, just-in-time exact-scope OBO, and ordered durable routing/model/budget/circuit/tool/terminal evidence;
 - filtered owner-scoped SSE over the same durable turn truth, with fixed public event schemas, bounded safety buffering, single-terminal ordering, disconnect-safe replay, and owner-scoped append-only feedback in `cs_db`;
@@ -95,10 +96,10 @@ The linked slice name is the canonical detailed specification. Target outcomes a
 | [CB-082 — Filtered SSE, feedback, and deterministic support end-to-end evidence](docs/slices/CB-082.md) | P0 | `VERIFIED` | `CB-081` |
 | [CB-090 — Versioned hybrid knowledge index and deterministic retrieval fusion](docs/slices/CB-090.md) | P0 | `VERIFIED` | `CB-014`, `CB-082` |
 | [CB-091 — Rerank, sufficiency calibration, and retrieval evidence](docs/slices/CB-091.md) | P0 | `VERIFIED` | `CB-090` |
-| [CB-100 — Evaluation identity provisioning and sandbox-bound token lifecycle](docs/slices/CB-100.md) | P0 | `READY` | `CB-020`, `CB-040`, `CB-061`, `CB-071`, `CB-082`, `CB-091` |
-| [CB-101 — Evaluation sandbox lifecycle and fail-closed enforcement](docs/slices/CB-101.md) | P0 | `PLANNED` | `CB-100` |
+| [CB-100 — Evaluation identity provisioning and sandbox-bound token lifecycle](docs/slices/CB-100.md) | P0 | `VERIFIED` | `CB-020`, `CB-040`, `CB-061`, `CB-071`, `CB-082`, `CB-091` |
+| [CB-101 — Evaluation sandbox lifecycle and fail-closed enforcement](docs/slices/CB-101.md) | P0 | `READY` | `CB-100` |
 | [CB-102 — Commerce evaluation state, audit, and version APIs](docs/slices/CB-102.md) | P0 | `PLANNED` | `CB-101` |
-| `CB-103 — Agent evaluation evidence API` | P0 | `PLANNED` | `CB-102` |
+| [CB-103 — Agent evaluation evidence API](docs/slices/CB-103.md) | P0 | `PLANNED` | `CB-102` |
 | `CB-104 — Asynchronous sandbox liveness guards` | P0 | `PLANNED` | `CB-103` |
 | `CB-105 — Sandbox-bound idempotent mock-payment callbacks` | P0 | `PLANNED` | `CB-104` |
 | `CB-110 — FAQ publication truth and transactional Outbox` | P1 | `PLANNED` | `CB-030`, `CB-085`, `CB-091` |

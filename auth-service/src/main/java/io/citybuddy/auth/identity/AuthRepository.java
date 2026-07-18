@@ -63,6 +63,114 @@ public final class AuthRepository {
         == 1;
   }
 
+  public Optional<EvaluationPrincipal> findEvaluationByProvisionKey(String idempotencyKey) {
+    return evaluationQuery("provision_idempotency_key = :value", idempotencyKey);
+  }
+
+  public Optional<EvaluationPrincipal> findEvaluationByProvisionKeyForShare(String idempotencyKey) {
+    return evaluationQueryForShare("provision_idempotency_key = :value", idempotencyKey);
+  }
+
+  public Optional<EvaluationPrincipal> findEvaluationBySandboxCase(
+      String sandboxId, String caseCorrelation) {
+    return jdbc.sql(
+            evaluationSelect()
+                + " WHERE sandbox_id = :sandboxId AND case_correlation = :caseCorrelation")
+        .param("sandboxId", sandboxId)
+        .param("caseCorrelation", caseCorrelation)
+        .query(EvaluationPrincipal.class)
+        .optional();
+  }
+
+  public Optional<EvaluationPrincipal> findEvaluationBySandboxCaseForShare(
+      String sandboxId, String caseCorrelation) {
+    return jdbc.sql(
+            evaluationSelect()
+                + " WHERE sandbox_id = :sandboxId AND case_correlation = :caseCorrelation"
+                + " FOR SHARE")
+        .param("sandboxId", sandboxId)
+        .param("caseCorrelation", caseCorrelation)
+        .query(EvaluationPrincipal.class)
+        .optional();
+  }
+
+  public Optional<EvaluationPrincipal> findEvaluationByHandle(String handle) {
+    return evaluationQuery("opaque_handle = :value", handle);
+  }
+
+  public Optional<EvaluationPrincipal> findEvaluationByHandleForUpdate(String handle) {
+    return evaluationQueryForUpdate("opaque_handle = :value", handle);
+  }
+
+  public int insertEvaluationPrincipal(EvaluationPrincipal principal) {
+    return jdbc.sql(
+            """
+            INSERT IGNORE INTO auth_eval_test_principal (
+              provisioning_id, opaque_handle, subject, sandbox_id, case_correlation,
+              test_user_label, permissions, provision_idempotency_key, ttl_seconds,
+              state, expires_at
+            ) VALUES (
+              :provisioningId, :opaqueHandle, :subject, :sandboxId, :caseCorrelation,
+              :testUserLabel, :permissions, :provisionIdempotencyKey, :ttlSeconds,
+              'PROVISIONED', :expiresAt
+            )
+            """)
+        .param("provisioningId", principal.provisioningId())
+        .param("opaqueHandle", principal.opaqueHandle())
+        .param("subject", principal.subject())
+        .param("sandboxId", principal.sandboxId())
+        .param("caseCorrelation", principal.caseCorrelation())
+        .param("testUserLabel", principal.testUserLabel())
+        .param("permissions", principal.permissions())
+        .param("provisionIdempotencyKey", principal.provisionIdempotencyKey())
+        .param("ttlSeconds", principal.ttlSeconds())
+        .param("expiresAt", principal.expiresAt())
+        .update();
+  }
+
+  public int revokeEvaluationPrincipal(
+      String handle,
+      String sandboxId,
+      String caseCorrelation,
+      String revokeIdempotencyKey,
+      Instant revokedAt) {
+    return jdbc.sql(
+            """
+            UPDATE auth_eval_test_principal
+               SET state = 'REVOKED',
+                   revoke_idempotency_key = :revokeIdempotencyKey,
+                   revoked_at = :revokedAt
+             WHERE opaque_handle = :handle
+               AND sandbox_id = :sandboxId
+               AND case_correlation = :caseCorrelation
+               AND state = 'PROVISIONED'
+            """)
+        .param("revokeIdempotencyKey", revokeIdempotencyKey)
+        .param("revokedAt", revokedAt)
+        .param("handle", handle)
+        .param("sandboxId", sandboxId)
+        .param("caseCorrelation", caseCorrelation)
+        .update();
+  }
+
+  public boolean isActiveEvaluationSubject(String subject, String sandboxId, Instant now) {
+    return jdbc.sql(
+                """
+                SELECT COUNT(*)
+                  FROM auth_eval_test_principal
+                 WHERE subject = :subject
+                   AND sandbox_id = :sandboxId
+                   AND state = 'PROVISIONED'
+                   AND expires_at > :now
+                """)
+            .param("subject", subject)
+            .param("sandboxId", sandboxId)
+            .param("now", now)
+            .query(Integer.class)
+            .single()
+        == 1;
+  }
+
   public List<KeyMetadata> publicKeyMetadata() {
     return jdbc.sql(
             """
@@ -91,6 +199,36 @@ public final class AuthRepository {
         .toList();
   }
 
+  private Optional<EvaluationPrincipal> evaluationQuery(String predicate, String value) {
+    return jdbc.sql(evaluationSelect() + " WHERE " + predicate)
+        .param("value", value)
+        .query(EvaluationPrincipal.class)
+        .optional();
+  }
+
+  private Optional<EvaluationPrincipal> evaluationQueryForUpdate(String predicate, String value) {
+    return jdbc.sql(evaluationSelect() + " WHERE " + predicate + " FOR UPDATE")
+        .param("value", value)
+        .query(EvaluationPrincipal.class)
+        .optional();
+  }
+
+  private Optional<EvaluationPrincipal> evaluationQueryForShare(String predicate, String value) {
+    return jdbc.sql(evaluationSelect() + " WHERE " + predicate + " FOR SHARE")
+        .param("value", value)
+        .query(EvaluationPrincipal.class)
+        .optional();
+  }
+
+  private static String evaluationSelect() {
+    return """
+        SELECT provisioning_id, opaque_handle, subject, sandbox_id, case_correlation,
+               test_user_label, permissions, provision_idempotency_key, ttl_seconds,
+               state, expires_at, revoke_idempotency_key, revoked_at
+          FROM auth_eval_test_principal
+        """;
+  }
+
   public record UserCredential(
       String subject, String state, List<String> permissions, String passwordHash) {}
 
@@ -98,4 +236,23 @@ public final class AuthRepository {
       String clientId, String state, List<String> allowedScopes, String credentialHash) {}
 
   public record KeyMetadata(String kid, String state, Instant activatedAt, Instant retireAfter) {}
+
+  public record EvaluationPrincipal(
+      String provisioningId,
+      String opaqueHandle,
+      String subject,
+      String sandboxId,
+      String caseCorrelation,
+      String testUserLabel,
+      String permissions,
+      String provisionIdempotencyKey,
+      int ttlSeconds,
+      String state,
+      Instant expiresAt,
+      String revokeIdempotencyKey,
+      Instant revokedAt) {
+    public List<String> permissionList() {
+      return split(permissions);
+    }
+  }
 }

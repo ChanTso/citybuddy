@@ -16,9 +16,12 @@ def test_auth_contract_has_only_owned_identity_routes_and_closed_request_shapes(
     contract = load("auth-service/src/main/resources/openapi.json")
 
     assert set(contract["paths"]) == {
+        "/auth/eval/test-token",
         "/auth/login",
         "/auth/jwks",
         "/auth/token/exchange",
+        "/internal/eval/test-principals/provision",
+        "/internal/eval/test-principals/{handle}/revoke",
     }
     assert contract["components"]["schemas"]["LoginRequest"]["additionalProperties"] is False
     exchange = contract["components"]["schemas"]["ExchangeRequest"]
