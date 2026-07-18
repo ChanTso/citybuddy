@@ -185,3 +185,11 @@ This file records only factual pitfalls supported by merged pull-request, commit
 - 根因：grant 状态机的精确表组合没有随新迁移一起扩展；直接构造对象的测试不能覆盖 Spring 运行时代理约束。故障注入混淆了“持有可委派 role”与“当前会话已激活权限”，类型测试又把运行时已验证的 JSON 结构留在过宽的静态类型中。
 - 解决：把 V011 表加入 migration-state 检测，并只增加审计引用表的精确运行时 `SELECT, INSERT`；移除事务服务的 `final`，保留真实 profile 启动证据。故障注入改用集成环境既有 MySQL root 管理通道，临时撤销并恢复 `commerce_app` 对审计引用表的精确 `INSERT` 权限，实际失败请求仍由最小权限业务身份执行；合同测试先运行时验证对象形状，再收窄类型。effect 统一为公开时间优先的完整总序 `created_at, effect_type, correlation_key`，OpenAPI 明示同一顺序，静态合同锁定 SQL；真实 MySQL 插入两条完全相同 `created_at`、只由 correlation key 区分的平局记录，验证尾键顺序并重复调用比较完整响应。专属真实集成、`make python-ci` 和完整 `make ci` 均重新通过；并发 Docker 事件流没有 `oom`，所有 137 都有明确测试 teardown `kill` 前因。
 - 结论：新增表不仅要写迁移和静态 grant 文本，还必须进入全部受支持 schema 组合的精确升级状态机；事务代理能力必须由真实框架启动证明。受控故障注入可使用管理身份布置故障，但业务路径仍必须用运行时身份执行，且不能假装未激活的 role 已生效。动态 JSON 的运行时验证和静态类型收窄必须成对出现。排序稳定性测试必须包含真正的平局数据，且实现 SQL、可执行断言和公开 schema 必须表达同一个完整总序；否则只靠可区分时间戳的测试无法行使尾键，也会把契约漂移伪装成数据库抖动。
+
+## CB-103 — Agent evaluation evidence API
+
+- 现象：首次真实集成尝试通过现有评测沙箱 session 写入 feedback fixture，生产边界按既有规则正确返回 403；这说明证据脚本为了制造可读数据，意外要求了本切片明确禁止新增的评测 feedback 写行为。随后自查又发现，`support_event` 与 `retrieval_decision` 各自格式合法时仍可能对同一 trace 的 outcome 或 index version 给出不同说法，初稿会把矛盾事实一起投影为成功响应。
+- 证据链接：[slice PR #39](https://github.com/ChanTso/citybuddy/pull/39)、[implementation commit `088e9d2`](https://github.com/ChanTso/citybuddy/commit/088e9d2)
+- 根因：只读投影的集成 fixture 混淆了“读取既有权威事实”与“扩张生产写入入口以便造数”；另一方面，逐表验证结构和关联只能证明每一行单独有效，不能证明多个权威记录之间重叠的公开事实一致。
+- 解决：保留既有 chat/feedback 行为不变，由真实 MySQL 管理 fixture 写入一条已存在 feedback truth，再证明 API 仅投影 rating/time 且隐藏 comment。证据读取同时把 retrieval event 的 outcome/index version 与同 trace 的 `retrieval_decision` 逐项交叉校验，任何不一致返回固定 409；真实 MySQL 篡改后拒绝、恢复后成功以及重启稳定性均成为固定证据。专属集成重复通过，随后完整本地 `make ci` 通过。
+- 结论：只读评测切片不能为了制造证据而扩张业务写行为；fixture 应从拥有真值的持久边界布置。跨表证据视图不仅要验证标识关联和单行 schema，还必须校验所有重叠事实，否则“每张表都合法”仍可能组成自相矛盾的假绿响应。
