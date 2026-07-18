@@ -69,6 +69,27 @@ assert_status() {
   echo "Verified HTTP $expected: $label"
 }
 
+launch_request() {
+  local output="$1"
+  local status_output="$2"
+  shift 2
+  request_status "$output" "$@" >"$status_output" &
+  launched_pid=$!
+}
+
+require_status_pair() {
+  local label="$1"
+  local expected_first="$2"
+  local expected_second="$3"
+  local actual_first="$4"
+  local actual_second="$5"
+  if ! { [[ "$actual_first" == "$expected_first" && "$actual_second" == "$expected_second" ]] ||
+    [[ "$actual_first" == "$expected_second" && "$actual_second" == "$expected_first" ]]; }; then
+    echo "Unexpected concurrent HTTP statuses for $label: $actual_first $actual_second" >&2
+    exit 1
+  fi
+}
+
 wait_http() {
   for _ in {1..60}; do
     if curl --silent --fail "http://127.0.0.1:$auth_port/auth/jwks" >/dev/null 2>&1; then
@@ -256,6 +277,159 @@ assert_status 400 "malformed test-principal attribute" \
   --header 'Idempotency-Key: invalid-attribute' \
   --header 'Content-Type: application/json' \
   --data '{"sandboxId":"sandbox-2","caseCorrelation":"case-2","testUserLabel":"contains space","ttlSeconds":300}'
+
+for round in {1..5}; do
+  concurrent_sandbox="sandbox-concurrent-same-$round"
+  concurrent_case="case-concurrent-same-$round"
+  concurrent_key="provision-concurrent-same-$round"
+  concurrent_body="{\"sandboxId\":\"$concurrent_sandbox\",\"caseCorrelation\":\"$concurrent_case\",\"testUserLabel\":\"user-concurrent-$round\",\"ttlSeconds\":300}"
+  launch_request "$tmp_dir/concurrent-provision-same-$round-a.json" "$tmp_dir/concurrent-provision-same-$round-a.status" \
+    --request POST "http://127.0.0.1:$auth_port/internal/eval/test-principals/provision" \
+    --user "commerce-service:$commerce_service_password" \
+    --header "Idempotency-Key: $concurrent_key" \
+    --header 'Content-Type: application/json' \
+    --data "$concurrent_body"
+  first_pid=$launched_pid
+  launch_request "$tmp_dir/concurrent-provision-same-$round-b.json" "$tmp_dir/concurrent-provision-same-$round-b.status" \
+    --request POST "http://127.0.0.1:$auth_port/internal/eval/test-principals/provision" \
+    --user "commerce-service:$commerce_service_password" \
+    --header "Idempotency-Key: $concurrent_key" \
+    --header 'Content-Type: application/json' \
+    --data "$concurrent_body"
+  second_pid=$launched_pid
+  launch_request "$tmp_dir/concurrent-provision-same-$round-c.json" "$tmp_dir/concurrent-provision-same-$round-c.status" \
+    --request POST "http://127.0.0.1:$auth_port/internal/eval/test-principals/provision" \
+    --user "commerce-service:$commerce_service_password" \
+    --header "Idempotency-Key: $concurrent_key" \
+    --header 'Content-Type: application/json' \
+    --data "$concurrent_body"
+  third_pid=$launched_pid
+  wait "$first_pid"
+  wait "$second_pid"
+  wait "$third_pid"
+  test "$(<"$tmp_dir/concurrent-provision-same-$round-a.status")" = 200
+  test "$(<"$tmp_dir/concurrent-provision-same-$round-b.status")" = 200
+  test "$(<"$tmp_dir/concurrent-provision-same-$round-c.status")" = 200
+  cmp "$tmp_dir/concurrent-provision-same-$round-a.json" "$tmp_dir/concurrent-provision-same-$round-b.json"
+  cmp "$tmp_dir/concurrent-provision-same-$round-a.json" "$tmp_dir/concurrent-provision-same-$round-c.json"
+  test "$(mysql_query auth_app "$auth_app_password" commerce_db "SELECT COUNT(*) FROM auth_eval_test_principal WHERE sandbox_id = '$concurrent_sandbox' AND case_correlation = '$concurrent_case'")" = 1
+done
+echo "Verified five concurrent three-request same-key provisioning bursts converge to one principal."
+
+for round in {1..5}; do
+  concurrent_sandbox="sandbox-concurrent-conflict-$round"
+  concurrent_case="case-concurrent-conflict-$round"
+  concurrent_body="{\"sandboxId\":\"$concurrent_sandbox\",\"caseCorrelation\":\"$concurrent_case\",\"testUserLabel\":\"user-conflict-$round\",\"ttlSeconds\":300}"
+  launch_request "$tmp_dir/concurrent-provision-conflict-$round-a.json" "$tmp_dir/concurrent-provision-conflict-$round-a.status" \
+    --request POST "http://127.0.0.1:$auth_port/internal/eval/test-principals/provision" \
+    --user "commerce-service:$commerce_service_password" \
+    --header "Idempotency-Key: provision-conflict-$round-a" \
+    --header 'Content-Type: application/json' \
+    --data "$concurrent_body"
+  first_pid=$launched_pid
+  launch_request "$tmp_dir/concurrent-provision-conflict-$round-b.json" "$tmp_dir/concurrent-provision-conflict-$round-b.status" \
+    --request POST "http://127.0.0.1:$auth_port/internal/eval/test-principals/provision" \
+    --user "commerce-service:$commerce_service_password" \
+    --header "Idempotency-Key: provision-conflict-$round-b" \
+    --header 'Content-Type: application/json' \
+    --data "$concurrent_body"
+  second_pid=$launched_pid
+  launch_request "$tmp_dir/concurrent-provision-conflict-$round-c.json" "$tmp_dir/concurrent-provision-conflict-$round-c.status" \
+    --request POST "http://127.0.0.1:$auth_port/internal/eval/test-principals/provision" \
+    --user "commerce-service:$commerce_service_password" \
+    --header "Idempotency-Key: provision-conflict-$round-c" \
+    --header 'Content-Type: application/json' \
+    --data "$concurrent_body"
+  third_pid=$launched_pid
+  wait "$first_pid"
+  wait "$second_pid"
+  wait "$third_pid"
+  success_count=0
+  conflict_count=0
+  for status_file in \
+    "$tmp_dir/concurrent-provision-conflict-$round-a.status" \
+    "$tmp_dir/concurrent-provision-conflict-$round-b.status" \
+    "$tmp_dir/concurrent-provision-conflict-$round-c.status"; do
+    case "$(<"$status_file")" in
+      200) success_count=$((success_count + 1)) ;;
+      409) conflict_count=$((conflict_count + 1)) ;;
+      *)
+        echo "Unexpected concurrent HTTP status for conflicting provisioning round $round." >&2
+        exit 1
+        ;;
+    esac
+  done
+  test "$success_count" = 1
+  test "$conflict_count" = 2
+  test "$(mysql_query auth_app "$auth_app_password" commerce_db "SELECT COUNT(*) FROM auth_eval_test_principal WHERE sandbox_id = '$concurrent_sandbox' AND case_correlation = '$concurrent_case'")" = 1
+done
+echo "Verified five concurrent three-request conflicting-key provisioning bursts choose one binding."
+
+for round in {1..5}; do
+  concurrent_sandbox="sandbox-revoke-same-$round"
+  concurrent_case="case-revoke-same-$round"
+  assert_status 200 "concurrent revocation fixture provision $round" \
+    --request POST "http://127.0.0.1:$auth_port/internal/eval/test-principals/provision" \
+    --user "commerce-service:$commerce_service_password" \
+    --header "Idempotency-Key: revoke-fixture-same-$round" \
+    --header 'Content-Type: application/json' \
+    --data "{\"sandboxId\":\"$concurrent_sandbox\",\"caseCorrelation\":\"$concurrent_case\",\"testUserLabel\":\"revoke-user-$round\",\"ttlSeconds\":300}"
+  concurrent_handle="$(uv run python scripts/read_json_field.py "$tmp_dir/http-response.json" handle)"
+  launch_request "$tmp_dir/concurrent-revoke-same-$round-a.json" "$tmp_dir/concurrent-revoke-same-$round-a.status" \
+    --request POST "http://127.0.0.1:$auth_port/internal/eval/test-principals/$concurrent_handle/revoke" \
+    --user "commerce-service:$commerce_service_password" \
+    --header "Idempotency-Key: revoke-concurrent-same-$round" \
+    --header 'Content-Type: application/json' \
+    --data "{\"sandboxId\":\"$concurrent_sandbox\",\"caseCorrelation\":\"$concurrent_case\"}"
+  first_pid=$launched_pid
+  launch_request "$tmp_dir/concurrent-revoke-same-$round-b.json" "$tmp_dir/concurrent-revoke-same-$round-b.status" \
+    --request POST "http://127.0.0.1:$auth_port/internal/eval/test-principals/$concurrent_handle/revoke" \
+    --user "commerce-service:$commerce_service_password" \
+    --header "Idempotency-Key: revoke-concurrent-same-$round" \
+    --header 'Content-Type: application/json' \
+    --data "{\"sandboxId\":\"$concurrent_sandbox\",\"caseCorrelation\":\"$concurrent_case\"}"
+  second_pid=$launched_pid
+  wait "$first_pid"
+  wait "$second_pid"
+  test "$(<"$tmp_dir/concurrent-revoke-same-$round-a.status")" = 200
+  test "$(<"$tmp_dir/concurrent-revoke-same-$round-b.status")" = 200
+  cmp "$tmp_dir/concurrent-revoke-same-$round-a.json" "$tmp_dir/concurrent-revoke-same-$round-b.json"
+  test "$(mysql_query auth_app "$auth_app_password" commerce_db "SELECT COUNT(*) FROM auth_eval_test_principal WHERE opaque_handle = '$concurrent_handle' AND state = 'REVOKED' AND revoke_idempotency_key = 'revoke-concurrent-same-$round'")" = 1
+done
+echo "Verified five concurrent same-key revocation pairs converge to one result."
+
+for round in {1..5}; do
+  concurrent_sandbox="sandbox-revoke-conflict-$round"
+  concurrent_case="case-revoke-conflict-$round"
+  assert_status 200 "conflicting revocation fixture provision $round" \
+    --request POST "http://127.0.0.1:$auth_port/internal/eval/test-principals/provision" \
+    --user "commerce-service:$commerce_service_password" \
+    --header "Idempotency-Key: revoke-fixture-conflict-$round" \
+    --header 'Content-Type: application/json' \
+    --data "{\"sandboxId\":\"$concurrent_sandbox\",\"caseCorrelation\":\"$concurrent_case\",\"testUserLabel\":\"revoke-conflict-user-$round\",\"ttlSeconds\":300}"
+  concurrent_handle="$(uv run python scripts/read_json_field.py "$tmp_dir/http-response.json" handle)"
+  launch_request "$tmp_dir/concurrent-revoke-conflict-$round-a.json" "$tmp_dir/concurrent-revoke-conflict-$round-a.status" \
+    --request POST "http://127.0.0.1:$auth_port/internal/eval/test-principals/$concurrent_handle/revoke" \
+    --user "commerce-service:$commerce_service_password" \
+    --header "Idempotency-Key: revoke-conflict-$round-a" \
+    --header 'Content-Type: application/json' \
+    --data "{\"sandboxId\":\"$concurrent_sandbox\",\"caseCorrelation\":\"$concurrent_case\"}"
+  first_pid=$launched_pid
+  launch_request "$tmp_dir/concurrent-revoke-conflict-$round-b.json" "$tmp_dir/concurrent-revoke-conflict-$round-b.status" \
+    --request POST "http://127.0.0.1:$auth_port/internal/eval/test-principals/$concurrent_handle/revoke" \
+    --user "commerce-service:$commerce_service_password" \
+    --header "Idempotency-Key: revoke-conflict-$round-b" \
+    --header 'Content-Type: application/json' \
+    --data "{\"sandboxId\":\"$concurrent_sandbox\",\"caseCorrelation\":\"$concurrent_case\"}"
+  second_pid=$launched_pid
+  wait "$first_pid"
+  wait "$second_pid"
+  require_status_pair "conflicting revocation round $round" 200 409 \
+    "$(<"$tmp_dir/concurrent-revoke-conflict-$round-a.status")" \
+    "$(<"$tmp_dir/concurrent-revoke-conflict-$round-b.status")"
+  test "$(mysql_query auth_app "$auth_app_password" commerce_db "SELECT COUNT(*) FROM auth_eval_test_principal WHERE opaque_handle = '$concurrent_handle' AND state = 'REVOKED' AND revoke_idempotency_key IN ('revoke-conflict-$round-a', 'revoke-conflict-$round-b')")" = 1
+done
+echo "Verified five concurrent conflicting-key revocation pairs choose one decision."
 
 assert_status 401 "unknown handle token issuance" \
   --request POST "http://127.0.0.1:$auth_port/auth/eval/test-token" \

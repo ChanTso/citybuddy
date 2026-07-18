@@ -67,6 +67,10 @@ public final class AuthRepository {
     return evaluationQuery("provision_idempotency_key = :value", idempotencyKey);
   }
 
+  public Optional<EvaluationPrincipal> findEvaluationByProvisionKeyForShare(String idempotencyKey) {
+    return evaluationQueryForShare("provision_idempotency_key = :value", idempotencyKey);
+  }
+
   public Optional<EvaluationPrincipal> findEvaluationBySandboxCase(
       String sandboxId, String caseCorrelation) {
     return jdbc.sql(
@@ -78,8 +82,24 @@ public final class AuthRepository {
         .optional();
   }
 
+  public Optional<EvaluationPrincipal> findEvaluationBySandboxCaseForShare(
+      String sandboxId, String caseCorrelation) {
+    return jdbc.sql(
+            evaluationSelect()
+                + " WHERE sandbox_id = :sandboxId AND case_correlation = :caseCorrelation"
+                + " FOR SHARE")
+        .param("sandboxId", sandboxId)
+        .param("caseCorrelation", caseCorrelation)
+        .query(EvaluationPrincipal.class)
+        .optional();
+  }
+
   public Optional<EvaluationPrincipal> findEvaluationByHandle(String handle) {
     return evaluationQuery("opaque_handle = :value", handle);
+  }
+
+  public Optional<EvaluationPrincipal> findEvaluationByHandleForUpdate(String handle) {
+    return evaluationQueryForUpdate("opaque_handle = :value", handle);
   }
 
   public int insertEvaluationPrincipal(EvaluationPrincipal principal) {
@@ -181,6 +201,20 @@ public final class AuthRepository {
 
   private Optional<EvaluationPrincipal> evaluationQuery(String predicate, String value) {
     return jdbc.sql(evaluationSelect() + " WHERE " + predicate)
+        .param("value", value)
+        .query(EvaluationPrincipal.class)
+        .optional();
+  }
+
+  private Optional<EvaluationPrincipal> evaluationQueryForUpdate(String predicate, String value) {
+    return jdbc.sql(evaluationSelect() + " WHERE " + predicate + " FOR UPDATE")
+        .param("value", value)
+        .query(EvaluationPrincipal.class)
+        .optional();
+  }
+
+  private Optional<EvaluationPrincipal> evaluationQueryForShare(String predicate, String value) {
+    return jdbc.sql(evaluationSelect() + " WHERE " + predicate + " FOR SHARE")
         .param("value", value)
         .query(EvaluationPrincipal.class)
         .optional();

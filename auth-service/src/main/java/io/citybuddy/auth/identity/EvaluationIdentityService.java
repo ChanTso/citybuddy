@@ -74,9 +74,9 @@ public class EvaluationIdentityService {
     repository.insertEvaluationPrincipal(candidate);
 
     EvaluationPrincipal persisted =
-        repository.findEvaluationByProvisionKey(idempotencyKey).orElse(null);
+        repository.findEvaluationByProvisionKeyForShare(idempotencyKey).orElse(null);
     if (persisted == null) {
-      if (repository.findEvaluationBySandboxCase(sandboxId, caseCorrelation).isPresent()) {
+      if (repository.findEvaluationBySandboxCaseForShare(sandboxId, caseCorrelation).isPresent()) {
         throw new IdentityException(409, "Conflicting evaluation provisioning");
       }
       throw new IllegalStateException("Evaluation provisioning did not persist");
@@ -93,7 +93,7 @@ public class EvaluationIdentityService {
     requireBounded(idempotencyKey, 128, "Invalid idempotency key");
     EvaluationPrincipal existing =
         repository
-            .findEvaluationByHandle(handle)
+            .findEvaluationByHandleForUpdate(handle)
             .orElseThrow(() -> new IdentityException(404, "Evaluation principal not found"));
     requireBinding(existing, sandboxId, caseCorrelation);
     if ("REVOKED".equals(existing.state())) {
@@ -108,7 +108,7 @@ public class EvaluationIdentityService {
     if (changed != 1) {
       EvaluationPrincipal converged =
           repository
-              .findEvaluationByHandle(handle)
+              .findEvaluationByHandleForUpdate(handle)
               .orElseThrow(() -> new IdentityException(404, "Evaluation principal not found"));
       if (!"REVOKED".equals(converged.state())
           || !idempotencyKey.equals(converged.revokeIdempotencyKey())) {

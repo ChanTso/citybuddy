@@ -76,6 +76,8 @@ class EvaluationIdentityTest {
         .thenAnswer(invocation -> Optional.ofNullable(stored.get()));
     when(repository.findEvaluationBySandboxCase("sandbox-1", "case-1"))
         .thenAnswer(invocation -> Optional.ofNullable(stored.get()));
+    when(repository.findEvaluationByProvisionKeyForShare("provision-1"))
+        .thenAnswer(invocation -> Optional.ofNullable(stored.get()));
     doAnswer(
             invocation -> {
               stored.set(invocation.getArgument(0));
@@ -101,7 +103,9 @@ class EvaluationIdentityTest {
     EvaluationPrincipal winner = principal("winner", "winner-key", "PROVISIONED", null, null);
     when(repository.findEvaluationByProvisionKey("loser-key")).thenReturn(Optional.empty());
     when(repository.findEvaluationBySandboxCase("sandbox-1", "case-1"))
-        .thenReturn(Optional.empty(), Optional.of(winner));
+        .thenReturn(Optional.empty());
+    when(repository.findEvaluationBySandboxCaseForShare("sandbox-1", "case-1"))
+        .thenReturn(Optional.of(winner));
 
     assertThatThrownBy(
             () -> service.provision("sandbox-1", "case-1", "test-user-1", 300, "loser-key"))
@@ -165,8 +169,9 @@ class EvaluationIdentityTest {
         principal("opaque-handle", "provision-key", "PROVISIONED", null, null);
     EvaluationPrincipal revoked =
         principal("opaque-handle", "provision-key", "REVOKED", "revoke-1", NOW);
-    when(repository.findEvaluationByHandle("opaque-handle"))
-        .thenReturn(Optional.of(provisioned), Optional.of(revoked), Optional.of(revoked));
+    when(repository.findEvaluationByHandleForUpdate("opaque-handle"))
+        .thenReturn(Optional.of(provisioned), Optional.of(revoked));
+    when(repository.findEvaluationByHandle("opaque-handle")).thenReturn(Optional.of(revoked));
     when(repository.revokeEvaluationPrincipal(
             "opaque-handle", "sandbox-1", "case-1", "revoke-1", NOW))
         .thenReturn(1);
@@ -179,7 +184,8 @@ class EvaluationIdentityTest {
         .isInstanceOf(IdentityException.class)
         .hasMessage("Invalid evaluation handle");
 
-    when(repository.findEvaluationByHandle("other-handle")).thenReturn(Optional.of(provisioned));
+    when(repository.findEvaluationByHandleForUpdate("other-handle"))
+        .thenReturn(Optional.of(provisioned));
     assertThatThrownBy(() -> service.revoke("other-handle", "sandbox-2", "case-1", "revoke-2"))
         .isInstanceOf(IdentityException.class)
         .hasMessage("Evaluation principal not found");
