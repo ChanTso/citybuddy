@@ -115,6 +115,7 @@ public class EvaluationCommerceAuditService {
                    entity_version, outcome
             FROM eval_commerce_audit_reference
             WHERE sandbox_id = ? AND operation_id = ?
+            FOR SHARE
             """,
             (result, row) ->
                 new StoredReference(

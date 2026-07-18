@@ -73,6 +73,10 @@ def check_state(args: argparse.Namespace) -> None:
         if not isinstance(effect, dict):
             raise ValueError("Invalid effect state")
         exact_keys(effect, {"effectType", "outcome", "createdAt"}, "effect state")
+    if args.effects_created_ascending:
+        created = [effect["createdAt"] for effect in effects]
+        if len(created) < 2 or created != sorted(created):
+            raise ValueError("Effect state did not use stable multi-record ordering")
     serialized = json.dumps(payload, sort_keys=True)
     for forbidden in (
         "caseCorrelation",
@@ -149,6 +153,7 @@ def main() -> None:
     state.add_argument("--sandbox", required=True)
     state.add_argument("--lifecycle", choices=("ACTIVE", "DEAD"), required=True)
     state.add_argument("--product-count", type=int, required=True)
+    state.add_argument("--effects-created-ascending", action="store_true")
     state.set_defaults(handler=check_state)
 
     audit = subparsers.add_parser("audit")

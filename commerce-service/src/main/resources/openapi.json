@@ -153,11 +153,11 @@
         ],
         "responses": {
           "200": {"description": "Bounded authoritative commerce sandbox state", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/EvaluationStateResponse"}}}},
-          "400": {"description": "Malformed or widened request"},
-          "401": {"description": "Invalid independent management credential"},
-          "404": {"description": "Unknown sandbox"},
-          "409": {"description": "Inconsistent or unobservable sandbox truth"},
-          "503": {"description": "Authoritative commerce state unavailable"}
+          "400": {"description": "Malformed or widened request", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/EvaluationError"}}}},
+          "401": {"description": "Invalid independent management credential", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/EvaluationError"}}}},
+          "404": {"description": "Unknown sandbox", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/EvaluationError"}}}},
+          "409": {"description": "Inconsistent or unobservable sandbox truth", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/EvaluationError"}}}},
+          "503": {"description": "Authoritative commerce state unavailable", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/EvaluationError"}}}}
         }
       }
     },
@@ -174,11 +174,11 @@
         ],
         "responses": {
           "200": {"description": "Bounded session-associated commerce audit references", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/EvaluationAuditPage"}}}},
-          "400": {"description": "Malformed, unbounded, or widened request"},
-          "401": {"description": "Invalid independent management credential"},
-          "404": {"description": "Unknown or unassociated sandbox/session"},
-          "409": {"description": "Referenced commerce truth is inconsistent"},
-          "503": {"description": "Authoritative commerce audit unavailable"}
+          "400": {"description": "Malformed, unbounded, or widened request", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/EvaluationError"}}}},
+          "401": {"description": "Invalid independent management credential", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/EvaluationError"}}}},
+          "404": {"description": "Unknown or unassociated sandbox/session", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/EvaluationError"}}}},
+          "409": {"description": "Referenced commerce truth is inconsistent", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/EvaluationError"}}}},
+          "503": {"description": "Authoritative commerce audit unavailable", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/EvaluationError"}}}}
         }
       }
     },
@@ -189,9 +189,9 @@
         "security": [{"evaluationManagementBasic": []}],
         "responses": {
           "200": {"description": "Fixed server-owned evaluation compatibility identifiers", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/EvaluationVersionResponse"}}}},
-          "400": {"description": "Caller-selected version or capability rejected"},
-          "401": {"description": "Invalid independent management credential"},
-          "503": {"description": "Startup-validated schema compatibility unavailable"}
+          "400": {"description": "Caller-selected version or capability rejected", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/EvaluationError"}}}},
+          "401": {"description": "Invalid independent management credential", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/EvaluationError"}}}},
+          "503": {"description": "Startup-validated schema compatibility unavailable", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/EvaluationError"}}}}
         }
       }
     },
@@ -386,7 +386,7 @@
         "properties": {
           "sandbox": {"$ref": "#/components/schemas/EvaluationSandboxState"},
           "products": {"type": "array", "maxItems": 16, "items": {"$ref": "#/components/schemas/EvaluationStateProduct"}},
-          "effects": {"type": "array", "maxItems": 8, "items": {"$ref": "#/components/schemas/EvaluationStateEffect"}}
+          "effects": {"type": "array", "maxItems": 8, "description": "Global ascending order by createdAt, then effectType, then the internal stable correlation key", "items": {"$ref": "#/components/schemas/EvaluationStateEffect"}}
         }
       },
       "EvaluationAuditReference": {
@@ -424,6 +424,14 @@
           "buildId": {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,63}$"},
           "schemaCompatibility": {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,63}$"},
           "capabilities": {"type": "array", "minItems": 3, "maxItems": 3, "items": {"type": "string", "enum": ["commerce-audit-v1", "commerce-state-v1", "commerce-version-v1"]}}
+        }
+      },
+      "EvaluationError": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["error"],
+        "properties": {
+          "error": {"type": "string", "minLength": 1, "maxLength": 128}
         }
       },
       "Product": {

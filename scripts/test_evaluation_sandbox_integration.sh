@@ -394,13 +394,24 @@ test "$(mysql_query auth_app "$auth_app_password" commerce_db \
   "SELECT COUNT(*) FROM auth_eval_test_principal WHERE opaque_handle = '$main_handle' AND sandbox_id = 'sandbox-main' AND case_correlation = 'case-main' AND state = 'PROVISIONED'")" = 1
 state_truth_before="$(mysql_query commerce_app "$commerce_app_password" commerce_db \
   "SELECT CONCAT(version, ':', UNIX_TIMESTAMP(expires_at), ':', UNIX_TIMESTAMP(updated_at)) FROM eval_sandbox WHERE sandbox_id = 'sandbox-main'")"
+mysql_query commerce_app "$commerce_app_password" commerce_db \
+  "INSERT INTO eval_sandbox_effect_stub (sandbox_id, effect_type, correlation_key, outcome, created_at) VALUES ('sandbox-main', 'SMS', '000-effect-order-first', 'SUPPRESSED', '2020-01-01 00:00:00.000000'), ('sandbox-main', 'SMS', 'tie-effect-a', 'SUPPRESSED', '2025-01-01 00:00:00.000000'), ('sandbox-main', 'SMS', 'tie-effect-b', 'SUPPRESSED', '2025-01-01 00:00:00.000000'), ('sandbox-main', 'SMS', 'zzz-effect-order-last', 'SUPPRESSED', '2030-01-01 00:00:00.000000')"
+test "$(mysql_query commerce_app "$commerce_app_password" commerce_db \
+  "SELECT GROUP_CONCAT(correlation_key ORDER BY created_at, effect_type, correlation_key SEPARATOR ',') FROM eval_sandbox_effect_stub WHERE sandbox_id = 'sandbox-main' AND created_at = '2025-01-01 00:00:00.000000'")" = 'tie-effect-a,tie-effect-b'
 assert_status 200 "active state is exact bounded commerce truth" \
   --request GET "http://127.0.0.1:$commerce_port/api/eval/state" \
   --user "evaluation-manager:$management_password" \
   --header 'X-Eval-Sandbox-Id: sandbox-main'
 cp "$tmp_dir/http-response.json" "$tmp_dir/state-active.json"
 uv run python scripts/check_evaluation_views.py state "$tmp_dir/state-active.json" \
-  --sandbox sandbox-main --lifecycle ACTIVE --product-count 1
+  --sandbox sandbox-main --lifecycle ACTIVE --product-count 1 \
+  --effects-created-ascending
+assert_status 200 "repeated state preserves stable total effect ordering" \
+  --request GET "http://127.0.0.1:$commerce_port/api/eval/state" \
+  --user "evaluation-manager:$management_password" \
+  --header 'X-Eval-Sandbox-Id: sandbox-main'
+cmp "$tmp_dir/state-active.json" "$tmp_dir/http-response.json"
+printf '%s\n' 'Verified stable multi-record effect ordering with an exercised equal-time tie key.'
 assert_status 400 "state rejects caller-selected fields" \
   --request GET "http://127.0.0.1:$commerce_port/api/eval/state?fields=sandbox" \
   --user "evaluation-manager:$management_password" \

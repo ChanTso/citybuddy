@@ -27,6 +27,12 @@ def test_evaluation_views_are_profile_bound_authenticated_and_bounded() -> None:
         assert "200" in operation["responses"]
         assert "401" in operation["responses"]
 
+        for status, response in operation["responses"].items():
+            if status != "200":
+                assert response["content"]["application/json"]["schema"] == {
+                    "$ref": "#/components/schemas/EvaluationError"
+                }
+
     audit_parameters = {item["name"]: item for item in audit["parameters"]}
     assert audit_parameters["limit"]["schema"] == {
         "type": "integer",
@@ -50,11 +56,24 @@ def test_evaluation_views_are_profile_bound_authenticated_and_bounded() -> None:
         "EvaluationAuditReference",
         "EvaluationAuditPage",
         "EvaluationVersionResponse",
+        "EvaluationError",
     ):
         assert schemas[name]["additionalProperties"] is False
     assert schemas["EvaluationStateResponse"]["properties"]["products"]["maxItems"] == 16
+    assert schemas["EvaluationStateResponse"]["properties"]["effects"]["description"] == (
+        "Global ascending order by createdAt, then effectType, then the internal stable "
+        "correlation key"
+    )
     assert schemas["EvaluationAuditPage"]["properties"]["entries"]["maxItems"] == 50
     assert schemas["EvaluationVersionResponse"]["properties"]["capabilities"]["maxItems"] == 3
+    assert schemas["EvaluationError"] == {
+        "type": "object",
+        "additionalProperties": False,
+        "required": ["error"],
+        "properties": {
+            "error": {"type": "string", "minLength": 1, "maxLength": 128}
+        },
+    }
 
 
 def test_evaluation_audit_is_append_only_scoped_and_not_agent_evidence() -> None:
@@ -80,6 +99,12 @@ def test_evaluation_audit_is_append_only_scoped_and_not_agent_evidence() -> None
     assert "DELETE ON commerce_db.eval_commerce_audit_reference" not in grants
     assert "WHERE sandbox_id = ? AND support_session_id = ? AND sequence_id > ?" in repository
     assert "WHERE sandbox_id = ? AND product_id = ? AND publication_version = ?" in repository
+    assert "ORDER BY created_at, effect_type, correlation_key LIMIT 8" in repository
+    assert "WHERE sandbox_id = ? AND operation_id = ?\n            FOR SHARE" in (
+        ROOT
+        / "commerce-service/src/main/java/io/citybuddy/commerce/evaluation"
+        / "EvaluationCommerceAuditService.java"
+    ).read_text(encoding="utf-8")
     assert 'headers["X-Agent-Trace-Id"] = trace_id' in agent
     assert 'headers["X-Agent-Operation-Id"]' in agent
     assert "support_event" not in repository

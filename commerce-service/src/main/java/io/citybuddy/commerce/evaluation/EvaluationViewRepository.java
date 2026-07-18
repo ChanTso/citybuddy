@@ -85,7 +85,7 @@ public final class EvaluationViewRepository {
         """
         SELECT effect_type, outcome, created_at
         FROM eval_sandbox_effect_stub
-        WHERE sandbox_id = ? ORDER BY effect_type LIMIT 8
+        WHERE sandbox_id = ? ORDER BY created_at, effect_type, correlation_key LIMIT 8
         """,
         (result, row) ->
             new EffectView(
