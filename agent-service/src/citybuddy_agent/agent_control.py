@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import threading
 import time
@@ -616,6 +617,8 @@ class ToolAdapter:
         plan: ModelPlan | None = None,
         knowledge_allowed: bool = True,
         sandbox_id: str | None = None,
+        trace_id: str | None = None,
+        turn_id: str | None = None,
     ) -> ToolResult:
         spec = self._specs.get(name)
         if spec is None:
@@ -700,7 +703,16 @@ class ToolAdapter:
                 "X-Support-Session-Id": session_id,
             }
             if sandbox_id is not None:
+                if trace_id is None or turn_id is None:
+                    raise RuntimeError("Evaluation tool call omitted server correlation")
+                operation_material = "\x00".join(
+                    (turn_id, name, arguments.model_dump_json(by_alias=True))
+                )
                 headers["X-Eval-Sandbox-Id"] = sandbox_id
+                headers["X-Agent-Trace-Id"] = trace_id
+                headers["X-Agent-Operation-Id"] = hashlib.sha256(
+                    operation_material.encode("utf-8")
+                ).hexdigest()
             response = httpx.post(
                 f"{self._base_url}/internal/tools/{name}",
                 headers=headers,
@@ -711,7 +723,7 @@ class ToolAdapter:
             return self._deny(name, "timeout", events)
         except httpx.NetworkError:
             return self._deny(name, "tool_unavailable", events)
-        if response.status_code in {400, 401, 403, 404, 408, 422, 504}:
+        if response.status_code in {400, 401, 403, 404, 408, 409, 422, 503, 504}:
             return self._deny(name, "policy_denied", events)
         if response.status_code != 200:
             raise RuntimeError("Unexpected commerce tool failure")
@@ -806,7 +818,6 @@ class BoundedAgent:
         turn_id: str,
         sandbox_id: str | None = None,
     ) -> AgentRunResult:
-        del trace_id, turn_id
         events: list[AgentEvent] = []
         signals = self._rule_router.signals(message)
         plan = self._model_router.plan(signals)
@@ -847,6 +858,8 @@ class BoundedAgent:
                     plan=plan,
                     knowledge_allowed=retrieval_decision is None,
                     sandbox_id=sandbox_id,
+                    trace_id=trace_id,
+                    turn_id=turn_id,
                 )
                 if result.retrieval_decision is not None:
                     retrieval_decision = result.retrieval_decision

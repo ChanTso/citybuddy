@@ -32,3 +32,4 @@ GRANT SELECT, INSERT, UPDATE ON commerce_db.auth_eval_test_principal TO 'auth_ap
 GRANT SELECT, INSERT, UPDATE ON commerce_db.eval_sandbox TO 'commerce_app'@'%';
 GRANT SELECT, INSERT, UPDATE, DELETE ON commerce_db.eval_sandbox_product_fixture TO 'commerce_app'@'%';
 GRANT SELECT, INSERT ON commerce_db.eval_sandbox_effect_stub TO 'commerce_app'@'%';
+GRANT SELECT, INSERT ON commerce_db.eval_commerce_audit_reference TO 'commerce_app'@'%';

@@ -68,6 +68,7 @@ expected=(
   "GRANT SELECT, INSERT, UPDATE ON commerce_db.eval_sandbox TO 'commerce_app'@'%';"
   "GRANT SELECT, INSERT, UPDATE, DELETE ON commerce_db.eval_sandbox_product_fixture TO 'commerce_app'@'%';"
   "GRANT SELECT, INSERT ON commerce_db.eval_sandbox_effect_stub TO 'commerce_app'@'%';"
+  "GRANT SELECT, INSERT ON commerce_db.eval_commerce_audit_reference TO 'commerce_app'@'%';"
 )
 mapfile -t actual < <(sed -e '/^[[:space:]]*$/d' -e '/^[[:space:]]*--/d' "$manifest")
 
@@ -146,6 +147,7 @@ support_feedback_grants="$(printf '%s\n' "${actual[@]:23:5}")"
 legacy_runtime_sql="$(printf '%s\n' "${actual[@]:5:4}" "$support_grant")"
 evaluation_grant="${actual[30]}"
 sandbox_grants="$(printf '%s\n' "${actual[@]:31:3}")"
+evaluation_audit_grant="${actual[34]}"
 
 sql="SET ROLE 'bootstrap_grant_role';
 SELECT CONCAT('role-active=', CURRENT_ROLE());
@@ -182,6 +184,7 @@ runtime_table_state="$(mysql "${mysql_args[@]}" --execute="
       'eval_sandbox',
       'eval_sandbox_product_fixture',
       'eval_sandbox_effect_stub',
+      'eval_commerce_audit_reference',
       'crm_profile',
       'product',
       'catalog_metadata',
@@ -207,6 +210,7 @@ runtime_table_state="$(mysql "${mysql_args[@]}" --execute="
 normalized_runtime_table_state="$runtime_table_state"
 evaluation_table_present=false
 sandbox_tables_present=false
+evaluation_audit_table_present=false
 feedback_table_present=false
 retrieval_tables_present=false
 retrieval_decision_present=false
@@ -238,6 +242,17 @@ elif (( sandbox_table_count == 3 )); then
   runtime_table_list="${runtime_table_list/commerce_db.eval_sandbox_product_fixture,/}"
   normalized_runtime_table_state="$((runtime_table_count - 3)):$runtime_table_list"
   sandbox_tables_present=true
+fi
+if [[ ",$normalized_runtime_table_state," == *",commerce_db.eval_commerce_audit_reference,"* ]]; then
+  if [[ "$sandbox_tables_present" != true ]]; then
+    echo "Grant job found evaluation audit without the prerequisite sandbox schema." >&2
+    exit 1
+  fi
+  runtime_table_count="${normalized_runtime_table_state%%:*}"
+  runtime_table_list="${normalized_runtime_table_state#*:}"
+  runtime_table_list="${runtime_table_list/commerce_db.eval_commerce_audit_reference,/}"
+  normalized_runtime_table_state="$((runtime_table_count - 1)):$runtime_table_list"
+  evaluation_audit_table_present=true
 fi
 if [[ "$runtime_table_state" == *"cs_db.retrieval_decision"* ]]; then
   retrieval_decision_present=true
@@ -285,6 +300,9 @@ if [[ "$evaluation_table_present" == true ]]; then
 fi
 if [[ "$sandbox_tables_present" == true ]]; then
   optional_evaluation_grants="$(printf '%s\n' "$optional_evaluation_grants" "$sandbox_grants")"
+fi
+if [[ "$evaluation_audit_table_present" == true ]]; then
+  optional_evaluation_grants="$(printf '%s\n' "$optional_evaluation_grants" "$evaluation_audit_grant")"
 fi
 if [[ "$normalized_runtime_table_state" == "$cb080_runtime_table_state" ]]; then
   selected_runtime_sql="$(printf '%s\n' "${actual[@]:5:22}")"

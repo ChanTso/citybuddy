@@ -6,6 +6,7 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import java.util.List;
 import org.junit.jupiter.api.Test;
+import org.springframework.util.LinkedMultiValueMap;
 
 class EvaluationRequestParserTest {
   private final ObjectMapper mapper = new ObjectMapper();
@@ -75,6 +76,33 @@ class EvaluationRequestParserTest {
                          "testUserLabel":"test-user-1","products":[%s]}
                         """
                             .formatted(validProduct))))
+        .isInstanceOf(EvaluationSandboxException.class);
+  }
+
+  @Test
+  void evaluationViewParametersAreExactAndBounded() {
+    LinkedMultiValueMap<String, String> accepted = new LinkedMultiValueMap<>();
+    accepted.add("after", "7");
+    accepted.add("limit", "50");
+    EvaluationViewRequestParser.AuditPageRequest page =
+        EvaluationViewRequestParser.auditPage(accepted);
+    assertThat(page.after()).isEqualTo(7);
+    assertThat(page.limit()).isEqualTo(50);
+
+    LinkedMultiValueMap<String, String> widened = new LinkedMultiValueMap<>();
+    widened.add("sort", "trace_id");
+    assertThatThrownBy(() -> EvaluationViewRequestParser.auditPage(widened))
+        .isInstanceOf(EvaluationSandboxException.class);
+
+    LinkedMultiValueMap<String, String> unbounded = new LinkedMultiValueMap<>();
+    unbounded.add("limit", "51");
+    assertThatThrownBy(() -> EvaluationViewRequestParser.auditPage(unbounded))
+        .isInstanceOf(EvaluationSandboxException.class);
+
+    LinkedMultiValueMap<String, String> duplicate = new LinkedMultiValueMap<>();
+    duplicate.add("limit", "1");
+    duplicate.add("limit", "2");
+    assertThatThrownBy(() -> EvaluationViewRequestParser.auditPage(duplicate))
         .isInstanceOf(EvaluationSandboxException.class);
   }
 }

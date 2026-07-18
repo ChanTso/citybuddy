@@ -192,6 +192,8 @@ start_commerce() {
     --citybuddy.evaluation.janitor-interval=5s \
     --citybuddy.evaluation.max-cleanup-attempts=5 \
     --citybuddy.evaluation.janitor-batch-size=4 \
+    --citybuddy.evaluation.build-id=cb102-integration-build \
+    --citybuddy.evaluation.schema-compatibility=commerce-evaluation-v1 \
     ${profile_argument[@]+"${profile_argument[@]}"} \
     >>"$tmp_dir/commerce.log" 2>&1 &
   commerce_pid=$!
@@ -275,14 +277,33 @@ assert_mysql_fails "auth runtime cannot read sandbox registry" \
   mysql_query auth_app "$auth_app_password" commerce_db 'SELECT * FROM eval_sandbox'
 assert_mysql_fails "agent runtime cannot read sandbox registry" \
   mysql_query agent_app "$agent_app_password" commerce_db 'SELECT * FROM eval_sandbox'
+assert_mysql_fails "auth runtime cannot read commerce evaluation audit" \
+  mysql_query auth_app "$auth_app_password" commerce_db \
+  'SELECT * FROM eval_commerce_audit_reference'
+assert_mysql_fails "agent runtime cannot read commerce evaluation audit" \
+  mysql_query agent_app "$agent_app_password" commerce_db \
+  'SELECT * FROM eval_commerce_audit_reference'
 assert_mysql_fails "commerce runtime cannot read auth provisioning truth" \
   mysql_query commerce_app "$commerce_app_password" commerce_db 'SELECT * FROM auth_eval_test_principal'
 assert_mysql_fails "commerce runtime cannot execute DDL" \
   mysql_query commerce_app "$commerce_app_password" commerce_db 'CREATE TABLE forbidden_cb101 (id INT)'
 commerce_grants="$(mysql_query commerce_app "$commerce_app_password" '' 'SHOW GRANTS FOR CURRENT_USER')"
+evaluation_grants="$(grep -F 'eval_' <<<"$commerce_grants")"
+printf '%s\n' "$evaluation_grants"
 grep -Fq 'GRANT SELECT, INSERT, UPDATE ON `commerce_db`.`eval_sandbox`' <<<"$commerce_grants"
 grep -Fq 'GRANT SELECT, INSERT, UPDATE, DELETE ON `commerce_db`.`eval_sandbox_product_fixture`' <<<"$commerce_grants"
 grep -Fq 'GRANT SELECT, INSERT ON `commerce_db`.`eval_sandbox_effect_stub`' <<<"$commerce_grants"
+grep -Fq 'GRANT SELECT, INSERT ON `commerce_db`.`eval_commerce_audit_reference`' \
+  <<<"$commerce_grants"
+assert_mysql_fails "commerce audit references are append-only" \
+  mysql_query commerce_app "$commerce_app_password" commerce_db \
+  "UPDATE eval_commerce_audit_reference SET outcome = 'OBSERVED' WHERE sequence_id = 1"
+assert_mysql_fails "commerce audit references cannot be deleted by runtime" \
+  mysql_query commerce_app "$commerce_app_password" commerce_db \
+  'DELETE FROM eval_commerce_audit_reference WHERE sequence_id = 1'
+explain_audit="$(mysql_query commerce_app "$commerce_app_password" commerce_db \
+  "EXPLAIN SELECT sequence_id, audit_reference_id, sandbox_id, support_session_id, trace_id, operation_id, entity_type, entity_id, entity_version, outcome, created_at FROM eval_commerce_audit_reference WHERE sandbox_id = 'sandbox-main' AND support_session_id = 'session-main' AND sequence_id > 0 ORDER BY sequence_id LIMIT 21")"
+grep -Fq 'ix_eval_audit_session_page' <<<"$explain_audit"
 explain_cleanup="$(mysql_query commerce_app "$commerce_app_password" commerce_db \
   "EXPLAIN SELECT sandbox_id, case_correlation, reset_idempotency_key, fixture_digest, fixture_count, test_user_label, requested_ttl_seconds, auth_provision_idempotency_key, auth_revoke_idempotency_key, opaque_handle, lifecycle_state, auth_invalidation_state, death_reason, completion_idempotency_key, cleanup_attempts, cleanup_due_at, provisioning_due_at, auth_expiry_upper_bound, expires_at, activated_at, dead_at, closed_at, version FROM eval_sandbox WHERE cleanup_due_at IS NOT NULL AND cleanup_due_at <= CURRENT_TIMESTAMP(6) ORDER BY cleanup_due_at, lifecycle_state, sandbox_id LIMIT 4 FOR UPDATE SKIP LOCKED")"
 grep -Fq 'ix_eval_sandbox_cleanup' <<<"$explain_cleanup"
@@ -311,6 +332,17 @@ assert_status 404 "production profile omits completion" \
   --header 'Idempotency-Key: production-complete' \
   --header 'Content-Type: application/json' \
   --data '{"caseCorrelation":"case-production"}'
+assert_status 404 "production profile omits evaluation state" \
+  --request GET "http://127.0.0.1:$commerce_port/api/eval/state" \
+  --user "evaluation-manager:$management_password" \
+  --header 'X-Eval-Sandbox-Id: sandbox-production'
+assert_status 404 "production profile omits evaluation audit" \
+  --request GET "http://127.0.0.1:$commerce_port/api/eval/audit/session-production" \
+  --user "evaluation-manager:$management_password" \
+  --header 'X-Eval-Sandbox-Id: sandbox-production'
+assert_status 404 "production profile omits evaluation version" \
+  --request GET "http://127.0.0.1:$commerce_port/api/eval/version" \
+  --user "evaluation-manager:$management_password"
 assert_status 404 "production profile omits liveness" \
   --request POST "http://127.0.0.1:$commerce_port/internal/eval/sandboxes/sandbox-production/liveness"
 stop_process commerce_pid "$commerce_pid"
@@ -318,6 +350,18 @@ stop_process auth_pid "$auth_pid"
 
 start_auth evaluation
 start_commerce evaluation "http://127.0.0.1:$auth_port"
+assert_status 200 "version exposes only fixed server identifiers" \
+  --request GET "http://127.0.0.1:$commerce_port/api/eval/version" \
+  --user "evaluation-manager:$management_password"
+cp "$tmp_dir/http-response.json" "$tmp_dir/version.json"
+uv run python scripts/check_evaluation_views.py version "$tmp_dir/version.json" \
+  --build cb102-integration-build --schema commerce-evaluation-v1
+assert_status 401 "version rejects substituted credential" \
+  --request GET "http://127.0.0.1:$commerce_port/api/eval/version" \
+  --user "evaluation-client:$invalid_management_password"
+assert_status 400 "version rejects caller capability override" \
+  --request GET "http://127.0.0.1:$commerce_port/api/eval/version?capability=all" \
+  --user "evaluation-manager:$management_password"
 curl --silent --show-error "http://127.0.0.1:$auth_port/auth/jwks" >"$tmp_dir/jwks.json"
 assert_status 401 "reset rejects substituted management credential" \
   --request POST "http://127.0.0.1:$commerce_port/api/eval/reset" \
@@ -348,6 +392,29 @@ test "$(mysql_query commerce_app "$commerce_app_password" commerce_db \
   "SELECT COUNT(*) FROM eval_sandbox_effect_stub WHERE sandbox_id = 'sandbox-main' AND effect_type = 'SMS' AND outcome = 'SUPPRESSED'")" = 1
 test "$(mysql_query auth_app "$auth_app_password" commerce_db \
   "SELECT COUNT(*) FROM auth_eval_test_principal WHERE opaque_handle = '$main_handle' AND sandbox_id = 'sandbox-main' AND case_correlation = 'case-main' AND state = 'PROVISIONED'")" = 1
+state_truth_before="$(mysql_query commerce_app "$commerce_app_password" commerce_db \
+  "SELECT CONCAT(version, ':', UNIX_TIMESTAMP(expires_at), ':', UNIX_TIMESTAMP(updated_at)) FROM eval_sandbox WHERE sandbox_id = 'sandbox-main'")"
+assert_status 200 "active state is exact bounded commerce truth" \
+  --request GET "http://127.0.0.1:$commerce_port/api/eval/state" \
+  --user "evaluation-manager:$management_password" \
+  --header 'X-Eval-Sandbox-Id: sandbox-main'
+cp "$tmp_dir/http-response.json" "$tmp_dir/state-active.json"
+uv run python scripts/check_evaluation_views.py state "$tmp_dir/state-active.json" \
+  --sandbox sandbox-main --lifecycle ACTIVE --product-count 1
+assert_status 400 "state rejects caller-selected fields" \
+  --request GET "http://127.0.0.1:$commerce_port/api/eval/state?fields=sandbox" \
+  --user "evaluation-manager:$management_password" \
+  --header 'X-Eval-Sandbox-Id: sandbox-main'
+assert_status 404 "state does not reveal a different sandbox" \
+  --request GET "http://127.0.0.1:$commerce_port/api/eval/state" \
+  --user "evaluation-manager:$management_password" \
+  --header 'X-Eval-Sandbox-Id: sandbox-other'
+assert_status 401 "sandbox header is not an authentication fallback" \
+  --request GET "http://127.0.0.1:$commerce_port/api/eval/state" \
+  --header 'X-Eval-Sandbox-Id: sandbox-main'
+assert_equal "$state_truth_before" "$(mysql_query commerce_app "$commerce_app_password" commerce_db \
+  "SELECT CONCAT(version, ':', UNIX_TIMESTAMP(expires_at), ':', UNIX_TIMESTAMP(updated_at)) FROM eval_sandbox WHERE sandbox_id = 'sandbox-main'")" \
+  "state read has no lifecycle side effect"
 
 reset_sandbox sandbox-main case-main reset-main sandbox-product
 cmp "$tmp_dir/reset-main.json" "$tmp_dir/http-response.json"
@@ -408,19 +475,61 @@ assert_status 200 "JIT exchange preserves the exact sandbox" \
   --header 'Content-Type: application/json' \
   --data "{\"sessionId\":\"$session_id\",\"userSubject\":\"$direct_subject\",\"scope\":\"catalog:read\"}"
 obo_token="$(uv run python scripts/read_json_field.py "$tmp_dir/http-response.json" accessToken)"
+direct_trace="direct-trace-$(openssl rand -hex 8)"
+direct_operation="$(openssl rand -hex 32)"
+failed_operation="$(openssl rand -hex 32)"
+mysql_query root "$root_password" '' \
+  "REVOKE INSERT ON commerce_db.eval_commerce_audit_reference FROM 'commerce_app'@'%'"
+assert_status 503 "tool read cannot report success when audit persistence fails" \
+  --request POST "http://127.0.0.1:$commerce_port/internal/tools/catalog.product.get" \
+  --header "Authorization: Bearer $obo_token" \
+  --header "X-Support-Session-Id: $session_id" \
+  --header 'X-Eval-Sandbox-Id: sandbox-main' \
+  --header "X-Agent-Trace-Id: $direct_trace" \
+  --header "X-Agent-Operation-Id: $failed_operation" \
+  --header 'Content-Type: application/json' \
+  --data '{"productId":"product-1"}'
+test "$(mysql_query root "$root_password" commerce_db \
+  "SELECT COUNT(*) FROM eval_commerce_audit_reference WHERE operation_id = '$failed_operation'")" = 0
+mysql_query root "$root_password" '' \
+  "GRANT INSERT ON commerce_db.eval_commerce_audit_reference TO 'commerce_app'@'%'"
 assert_status 200 "OBO tool reads only the exact sandbox fixture" \
   --request POST "http://127.0.0.1:$commerce_port/internal/tools/catalog.product.get" \
   --header "Authorization: Bearer $obo_token" \
   --header "X-Support-Session-Id: $session_id" \
   --header 'X-Eval-Sandbox-Id: sandbox-main' \
+  --header "X-Agent-Trace-Id: $direct_trace" \
+  --header "X-Agent-Operation-Id: $direct_operation" \
   --header 'Content-Type: application/json' \
   --data '{"productId":"product-1"}'
 test "$(uv run python scripts/read_json_field.py "$tmp_dir/http-response.json" name)" = sandbox-product
+assert_status 200 "same evaluation operation replays one audit identity" \
+  --request POST "http://127.0.0.1:$commerce_port/internal/tools/catalog.product.get" \
+  --header "Authorization: Bearer $obo_token" \
+  --header "X-Support-Session-Id: $session_id" \
+  --header 'X-Eval-Sandbox-Id: sandbox-main' \
+  --header "X-Agent-Trace-Id: $direct_trace" \
+  --header "X-Agent-Operation-Id: $direct_operation" \
+  --header 'Content-Type: application/json' \
+  --data '{"productId":"product-1"}'
+test "$(mysql_query commerce_app "$commerce_app_password" commerce_db \
+  "SELECT COUNT(*) FROM eval_commerce_audit_reference WHERE operation_id = '$direct_operation'")" = 1
+assert_status 403 "same operation rejects conflicting trace reuse" \
+  --request POST "http://127.0.0.1:$commerce_port/internal/tools/catalog.product.get" \
+  --header "Authorization: Bearer $obo_token" \
+  --header "X-Support-Session-Id: $session_id" \
+  --header 'X-Eval-Sandbox-Id: sandbox-main' \
+  --header 'X-Agent-Trace-Id: conflicting-trace' \
+  --header "X-Agent-Operation-Id: $direct_operation" \
+  --header 'Content-Type: application/json' \
+  --data '{"productId":"product-1"}'
 assert_status 403 "OBO tool rejects sandbox substitution" \
   --request POST "http://127.0.0.1:$commerce_port/internal/tools/catalog.product.get" \
   --header "Authorization: Bearer $obo_token" \
   --header "X-Support-Session-Id: $session_id" \
   --header 'X-Eval-Sandbox-Id: sandbox-other' \
+  --header "X-Agent-Trace-Id: $direct_trace" \
+  --header "X-Agent-Operation-Id: $direct_operation" \
   --header 'Content-Type: application/json' \
   --data '{"productId":"product-1"}'
 assert_status 200 "evaluation chat executes sandbox-bound OBO tool" \
@@ -434,6 +543,66 @@ assert_status 200 "evaluation chat executes sandbox-bound OBO tool" \
 trace_id="$(uv run python scripts/read_json_field.py "$tmp_dir/http-response.json" traceId)"
 test "$(mysql_query agent_app "$agent_app_password" cs_db \
   "SELECT GROUP_CONCAT(JSON_UNQUOTE(JSON_EXTRACT(payload_json, '$.state')) ORDER BY sequence SEPARATOR ',') FROM support_event WHERE trace_id = '$trace_id' AND event_type = 'TOOL_LIFECYCLE'")" = 'requested,succeeded'
+test "$(mysql_query commerce_app "$commerce_app_password" commerce_db \
+  "SELECT COUNT(*) FROM eval_commerce_audit_reference WHERE sandbox_id = 'sandbox-main' AND support_session_id = '$session_id'")" = 2
+assert_status 200 "audit returns only the exact sandbox and support session" \
+  --request GET "http://127.0.0.1:$commerce_port/api/eval/audit/$session_id" \
+  --user "evaluation-manager:$management_password" \
+  --header 'X-Eval-Sandbox-Id: sandbox-main'
+cp "$tmp_dir/http-response.json" "$tmp_dir/audit.json"
+uv run python scripts/check_evaluation_views.py audit "$tmp_dir/audit.json" \
+  --sandbox sandbox-main --session "$session_id" --count 2 --trace "$trace_id"
+assert_status 200 "audit first page is bounded and has a stable cursor" \
+  --request GET "http://127.0.0.1:$commerce_port/api/eval/audit/$session_id?limit=1" \
+  --user "evaluation-manager:$management_password" \
+  --header 'X-Eval-Sandbox-Id: sandbox-main'
+uv run python scripts/check_evaluation_views.py audit "$tmp_dir/http-response.json" \
+  --sandbox sandbox-main --session "$session_id" --count 1 --next-cursor
+first_sequence="$(mysql_query commerce_app "$commerce_app_password" commerce_db \
+  "SELECT MIN(sequence_id) FROM eval_commerce_audit_reference WHERE sandbox_id = 'sandbox-main' AND support_session_id = '$session_id'")"
+assert_status 200 "audit cursor advances deterministically" \
+  --request GET "http://127.0.0.1:$commerce_port/api/eval/audit/$session_id?limit=1&after=$first_sequence" \
+  --user "evaluation-manager:$management_password" \
+  --header 'X-Eval-Sandbox-Id: sandbox-main'
+uv run python scripts/check_evaluation_views.py audit "$tmp_dir/http-response.json" \
+  --sandbox sandbox-main --session "$session_id" --count 1
+assert_status 400 "audit rejects unbounded limit" \
+  --request GET "http://127.0.0.1:$commerce_port/api/eval/audit/$session_id?limit=51" \
+  --user "evaluation-manager:$management_password" \
+  --header 'X-Eval-Sandbox-Id: sandbox-main'
+assert_status 404 "audit rejects an unassociated support session" \
+  --request GET "http://127.0.0.1:$commerce_port/api/eval/audit/session-other" \
+  --user "evaluation-manager:$management_password" \
+  --header 'X-Eval-Sandbox-Id: sandbox-main'
+assert_status 404 "audit rejects cross-sandbox lookup" \
+  --request GET "http://127.0.0.1:$commerce_port/api/eval/audit/$session_id" \
+  --user "evaluation-manager:$management_password" \
+  --header 'X-Eval-Sandbox-Id: sandbox-other'
+
+stop_process commerce_pid "$commerce_pid"
+start_commerce evaluation "http://127.0.0.1:$auth_port"
+assert_status 200 "state persists across commerce restart" \
+  --request GET "http://127.0.0.1:$commerce_port/api/eval/state" \
+  --user "evaluation-manager:$management_password" \
+  --header 'X-Eval-Sandbox-Id: sandbox-main'
+cmp "$tmp_dir/state-active.json" "$tmp_dir/http-response.json"
+assert_status 200 "audit references persist across commerce restart" \
+  --request GET "http://127.0.0.1:$commerce_port/api/eval/audit/$session_id" \
+  --user "evaluation-manager:$management_password" \
+  --header 'X-Eval-Sandbox-Id: sandbox-main'
+cmp "$tmp_dir/audit.json" "$tmp_dir/http-response.json"
+assert_status 200 "version identifiers persist across commerce restart" \
+  --request GET "http://127.0.0.1:$commerce_port/api/eval/version" \
+  --user "evaluation-manager:$management_password"
+cmp "$tmp_dir/version.json" "$tmp_dir/http-response.json"
+mysql_query root "$root_password" commerce_db \
+  "UPDATE eval_commerce_audit_reference SET entity_version = 2 WHERE sandbox_id = 'sandbox-main' AND support_session_id = '$session_id' LIMIT 1"
+assert_status 409 "audit fails closed on mismatched authoritative version" \
+  --request GET "http://127.0.0.1:$commerce_port/api/eval/audit/$session_id" \
+  --user "evaluation-manager:$management_password" \
+  --header 'X-Eval-Sandbox-Id: sandbox-main'
+mysql_query root "$root_password" commerce_db \
+  "UPDATE eval_commerce_audit_reference SET entity_version = 1 WHERE sandbox_id = 'sandbox-main' AND support_session_id = '$session_id'"
 assert_status 401 "evaluation chat rejects sandbox header substitution" \
   --request POST "http://127.0.0.1:$agent_port/api/chat" \
   --header "Authorization: Bearer $direct_token" \
@@ -462,6 +631,12 @@ test "$(mysql_query commerce_app "$commerce_app_password" commerce_db \
   "SELECT COUNT(*) FROM eval_sandbox_product_fixture WHERE sandbox_id = 'sandbox-main'")" = 0
 test "$(mysql_query auth_app "$auth_app_password" commerce_db \
   "SELECT state FROM auth_eval_test_principal WHERE opaque_handle = '$main_handle'")" = REVOKED
+assert_status 200 "dead sandbox remains bounded historical state" \
+  --request GET "http://127.0.0.1:$commerce_port/api/eval/state" \
+  --user "evaluation-manager:$management_password" \
+  --header 'X-Eval-Sandbox-Id: sandbox-main'
+uv run python scripts/check_evaluation_views.py state "$tmp_dir/http-response.json" \
+  --sandbox sandbox-main --lifecycle DEAD --product-count 0
 assert_status 200 "normal completion replay" \
   --request POST "http://127.0.0.1:$commerce_port/api/eval/sandboxes/sandbox-main/complete" \
   --user "evaluation-manager:$management_password" \
@@ -594,4 +769,4 @@ for private_value in \
   fi
 done
 
-echo "CB-101 evaluation sandbox reset, compensation, lifecycle, SQL, RS256/OBO, agent liveness, profile, grant, restart, janitor, effect-stub, and redaction integration passed."
+echo "CB-101/CB-102 evaluation lifecycle, state, audit, version, profile, grant, restart, liveness, and redaction integration passed."
