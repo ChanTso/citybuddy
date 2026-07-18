@@ -75,6 +75,7 @@ public final class RocketMqSeckillTimeouts implements AutoCloseable, SeckillTime
         consumer.receive(properties.receiveBatchSize(), properties.receiveInvisibleDuration());
     int consumed = 0;
     for (MessageView message : messages) {
+      rejectEvaluationContext(message);
       if (message.getDeliveryAttempt() > properties.maximumDeliveryAttempts()) {
         throw new IllegalStateException("Seckill timeout delivery exceeded its configured bound");
       }
@@ -119,6 +120,15 @@ public final class RocketMqSeckillTimeouts implements AutoCloseable, SeckillTime
       return payload;
     } catch (Exception exception) {
       throw new IllegalArgumentException("Seckill timeout message is malformed", exception);
+    }
+  }
+
+  private static void rejectEvaluationContext(MessageView message) {
+    if (message
+        .getProperties()
+        .containsKey(RocketMqSeckillTransactions.RESERVED_SANDBOX_PROPERTY)) {
+      throw new IllegalArgumentException(
+          "Production seckill timeout cannot carry evaluation context");
     }
   }
 

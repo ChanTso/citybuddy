@@ -1,0 +1,77 @@
+{
+  "version": "cb104-v2",
+  "reservedSandboxEnvelopeProperty": "citybuddy-eval-sandbox-id",
+  "evaluationReachablePathCount": 0,
+  "paths": [
+    {
+      "id": "seckill-order-transaction",
+      "owner": "commerce-service",
+      "classification": "production-only",
+      "producer": "SeckillReservationController -> RocketMqSeckillTransactions",
+      "consumer": "RocketMqSeckillTransactions -> SeckillOrderService",
+      "evidence": [
+        "real evaluation JWT is rejected by the real reservation controller before coordinator access",
+        "SeckillTransactionMessage has no sandbox field",
+        "the real Broker consumer rejects the reserved sandbox envelope property before mutation"
+      ]
+    },
+    {
+      "id": "seckill-unpaid-timeout",
+      "owner": "commerce-service",
+      "classification": "unreachable-from-evaluation",
+      "producer": "SeckillTimeoutDispatchService -> RocketMqSeckillTimeouts",
+      "consumer": "RocketMqSeckillTimeouts -> SeckillCancellationService",
+      "evidence": [
+        "the only source is a seckill order created by the production-only transaction path",
+        "SeckillTimeoutMessage has no sandbox field",
+        "the real Broker consumer rejects the reserved sandbox envelope property before mutation"
+      ]
+    },
+    {
+      "id": "product-publication",
+      "owner": "commerce-service",
+      "classification": "production-only",
+      "producer": "CatalogOutboxPublisher -> RocketMqCatalogMessaging",
+      "consumer": "RocketMqCatalogMessaging -> ProductInvalidationHandler",
+      "evidence": [
+        "the publisher selects only PRODUCT_PUBLICATION_CHANGED truth",
+        "CatalogEvent has no sandbox field",
+        "the real Broker consumer rejects the reserved sandbox envelope property before mutation"
+      ]
+    },
+    {
+      "id": "standard-order-and-refund-outbox",
+      "owner": "commerce-service",
+      "classification": "unreachable-from-evaluation",
+      "producer": "OrderRepository and RefundRepository",
+      "consumer": "none",
+      "evidence": [
+        "real evaluation JWTs are rejected by the real order and refund controllers",
+        "the durable Outbox payloads have no sandbox field",
+        "no runtime publisher selects STANDARD_ORDER or refund Outbox event types"
+      ]
+    },
+    {
+      "id": "knowledge-indexer-spike",
+      "owner": "knowledge-indexer",
+      "classification": "not-a-runtime-path",
+      "producer": "CB-085 disposable spike",
+      "consumer": "CB-085 disposable spike",
+      "evidence": [
+        "SpikeEvent has no sandbox field",
+        "the production worker contains no messaging behavior"
+      ]
+    },
+    {
+      "id": "agent-service",
+      "owner": "agent-service",
+      "classification": "no-asynchronous-runtime",
+      "producer": "none",
+      "consumer": "none",
+      "evidence": [
+        "the evaluation chat and evidence routes are synchronous",
+        "the runtime contains no RocketMQ producer, consumer, or durable asynchronous publisher"
+      ]
+    }
+  ]
+}

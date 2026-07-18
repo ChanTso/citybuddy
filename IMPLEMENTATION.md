@@ -2,7 +2,7 @@
 
 **Document version:** v0.25\
 **Verification date:** 2026-07-19\
-**Repository phase:** Asynchronous sandbox liveness guards ready
+**Repository phase:** Asynchronous evaluation-entry inventory and production-only closure in progress
 
 ## How to use this index
 
@@ -103,7 +103,7 @@ The linked slice name is the canonical detailed specification. Target outcomes a
 | [CB-101 — Evaluation sandbox lifecycle and fail-closed enforcement](docs/slices/CB-101.md) | P0 | `VERIFIED` | `CB-100` |
 | [CB-102 — Commerce evaluation state, audit, and version APIs](docs/slices/CB-102.md) | P0 | `VERIFIED` | `CB-101` |
 | [CB-103 — Agent evaluation evidence API](docs/slices/CB-103.md) | P0 | `VERIFIED` | `CB-102` |
-| [CB-104 — Asynchronous sandbox liveness guards](docs/slices/CB-104.md) | P0 | `READY` | `CB-103` |
+| [CB-104 — Asynchronous evaluation-entry inventory and production-only closure](docs/slices/CB-104.md) | P0 | `IN_PROGRESS` | `CB-103` |
 | [CB-105 — Sandbox-bound idempotent mock-payment callbacks](docs/slices/CB-105.md) | P0 | `PLANNED` | `CB-104` |
 | [CB-110 — FAQ publication truth and transactional Outbox](docs/slices/CB-110.md) | P1 | `PLANNED` | `CB-030`, `CB-085`, `CB-091` |
 | `CB-111 — Incremental knowledge sync and versioned two-level cache` | P1 | `PLANNED` | `CB-110` |
