@@ -189,8 +189,8 @@ start_commerce() {
     --citybuddy.evaluation.provisioning-timeout=10s \
     --citybuddy.evaluation.auth-expiry-safety=2s \
     --citybuddy.evaluation.cleanup-retry=1s \
-    --citybuddy.evaluation.janitor-interval=1s \
-    --citybuddy.evaluation.max-cleanup-attempts=3 \
+    --citybuddy.evaluation.janitor-interval=5s \
+    --citybuddy.evaluation.max-cleanup-attempts=5 \
     --citybuddy.evaluation.janitor-batch-size=4 \
     ${profile_argument[@]+"${profile_argument[@]}"} \
     >>"$tmp_dir/commerce.log" 2>&1 &
@@ -251,6 +251,7 @@ commerce_service_password="$(openssl rand -hex 24)"
 evaluator_password="$(openssl rand -hex 24)"
 agent_service_password="$(openssl rand -hex 24)"
 management_password="$(openssl rand -hex 24)"
+invalid_management_password="$(openssl rand -hex 24)"
 commerce_service_hash="$(uv run python scripts/hash_test_credential.py "$commerce_service_password")"
 evaluator_hash="$(uv run python scripts/hash_test_credential.py "$evaluator_password")"
 agent_service_hash="$(uv run python scripts/hash_test_credential.py "$agent_service_password")"
@@ -320,7 +321,7 @@ start_commerce evaluation "http://127.0.0.1:$auth_port"
 curl --silent --show-error "http://127.0.0.1:$auth_port/auth/jwks" >"$tmp_dir/jwks.json"
 assert_status 401 "reset rejects substituted management credential" \
   --request POST "http://127.0.0.1:$commerce_port/api/eval/reset" \
-  --user 'evaluation-client:wrong' \
+  --user "evaluation-client:$invalid_management_password" \
   --header 'Idempotency-Key: reset-main' \
   --header 'Content-Type: application/json' \
   --data "$(reset_body sandbox-main case-main sandbox-product)"
