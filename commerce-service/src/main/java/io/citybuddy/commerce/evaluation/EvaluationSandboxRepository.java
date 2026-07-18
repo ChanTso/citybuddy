@@ -271,7 +271,7 @@ public class EvaluationSandboxRepository {
             "SELECT "
                 + COLUMNS
                 + " FROM eval_sandbox WHERE cleanup_due_at IS NOT NULL "
-                + "AND cleanup_due_at <= ? ORDER BY cleanup_due_at, sandbox_id "
+                + "AND cleanup_due_at <= ? ORDER BY cleanup_due_at, lifecycle_state, sandbox_id "
                 + "LIMIT ? FOR UPDATE SKIP LOCKED",
             EvaluationSandboxRepository::mapSandbox,
             Timestamp.from(now),

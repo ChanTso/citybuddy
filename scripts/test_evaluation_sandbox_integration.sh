@@ -283,8 +283,12 @@ grep -Fq 'GRANT SELECT, INSERT, UPDATE ON `commerce_db`.`eval_sandbox`' <<<"$com
 grep -Fq 'GRANT SELECT, INSERT, UPDATE, DELETE ON `commerce_db`.`eval_sandbox_product_fixture`' <<<"$commerce_grants"
 grep -Fq 'GRANT SELECT, INSERT ON `commerce_db`.`eval_sandbox_effect_stub`' <<<"$commerce_grants"
 explain_cleanup="$(mysql_query commerce_app "$commerce_app_password" commerce_db \
-  "EXPLAIN SELECT sandbox_id FROM eval_sandbox WHERE cleanup_due_at IS NOT NULL AND cleanup_due_at <= CURRENT_TIMESTAMP(6) ORDER BY cleanup_due_at, lifecycle_state, sandbox_id LIMIT 4")"
+  "EXPLAIN SELECT sandbox_id, case_correlation, reset_idempotency_key, fixture_digest, fixture_count, test_user_label, requested_ttl_seconds, auth_provision_idempotency_key, auth_revoke_idempotency_key, opaque_handle, lifecycle_state, auth_invalidation_state, death_reason, completion_idempotency_key, cleanup_attempts, cleanup_due_at, provisioning_due_at, auth_expiry_upper_bound, expires_at, activated_at, dead_at, closed_at, version FROM eval_sandbox WHERE cleanup_due_at IS NOT NULL AND cleanup_due_at <= CURRENT_TIMESTAMP(6) ORDER BY cleanup_due_at, lifecycle_state, sandbox_id LIMIT 4 FOR UPDATE SKIP LOCKED")"
 grep -Fq 'ix_eval_sandbox_cleanup' <<<"$explain_cleanup"
+if grep -Fq 'Using filesort' <<<"$explain_cleanup"; then
+  echo "Cleanup claim query does not use index ordering." >&2
+  exit 1
+fi
 
 openssl genpkey -algorithm RSA -pkeyopt rsa_keygen_bits:2048 -out "$tmp_dir/current-private.pem" 2>/dev/null
 openssl pkey -in "$tmp_dir/current-private.pem" -pubout -out "$tmp_dir/current-public.pem" 2>/dev/null
@@ -470,6 +474,12 @@ assert_status 409 "completion rejects conflicting idempotency" \
   --header 'Idempotency-Key: complete-conflict' \
   --header 'Content-Type: application/json' \
   --data '{"caseCorrelation":"case-main"}'
+assert_status 409 "dead sandbox cannot be reset or reused" \
+  --request POST "http://127.0.0.1:$commerce_port/api/eval/reset" \
+  --user "evaluation-manager:$management_password" \
+  --header 'Idempotency-Key: reset-main' \
+  --header 'Content-Type: application/json' \
+  --data "$(reset_body sandbox-main case-main sandbox-product)"
 assert_status 403 "completion immediately blocks commerce liveness" \
   --request POST "http://127.0.0.1:$commerce_port/internal/eval/sandboxes/sandbox-main/liveness" \
   --header "Authorization: Bearer $direct_token" \
