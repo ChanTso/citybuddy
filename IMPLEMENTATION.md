@@ -1,8 +1,8 @@
 # CityBuddy implementation index
 
-**Document version:** v0.25\
+**Document version:** v0.26\
 **Verification date:** 2026-07-19\
-**Repository phase:** Asynchronous evaluation-entry inventory and production-only closure in progress
+**Repository phase:** Sandbox-bound idempotent mock-payment callbacks ready
 
 ## How to use this index
 
@@ -33,6 +33,7 @@ The repository contains the verified local-runtime foundations, identity vertica
 - commerce-owned one-time evaluation sandboxes with bounded reset-created fixtures, `PROVISIONING → ACTIVE → DEAD` durable truth, fail-closed activation, compensation, completion, and expiry cleanup, suppressed-effect evidence, and exact synchronous token, header, session, row, and active-liveness enforcement;
 - evaluation-profile-only commerce state, session-bound append-only audit-reference, and fixed version/capability views over authoritative sandbox-scoped `commerce_db` truth, with deterministic bounds, restart persistence, exact grants, and production route absence;
 - evaluation-profile-only agent evidence reads over authoritative sandbox/trace-associated `cs_db` truth, with an independent evaluator credential, deterministic bounds, complete accepted-to-terminal validation, cross-source retrieval consistency, safe-field projection, exact grants, restart persistence, and production route absence;
+- an executable six-family asynchronous-entry inventory proving zero current evaluation-reachable carriers, real evaluation-token rejection at production commerce controllers, payload non-carriage, and real-Broker rejection of reserved sandbox metadata before current production handlers;
 - direct-user durable support chat over server-owned sessions, with owner isolation, deterministic idempotent replay, atomic conversation/turn truth, and ordered append-only event evidence in `cs_db`;
 - one bounded ReAct agent with deterministic routing signals, server-owned business-tier selection, one shared attempt budget, provider-isolated finite circuit breakers, role-alias-only fake-provider routing, executable fixed ToolSpec mediation, just-in-time exact-scope OBO, and ordered durable routing/model/budget/circuit/tool/terminal evidence;
 - filtered owner-scoped SSE over the same durable turn truth, with fixed public event schemas, bounded safety buffering, single-terminal ordering, disconnect-safe replay, and owner-scoped append-only feedback in `cs_db`;
@@ -103,14 +104,15 @@ The linked slice name is the canonical detailed specification. Target outcomes a
 | [CB-101 — Evaluation sandbox lifecycle and fail-closed enforcement](docs/slices/CB-101.md) | P0 | `VERIFIED` | `CB-100` |
 | [CB-102 — Commerce evaluation state, audit, and version APIs](docs/slices/CB-102.md) | P0 | `VERIFIED` | `CB-101` |
 | [CB-103 — Agent evaluation evidence API](docs/slices/CB-103.md) | P0 | `VERIFIED` | `CB-102` |
-| [CB-104 — Asynchronous evaluation-entry inventory and production-only closure](docs/slices/CB-104.md) | P0 | `IN_PROGRESS` | `CB-103` |
-| [CB-105 — Sandbox-bound idempotent mock-payment callbacks](docs/slices/CB-105.md) | P0 | `PLANNED` | `CB-104` |
+| [CB-104 — Asynchronous evaluation-entry inventory and production-only closure](docs/slices/CB-104.md) | P0 | `VERIFIED` | `CB-103` |
+| [CB-105 — Sandbox-bound idempotent mock-payment callbacks](docs/slices/CB-105.md) | P0 | `READY` | `CB-104` |
 | [CB-110 — FAQ publication truth and transactional Outbox](docs/slices/CB-110.md) | P1 | `PLANNED` | `CB-030`, `CB-085`, `CB-091` |
-| `CB-111 — Incremental knowledge sync and versioned two-level cache` | P1 | `PLANNED` | `CB-110` |
-| `CB-112 — Knowledge rebuild validation and atomic alias switch` | P1 | `PLANNED` | `CB-111` |
+| [CB-111 — Incremental knowledge synchronization and version/tombstone convergence](docs/slices/CB-111.md) | P1 | `PLANNED` | `CB-110` |
+| `CB-112 — Versioned two-level FAQ cache` | P1 | `PLANNED` | `CB-111` |
+| `CB-113 — Knowledge rebuild validation and atomic alias switch` | P1 | `PLANNED` | `CB-112` |
 | `CB-120 — Commerce PendingAction and atomic ActionReceipt transaction` | P1 | `PLANNED` | `CB-071`, `CB-082` |
 | `CB-121 — Agent confirmation, receipt projection, and turn commit` | P1 | `PLANNED` | `CB-120`, `CB-082` |
-| `CB-130 — Memory watermarks, prompt/PII, and tiered output safety` | P1 | `PLANNED` | `CB-112`, `CB-121` |
+| `CB-130 — Memory watermarks, prompt/PII, and tiered output safety` | P1 | `PLANNED` | `CB-113`, `CB-121` |
 | `CB-131 — Authoritative handoff tickets and agent projection` | P1 | `PLANNED` | `CB-130` |
 | `CB-132 — Reviewed failure-candidate capture and authenticated export` | P1 | `PLANNED` | `CB-131` |
 | `CB-140 — Minimal web demonstration` | P1 | `PLANNED` | `CB-020`, `CB-030`, `CB-061`, `CB-082`, `CB-091`, `CB-121` |
