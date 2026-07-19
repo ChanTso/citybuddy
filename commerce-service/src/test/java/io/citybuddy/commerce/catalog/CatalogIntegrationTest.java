@@ -30,6 +30,9 @@ import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
+import org.apache.rocketmq.client.apis.ClientConfiguration;
+import org.apache.rocketmq.client.apis.ClientServiceProvider;
+import org.apache.rocketmq.client.apis.producer.Producer;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.condition.EnabledIfEnvironmentVariable;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -107,6 +110,7 @@ class CatalogIntegrationTest {
     proveAuthenticatedContractsAndLiveFields();
     proveRedisProtectionsAndMysqlFallback();
     provePublicationAtomicityAndNormalEventRecovery();
+    proveProductionConsumerRejectsReservedEvaluationContext();
   }
 
   @Test
@@ -939,6 +943,81 @@ class CatalogIntegrationTest {
       consumed += messaging.consumeOnce(handler);
     }
     return consumed;
+  }
+
+  private void proveProductionConsumerRejectsReservedEvaluationContext() throws Exception {
+    String eventId = UUID.randomUUID().toString();
+    String payload =
+        objectMapper.writeValueAsString(
+            Map.of(
+                "eventId",
+                eventId,
+                "productId",
+                "production-only-proof",
+                "productVersion",
+                1,
+                "catalogGeneration",
+                repository.catalogGeneration(),
+                "publicationState",
+                "PUBLISHED"));
+    ClientConfiguration configuration =
+        ClientConfiguration.newBuilder()
+            .setEndpoints(required("ROCKETMQ_ENDPOINTS"))
+            .setRequestTimeout(Duration.ofSeconds(10))
+            .enableSsl(false)
+            .build();
+    CatalogProperties isolatedProperties =
+        new CatalogProperties(
+            properties.issuer(),
+            properties.userAudience(),
+            properties.jwksUrl(),
+            properties.jwksCacheTtl(),
+            properties.clockSkew(),
+            properties.requiredPermission(),
+            properties.cacheTtl(),
+            properties.cacheJitter(),
+            properties.nullTtl(),
+            properties.mutexTtl(),
+            properties.rocketmqEndpoints(),
+            properties.rocketmqTopic(),
+            properties.rocketmqConsumerGroup() + "-closed");
+    try (RocketMqCatalogMessaging isolated = new RocketMqCatalogMessaging(isolatedProperties);
+        Producer producer =
+            ClientServiceProvider.loadService()
+                .newProducerBuilder()
+                .setClientConfiguration(configuration)
+                .setTopics(required("ROCKETMQ_TOPIC"))
+                .build()) {
+      int drained;
+      do {
+        drained = isolated.consumeOnce(ignored -> assertThat(ignored).isNotNull());
+      } while (drained > 0);
+      producer.send(
+          ClientServiceProvider.loadService()
+              .newMessageBuilder()
+              .setTopic(required("ROCKETMQ_TOPIC"))
+              .setTag("product-publication")
+              .setKeys(eventId)
+              .addProperty(
+                  RocketMqCatalogMessaging.RESERVED_SANDBOX_PROPERTY,
+                  "sandbox-must-not-be-accepted")
+              .setBody(payload.getBytes(java.nio.charset.StandardCharsets.UTF_8))
+              .build());
+
+      AtomicInteger handlerCalls = new AtomicInteger();
+      long deadline = System.nanoTime() + Duration.ofSeconds(20).toNanos();
+      while (System.nanoTime() < deadline) {
+        try {
+          isolated.consumeOnce(ignored -> handlerCalls.incrementAndGet());
+        } catch (IllegalArgumentException exception) {
+          assertThat(exception)
+              .hasMessage("Production catalog message cannot carry evaluation context");
+          assertThat(handlerCalls).hasValue(0);
+          return;
+        }
+      }
+    }
+    throw new AssertionError("Reserved evaluation context was not delivered by the real Broker");
   }
 
   private String outboxState(UUID eventId) {

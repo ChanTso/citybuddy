@@ -193,3 +193,11 @@ This file records only factual pitfalls supported by merged pull-request, commit
 - 根因：只读投影的集成 fixture 混淆了“读取既有权威事实”与“扩张生产写入入口以便造数”；逐表、逐行和首尾验证只能证明局部结构有效，不能证明跨记录生命周期或重叠事实一致。数据库时间类型还丢失了会话时区语义，测试使用的 aware fixture 掩盖了真实驱动行为；响应脱敏断言也被误当成了服务日志脱敏证据。鉴权输入校验则按已知坏输入和异常实例逐个补洞，没有以“所有凭据解析失败都必须收敛”为边界关闭整个异常类。
 - 解决：保留既有 chat/feedback 行为不变，由真实 MySQL 管理 fixture 写入一条已存在 feedback truth，再证明 API 仅投影 rating/time 且隐藏 comment。证据读取把 retrieval event 与 `retrieval_decision` 的重叠事实交叉校验，并要求 completed 记录以一致的 `AGENT_OUTCOME → ASSISTANT_RESPONSE → TURN_COMPLETED` 收敛、failed 记录只保留合法 accepted-to-failed 序列，任何中间或冲突终态返回 409。MySQL 连接固定 UTC 会话，naive 驱动值显式转换为 aware UTC，wire checker 要求 RFC 3339 offset；真实集成分别篡改冲突 outcome 和中间 terminal，并扫描所有相关服务日志中的每个 CB-103 私密 marker。Basic 边界先限制 header 长度，再把 token 显式编码为 ASCII bytes，并以一个 `ValueError` 总异常边界同时覆盖原始非 ASCII 与 `binascii.Error` 等 Base64 解析失败；成功解析后仅做 bytes 拆分和常量时间比较。真实恶意 header 电池覆盖 raw/decoded 非 ASCII、非法 Base64、非 UTF-8、缺冒号、空值、错误 scheme、超长值、控制字符与 NUL，全部只返回固定 401，响应和日志没有内部异常。专属集成、190 项 Python CI 和包构建通过。
 - 结论：只读评测切片不能为了制造证据而扩张业务写行为；fixture 应从拥有真值的持久边界布置。跨表证据视图不仅要验证标识关联和单行 schema，还必须校验所有重叠事实与完整生命周期。数据库 timestamp 必须同时固定会话时区和 wire offset，aware 单元 fixture 不能替代真实驱动证据；响应与日志是两个不同泄漏面，必须分别注入标记并分别扫描。输入校验类缺陷必须用总异常边界关闭，而非枚举坏输入；网络凭据保持 bytes，并以按类构造的恶意输入电池证明所有失败路径收敛。
+
+## CB-104 — Asynchronous evaluation-entry inventory and production-only closure
+
+- 现象：原规格要求在异步消费者上证明 sandbox liveness guard 的 redelivery、完成竞态、restart、liveness outage 和幂等 drop/archive，但可执行盘点发现当前六类异步或表面异步路径中没有任何一条能由合法 evaluation 请求触发。早期恢复稿只能直接调用 coordinator、插入数据库 fixture 或手造带 sandbox 的消息来测试 guard，绕过了真实入口并形成假绿。
+- 证据链接：[slice PR #40](https://github.com/ChanTso/citybuddy/pull/40)、[implementation commit `7eb9f0d`](https://github.com/ChanTso/citybuddy/commit/7eb9f0d)
+- 根因：横切守卫切片被排在第一条可守卫的真实 evaluation 异步载体之前，因而没有合法 producer、消息 schema 或消费者真值边界可供端到端取证；把不存在的入口 mock 出来会把“守卫函数能工作”误报成“系统路径受保护”。
+- 解决：经所有者批准，把 CB-104 缩窄为精确六路径的可执行盘点、真实 evaluation token 对真实 production controller 的拒绝、当前 payload 非承载，以及三个真实 Broker consumer 在 handler 前拒绝保留 sandbox 属性。无法真实取证的 guard 实现和 mock 测试全部移除；完整 liveness guard 及 redelivery、竞态、restart、outage、幂等 drop/archive 证据冻结到首个引入 evaluation 可达异步载体的未来切片，并要求在同一切片交付。
+- 结论：横切安全守卫必须绑定首个真实载体及其真实入口、Broker 和权威状态取证，不能作为无载体的独立前置切片；不可达性也要通过真实入口证明，mock、直接 repository/coordinator 调用和手造消息不能证明系统边界。

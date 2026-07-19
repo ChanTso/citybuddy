@@ -2,6 +2,8 @@ package io.citybuddy.commerce.seckill;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.verifyNoInteractions;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
 import java.time.Clock;
@@ -962,6 +964,50 @@ class SeckillTransactionIntegrationTest {
     assertThat(alwaysFailing.dispatchCurrentOnce().selected()).isZero();
   }
 
+  @Test
+  @Order(11)
+  void realBrokerConsumersRejectReservedEvaluationContextOnProductionOnlyPaths() throws Exception {
+    SeckillOrderService untouchedOrderHandler = mock(SeckillOrderService.class);
+    SeckillCancellationService untouchedTimeoutHandler = mock(SeckillCancellationService.class);
+    SeckillReservation reservation =
+        reservationRepository
+            .findByIdempotencyForUpdate(USER, "cb060-commit", "cb060-key-commit")
+            .orElseThrow();
+    int orderMovementsBefore = orderCreateMovementCount(reservation.reservationId());
+    try (Producer producer = producer(new AtomicInteger())) {
+      Transaction transaction = producer.beginTransaction();
+      producer.send(
+          ClientServiceProvider.loadService()
+              .newMessageBuilder()
+              .setTopic(required("ROCKETMQ_TRANSACTION_TOPIC"))
+              .setTag(RocketMqSeckillTransactions.TAG)
+              .setKeys(reservation.reservationId())
+              .addProperty(
+                  RocketMqSeckillTransactions.RESERVED_SANDBOX_PROPERTY,
+                  "sandbox-must-not-be-accepted")
+              .setBody(objectMapper.writeValueAsBytes(SeckillTransactionMessage.from(reservation)))
+              .build(),
+          transaction);
+      transaction.commit();
+    }
+    awaitProductionOnlyRejection(
+        () -> messaging.consumeOnce(untouchedOrderHandler),
+        "Production seckill transaction cannot carry evaluation context");
+    verifyNoInteractions(untouchedOrderHandler);
+    assertThat(orderCreateMovementCount(reservation.reservationId()))
+        .isEqualTo(orderMovementsBefore);
+
+    SeckillOrderRepository.OrderRecord order =
+        orderRepository.findByReservation(reservation.reservationId()).orElseThrow();
+    sendImmediateTimeout(SeckillTimeoutMessage.from(order), true);
+    awaitProductionOnlyRejection(
+        () -> timeoutMessaging.consumeOnce(untouchedTimeoutHandler),
+        "Production seckill timeout cannot carry evaluation context");
+    verifyNoInteractions(untouchedTimeoutHandler);
+    assertThat(orderStatus(reservation.reservationId())).isEqualTo("UNPAID");
+    assertThat(cancellationMovementCount(reservation.reservationId())).isZero();
+  }
+
   private void forceDue(String reservationId) {
     assertThat(
             jdbc.update(
@@ -1059,6 +1105,14 @@ class SeckillTransactionIntegrationTest {
         reservationId);
   }
 
+  private int orderCreateMovementCount(String reservationId) {
+    return jdbc.queryForObject(
+        "SELECT COUNT(*) FROM inventory_ledger WHERE reservation_id = ? "
+            + "AND movement_type = 'SECKILL_ORDER_CREATE'",
+        Integer.class,
+        reservationId);
+  }
+
   private long productStock(String productId) {
     return jdbc.queryForObject(
         "SELECT stock_quantity FROM product WHERE product_id = ?", Long.class, productId);
@@ -1090,17 +1144,40 @@ class SeckillTransactionIntegrationTest {
   }
 
   private void sendImmediateTimeout(SeckillTimeoutMessage payload) throws Exception {
+    sendImmediateTimeout(payload, false);
+  }
+
+  private void sendImmediateTimeout(SeckillTimeoutMessage payload, boolean reservedSandbox)
+      throws Exception {
     try (Producer producer = plainProducer(required("ROCKETMQ_TIMEOUT_TOPIC"))) {
-      producer.send(
+      var builder =
           ClientServiceProvider.loadService()
               .newMessageBuilder()
               .setTopic(required("ROCKETMQ_TIMEOUT_TOPIC"))
               .setTag(RocketMqSeckillTimeouts.TAG)
               .setKeys(payload.eventId())
               .setDeliveryTimestamp(System.currentTimeMillis())
-              .setBody(objectMapper.writeValueAsBytes(payload))
-              .build());
+              .setBody(objectMapper.writeValueAsBytes(payload));
+      if (reservedSandbox) {
+        builder.addProperty(
+            RocketMqSeckillTransactions.RESERVED_SANDBOX_PROPERTY, "sandbox-must-not-be-accepted");
+      }
+      producer.send(builder.build());
     }
+  }
+
+  private void awaitProductionOnlyRejection(CheckedConsume consume, String message)
+      throws Exception {
+    long deadline = System.nanoTime() + Duration.ofSeconds(20).toNanos();
+    while (System.nanoTime() < deadline) {
+      try {
+        assertThat(consume.once()).isZero();
+      } catch (IllegalArgumentException exception) {
+        assertThat(exception).hasMessage(message);
+        return;
+      }
+    }
+    throw new AssertionError("Reserved evaluation context was not delivered by the real Broker");
   }
 
   private Producer plainProducer(String topic) throws Exception {
@@ -1266,6 +1343,11 @@ class SeckillTransactionIntegrationTest {
     while (System.nanoTime() < deadline) {
       Thread.sleep(100);
     }
+  }
+
+  @FunctionalInterface
+  private interface CheckedConsume {
+    int once() throws Exception;
   }
 
   private ResponseEntity<ReservationResult> reserve(

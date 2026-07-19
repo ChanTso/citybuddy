@@ -20,6 +20,7 @@ import org.apache.rocketmq.client.apis.producer.TransactionResolution;
 
 public final class RocketMqSeckillTransactions implements AutoCloseable {
   static final String TAG = "seckill-order";
+  static final String RESERVED_SANDBOX_PROPERTY = "citybuddy-eval-sandbox-id";
 
   private final ClientServiceProvider provider;
   private final ObjectMapper objectMapper;
@@ -100,6 +101,7 @@ public final class RocketMqSeckillTransactions implements AutoCloseable {
         consumer.receive(properties.receiveBatchSize(), properties.receiveInvisibleDuration());
     int consumed = 0;
     for (MessageView message : messages) {
+      rejectEvaluationContext(message);
       orderService.create(payload(message));
       consumer.ack(message);
       consumed++;
@@ -156,6 +158,13 @@ public final class RocketMqSeckillTransactions implements AutoCloseable {
       return objectMapper.readValue(bytes, SeckillTransactionMessage.class);
     } catch (Exception exception) {
       throw new IllegalArgumentException("Seckill transaction message is malformed", exception);
+    }
+  }
+
+  private static void rejectEvaluationContext(MessageView message) {
+    if (message.getProperties().containsKey(RESERVED_SANDBOX_PROPERTY)) {
+      throw new IllegalArgumentException(
+          "Production seckill transaction cannot carry evaluation context");
     }
   }
 

@@ -16,6 +16,7 @@ import org.apache.rocketmq.client.apis.producer.Producer;
 public final class RocketMqCatalogMessaging
     implements CatalogOutboxPublisher.CatalogEventSender, AutoCloseable {
   private static final String TAG = "product-publication";
+  static final String RESERVED_SANDBOX_PROPERTY = "citybuddy-eval-sandbox-id";
 
   private final ClientServiceProvider provider;
   private final CatalogProperties properties;
@@ -72,6 +73,7 @@ public final class RocketMqCatalogMessaging
   public int consumeOnce(CatalogEventHandler handler) throws Exception {
     int consumed = 0;
     for (MessageView message : consumer.receive(16, Duration.ofSeconds(15))) {
+      rejectEvaluationContext(message);
       handler.handle(body(message));
       consumer.ack(message);
       consumed++;
@@ -90,5 +92,12 @@ public final class RocketMqCatalogMessaging
     byte[] bytes = new byte[buffer.remaining()];
     buffer.get(bytes);
     return new String(bytes, StandardCharsets.UTF_8);
+  }
+
+  private static void rejectEvaluationContext(MessageView message) {
+    if (message.getProperties().containsKey(RESERVED_SANDBOX_PROPERTY)) {
+      throw new IllegalArgumentException(
+          "Production catalog message cannot carry evaluation context");
+    }
   }
 }
