@@ -7,7 +7,8 @@ public record EvaluationResetRequest(
     String caseCorrelation,
     int ttlSeconds,
     String testUserLabel,
-    List<ProductFixture> products) {
+    List<ProductFixture> products,
+    PaymentOrderFixture paymentOrder) {
 
   public record ProductFixture(
       String productId,
@@ -17,4 +18,6 @@ public record EvaluationResetRequest(
       String currency,
       long stockQuantity,
       boolean available) {}
+
+  public record PaymentOrderFixture(String orderId, String productId, int quantity) {}
 }

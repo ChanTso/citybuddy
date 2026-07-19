@@ -80,6 +80,57 @@ class EvaluationRequestParserTest {
   }
 
   @Test
+  void paymentOrderFixtureIsExactBoundedAndPartOfTheResetIntent() throws Exception {
+    EvaluationResetRequest request =
+        EvaluationRequestParser.parseReset(
+            mapper.readTree(
+                """
+                {
+                  "sandboxId":"sandbox-pay",
+                  "caseCorrelation":"case-pay",
+                  "ttlSeconds":300,
+                  "testUserLabel":"test-user-pay",
+                  "products":[{
+                    "productId":"product-pay",
+                    "name":"Tea",
+                    "description":"Evaluation tea",
+                    "priceMinor":500,
+                    "currency":"CNY",
+                    "stockQuantity":10,
+                    "available":true
+                  }],
+                  "paymentOrder":{
+                    "orderId":"00000000-0000-0000-0000-000000000105",
+                    "productId":"product-pay",
+                    "quantity":2
+                  }
+                }
+                """));
+
+    assertThat(request.paymentOrder().quantity()).isEqualTo(2);
+    assertThat(EvaluationRequestParser.fixtureDigest(request.products(), request.paymentOrder()))
+        .isNotEqualTo(EvaluationRequestParser.fixtureDigest(request.products()));
+
+    for (String invalidPayment :
+        List.of(
+            "{\"orderId\":\"not-a-uuid\",\"productId\":\"product-pay\",\"quantity\":2}",
+            "{\"orderId\":\"00000000-0000-0000-0000-000000000105\",\"productId\":\"missing\",\"quantity\":2}",
+            "{\"orderId\":\"00000000-0000-0000-0000-000000000105\",\"productId\":\"product-pay\",\"quantity\":101}",
+            "{\"orderId\":\"00000000-0000-0000-0000-000000000105\",\"productId\":\"product-pay\",\"quantity\":2,\"owner\":\"caller\"}")) {
+      String body =
+          """
+          {"sandboxId":"sandbox-pay","caseCorrelation":"case-pay","ttlSeconds":300,
+           "testUserLabel":"test-user-pay","products":[{"productId":"product-pay",
+           "name":"Tea","description":"Evaluation tea","priceMinor":500,
+           "currency":"CNY","stockQuantity":10,"available":true}],"paymentOrder":%s}
+          """
+              .formatted(invalidPayment);
+      assertThatThrownBy(() -> EvaluationRequestParser.parseReset(mapper.readTree(body)))
+          .isInstanceOf(EvaluationSandboxException.class);
+    }
+  }
+
+  @Test
   void evaluationViewParametersAreExactAndBounded() {
     LinkedMultiValueMap<String, String> accepted = new LinkedMultiValueMap<>();
     accepted.add("after", "7");

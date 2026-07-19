@@ -52,6 +52,48 @@ class MockPaymentCallbackAuthenticatorTest {
                 "wrong-key", epoch(NOW), signature(NOW, "wrong-key"), "wrong-key", REQUEST));
   }
 
+  @Test
+  void authenticatedCanonicalCoversTheCompleteEvaluationContext() {
+    MockPaymentCallbackRequest evaluation =
+        new MockPaymentCallbackRequest(
+            REQUEST.callbackEventId(),
+            REQUEST.callbackCorrelationId(),
+            REQUEST.orderId(),
+            REQUEST.amountMinor(),
+            REQUEST.currency(),
+            REQUEST.outcome(),
+            "sandbox-105",
+            "session-105",
+            "trace-105",
+            "a".repeat(64));
+    String timestamp = epoch(NOW);
+    String key = "callback-evaluation";
+    String signature =
+        HexFormat.of()
+            .formatHex(
+                MockPaymentCallbackAuthenticator.hmac(
+                    SECRET,
+                    MockPaymentCallbackAuthenticator.canonical(
+                        KEY_ID, timestamp, key, evaluation)));
+
+    assertThatCode(() -> authenticator.authenticate(KEY_ID, timestamp, signature, key, evaluation))
+        .doesNotThrowAnyException();
+    MockPaymentCallbackRequest substituted =
+        new MockPaymentCallbackRequest(
+            evaluation.callbackEventId(),
+            evaluation.callbackCorrelationId(),
+            evaluation.orderId(),
+            evaluation.amountMinor(),
+            evaluation.currency(),
+            evaluation.outcome(),
+            "sandbox-other",
+            evaluation.supportSessionId(),
+            evaluation.traceId(),
+            evaluation.operationId());
+    assertUnauthorized(
+        () -> authenticator.authenticate(KEY_ID, timestamp, signature, key, substituted));
+  }
+
   private void assertAccepted(Instant signedAt, String idempotencyKey) {
     assertThatCode(() -> authenticate(signedAt, idempotencyKey)).doesNotThrowAnyException();
   }

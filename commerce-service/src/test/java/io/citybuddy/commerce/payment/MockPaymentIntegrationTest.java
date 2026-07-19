@@ -3,6 +3,9 @@ package io.citybuddy.commerce.payment;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
+import io.citybuddy.commerce.evaluation.EvaluationSandboxException;
+import io.citybuddy.commerce.evaluation.EvaluationSandboxRepository;
+import io.citybuddy.commerce.evaluation.EvaluationViewRepository;
 import io.citybuddy.commerce.seckill.SeckillActivityRepository;
 import io.citybuddy.commerce.seckill.SeckillCancellationService;
 import io.citybuddy.commerce.seckill.SeckillOrderRepository;
@@ -11,14 +14,18 @@ import io.citybuddy.commerce.seckill.SeckillTimeoutMessage;
 import java.sql.SQLException;
 import java.time.Clock;
 import java.time.Instant;
+import java.time.ZoneId;
 import java.time.temporal.ChronoUnit;
 import java.util.HexFormat;
+import java.util.LinkedHashMap;
+import java.util.List;
 import java.util.Map;
 import java.util.UUID;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicReference;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.condition.EnabledIfEnvironmentVariable;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -103,6 +110,23 @@ class MockPaymentIntegrationTest {
                     Map.of("amountMinor", 1500, "currency", "AUD", "userSubject", OTHER_USER))
                 .getStatusCode())
         .isEqualTo(HttpStatus.BAD_REQUEST);
+    assertThat(
+            start(
+                    directToken(),
+                    orderId,
+                    "payment-extra-field",
+                    Map.of("amountMinor", 1500, "currency", "AUD", "metadata", "forbidden"))
+                .getStatusCode())
+        .isEqualTo(HttpStatus.BAD_REQUEST);
+    assertThat(
+            start(
+                    directToken(),
+                    "production-cannot-add-evaluation",
+                    orderId,
+                    "payment-evaluation-header",
+                    body(1500))
+                .getStatusCode())
+        .isEqualTo(HttpStatus.UNAUTHORIZED);
     assertThat(start(directToken(), orderId, "payment-wrong-amount", body(1499)).getStatusCode())
         .isEqualTo(HttpStatus.CONFLICT);
 
@@ -128,6 +152,26 @@ class MockPaymentIntegrationTest {
     MockPaymentCallbackRequest callback = callback(attempt, UUID.randomUUID().toString());
     long attemptsBefore = count("mock_payment_attempt");
     long callbacksBefore = count("mock_payment_callback");
+    MockPaymentCallbackRequest evaluationContext =
+        new MockPaymentCallbackRequest(
+            UUID.randomUUID().toString(),
+            attempt.callbackCorrelationId(),
+            attempt.orderId(),
+            attempt.amountMinor(),
+            attempt.currency(),
+            "SUCCEEDED",
+            "production-cannot-add-evaluation",
+            "payment-session",
+            "payment-trace",
+            "a".repeat(64));
+    assertThat(
+            callback(
+                    evaluationContext,
+                    "callback-production-evaluation",
+                    Instant.now(),
+                    CALLBACK_SECRET)
+                .getStatusCode())
+        .isEqualTo(HttpStatus.FORBIDDEN);
     assertThat(callback(callback, "callback-unsigned", null, null).getStatusCode())
         .isEqualTo(HttpStatus.UNAUTHORIZED);
     assertThat(
@@ -165,6 +209,229 @@ class MockPaymentIntegrationTest {
     assertThat(reorderedResult.getBody()).isNotNull();
     assertThat(reorderedResult.getBody().replayed()).isTrue();
     assertPaidTruth(orderId, attempt.attemptId(), "STANDARD_PAYMENT", 1500);
+  }
+
+  @Test
+  void paymentJsonRejectionClosesUnknownAndMalformedInputClasses() {
+    String orderId = seedStandardOrder(USER, 1700);
+    List<Map<String, Object>> startBodies =
+        List.of(
+            mapWith("amountMinor", 1700, "currency", "AUD", "metadata", null),
+            mapWith("amountMinor", 1700, "currency", "AUD", "metadata", Map.of("x", 1)),
+            mapWith("amountMinor", 1700, "currency", "AUD", "metadata", List.of("x")),
+            mapWith("amountMinor", Map.of("value", 1700), "currency", "AUD"),
+            mapWith("amountMinor", 1700, "currency", List.of("AUD")));
+    String startFailure = null;
+    for (int index = 0; index < startBodies.size(); index++) {
+      ResponseEntity<String> response =
+          startRaw(directToken(), orderId, "payment-invalid-json-" + index, startBodies.get(index));
+      assertThat(response.getStatusCode()).isEqualTo(HttpStatus.BAD_REQUEST);
+      if (startFailure == null) {
+        startFailure = response.getBody();
+      } else {
+        assertThat(response.getBody()).isEqualTo(startFailure);
+      }
+    }
+
+    MockPaymentResult attempt =
+        payments.start(
+            USER, orderId, "payment-valid-after-json", new MockPaymentRequest(1700L, "AUD", null));
+    MockPaymentCallbackRequest valid = callback(attempt, UUID.randomUUID().toString());
+    Map<String, Object> base = callbackBody(valid);
+    List<Map<String, Object>> callbackBodies =
+        List.of(
+            withExtra(base, "metadata", null),
+            withExtra(base, "metadata", Map.of("nested", true)),
+            withExtra(base, "metadata", List.of("nested")),
+            withExtra(base, "amountMinor", Map.of("value", 1700)),
+            withExtra(base, "currency", List.of("AUD")));
+    String callbackFailure = null;
+    for (int index = 0; index < callbackBodies.size(); index++) {
+      ResponseEntity<String> response =
+          callbackRaw(valid, "callback-invalid-json-" + index, callbackBodies.get(index));
+      assertThat(response.getStatusCode()).isEqualTo(HttpStatus.BAD_REQUEST);
+      if (callbackFailure == null) {
+        callbackFailure = response.getBody();
+      } else {
+        assertThat(response.getBody()).isEqualTo(callbackFailure);
+      }
+    }
+    assertThat(orderState(orderId)).containsExactly("UNPAID", "1");
+    assertThat(callbackCount(attempt.attemptId())).isZero();
+    assertThat(paymentMovementCount(attempt.attemptId())).isZero();
+  }
+
+  @Test
+  void evaluationLookupsConcealOtherActiveSandboxAndReplayRequiresExactFullIntent() {
+    EvaluationPaymentFixture first = seedEvaluationPayment("full-intent-first");
+    EvaluationPaymentFixture second = seedEvaluationPayment("full-intent-second");
+    MockPaymentService evaluation = evaluationPayments(new MockPaymentRepository(jdbc));
+
+    String crossOrder =
+        paymentFailure(
+            () ->
+                evaluation.start(
+                    second.userSubject(),
+                    second.sandboxId(),
+                    first.orderId(),
+                    "payment-cross-order",
+                    new MockPaymentRequest(1800L, "CNY", null)));
+    String unknownOrder =
+        paymentFailure(
+            () ->
+                evaluation.start(
+                    second.userSubject(),
+                    second.sandboxId(),
+                    UUID.randomUUID().toString(),
+                    "payment-unknown-order",
+                    new MockPaymentRequest(1800L, "CNY", null)));
+    assertThat(crossOrder).isEqualTo(unknownOrder);
+
+    MockPaymentResult attempt =
+        evaluation.start(
+            first.userSubject(),
+            first.sandboxId(),
+            first.orderId(),
+            "payment-full-intent",
+            new MockPaymentRequest(1800L, "CNY", null));
+    MockPaymentCallbackRequest callback =
+        evaluationCallback(attempt, first.sandboxId(), "full-intent");
+    MockPaymentCallbackRequest crossCorrelation =
+        evaluationCallbackWith(
+            callback,
+            callback.callbackEventId(),
+            callback.callbackCorrelationId(),
+            callback.orderId(),
+            callback.amountMinor(),
+            callback.currency(),
+            callback.outcome(),
+            second.sandboxId(),
+            callback.supportSessionId(),
+            callback.traceId(),
+            callback.operationId());
+    MockPaymentCallbackRequest unknownCorrelation =
+        evaluationCallbackWith(
+            crossCorrelation,
+            crossCorrelation.callbackEventId(),
+            UUID.randomUUID().toString(),
+            crossCorrelation.orderId(),
+            crossCorrelation.amountMinor(),
+            crossCorrelation.currency(),
+            crossCorrelation.outcome(),
+            crossCorrelation.sandboxId(),
+            crossCorrelation.supportSessionId(),
+            crossCorrelation.traceId(),
+            crossCorrelation.operationId());
+    assertThat(paymentFailure(() -> evaluation.callback("callback-cross", crossCorrelation)))
+        .isEqualTo(
+            paymentFailure(() -> evaluation.callback("callback-unknown", unknownCorrelation)));
+
+    String callbackKey = "callback-full-intent";
+    assertThat(evaluation.callback(callbackKey, callback).replayed()).isFalse();
+    assertThat(evaluation.callback(callbackKey, callback).replayed()).isTrue();
+    List<Runnable> conflicts =
+        List.of(
+            () -> evaluation.callback("callback-full-intent-new-key", callback),
+            () ->
+                evaluation.callback(
+                    callbackKey,
+                    evaluationCallbackWith(
+                        callback,
+                        UUID.randomUUID().toString(),
+                        callback.callbackCorrelationId(),
+                        callback.orderId(),
+                        callback.amountMinor(),
+                        callback.currency(),
+                        callback.outcome(),
+                        callback.sandboxId(),
+                        callback.supportSessionId(),
+                        callback.traceId(),
+                        callback.operationId())),
+            () ->
+                evaluation.callback(
+                    callbackKey,
+                    evaluationCallbackWith(
+                        callback,
+                        callback.callbackEventId(),
+                        callback.callbackCorrelationId(),
+                        callback.orderId(),
+                        callback.amountMinor(),
+                        callback.currency(),
+                        callback.outcome(),
+                        callback.sandboxId(),
+                        "changed-session",
+                        callback.traceId(),
+                        callback.operationId())),
+            () ->
+                evaluation.callback(
+                    callbackKey,
+                    evaluationCallbackWith(
+                        callback,
+                        callback.callbackEventId(),
+                        callback.callbackCorrelationId(),
+                        callback.orderId(),
+                        callback.amountMinor(),
+                        callback.currency(),
+                        callback.outcome(),
+                        callback.sandboxId(),
+                        callback.supportSessionId(),
+                        "changed-trace",
+                        callback.operationId())),
+            () ->
+                evaluation.callback(
+                    callbackKey,
+                    evaluationCallbackWith(
+                        callback,
+                        callback.callbackEventId(),
+                        callback.callbackCorrelationId(),
+                        callback.orderId(),
+                        callback.amountMinor(),
+                        callback.currency(),
+                        callback.outcome(),
+                        callback.sandboxId(),
+                        callback.supportSessionId(),
+                        callback.traceId(),
+                        "b".repeat(64))));
+    for (Runnable conflict : conflicts) {
+      assertThat(paymentFailure(conflict)).startsWith("409:CONFLICT:");
+    }
+    assertPaidTruth(first.orderId(), attempt.attemptId(), "STANDARD_PAYMENT", 1800, "CNY");
+    assertThat(callbackCount(attempt.attemptId())).isOne();
+  }
+
+  @Test
+  void evaluationPaymentOrderingUsesItsDocumentedTotalOrderAndExercisesTheTieKey() {
+    EvaluationPaymentFixture fixture = seedEvaluationPayment("payment-ordering");
+    MockPaymentService evaluation = evaluationPayments(new MockPaymentRepository(jdbc));
+    MockPaymentResult first =
+        evaluation.start(
+            fixture.userSubject(),
+            fixture.sandboxId(),
+            fixture.orderId(),
+            "payment-ordering-first",
+            new MockPaymentRequest(1800L, "CNY", null));
+    String secondOrder = seedAdditionalEvaluationOrder(fixture);
+    MockPaymentResult second =
+        evaluation.start(
+            fixture.userSubject(),
+            fixture.sandboxId(),
+            secondOrder,
+            "payment-ordering-second",
+            new MockPaymentRequest(1800L, "CNY", null));
+    jdbc.update(
+        "UPDATE mock_payment_attempt SET created_at = '2035-01-02 03:04:05.123456' "
+            + "WHERE attempt_id IN (?, ?)",
+        first.attemptId(),
+        second.attemptId());
+
+    EvaluationViewRepository views = new EvaluationViewRepository(jdbc);
+    List<String> expected =
+        List.of(first.attemptId(), second.attemptId()).stream().sorted().toList();
+    List<EvaluationViewRepository.PaymentView> firstRead = views.payments(fixture.sandboxId());
+    List<EvaluationViewRepository.PaymentView> secondRead = views.payments(fixture.sandboxId());
+    assertThat(firstRead.stream().map(EvaluationViewRepository.PaymentView::attemptId).toList())
+        .containsExactlyElementsOf(expected);
+    assertThat(secondRead).isEqualTo(firstRead);
   }
 
   @Test
@@ -321,6 +588,298 @@ class MockPaymentIntegrationTest {
       assertThat(first.get(10, TimeUnit.SECONDS).replayed())
           .isNotEqualTo(second.get(10, TimeUnit.SECONDS).replayed());
       assertPaidTruth(orderId, attempt.attemptId(), "STANDARD_PAYMENT", amount);
+    }
+  }
+
+  @Test
+  void evaluationConcurrentDuplicateCallbackCommitsOneAuditAndMovement() throws Exception {
+    for (int iteration = 0; iteration < 10; iteration++) {
+      EvaluationPaymentFixture fixture = seedEvaluationPayment("duplicate-" + iteration);
+      MockPaymentService evaluationPayments = evaluationPayments(new MockPaymentRepository(jdbc));
+      MockPaymentResult attempt =
+          evaluationPayments.start(
+              fixture.userSubject(),
+              fixture.sandboxId(),
+              fixture.orderId(),
+              "payment-eval-duplicate-" + iteration,
+              new MockPaymentRequest(1800L, "CNY", null));
+      MockPaymentCallbackRequest callback =
+          evaluationCallback(attempt, fixture.sandboxId(), "duplicate-" + iteration);
+      CountDownLatch ready = new CountDownLatch(2);
+      CountDownLatch release = new CountDownLatch(1);
+      String callbackKey = "callback-eval-duplicate-" + iteration;
+
+      CompletableFuture<MockPaymentCallbackResult> first =
+          CompletableFuture.supplyAsync(
+              () -> concurrentCallback(evaluationPayments, ready, release, callbackKey, callback));
+      CompletableFuture<MockPaymentCallbackResult> second =
+          CompletableFuture.supplyAsync(
+              () -> concurrentCallback(evaluationPayments, ready, release, callbackKey, callback));
+      assertThat(ready.await(10, TimeUnit.SECONDS)).isTrue();
+      release.countDown();
+
+      assertThat(first.get(10, TimeUnit.SECONDS).replayed())
+          .isNotEqualTo(second.get(10, TimeUnit.SECONDS).replayed());
+      assertPaidTruth(fixture.orderId(), attempt.attemptId(), "STANDARD_PAYMENT", 1800, "CNY");
+      assertThat(paymentAuditCount(fixture.sandboxId())).isOne();
+    }
+  }
+
+  @Test
+  void evaluationCallbackWinsAControlledCompletionRace() throws Exception {
+    EvaluationPaymentFixture fixture = seedEvaluationPayment("callback-wins");
+    MockPaymentService healthy = evaluationPayments(new MockPaymentRepository(jdbc));
+    MockPaymentResult attempt =
+        healthy.start(
+            fixture.userSubject(),
+            fixture.sandboxId(),
+            fixture.orderId(),
+            "payment-eval-callback-wins",
+            new MockPaymentRequest(1800L, "CNY", null));
+    MockPaymentCallbackRequest callback =
+        evaluationCallback(attempt, fixture.sandboxId(), "callback-wins");
+    CountDownLatch callbackHasSandboxLock = new CountDownLatch(1);
+    CountDownLatch releaseCallback = new CountDownLatch(1);
+    CountDownLatch completionEntered = new CountDownLatch(1);
+    MockPaymentRepository pausedPayments =
+        new MockPaymentRepository(jdbc) {
+          @Override
+          public java.util.Optional<AttemptRecord> findEvaluationAttemptByCorrelationForUpdate(
+              String correlationId, String sandboxId) {
+            callbackHasSandboxLock.countDown();
+            awaitSignal(releaseCallback, "callback release");
+            return super.findEvaluationAttemptByCorrelationForUpdate(correlationId, sandboxId);
+          }
+        };
+    MockPaymentService callbackService = evaluationPayments(pausedPayments);
+    EvaluationSandboxRepository completionRepository =
+        new EvaluationSandboxRepository(jdbc) {
+          @Override
+          public Sandbox beginCompletion(
+              String sandboxId, String caseCorrelation, String idempotencyKey, Instant now) {
+            completionEntered.countDown();
+            return super.beginCompletion(sandboxId, caseCorrelation, idempotencyKey, now);
+          }
+        };
+
+    CompletableFuture<MockPaymentCallbackResult> callbackFuture =
+        CompletableFuture.supplyAsync(
+            () -> callbackService.callback("callback-eval-callback-wins", callback));
+    assertThat(callbackHasSandboxLock.await(10, TimeUnit.SECONDS)).isTrue();
+    CompletableFuture<EvaluationSandboxRepository.Sandbox> completionFuture =
+        CompletableFuture.supplyAsync(
+            () ->
+                transactionTemplate()
+                    .execute(
+                        status ->
+                            completionRepository.beginCompletion(
+                                fixture.sandboxId(),
+                                fixture.caseCorrelation(),
+                                "complete-eval-callback-wins",
+                                Instant.now())));
+    assertThat(completionEntered.await(10, TimeUnit.SECONDS)).isTrue();
+    assertThat(completionFuture).isNotDone();
+    releaseCallback.countDown();
+
+    assertThat(callbackFuture.get(10, TimeUnit.SECONDS).replayed()).isFalse();
+    assertThat(completionFuture.get(10, TimeUnit.SECONDS).lifecycleState()).isEqualTo("DEAD");
+    assertPaidTruth(fixture.orderId(), attempt.attemptId(), "STANDARD_PAYMENT", 1800, "CNY");
+    assertThat(paymentAuditCount(fixture.sandboxId())).isOne();
+  }
+
+  @Test
+  void evaluationCompletionWinsAControlledCallbackRace() throws Exception {
+    EvaluationPaymentFixture fixture = seedEvaluationPayment("completion-wins");
+    MockPaymentService healthy = evaluationPayments(new MockPaymentRepository(jdbc));
+    MockPaymentResult attempt =
+        healthy.start(
+            fixture.userSubject(),
+            fixture.sandboxId(),
+            fixture.orderId(),
+            "payment-eval-completion-wins",
+            new MockPaymentRequest(1800L, "CNY", null));
+    MockPaymentCallbackRequest callback =
+        evaluationCallback(attempt, fixture.sandboxId(), "completion-wins");
+    CountDownLatch completionHasSandboxLock = new CountDownLatch(1);
+    CountDownLatch releaseCompletion = new CountDownLatch(1);
+    CountDownLatch callbackEntered = new CountDownLatch(1);
+    EvaluationSandboxRepository completionRepository =
+        new EvaluationSandboxRepository(jdbc) {
+          @Override
+          public Sandbox beginCompletion(
+              String sandboxId, String caseCorrelation, String idempotencyKey, Instant now) {
+            Sandbox completed =
+                super.beginCompletion(sandboxId, caseCorrelation, idempotencyKey, now);
+            completionHasSandboxLock.countDown();
+            awaitSignal(releaseCompletion, "completion release");
+            return completed;
+          }
+        };
+    EvaluationSandboxRepository observingSandboxRepository =
+        new EvaluationSandboxRepository(jdbc) {
+          @Override
+          public Sandbox lockForPayment(String sandboxId) {
+            callbackEntered.countDown();
+            return super.lockForPayment(sandboxId);
+          }
+        };
+    MockPaymentService callbackService =
+        evaluationPayments(new MockPaymentRepository(jdbc), observingSandboxRepository);
+
+    CompletableFuture<EvaluationSandboxRepository.Sandbox> completionFuture =
+        CompletableFuture.supplyAsync(
+            () ->
+                transactionTemplate()
+                    .execute(
+                        status ->
+                            completionRepository.beginCompletion(
+                                fixture.sandboxId(),
+                                fixture.caseCorrelation(),
+                                "complete-eval-completion-wins",
+                                Instant.now())));
+    assertThat(completionHasSandboxLock.await(10, TimeUnit.SECONDS)).isTrue();
+    CompletableFuture<Object> callbackFuture =
+        CompletableFuture.supplyAsync(
+            () -> {
+              try {
+                return callbackService.callback("callback-eval-completion-wins", callback);
+              } catch (EvaluationSandboxException exception) {
+                return exception;
+              }
+            });
+    assertThat(callbackEntered.await(10, TimeUnit.SECONDS)).isTrue();
+    assertThat(callbackFuture).isNotDone();
+    releaseCompletion.countDown();
+
+    assertThat(completionFuture.get(10, TimeUnit.SECONDS).lifecycleState()).isEqualTo("DEAD");
+    assertThat(callbackFuture.get(10, TimeUnit.SECONDS))
+        .isInstanceOfSatisfying(
+            EvaluationSandboxException.class,
+            exception -> assertThat(exception.status()).isEqualTo(403));
+    assertThat(orderState(fixture.orderId())).containsExactly("UNPAID", "1");
+    assertThat(attemptState(attempt.attemptId())).containsExactly("PENDING", "1");
+    assertThat(paymentMovementCount(attempt.attemptId())).isZero();
+    assertThat(callbackCount(attempt.attemptId())).isZero();
+    assertThat(paymentAuditCount(fixture.sandboxId())).isZero();
+  }
+
+  @Test
+  void evaluationCallbackRechecksExpiryAfterWaitingForSandboxLock() throws Exception {
+    EvaluationPaymentFixture fixture = seedEvaluationPayment("expiry-wait");
+    MockPaymentService healthy = evaluationPayments(new MockPaymentRepository(jdbc));
+    MockPaymentResult attempt =
+        healthy.start(
+            fixture.userSubject(),
+            fixture.sandboxId(),
+            fixture.orderId(),
+            "payment-eval-expiry-wait",
+            new MockPaymentRequest(1800L, "CNY", null));
+    MockPaymentCallbackRequest callback =
+        evaluationCallback(attempt, fixture.sandboxId(), "expiry-wait");
+    MutableClock callbackClock = new MutableClock(Instant.now(), ZoneId.of("UTC"));
+    Instant expiry = callbackClock.instant().plusSeconds(10);
+    jdbc.update(
+        "UPDATE eval_sandbox SET expires_at = ? WHERE sandbox_id = ?",
+        java.sql.Timestamp.from(expiry),
+        fixture.sandboxId());
+    CountDownLatch holderHasLock = new CountDownLatch(1);
+    CountDownLatch releaseHolder = new CountDownLatch(1);
+    CountDownLatch callbackEntered = new CountDownLatch(1);
+    EvaluationSandboxRepository observingSandboxRepository =
+        new EvaluationSandboxRepository(jdbc) {
+          @Override
+          public Sandbox lockForPayment(String sandboxId) {
+            callbackEntered.countDown();
+            return super.lockForPayment(sandboxId);
+          }
+        };
+    MockPaymentService callbackService =
+        evaluationPayments(
+            new MockPaymentRepository(jdbc), observingSandboxRepository, callbackClock);
+
+    CompletableFuture<Boolean> lockHolder =
+        CompletableFuture.supplyAsync(
+            () ->
+                transactionTemplate()
+                    .execute(
+                        status -> {
+                          new EvaluationSandboxRepository(jdbc).lockForPayment(fixture.sandboxId());
+                          holderHasLock.countDown();
+                          awaitSignal(releaseHolder, "sandbox lock holder release");
+                          return true;
+                        }));
+    assertThat(holderHasLock.await(10, TimeUnit.SECONDS)).isTrue();
+    CompletableFuture<Object> callbackFuture =
+        CompletableFuture.supplyAsync(
+            () -> {
+              try {
+                return callbackService.callback("callback-eval-expiry-wait", callback);
+              } catch (EvaluationSandboxException exception) {
+                return exception;
+              }
+            });
+    assertThat(callbackEntered.await(10, TimeUnit.SECONDS)).isTrue();
+    assertThat(callbackClock.instant()).isBefore(expiry);
+    assertThat(callbackFuture).isNotDone();
+    callbackClock.set(expiry.plusSeconds(1));
+    assertThat(callbackClock.instant()).isAfter(expiry);
+    releaseHolder.countDown();
+
+    assertThat(lockHolder.get(10, TimeUnit.SECONDS)).isTrue();
+    assertThat(callbackFuture.get(10, TimeUnit.SECONDS))
+        .isInstanceOfSatisfying(
+            EvaluationSandboxException.class,
+            exception -> assertThat(exception.status()).isEqualTo(403));
+    assertThat(orderState(fixture.orderId())).containsExactly("UNPAID", "1");
+    assertThat(attemptState(attempt.attemptId())).containsExactly("PENDING", "1");
+    assertThat(paymentMovementCount(attempt.attemptId())).isZero();
+    assertThat(callbackCount(attempt.attemptId())).isZero();
+    assertThat(paymentAuditCount(fixture.sandboxId())).isZero();
+  }
+
+  @Test
+  void evaluationCallbackRollsBackAfterEveryIntermediateWriteAndRetryConverges() {
+    for (FailurePoint failurePoint : FailurePoint.values()) {
+      EvaluationPaymentFixture fixture = seedEvaluationPayment("rollback-" + failurePoint.name());
+      MockPaymentService healthy = evaluationPayments(new MockPaymentRepository(jdbc));
+      MockPaymentResult attempt =
+          healthy.start(
+              fixture.userSubject(),
+              fixture.sandboxId(),
+              fixture.orderId(),
+              "payment-eval-rollback-" + failurePoint.name(),
+              new MockPaymentRequest(1800L, "CNY", null));
+      MockPaymentCallbackRequest callback =
+          evaluationCallback(attempt, fixture.sandboxId(), failurePoint.name());
+      MockPaymentService failing = evaluationPayments(failingRepository(failurePoint));
+      String callbackKey = "callback-eval-rollback-" + failurePoint.name();
+
+      assertThatThrownBy(() -> failing.callback(callbackKey, callback))
+          .isInstanceOf(DataAccessResourceFailureException.class);
+      assertThat(orderState(fixture.orderId())).containsExactly("UNPAID", "1");
+      assertThat(attemptState(attempt.attemptId())).containsExactly("PENDING", "1");
+      assertThat(paymentMovementCount(attempt.attemptId())).isZero();
+      assertThat(
+              jdbc.queryForObject(
+                  "SELECT COUNT(*) FROM mock_payment_callback WHERE attempt_id = ?",
+                  Long.class,
+                  attempt.attemptId()))
+          .isZero();
+      assertThat(
+              jdbc.queryForObject(
+                  "SELECT COUNT(*) FROM eval_commerce_audit_reference WHERE sandbox_id = ?",
+                  Long.class,
+                  fixture.sandboxId()))
+          .isZero();
+
+      assertThat(healthy.callback(callbackKey, callback).state()).isEqualTo("SUCCEEDED");
+      assertPaidTruth(fixture.orderId(), attempt.attemptId(), "STANDARD_PAYMENT", 1800, "CNY");
+      assertThat(
+              jdbc.queryForObject(
+                  "SELECT COUNT(*) FROM eval_commerce_audit_reference WHERE sandbox_id = ?",
+                  Long.class,
+                  fixture.sandboxId()))
+          .isOne();
     }
   }
 
@@ -483,9 +1042,33 @@ class MockPaymentIntegrationTest {
 
   private ResponseEntity<MockPaymentResult> start(
       String token, String orderId, String idempotencyKey, Map<String, Object> request) {
+    return start(token, null, orderId, idempotencyKey, request);
+  }
+
+  private ResponseEntity<String> startRaw(
+      String token, String orderId, String idempotencyKey, Map<String, Object> request) {
+    HttpHeaders headers = new HttpHeaders();
+    headers.setBearerAuth(token);
+    headers.set("Idempotency-Key", idempotencyKey);
+    return http.exchange(
+        "/api/orders/" + orderId + "/mock-payment",
+        HttpMethod.POST,
+        new HttpEntity<>(request, headers),
+        String.class);
+  }
+
+  private ResponseEntity<MockPaymentResult> start(
+      String token,
+      String sandboxId,
+      String orderId,
+      String idempotencyKey,
+      Map<String, Object> request) {
     HttpHeaders headers = new HttpHeaders();
     if (token != null) {
       headers.setBearerAuth(token);
+    }
+    if (sandboxId != null) {
+      headers.set("X-Eval-Sandbox-Id", sandboxId);
     }
     headers.set("Idempotency-Key", idempotencyKey);
     return http.exchange(
@@ -515,6 +1098,29 @@ class MockPaymentIntegrationTest {
         HttpMethod.POST,
         new HttpEntity<>(request, headers),
         MockPaymentCallbackResult.class);
+  }
+
+  private ResponseEntity<String> callbackRaw(
+      MockPaymentCallbackRequest signedRequest,
+      String idempotencyKey,
+      Map<String, Object> requestBody) {
+    HttpHeaders headers = new HttpHeaders();
+    String timestamp = Long.toString(Instant.now().getEpochSecond());
+    headers.set("Idempotency-Key", idempotencyKey);
+    headers.set("X-Mock-Payment-Key-Id", CALLBACK_KEY);
+    headers.set("X-Mock-Payment-Timestamp", timestamp);
+    String canonical =
+        MockPaymentCallbackAuthenticator.canonical(
+            CALLBACK_KEY, timestamp, idempotencyKey, signedRequest);
+    headers.set(
+        "X-Mock-Payment-Signature",
+        HexFormat.of()
+            .formatHex(MockPaymentCallbackAuthenticator.hmac(CALLBACK_SECRET, canonical)));
+    return http.exchange(
+        "/internal/mock-payments/callback",
+        HttpMethod.POST,
+        new HttpEntity<>(requestBody, headers),
+        String.class);
   }
 
   private String seedStandardOrder(String user, long amount) {
@@ -635,19 +1241,167 @@ class MockPaymentIntegrationTest {
       CountDownLatch release,
       String idempotencyKey,
       MockPaymentCallbackRequest callback) {
+    return concurrentCallback(payments, ready, release, idempotencyKey, callback);
+  }
+
+  private static MockPaymentCallbackResult concurrentCallback(
+      MockPaymentService service,
+      CountDownLatch ready,
+      CountDownLatch release,
+      String idempotencyKey,
+      MockPaymentCallbackRequest callback) {
     awaitRace(ready, release);
-    return payments.callback(idempotencyKey, callback);
+    return service.callback(idempotencyKey, callback);
+  }
+
+  private MockPaymentService evaluationPayments(MockPaymentRepository repository) {
+    return evaluationPayments(repository, new EvaluationSandboxRepository(jdbc));
+  }
+
+  private MockPaymentService evaluationPayments(
+      MockPaymentRepository repository, EvaluationSandboxRepository sandboxRepository) {
+    return evaluationPayments(repository, sandboxRepository, Clock.systemUTC());
+  }
+
+  private MockPaymentService evaluationPayments(
+      MockPaymentRepository repository,
+      EvaluationSandboxRepository sandboxRepository,
+      Clock paymentClock) {
+    return new MockPaymentService(
+        repository, transactionTemplate(), paymentClock, sandboxRepository);
+  }
+
+  private MockPaymentRepository failingRepository(FailurePoint point) {
+    return new MockPaymentRepository(jdbc) {
+      private void fail(FailurePoint current) {
+        if (point == current) {
+          throw new DataAccessResourceFailureException("controlled " + current + " failure");
+        }
+      }
+
+      @Override
+      public void markOrderPaid(OrderTruth order) {
+        super.markOrderPaid(order);
+        fail(FailurePoint.ORDER);
+      }
+
+      @Override
+      public void markAttemptSucceeded(AttemptRecord attempt, Instant succeededAt) {
+        super.markAttemptSucceeded(attempt, succeededAt);
+        fail(FailurePoint.ATTEMPT);
+      }
+
+      @Override
+      public void insertPaymentMovement(AttemptRecord attempt, OrderTruth order) {
+        super.insertPaymentMovement(attempt, order);
+        fail(FailurePoint.LEDGER);
+      }
+
+      @Override
+      public void insertCallback(CallbackRecord callback) {
+        super.insertCallback(callback);
+        fail(FailurePoint.CALLBACK);
+      }
+
+      @Override
+      public void insertPaymentAuditReference(
+          String auditReferenceId, CallbackRecord callback, long entityVersion) {
+        super.insertPaymentAuditReference(auditReferenceId, callback, entityVersion);
+        fail(FailurePoint.AUDIT);
+      }
+    };
+  }
+
+  private EvaluationPaymentFixture seedEvaluationPayment(String suffix) {
+    String compact = suffix.replace('_', '-').toLowerCase(java.util.Locale.ROOT);
+    String sandboxId = "payment-sandbox-" + compact;
+    String caseCorrelation = "payment-case-" + compact;
+    String orderId = UUID.randomUUID().toString();
+    String handle = "h" + UUID.randomUUID().toString().replace("-", "") + "x".repeat(10);
+    String userSubject = "eval-" + UUID.randomUUID();
+    Instant now = Instant.now();
+    jdbc.update(
+        """
+        INSERT INTO eval_sandbox
+          (sandbox_id, case_correlation, reset_idempotency_key, fixture_digest, fixture_count,
+           test_user_label, requested_ttl_seconds, auth_provision_idempotency_key,
+           auth_revoke_idempotency_key, opaque_handle, lifecycle_state,
+           auth_invalidation_state, cleanup_due_at, provisioning_due_at,
+           auth_expiry_upper_bound, expires_at, activated_at, version)
+        VALUES (?, ?, ?, REPEAT('0', 64), 1, ?, 600, ?, ?, ?, 'ACTIVE', 'PROVISIONED',
+                ?, ?, ?, ?, ?, 2)
+        """,
+        sandboxId,
+        caseCorrelation,
+        "reset-" + compact,
+        "user-" + compact,
+        "provision-" + compact,
+        "revoke-" + compact,
+        handle,
+        java.sql.Timestamp.from(now.plusSeconds(600)),
+        java.sql.Timestamp.from(now.plusSeconds(60)),
+        java.sql.Timestamp.from(now.plusSeconds(660)),
+        java.sql.Timestamp.from(now.plusSeconds(600)),
+        java.sql.Timestamp.from(now));
+    jdbc.update(
+        """
+        INSERT INTO eval_sandbox_product_fixture
+          (sandbox_id, product_id, name, description, price_minor, currency,
+           stock_quantity, available, publication_version)
+        VALUES (?, ?, 'Payment fixture', 'Evaluation payment fixture', 900, 'CNY', 3, TRUE, 1)
+        """,
+        sandboxId,
+        "payment-product-" + compact);
+    jdbc.update(
+        """
+        INSERT INTO standard_order
+          (order_id, user_subject, sandbox_id, evaluation_owner_handle, product_id, product_name,
+           unit_price_minor, currency, quantity, total_price_minor, product_version)
+        VALUES (?, ?, ?, ?, ?, 'Payment fixture', 900, 'CNY', 2, 1800, 1)
+        """,
+        orderId,
+        EvaluationSandboxRepository.fixtureOwner(handle),
+        sandboxId,
+        handle,
+        "payment-product-" + compact);
+    return new EvaluationPaymentFixture(sandboxId, caseCorrelation, orderId, userSubject, handle);
+  }
+
+  private String seedAdditionalEvaluationOrder(EvaluationPaymentFixture fixture) {
+    String orderId = UUID.randomUUID().toString();
+    String productId =
+        jdbc.queryForObject(
+            "SELECT product_id FROM standard_order WHERE order_id = ?",
+            String.class,
+            fixture.orderId());
+    jdbc.update(
+        """
+        INSERT INTO standard_order
+          (order_id, user_subject, sandbox_id, evaluation_owner_handle, product_id, product_name,
+           unit_price_minor, currency, quantity, total_price_minor, product_version)
+        VALUES (?, ?, ?, ?, ?, 'Payment fixture', 900, 'CNY', 2, 1800, 1)
+        """,
+        orderId,
+        EvaluationSandboxRepository.fixtureOwner(fixture.ownerHandle()),
+        fixture.sandboxId(),
+        fixture.ownerHandle(),
+        productId);
+    return orderId;
   }
 
   private static void awaitRace(CountDownLatch ready, CountDownLatch release) {
     ready.countDown();
+    awaitSignal(release, "payment race release");
+  }
+
+  private static void awaitSignal(CountDownLatch signal, String description) {
     try {
-      if (!release.await(10, TimeUnit.SECONDS)) {
-        throw new IllegalStateException("Payment race was not released");
+      if (!signal.await(10, TimeUnit.SECONDS)) {
+        throw new IllegalStateException(description + " timed out");
       }
     } catch (InterruptedException exception) {
       Thread.currentThread().interrupt();
-      throw new IllegalStateException("Payment race was interrupted", exception);
+      throw new IllegalStateException(description + " was interrupted", exception);
     }
   }
 
@@ -667,6 +1421,11 @@ class MockPaymentIntegrationTest {
 
   private void assertPaidTruth(
       String orderId, String attemptId, String movementType, long amountMinor) {
+    assertPaidTruth(orderId, attemptId, movementType, amountMinor, "AUD");
+  }
+
+  private void assertPaidTruth(
+      String orderId, String attemptId, String movementType, long amountMinor, String currency) {
     assertThat(orderState(orderId)).containsExactly("PAID", "2");
     assertThat(attemptState(attemptId)).containsExactly("SUCCEEDED", "2");
     assertThat(
@@ -680,13 +1439,14 @@ class MockPaymentIntegrationTest {
                 """
                 SELECT COUNT(*) FROM inventory_ledger
                 WHERE business_event_key = ? AND movement_type = ?
-                  AND payment_amount_minor = ? AND payment_currency = 'AUD'
+                  AND payment_amount_minor = ? AND payment_currency = ?
                   AND inventory_delta = 0 AND activity_quota_delta = 0
                 """,
                 Long.class,
                 "mock-payment:" + attemptId,
                 movementType,
-                amountMinor))
+                amountMinor,
+                currency))
         .isOne();
   }
 
@@ -729,6 +1489,27 @@ class MockPaymentIntegrationTest {
     return count == null ? 0 : count;
   }
 
+  private long callbackCount(String attemptId) {
+    Long count =
+        jdbc.queryForObject(
+            "SELECT COUNT(*) FROM mock_payment_callback WHERE attempt_id = ?",
+            Long.class,
+            attemptId);
+    return count == null ? 0 : count;
+  }
+
+  private long paymentAuditCount(String sandboxId) {
+    Long count =
+        jdbc.queryForObject(
+            """
+            SELECT COUNT(*) FROM eval_commerce_audit_reference
+            WHERE sandbox_id = ? AND entity_type = 'PAYMENT_CALLBACK'
+            """,
+            Long.class,
+            sandboxId);
+    return count == null ? 0 : count;
+  }
+
   private long movementCount(String orderId, String movementType) {
     Long count =
         jdbc.queryForObject(
@@ -758,6 +1539,46 @@ class MockPaymentIntegrationTest {
     return Map.of("amountMinor", amountMinor, "currency", "AUD");
   }
 
+  private static Map<String, Object> mapWith(Object... values) {
+    Map<String, Object> result = new LinkedHashMap<>();
+    for (int index = 0; index < values.length; index += 2) {
+      result.put((String) values[index], values[index + 1]);
+    }
+    return result;
+  }
+
+  private static Map<String, Object> withExtra(
+      Map<String, Object> source, String name, Object value) {
+    Map<String, Object> result = new LinkedHashMap<>(source);
+    result.put(name, value);
+    return result;
+  }
+
+  private static Map<String, Object> callbackBody(MockPaymentCallbackRequest request) {
+    return mapWith(
+        "callbackEventId",
+        request.callbackEventId(),
+        "callbackCorrelationId",
+        request.callbackCorrelationId(),
+        "orderId",
+        request.orderId(),
+        "amountMinor",
+        request.amountMinor(),
+        "currency",
+        request.currency(),
+        "outcome",
+        request.outcome());
+  }
+
+  private static String paymentFailure(Runnable work) {
+    try {
+      work.run();
+    } catch (MockPaymentException exception) {
+      return exception.status() + ":" + exception.category() + ":" + exception.getMessage();
+    }
+    throw new AssertionError("Expected payment request to fail");
+  }
+
   private static MockPaymentCallbackRequest callback(
       MockPaymentResult attempt, String callbackEventId) {
     return new MockPaymentCallbackRequest(
@@ -767,6 +1588,46 @@ class MockPaymentIntegrationTest {
         attempt.amountMinor(),
         attempt.currency(),
         "SUCCEEDED");
+  }
+
+  private static MockPaymentCallbackRequest evaluationCallback(
+      MockPaymentResult attempt, String sandboxId, String suffix) {
+    return new MockPaymentCallbackRequest(
+        UUID.randomUUID().toString(),
+        attempt.callbackCorrelationId(),
+        attempt.orderId(),
+        attempt.amountMinor(),
+        attempt.currency(),
+        "SUCCEEDED",
+        sandboxId,
+        "payment-session-" + suffix.toLowerCase(java.util.Locale.ROOT),
+        "payment-trace-" + suffix.toLowerCase(java.util.Locale.ROOT),
+        "a".repeat(64));
+  }
+
+  private static MockPaymentCallbackRequest evaluationCallbackWith(
+      MockPaymentCallbackRequest source,
+      String callbackEventId,
+      String callbackCorrelationId,
+      String orderId,
+      long amountMinor,
+      String currency,
+      String outcome,
+      String sandboxId,
+      String supportSessionId,
+      String traceId,
+      String operationId) {
+    return new MockPaymentCallbackRequest(
+        callbackEventId,
+        callbackCorrelationId,
+        orderId,
+        amountMinor,
+        currency,
+        outcome,
+        sandboxId,
+        supportSessionId,
+        traceId,
+        operationId);
   }
 
   private static String directToken() {
@@ -788,6 +1649,50 @@ class MockPaymentIntegrationTest {
     }
     return value;
   }
+
+  private enum FailurePoint {
+    ORDER,
+    ATTEMPT,
+    LEDGER,
+    CALLBACK,
+    AUDIT
+  }
+
+  private static final class MutableClock extends Clock {
+    private final AtomicReference<Instant> current;
+    private final ZoneId zone;
+
+    private MutableClock(Instant initial, ZoneId zone) {
+      current = new AtomicReference<>(initial);
+      this.zone = zone;
+    }
+
+    private void set(Instant instant) {
+      current.set(instant);
+    }
+
+    @Override
+    public ZoneId getZone() {
+      return zone;
+    }
+
+    @Override
+    public Clock withZone(ZoneId requestedZone) {
+      return new MutableClock(current.get(), requestedZone);
+    }
+
+    @Override
+    public Instant instant() {
+      return current.get();
+    }
+  }
+
+  private record EvaluationPaymentFixture(
+      String sandboxId,
+      String caseCorrelation,
+      String orderId,
+      String userSubject,
+      String ownerHandle) {}
 
   private record SeckillFixture(String orderId, SeckillTimeoutMessage timeout) {}
 }

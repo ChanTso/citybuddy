@@ -27,10 +27,12 @@ def test_catalog_contract_exposes_only_authenticated_published_reads() -> None:
         "/api/products",
         "/api/products/{productId}",
         "/api/orders",
+        "/api/orders/{orderId}/mock-payment",
         "/api/seckill/activities/{activityId}/reservations",
         "/api/reservations/{reservationId}",
         "/internal/tools/catalog.product.get",
         "/internal/eval/sandboxes/{sandboxId}/liveness",
+        "/internal/mock-payments/callback",
     }
     for path in [
         contract["paths"]["/api/products"],

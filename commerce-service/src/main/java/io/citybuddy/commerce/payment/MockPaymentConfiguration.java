@@ -1,6 +1,8 @@
 package io.citybuddy.commerce.payment;
 
+import io.citybuddy.commerce.evaluation.EvaluationSandboxRepository;
 import java.time.Clock;
+import org.springframework.beans.factory.ObjectProvider;
 import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.boot.context.properties.EnableConfigurationProperties;
@@ -24,15 +26,22 @@ public class MockPaymentConfiguration {
   MockPaymentService mockPaymentService(
       MockPaymentRepository repository,
       PlatformTransactionManager transactionManager,
-      @Qualifier("catalogClock") Clock clock) {
+      @Qualifier("catalogClock") ObjectProvider<Clock> catalogClock,
+      ObjectProvider<EvaluationSandboxRepository> sandboxes) {
     TransactionTemplate transaction = new TransactionTemplate(transactionManager);
     transaction.setPropagationBehavior(TransactionDefinition.PROPAGATION_REQUIRES_NEW);
-    return new MockPaymentService(repository, transaction, clock);
+    return new MockPaymentService(
+        repository,
+        transaction,
+        catalogClock.getIfAvailable(Clock::systemUTC),
+        sandboxes.getIfAvailable());
   }
 
   @Bean
   MockPaymentCallbackAuthenticator mockPaymentCallbackAuthenticator(
-      MockPaymentProperties properties, @Qualifier("catalogClock") Clock clock) {
-    return new MockPaymentCallbackAuthenticator(properties, clock);
+      MockPaymentProperties properties,
+      @Qualifier("catalogClock") ObjectProvider<Clock> catalogClock) {
+    return new MockPaymentCallbackAuthenticator(
+        properties, catalogClock.getIfAvailable(Clock::systemUTC));
   }
 }

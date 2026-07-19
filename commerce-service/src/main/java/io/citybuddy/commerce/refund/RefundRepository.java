@@ -24,8 +24,8 @@ public class RefundRepository {
     List<MockPaymentRepository.OrderTruth> standard =
         jdbc.query(
             """
-            SELECT order_id, user_subject, product_id, total_price_minor, currency,
-                   status, state_version
+            SELECT order_id, user_subject, sandbox_id, evaluation_owner_handle, product_id,
+                   total_price_minor, currency, status, state_version
             FROM standard_order
             WHERE order_id = ?
             """,
@@ -34,6 +34,8 @@ public class RefundRepository {
                     "STANDARD",
                     result.getString("order_id"),
                     result.getString("user_subject"),
+                    result.getString("sandbox_id"),
+                    result.getString("evaluation_owner_handle"),
                     result.getString("product_id"),
                     null,
                     null,
@@ -45,8 +47,9 @@ public class RefundRepository {
     List<MockPaymentRepository.OrderTruth> seckill =
         jdbc.query(
             """
-            SELECT order_id, user_subject, product_id, reservation_id, activity_id,
-                   total_price_minor, currency, status, state_version
+            SELECT order_id, user_subject, NULL AS sandbox_id, NULL AS evaluation_owner_handle,
+                   product_id, reservation_id, activity_id, total_price_minor, currency, status,
+                   state_version
             FROM seckill_order
             WHERE order_id = ?
             """,
@@ -55,6 +58,8 @@ public class RefundRepository {
                     "SECKILL",
                     result.getString("order_id"),
                     result.getString("user_subject"),
+                    result.getString("sandbox_id"),
+                    result.getString("evaluation_owner_handle"),
                     result.getString("product_id"),
                     result.getString("reservation_id"),
                     result.getString("activity_id"),

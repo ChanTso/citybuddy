@@ -52,6 +52,7 @@ def test_evaluation_views_are_profile_bound_authenticated_and_bounded() -> None:
         "EvaluationSandboxState",
         "EvaluationStateProduct",
         "EvaluationStateEffect",
+        "EvaluationStatePayment",
         "EvaluationStateResponse",
         "EvaluationAuditReference",
         "EvaluationAuditPage",
@@ -60,11 +61,19 @@ def test_evaluation_views_are_profile_bound_authenticated_and_bounded() -> None:
     ):
         assert schemas[name]["additionalProperties"] is False
     assert schemas["EvaluationStateResponse"]["properties"]["products"]["maxItems"] == 16
+    assert schemas["EvaluationStateResponse"]["properties"]["payments"]["maxItems"] == 8
+    assert schemas["EvaluationStateResponse"]["properties"]["payments"]["description"] == (
+        "Global ascending order by createdAt, then attemptId."
+    )
     assert schemas["EvaluationStateResponse"]["properties"]["effects"]["description"] == (
         "Global ascending order by createdAt, then effectType, then the internal stable "
         "correlation key"
     )
     assert schemas["EvaluationAuditPage"]["properties"]["entries"]["maxItems"] == 50
+    assert schemas["EvaluationAuditReference"]["properties"]["entityType"]["enum"] == [
+        "PRODUCT_FIXTURE",
+        "PAYMENT_CALLBACK",
+    ]
     assert schemas["EvaluationVersionResponse"]["properties"]["capabilities"]["maxItems"] == 3
     assert schemas["EvaluationError"] == {
         "type": "object",
@@ -98,6 +107,7 @@ def test_evaluation_audit_is_append_only_scoped_and_not_agent_evidence() -> None
     assert "WHERE sandbox_id = ? AND support_session_id = ? AND sequence_id > ?" in repository
     assert "WHERE sandbox_id = ? AND product_id = ? AND publication_version = ?" in repository
     assert "ORDER BY created_at, effect_type, correlation_key LIMIT 8" in repository
+    assert "ORDER BY a.created_at, a.attempt_id" in repository
     assert "WHERE sandbox_id = ? AND operation_id = ?\n            FOR SHARE" in (
         ROOT
         / "commerce-service/src/main/java/io/citybuddy/commerce/evaluation"

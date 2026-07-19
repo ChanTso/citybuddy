@@ -16,6 +16,14 @@ public final class EvaluationRequestParser {
   private static final Pattern CURRENCY = Pattern.compile("^[A-Z]{3}$");
   private static final Set<String> RESET_FIELDS =
       Set.of("sandboxId", "caseCorrelation", "ttlSeconds", "testUserLabel", "products");
+  private static final Set<String> RESET_FIELDS_WITH_PAYMENT =
+      Set.of(
+          "sandboxId",
+          "caseCorrelation",
+          "ttlSeconds",
+          "testUserLabel",
+          "products",
+          "paymentOrder");
   private static final Set<String> PRODUCT_FIELDS =
       Set.of(
           "productId",
@@ -26,11 +34,13 @@ public final class EvaluationRequestParser {
           "stockQuantity",
           "available");
   private static final Set<String> COMPLETE_FIELDS = Set.of("caseCorrelation");
+  private static final Set<String> PAYMENT_ORDER_FIELDS =
+      Set.of("orderId", "productId", "quantity");
 
   private EvaluationRequestParser() {}
 
   public static EvaluationResetRequest parseReset(JsonNode body) {
-    requireExactObject(body, RESET_FIELDS);
+    requireExactObject(body, RESET_FIELDS, RESET_FIELDS_WITH_PAYMENT);
     String sandboxId = boundedId(body.get("sandboxId"), 64, "Invalid sandbox");
     String caseCorrelation =
         boundedId(body.get("caseCorrelation"), 128, "Invalid case correlation");
@@ -76,8 +86,25 @@ public final class EvaluationRequestParser {
               available.booleanValue()));
     }
     products.sort(java.util.Comparator.comparing(EvaluationResetRequest.ProductFixture::productId));
+    EvaluationResetRequest.PaymentOrderFixture paymentOrder = null;
+    if (body.has("paymentOrder")) {
+      JsonNode payment = body.get("paymentOrder");
+      requireExactObject(payment, PAYMENT_ORDER_FIELDS);
+      String orderId = uuid(payment.get("orderId"), "Invalid payment order fixture");
+      String productId = boundedId(payment.get("productId"), 64, "Invalid payment order fixture");
+      int quantity = exactInt(payment.get("quantity"), 1, 100, "Invalid payment order fixture");
+      EvaluationResetRequest.ProductFixture product =
+          products.stream()
+              .filter(item -> item.productId().equals(productId))
+              .findFirst()
+              .orElseThrow(() -> invalid("Invalid payment order fixture"));
+      if (!product.available() || product.stockQuantity() < quantity) {
+        throw invalid("Invalid payment order fixture");
+      }
+      paymentOrder = new EvaluationResetRequest.PaymentOrderFixture(orderId, productId, quantity);
+    }
     return new EvaluationResetRequest(
-        sandboxId, caseCorrelation, ttlSeconds, testUserLabel, List.copyOf(products));
+        sandboxId, caseCorrelation, ttlSeconds, testUserLabel, List.copyOf(products), paymentOrder);
   }
 
   public static String parseCompletionCase(JsonNode body) {
@@ -86,6 +113,12 @@ public final class EvaluationRequestParser {
   }
 
   public static String fixtureDigest(List<EvaluationResetRequest.ProductFixture> products) {
+    return fixtureDigest(products, null);
+  }
+
+  public static String fixtureDigest(
+      List<EvaluationResetRequest.ProductFixture> products,
+      EvaluationResetRequest.PaymentOrderFixture paymentOrder) {
     StringBuilder canonical = new StringBuilder();
     for (EvaluationResetRequest.ProductFixture product : products) {
       append(canonical, product.productId());
@@ -95,6 +128,12 @@ public final class EvaluationRequestParser {
       append(canonical, product.currency());
       append(canonical, Long.toString(product.stockQuantity()));
       append(canonical, Boolean.toString(product.available()));
+    }
+    if (paymentOrder != null) {
+      append(canonical, "PAYMENT_ORDER");
+      append(canonical, paymentOrder.orderId());
+      append(canonical, paymentOrder.productId());
+      append(canonical, Integer.toString(paymentOrder.quantity()));
     }
     try {
       byte[] digest =
@@ -141,6 +180,33 @@ public final class EvaluationRequestParser {
     if (!actual.equals(expected)) {
       throw invalid("Invalid evaluation request");
     }
+  }
+
+  @SafeVarargs
+  private static void requireExactObject(JsonNode node, Set<String>... expectedSets) {
+    if (node == null || !node.isObject()) {
+      throw invalid("Invalid evaluation request");
+    }
+    Set<String> actual = new HashSet<>();
+    node.fieldNames().forEachRemaining(actual::add);
+    for (Set<String> expected : expectedSets) {
+      if (actual.equals(expected)) {
+        return;
+      }
+    }
+    throw invalid("Invalid evaluation request");
+  }
+
+  private static String uuid(JsonNode node, String message) {
+    String value = boundedText(node, 36, message);
+    try {
+      if (!java.util.UUID.fromString(value).toString().equals(value)) {
+        throw invalid(message);
+      }
+    } catch (IllegalArgumentException exception) {
+      throw invalid(message);
+    }
+    return value;
   }
 
   private static String boundedId(JsonNode node, int maximum, String message) {

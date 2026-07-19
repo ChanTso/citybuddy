@@ -1,4 +1,4 @@
-"""Validate bounded CB-102 integration responses without printing private payloads."""
+"""Validate bounded CB-102/CB-105 integration responses without private payloads."""
 
 from __future__ import annotations
 
@@ -22,14 +22,16 @@ def exact_keys(value: dict[str, Any], expected: set[str], label: str) -> None:
 
 def check_state(args: argparse.Namespace) -> None:
     payload = load(args.path)
-    exact_keys(payload, {"sandbox", "products", "effects"}, "state")
+    exact_keys(payload, {"sandbox", "products", "effects", "payments"}, "state")
     sandbox = payload["sandbox"]
     products = payload["products"]
     effects = payload["effects"]
+    payments = payload["payments"]
     if (
         not isinstance(sandbox, dict)
         or not isinstance(products, list)
         or not isinstance(effects, list)
+        or not isinstance(payments, list)
     ):
         raise ValueError("Invalid state response shape")
     exact_keys(
@@ -50,7 +52,12 @@ def check_state(args: argparse.Namespace) -> None:
     )
     if sandbox["sandboxId"] != args.sandbox or sandbox["lifecycleState"] != args.lifecycle:
         raise ValueError("State response selected the wrong sandbox truth")
-    if len(products) != args.product_count or len(products) > 16 or len(effects) > 8:
+    if (
+        len(products) != args.product_count
+        or len(products) > 16
+        or len(effects) > 8
+        or len(payments) > 8
+    ):
         raise ValueError("State response exceeded or missed its bounded families")
     for product in products:
         if not isinstance(product, dict):
@@ -73,6 +80,26 @@ def check_state(args: argparse.Namespace) -> None:
         if not isinstance(effect, dict):
             raise ValueError("Invalid effect state")
         exact_keys(effect, {"effectType", "outcome", "createdAt"}, "effect state")
+    for payment in payments:
+        if not isinstance(payment, dict):
+            raise ValueError("Invalid payment state")
+        exact_keys(
+            payment,
+            {
+                "attemptId",
+                "callbackCorrelationId",
+                "orderId",
+                "amountMinor",
+                "currency",
+                "state",
+                "stateVersion",
+                "callbackEventId",
+                "orderStatus",
+                "orderStateVersion",
+                "movementCount",
+            },
+            "payment state",
+        )
     if args.effects_created_ascending:
         created = [effect["createdAt"] for effect in effects]
         if len(created) < 2 or created != sorted(created):

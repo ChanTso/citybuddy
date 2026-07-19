@@ -25,6 +25,19 @@ public final class EvaluationViewRepository {
         result -> null);
     jdbc.query(
         """
+        SELECT attempt_id, callback_correlation_id, order_id, sandbox_id, amount_minor,
+               currency, state, state_version
+        FROM mock_payment_attempt WHERE 1 = 0
+        """,
+        result -> null);
+    jdbc.query(
+        """
+        SELECT callback_event_id, attempt_id, sandbox_id, operation_id
+        FROM mock_payment_callback WHERE 1 = 0
+        """,
+        result -> null);
+    jdbc.query(
+        """
         SELECT sandbox_id, product_id, name, description, price_minor, currency,
                stock_quantity, available, publication_version
         FROM eval_sandbox_product_fixture WHERE 1 = 0
@@ -95,6 +108,78 @@ public final class EvaluationViewRepository {
         sandboxId);
   }
 
+  public List<PaymentView> payments(String sandboxId) {
+    return jdbc.query(
+        """
+        SELECT a.attempt_id, a.callback_correlation_id, a.order_id, a.amount_minor, a.currency,
+               a.state, a.state_version,
+               CASE
+                 WHEN c.callback_event_id IS NULL THEN NULL
+                 WHEN c.sandbox_id = a.sandbox_id
+                   AND c.callback_correlation_id = a.callback_correlation_id
+                   AND c.requested_outcome = 'SUCCEEDED' AND c.result_state = 'APPLIED'
+                   AND c.support_session_id IS NOT NULL AND c.trace_id IS NOT NULL
+                   AND c.operation_id IS NOT NULL
+                   AND c.intent_hash = SHA2(CONCAT_WS('\n', c.callback_event_id,
+                     c.callback_correlation_id, a.order_id, a.amount_minor, a.currency,
+                     c.requested_outcome, c.sandbox_id, c.support_session_id, c.trace_id,
+                     c.operation_id, c.callback_idempotency_key), 256)
+                   THEN c.callback_event_id
+                 ELSE 'INCONSISTENT'
+               END AS callback_event_id,
+               CASE
+                 WHEN a.order_kind = 'STANDARD' AND o.sandbox_id = a.sandbox_id
+                   AND o.user_subject = a.user_subject
+                   AND o.total_price_minor = a.amount_minor AND o.currency = a.currency
+                   THEN o.status
+                 ELSE 'INCONSISTENT'
+               END AS order_status,
+               CASE
+                 WHEN a.order_kind = 'STANDARD' AND o.sandbox_id = a.sandbox_id
+                   AND o.user_subject = a.user_subject
+                   AND o.total_price_minor = a.amount_minor AND o.currency = a.currency
+                   THEN o.state_version
+                 ELSE 0
+               END AS order_state_version,
+               CASE
+                 WHEN (SELECT COUNT(*) FROM inventory_ledger l
+                       WHERE l.business_event_key = CONCAT('mock-payment:', a.attempt_id))
+                    = (SELECT COUNT(*) FROM inventory_ledger l
+                       WHERE l.business_event_key = CONCAT('mock-payment:', a.attempt_id)
+                         AND l.movement_type = 'STANDARD_PAYMENT' AND l.order_id = a.order_id
+                         AND l.reservation_id IS NULL AND l.activity_id IS NULL
+                         AND l.product_id = o.product_id AND l.sandbox_id = a.sandbox_id
+                         AND l.inventory_delta = 0 AND l.activity_quota_delta = 0
+                         AND l.payment_amount_minor = a.amount_minor
+                         AND l.payment_currency = a.currency)
+                   THEN (SELECT COUNT(*) FROM inventory_ledger l
+                         WHERE l.business_event_key = CONCAT('mock-payment:', a.attempt_id))
+                 ELSE -1
+               END AS movement_count
+        FROM mock_payment_attempt a
+        LEFT JOIN standard_order o ON o.order_id = a.order_id
+        LEFT JOIN mock_payment_callback c
+          ON c.attempt_id = a.attempt_id
+        WHERE a.sandbox_id = ?
+        ORDER BY a.created_at, a.attempt_id
+        LIMIT 8
+        """,
+        (result, row) ->
+            new PaymentView(
+                result.getString("attempt_id"),
+                result.getString("callback_correlation_id"),
+                result.getString("order_id"),
+                result.getLong("amount_minor"),
+                result.getString("currency"),
+                result.getString("state"),
+                result.getLong("state_version"),
+                result.getString("callback_event_id"),
+                result.getString("order_status"),
+                result.getLong("order_state_version"),
+                result.getInt("movement_count")),
+        sandboxId);
+  }
+
   public List<AuditReference> audit(
       String sandboxId, String supportSessionId, long after, int fetchLimit) {
     return jdbc.query(
@@ -124,6 +209,96 @@ public final class EvaluationViewRepository {
             productId,
             version);
     return count != null && count == 1;
+  }
+
+  public boolean paymentCallbackVersionExists(
+      String sandboxId,
+      String supportSessionId,
+      String traceId,
+      String operationId,
+      String callbackEventId,
+      long version) {
+    Integer count =
+        jdbc.queryForObject(
+            """
+            SELECT COUNT(*)
+            FROM mock_payment_callback c
+            JOIN mock_payment_attempt a
+              ON a.attempt_id = c.attempt_id AND a.sandbox_id = c.sandbox_id
+             AND a.callback_correlation_id = c.callback_correlation_id
+            JOIN standard_order o
+              ON o.order_id = a.order_id AND o.sandbox_id = a.sandbox_id
+             AND o.user_subject = a.user_subject
+             AND o.total_price_minor = a.amount_minor AND o.currency = a.currency
+            JOIN inventory_ledger l
+              ON l.business_event_key = CONCAT('mock-payment:', a.attempt_id)
+             AND l.sandbox_id = a.sandbox_id AND l.movement_type = 'STANDARD_PAYMENT'
+             AND l.order_id = a.order_id AND l.payment_amount_minor = a.amount_minor
+             AND l.product_id = o.product_id AND l.reservation_id IS NULL
+             AND l.activity_id IS NULL AND l.inventory_delta = 0
+             AND l.activity_quota_delta = 0 AND l.payment_currency = a.currency
+            WHERE c.sandbox_id = ? AND c.support_session_id = ? AND c.trace_id = ?
+              AND c.operation_id = ? AND c.callback_event_id = ?
+              AND c.requested_outcome = 'SUCCEEDED' AND c.result_state = 'APPLIED'
+              AND c.intent_hash = SHA2(CONCAT_WS('\n', c.callback_event_id,
+                c.callback_correlation_id, a.order_id, a.amount_minor, a.currency,
+                c.requested_outcome, c.sandbox_id, c.support_session_id, c.trace_id,
+                c.operation_id, c.callback_idempotency_key), 256)
+              AND a.order_kind = 'STANDARD'
+              AND a.state = 'SUCCEEDED' AND a.state_version = ?
+              AND o.status = 'PAID' AND o.state_version = 2
+            """,
+            Integer.class,
+            sandboxId,
+            supportSessionId,
+            traceId,
+            operationId,
+            callbackEventId,
+            version);
+    return count != null && count == 1;
+  }
+
+  public boolean paymentAuditReferencesConsistent(String sandboxId) {
+    Integer invalid =
+        jdbc.queryForObject(
+            """
+            SELECT COUNT(*)
+            FROM eval_commerce_audit_reference r
+            WHERE r.sandbox_id = ? AND r.entity_type = 'PAYMENT_CALLBACK'
+              AND NOT EXISTS (
+                SELECT 1
+                FROM mock_payment_callback c
+                JOIN mock_payment_attempt a
+                  ON a.attempt_id = c.attempt_id AND a.sandbox_id = c.sandbox_id
+                 AND a.callback_correlation_id = c.callback_correlation_id
+                JOIN standard_order o
+                  ON o.order_id = a.order_id AND o.sandbox_id = a.sandbox_id
+                 AND o.user_subject = a.user_subject
+                 AND o.total_price_minor = a.amount_minor AND o.currency = a.currency
+                JOIN inventory_ledger l
+                  ON l.business_event_key = CONCAT('mock-payment:', a.attempt_id)
+                 AND l.sandbox_id = a.sandbox_id AND l.movement_type = 'STANDARD_PAYMENT'
+                 AND l.order_id = a.order_id AND l.product_id = o.product_id
+                 AND l.reservation_id IS NULL AND l.activity_id IS NULL
+                 AND l.inventory_delta = 0 AND l.activity_quota_delta = 0
+                 AND l.payment_amount_minor = a.amount_minor AND l.payment_currency = a.currency
+                WHERE c.sandbox_id = r.sandbox_id
+                  AND c.support_session_id = r.support_session_id
+                  AND c.trace_id = r.trace_id AND c.operation_id = r.operation_id
+                  AND c.callback_event_id = r.entity_id
+                  AND c.requested_outcome = 'SUCCEEDED' AND c.result_state = 'APPLIED'
+                  AND c.intent_hash = SHA2(CONCAT_WS('\n', c.callback_event_id,
+                    c.callback_correlation_id, a.order_id, a.amount_minor, a.currency,
+                    c.requested_outcome, c.sandbox_id, c.support_session_id, c.trace_id,
+                    c.operation_id, c.callback_idempotency_key), 256)
+                  AND a.order_kind = 'STANDARD' AND a.state = 'SUCCEEDED'
+                  AND a.state_version = r.entity_version
+                  AND o.status = 'PAID' AND o.state_version = 2
+              )
+            """,
+            Integer.class,
+            sandboxId);
+    return invalid != null && invalid == 0;
   }
 
   private static SandboxView mapSandbox(ResultSet result, int row) throws SQLException {
@@ -183,6 +358,19 @@ public final class EvaluationViewRepository {
       long publicationVersion) {}
 
   public record EffectView(String effectType, String outcome, Instant createdAt) {}
+
+  public record PaymentView(
+      String attemptId,
+      String callbackCorrelationId,
+      String orderId,
+      long amountMinor,
+      String currency,
+      String state,
+      long stateVersion,
+      String callbackEventId,
+      String orderStatus,
+      long orderStateVersion,
+      int movementCount) {}
 
   public record AuditReference(
       long sequence,

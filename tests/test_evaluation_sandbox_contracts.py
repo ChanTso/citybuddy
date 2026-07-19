@@ -23,6 +23,7 @@ def test_evaluation_sandbox_openapi_is_profile_bound_bounded_and_redacted() -> N
     schemas = contract["components"]["schemas"]
     request = schemas["EvaluationResetRequest"]
     fixture = schemas["EvaluationProductFixture"]
+    payment_fixture = schemas["EvaluationPaymentOrderFixture"]
     response = schemas["EvaluationResetResponse"]
     assert request["additionalProperties"] is False
     assert request["properties"]["ttlSeconds"] == {
@@ -33,6 +34,8 @@ def test_evaluation_sandbox_openapi_is_profile_bound_bounded_and_redacted() -> N
     assert request["properties"]["products"]["minItems"] == 1
     assert request["properties"]["products"]["maxItems"] == 16
     assert fixture["additionalProperties"] is False
+    assert payment_fixture["additionalProperties"] is False
+    assert payment_fixture["properties"]["quantity"]["maximum"] == 100
     assert response["additionalProperties"] is False
     assert set(response["properties"]) == {"sandboxId", "testUserHandle"}
     serialized = json.dumps(response)
