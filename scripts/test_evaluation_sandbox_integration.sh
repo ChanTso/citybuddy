@@ -850,30 +850,84 @@ assert_payment_truth_fails_closed() {
     --header 'X-Eval-Sandbox-Id: sandbox-payment'
 }
 
+assert_payment_audit_reconciliation_fails_closed() {
+  local description="$1"
+  assert_status 409 "$description rejects evaluation state" \
+    --request GET "http://127.0.0.1:$commerce_port/api/eval/state" \
+    --user "evaluation-manager:$management_password" \
+    --header 'X-Eval-Sandbox-Id: sandbox-payment'
+  assert_status 409 "$description rejects evaluation audit" \
+    --request GET "http://127.0.0.1:$commerce_port/api/eval/audit/$payment_session" \
+    --user "evaluation-manager:$management_password" \
+    --header 'X-Eval-Sandbox-Id: sandbox-payment'
+}
+
+payment_audit_reference_id="$(mysql_query commerce_app "$commerce_app_password" commerce_db \
+  "SELECT audit_reference_id FROM eval_commerce_audit_reference WHERE entity_type = 'PAYMENT_CALLBACK' AND entity_id = '$payment_event_id'")"
+
 mysql_query root "$root_password" commerce_db \
-  "UPDATE eval_commerce_audit_reference SET trace_id = 'tampered-payment-trace' WHERE entity_type = 'PAYMENT_CALLBACK' AND entity_id = '$payment_event_id'"
-assert_status 409 "payment audit fails closed when its trace locator is corrupted" \
-  --request GET "http://127.0.0.1:$commerce_port/api/eval/audit/$payment_session" \
-  --user "evaluation-manager:$management_password" \
-  --header 'X-Eval-Sandbox-Id: sandbox-payment'
+  "DELETE FROM eval_commerce_audit_reference WHERE audit_reference_id = '$payment_audit_reference_id'"
+assert_payment_audit_reconciliation_fails_closed "missing payment audit reference"
 mysql_query root "$root_password" commerce_db \
-  "UPDATE eval_commerce_audit_reference SET trace_id = '$payment_trace' WHERE entity_type = 'PAYMENT_CALLBACK' AND entity_id = '$payment_event_id'"
+  "INSERT INTO eval_commerce_audit_reference (audit_reference_id, sandbox_id, support_session_id, trace_id, operation_id, entity_type, entity_id, entity_version, outcome) VALUES ('$payment_audit_reference_id', 'sandbox-payment', '$payment_session', '$payment_trace', '$payment_operation', 'PAYMENT_CALLBACK', '$payment_event_id', 2, 'OBSERVED')"
+
 mysql_query root "$root_password" commerce_db \
-  "UPDATE eval_commerce_audit_reference SET operation_id = 'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb' WHERE entity_type = 'PAYMENT_CALLBACK' AND entity_id = '$payment_event_id'"
-assert_status 409 "payment audit fails closed when its operation locator is corrupted" \
-  --request GET "http://127.0.0.1:$commerce_port/api/eval/audit/$payment_session" \
-  --user "evaluation-manager:$management_password" \
-  --header 'X-Eval-Sandbox-Id: sandbox-payment'
+  "UPDATE eval_commerce_audit_reference SET audit_reference_id = REPEAT('f', 64) WHERE audit_reference_id = '$payment_audit_reference_id'"
+assert_payment_audit_reconciliation_fails_closed "corrupted payment audit reference identity"
 mysql_query root "$root_password" commerce_db \
-  "UPDATE eval_commerce_audit_reference SET operation_id = '$payment_operation' WHERE entity_type = 'PAYMENT_CALLBACK' AND entity_id = '$payment_event_id'"
+  "UPDATE eval_commerce_audit_reference SET audit_reference_id = '$payment_audit_reference_id' WHERE audit_reference_id = REPEAT('f', 64)"
 mysql_query root "$root_password" commerce_db \
-  "UPDATE eval_commerce_audit_reference SET support_session_id = 'tampered-payment-session' WHERE entity_type = 'PAYMENT_CALLBACK' AND entity_id = '$payment_event_id'"
-assert_status 404 "payment audit cannot be found through a corrupted session locator" \
-  --request GET "http://127.0.0.1:$commerce_port/api/eval/audit/$payment_session" \
-  --user "evaluation-manager:$management_password" \
-  --header 'X-Eval-Sandbox-Id: sandbox-payment'
+  "UPDATE eval_commerce_audit_reference SET sandbox_id = 'sandbox-main' WHERE audit_reference_id = '$payment_audit_reference_id'"
+assert_payment_audit_reconciliation_fails_closed "corrupted payment audit sandbox identity"
 mysql_query root "$root_password" commerce_db \
-  "UPDATE eval_commerce_audit_reference SET support_session_id = '$payment_session' WHERE entity_type = 'PAYMENT_CALLBACK' AND entity_id = '$payment_event_id'"
+  "UPDATE eval_commerce_audit_reference SET sandbox_id = 'sandbox-payment' WHERE audit_reference_id = '$payment_audit_reference_id'"
+mysql_query root "$root_password" commerce_db \
+  "UPDATE eval_commerce_audit_reference SET support_session_id = 'tampered-payment-session' WHERE audit_reference_id = '$payment_audit_reference_id'"
+assert_payment_audit_reconciliation_fails_closed "corrupted payment audit session identity"
+mysql_query root "$root_password" commerce_db \
+  "UPDATE eval_commerce_audit_reference SET support_session_id = '$payment_session' WHERE audit_reference_id = '$payment_audit_reference_id'"
+mysql_query root "$root_password" commerce_db \
+  "UPDATE eval_commerce_audit_reference SET trace_id = 'tampered-payment-trace' WHERE audit_reference_id = '$payment_audit_reference_id'"
+assert_payment_audit_reconciliation_fails_closed "corrupted payment audit trace identity"
+mysql_query root "$root_password" commerce_db \
+  "UPDATE eval_commerce_audit_reference SET trace_id = '$payment_trace' WHERE audit_reference_id = '$payment_audit_reference_id'"
+mysql_query root "$root_password" commerce_db \
+  "UPDATE eval_commerce_audit_reference SET operation_id = REPEAT('b', 64) WHERE audit_reference_id = '$payment_audit_reference_id'"
+assert_payment_audit_reconciliation_fails_closed "corrupted payment audit operation identity"
+mysql_query root "$root_password" commerce_db \
+  "UPDATE eval_commerce_audit_reference SET operation_id = '$payment_operation' WHERE audit_reference_id = '$payment_audit_reference_id'"
+mysql_query root "$root_password" commerce_db \
+  "UPDATE eval_commerce_audit_reference SET entity_type = 'PRODUCT_FIXTURE' WHERE audit_reference_id = '$payment_audit_reference_id'"
+assert_payment_audit_reconciliation_fails_closed "corrupted payment audit entity-type identity"
+mysql_query root "$root_password" commerce_db \
+  "UPDATE eval_commerce_audit_reference SET entity_type = 'PAYMENT_CALLBACK' WHERE audit_reference_id = '$payment_audit_reference_id'"
+mysql_query root "$root_password" commerce_db \
+  "UPDATE eval_commerce_audit_reference SET entity_id = '00000000-0000-0000-0000-000000000196' WHERE audit_reference_id = '$payment_audit_reference_id'"
+assert_payment_audit_reconciliation_fails_closed "corrupted payment audit entity identity"
+mysql_query root "$root_password" commerce_db \
+  "UPDATE eval_commerce_audit_reference SET entity_id = '$payment_event_id' WHERE audit_reference_id = '$payment_audit_reference_id'"
+mysql_query root "$root_password" commerce_db \
+  "UPDATE eval_commerce_audit_reference SET entity_version = 3 WHERE audit_reference_id = '$payment_audit_reference_id'"
+assert_payment_audit_reconciliation_fails_closed "corrupted payment audit entity version"
+mysql_query root "$root_password" commerce_db \
+  "UPDATE eval_commerce_audit_reference SET entity_version = 2 WHERE audit_reference_id = '$payment_audit_reference_id'"
+mysql_query root "$root_password" commerce_db \
+  "SET SESSION sql_mode = 'NO_ENGINE_SUBSTITUTION'; UPDATE eval_commerce_audit_reference SET outcome = 'CORRUPTED' WHERE audit_reference_id = '$payment_audit_reference_id'"
+assert_payment_audit_reconciliation_fails_closed "corrupted payment audit outcome"
+mysql_query root "$root_password" commerce_db \
+  "UPDATE eval_commerce_audit_reference SET outcome = 'OBSERVED' WHERE audit_reference_id = '$payment_audit_reference_id'"
+
+mysql_query root "$root_password" commerce_db \
+  "INSERT INTO eval_commerce_audit_reference (audit_reference_id, sandbox_id, support_session_id, trace_id, operation_id, entity_type, entity_id, entity_version, outcome) VALUES (REPEAT('d', 64), 'sandbox-payment', '$payment_session', '$payment_trace', REPEAT('e', 64), 'PAYMENT_CALLBACK', '$payment_event_id', 2, 'OBSERVED')"
+assert_payment_audit_reconciliation_fails_closed "duplicate payment audit reference"
+mysql_query root "$root_password" commerce_db \
+  "DELETE FROM eval_commerce_audit_reference WHERE audit_reference_id = REPEAT('d', 64)"
+mysql_query root "$root_password" commerce_db \
+  "INSERT INTO eval_commerce_audit_reference (audit_reference_id, sandbox_id, support_session_id, trace_id, operation_id, entity_type, entity_id, entity_version, outcome) VALUES (REPEAT('c', 64), 'sandbox-payment', '$payment_session', '$payment_trace', REPEAT('a', 64), 'PAYMENT_CALLBACK', '00000000-0000-0000-0000-000000000197', 2, 'OBSERVED')"
+assert_payment_audit_reconciliation_fails_closed "orphan payment audit reference"
+mysql_query root "$root_password" commerce_db \
+  "DELETE FROM eval_commerce_audit_reference WHERE audit_reference_id = REPEAT('c', 64)"
+
 tampered_payment_correlation='00000000-0000-0000-0000-000000000107'
 mysql_query root "$root_password" commerce_db \
   "UPDATE mock_payment_callback SET callback_correlation_id = '$tampered_payment_correlation' WHERE callback_event_id = '$payment_event_id'"

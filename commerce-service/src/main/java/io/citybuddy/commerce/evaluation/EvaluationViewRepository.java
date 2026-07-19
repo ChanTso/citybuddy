@@ -262,41 +262,74 @@ public final class EvaluationViewRepository {
     Integer invalid =
         jdbc.queryForObject(
             """
+            WITH successful_payment AS (
+              SELECT DISTINCT c.callback_event_id, c.sandbox_id, c.support_session_id,
+                     c.trace_id, c.operation_id, a.state_version
+              FROM mock_payment_callback c
+              JOIN mock_payment_attempt a
+                ON a.attempt_id = c.attempt_id AND a.sandbox_id = c.sandbox_id
+               AND a.callback_correlation_id = c.callback_correlation_id
+              JOIN standard_order o
+                ON o.order_id = a.order_id AND o.sandbox_id = a.sandbox_id
+               AND o.user_subject = a.user_subject
+               AND o.total_price_minor = a.amount_minor AND o.currency = a.currency
+              JOIN inventory_ledger l
+                ON l.business_event_key = CONCAT('mock-payment:', a.attempt_id)
+               AND l.sandbox_id = a.sandbox_id AND l.movement_type = 'STANDARD_PAYMENT'
+               AND l.order_id = a.order_id AND l.product_id = o.product_id
+               AND l.reservation_id IS NULL AND l.activity_id IS NULL
+               AND l.inventory_delta = 0 AND l.activity_quota_delta = 0
+               AND l.payment_amount_minor = a.amount_minor AND l.payment_currency = a.currency
+              WHERE a.sandbox_id = ?
+                AND c.requested_outcome = 'SUCCEEDED' AND c.result_state = 'APPLIED'
+                AND c.intent_hash = SHA2(CONCAT_WS('\n', c.callback_event_id,
+                  c.callback_correlation_id, a.order_id, a.amount_minor, a.currency,
+                  c.requested_outcome, c.sandbox_id, c.support_session_id, c.trace_id,
+                  c.operation_id, c.callback_idempotency_key), 256)
+                AND a.order_kind = 'STANDARD' AND a.state = 'SUCCEEDED'
+                AND o.status = 'PAID' AND o.state_version = 2
+            )
             SELECT COUNT(*)
-            FROM eval_commerce_audit_reference r
-            WHERE r.sandbox_id = ? AND r.entity_type = 'PAYMENT_CALLBACK'
-              AND NOT EXISTS (
-                SELECT 1
-                FROM mock_payment_callback c
-                JOIN mock_payment_attempt a
-                  ON a.attempt_id = c.attempt_id AND a.sandbox_id = c.sandbox_id
-                 AND a.callback_correlation_id = c.callback_correlation_id
-                JOIN standard_order o
-                  ON o.order_id = a.order_id AND o.sandbox_id = a.sandbox_id
-                 AND o.user_subject = a.user_subject
-                 AND o.total_price_minor = a.amount_minor AND o.currency = a.currency
-                JOIN inventory_ledger l
-                  ON l.business_event_key = CONCAT('mock-payment:', a.attempt_id)
-                 AND l.sandbox_id = a.sandbox_id AND l.movement_type = 'STANDARD_PAYMENT'
-                 AND l.order_id = a.order_id AND l.product_id = o.product_id
-                 AND l.reservation_id IS NULL AND l.activity_id IS NULL
-                 AND l.inventory_delta = 0 AND l.activity_quota_delta = 0
-                 AND l.payment_amount_minor = a.amount_minor AND l.payment_currency = a.currency
-                WHERE c.sandbox_id = r.sandbox_id
-                  AND c.support_session_id = r.support_session_id
-                  AND c.trace_id = r.trace_id AND c.operation_id = r.operation_id
-                  AND c.callback_event_id = r.entity_id
-                  AND c.requested_outcome = 'SUCCEEDED' AND c.result_state = 'APPLIED'
-                  AND c.intent_hash = SHA2(CONCAT_WS('\n', c.callback_event_id,
-                    c.callback_correlation_id, a.order_id, a.amount_minor, a.currency,
-                    c.requested_outcome, c.sandbox_id, c.support_session_id, c.trace_id,
-                    c.operation_id, c.callback_idempotency_key), 256)
-                  AND a.order_kind = 'STANDARD' AND a.state = 'SUCCEEDED'
-                  AND a.state_version = r.entity_version
-                  AND o.status = 'PAID' AND o.state_version = 2
-              )
+            FROM (
+              SELECT p.callback_event_id
+              FROM successful_payment p
+              WHERE (
+                SELECT COUNT(*)
+                FROM eval_commerce_audit_reference r
+                WHERE r.audit_reference_id = SHA2(CONCAT_WS('\n', p.sandbox_id,
+                    p.support_session_id, p.trace_id, p.operation_id,
+                    p.callback_event_id, p.state_version), 256)
+                  AND r.sandbox_id = p.sandbox_id
+                  AND r.support_session_id = p.support_session_id
+                  AND r.trace_id = p.trace_id AND r.operation_id = p.operation_id
+                  AND r.entity_type = 'PAYMENT_CALLBACK'
+                  AND r.entity_id = p.callback_event_id
+                  AND r.entity_version = p.state_version AND r.outcome = 'OBSERVED'
+              ) <> 1
+              UNION ALL
+              SELECT r.audit_reference_id
+              FROM eval_commerce_audit_reference r
+              WHERE r.entity_type = 'PAYMENT_CALLBACK'
+                AND (r.sandbox_id = ? OR EXISTS (
+                  SELECT 1 FROM successful_payment p
+                  WHERE p.callback_event_id = r.entity_id
+                ))
+                AND NOT EXISTS (
+                  SELECT 1
+                  FROM successful_payment p
+                  WHERE r.audit_reference_id = SHA2(CONCAT_WS('\n', p.sandbox_id,
+                      p.support_session_id, p.trace_id, p.operation_id,
+                      p.callback_event_id, p.state_version), 256)
+                    AND r.sandbox_id = p.sandbox_id
+                    AND r.support_session_id = p.support_session_id
+                    AND r.trace_id = p.trace_id AND r.operation_id = p.operation_id
+                    AND r.entity_id = p.callback_event_id
+                    AND r.entity_version = p.state_version AND r.outcome = 'OBSERVED'
+                )
+            ) inconsistent_reference
             """,
             Integer.class,
+            sandboxId,
             sandboxId);
     return invalid != null && invalid == 0;
   }

@@ -60,6 +60,9 @@ public class EvaluationViewService {
       String supportSessionId,
       EvaluationViewRequestParser.AuditPageRequest page) {
     observableSandbox(sandboxId);
+    if (!repository.paymentAuditReferencesConsistent(sandboxId)) {
+      throw new EvaluationSandboxException(409, "Evaluation audit truth is inconsistent");
+    }
     List<EvaluationViewRepository.AuditReference> fetched =
         repository.audit(sandboxId, supportSessionId, page.after(), page.limit() + 1);
     if (fetched.isEmpty()) {
