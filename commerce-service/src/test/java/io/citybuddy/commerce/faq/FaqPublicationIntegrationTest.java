@@ -301,7 +301,8 @@ class FaqPublicationIntegrationTest {
 
   private void proveCommittedOutboxColumnsRejectCorruptReplay(
       FaqPublicationService.PublicationCommand command,
-      FaqPublicationService.PublicationResult originalResult) {
+      FaqPublicationService.PublicationResult originalResult)
+      throws Exception {
     FaqRepository.OutboxEvent original = repository.findOutbox(command.eventId()).orElseThrow();
     String changedEventId = UUID.randomUUID().toString();
     List<OutboxCorruption> corruptions =
@@ -347,18 +348,25 @@ class FaqPublicationIntegrationTest {
             jsonCorruption(original, "$.content.question", "Changed but bounded question?"),
             jsonCorruption(original, "$.content.answer", "Changed but bounded answer."));
 
-    for (OutboxCorruption corruption : corruptions) {
-      corruption.inject().run();
-      try {
-        assertCode(
-            () -> service.publish(command),
-            FaqPublicationException.Code.INCONSISTENT_DURABLE_STATE);
-      } finally {
-        restoreOutbox(original, corruption.currentEventId());
+    try (SimpleConsumer consumer = faqConsumer()) {
+      for (OutboxCorruption corruption : corruptions) {
+        corruption.inject().run();
+        try {
+          assertCode(
+              () -> new FaqOutboxPublisher(repository, codec, messaging).publishPending(100),
+              FaqPublicationException.Code.INCONSISTENT_DURABLE_STATE);
+          assertThat(consumer.receive(1, Duration.ofSeconds(10))).isEmpty();
+          assertThat(outboxState(corruption.currentEventId())).isEqualTo("PENDING:0");
+          assertCode(
+              () -> service.publish(command),
+              FaqPublicationException.Code.INCONSISTENT_DURABLE_STATE);
+        } finally {
+          restoreOutbox(original, corruption.currentEventId());
+        }
+        FaqPublicationService.PublicationResult replay = service.publish(command);
+        assertThat(replay.replayed()).isTrue();
+        assertThat(replay.event()).isEqualTo(originalResult.event());
       }
-      FaqPublicationService.PublicationResult replay = service.publish(command);
-      assertThat(replay.replayed()).isTrue();
-      assertThat(replay.event()).isEqualTo(originalResult.event());
     }
   }
 
@@ -535,7 +543,7 @@ class FaqPublicationIntegrationTest {
             properties.rocketmqConsumerGroup() + "-faq-closed");
     RocketMqCatalogMessaging closed = new RocketMqCatalogMessaging(closedProperties);
     closed.close();
-    assertThatThrownBy(() -> new FaqOutboxPublisher(repository, closed).publishPending(1))
+    assertThatThrownBy(() -> new FaqOutboxPublisher(repository, codec, closed).publishPending(1))
         .isInstanceOf(Exception.class);
     assertThat(outboxState(firstPending.eventId())).isEqualTo("PENDING:1");
     assertThat(repository.findSource(failedEvent.sourceId())).contains(failedSourceBefore);
@@ -543,7 +551,7 @@ class FaqPublicationIntegrationTest {
 
     try (SimpleConsumer consumer = faqConsumer()) {
       int expected = repository.pendingOutbox(100).size();
-      FaqOutboxPublisher restarted = new FaqOutboxPublisher(repository, messaging);
+      FaqOutboxPublisher restarted = new FaqOutboxPublisher(repository, codec, messaging);
       assertThat(restarted.publishPending(100)).isEqualTo(expected);
       assertThat(repository.pendingOutbox(100)).isEmpty();
       List<FaqKnowledgeEvent> delivered = receive(consumer, expected, Duration.ofSeconds(45));
@@ -576,14 +584,15 @@ class FaqPublicationIntegrationTest {
               throw new IllegalStateException("Controlled failure after broker acceptance");
             }
           };
-      assertThatThrownBy(() -> new FaqOutboxPublisher(markFailure, messaging).publishPending(1))
+      assertThatThrownBy(
+              () -> new FaqOutboxPublisher(markFailure, codec, messaging).publishPending(1))
           .isInstanceOf(IllegalStateException.class)
           .hasMessage("Controlled failure after broker acceptance");
       assertThat(outboxState(markWindow.event().eventId())).isEqualTo("PENDING:1");
       assertThat(receive(consumer, 1, Duration.ofSeconds(30)))
           .anySatisfy(event -> assertThat(event).isEqualTo(markWindow.event()));
 
-      FaqOutboxPublisher afterMarkFailure = new FaqOutboxPublisher(repository, messaging);
+      FaqOutboxPublisher afterMarkFailure = new FaqOutboxPublisher(repository, codec, messaging);
       assertThat(afterMarkFailure.publishPending(1)).isEqualTo(1);
       assertThat(receive(consumer, 1, Duration.ofSeconds(30)))
           .anySatisfy(event -> assertThat(event).isEqualTo(markWindow.event()));

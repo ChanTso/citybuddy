@@ -97,8 +97,8 @@ public class CatalogConfiguration {
 
   @Bean
   FaqOutboxPublisher faqOutboxPublisher(
-      FaqRepository repository, RocketMqCatalogMessaging messaging) {
-    return new FaqOutboxPublisher(repository, messaging);
+      FaqRepository repository, FaqKnowledgeEventCodec codec, RocketMqCatalogMessaging messaging) {
+    return new FaqOutboxPublisher(repository, codec, messaging);
   }
 
   @Bean

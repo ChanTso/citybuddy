@@ -1,12 +1,8 @@
 package io.citybuddy.commerce.faq;
 
-import java.nio.charset.StandardCharsets;
-import java.security.MessageDigest;
-import java.security.NoSuchAlgorithmException;
 import java.time.Clock;
 import java.time.Instant;
 import java.time.temporal.ChronoUnit;
-import java.util.HexFormat;
 import java.util.List;
 import java.util.UUID;
 import java.util.regex.Pattern;
@@ -15,7 +11,6 @@ import org.springframework.transaction.annotation.Transactional;
 import org.springframework.transaction.support.TransactionSynchronizationManager;
 
 public class FaqPublicationService {
-  private static final String INTENT_COMMITMENT_FORMAT = "FAQ_PUBLICATION_INTENT_V1";
   private static final Pattern FAQ_ID = Pattern.compile("[a-z0-9][a-z0-9-]{0,63}");
   private static final int MAX_IDEMPOTENCY_KEY_LENGTH = 128;
 
@@ -89,8 +84,12 @@ public class FaqPublicationService {
             new FaqKnowledgeEvent.PublicContent(source.draftQuestion(), source.draftAnswer()));
     String payload = codec.encode(event);
     String intentHash =
-        intentHash(
-            valid,
+        FaqPublicationCommitment.create(
+            valid.faqId(),
+            valid.idempotencyKey(),
+            valid.eventId(),
+            valid.expectedDraftRevision(),
+            valid.expectedPublishedVersion(),
             valid.eventId(),
             FaqRepository.AGGREGATE_TYPE,
             valid.faqId(),
@@ -135,35 +134,7 @@ public class FaqPublicationService {
         repository
             .findOutbox(durable.eventId())
             .orElseThrow(() -> inconsistent("FAQ publication command has no matching Outbox"));
-    FaqKnowledgeEvent event;
-    try {
-      event = codec.decode(outbox.payload());
-    } catch (FaqPublicationException exception) {
-      throw inconsistent("FAQ publication Outbox payload is invalid", exception);
-    }
-    if (!event.eventId().equals(durable.eventId())
-        || !FaqRepository.AGGREGATE_TYPE.equals(outbox.aggregateType())
-        || !outbox.aggregateId().equals(durable.faqId())
-        || outbox.aggregateVersion() != durable.sourceVersion()
-        || !FaqRepository.EVENT_TYPE.equals(outbox.eventType())
-        || !event.sourceId().equals(durable.faqId())
-        || event.sourceVersion() != durable.sourceVersion()
-        || !event.occurredTime().equals(durable.occurredAt().toString())) {
-      throw inconsistent("FAQ publication command and Outbox payload disagree");
-    }
-    if (!durable
-        .intentHash()
-        .equals(
-            intentHash(
-                valid,
-                outbox.eventId(),
-                outbox.aggregateType(),
-                outbox.aggregateId(),
-                outbox.aggregateVersion(),
-                outbox.eventType(),
-                event))) {
-      throw inconsistent("FAQ publication event content no longer matches its commitment");
-    }
+    FaqKnowledgeEvent event = FaqPublicationCommitment.verify(durable, outbox, codec);
     requireTransaction();
     return new PublicationResult(event, true);
   }
@@ -185,38 +156,6 @@ public class FaqPublicationService {
         command.expectedPublishedVersion());
   }
 
-  private static String intentHash(
-      ValidatedCommand command,
-      String outboxEventId,
-      String aggregateType,
-      String aggregateId,
-      long aggregateVersion,
-      String eventType,
-      FaqKnowledgeEvent event) {
-    return hash(
-        List.of(
-            INTENT_COMMITMENT_FORMAT,
-            command.faqId(),
-            command.idempotencyKey(),
-            command.eventId(),
-            Long.toString(command.expectedDraftRevision()),
-            Long.toString(command.expectedPublishedVersion()),
-            outboxEventId,
-            aggregateType,
-            aggregateId,
-            Long.toString(aggregateVersion),
-            eventType,
-            event.eventId(),
-            event.sourceId(),
-            event.sourceType(),
-            Long.toString(event.sourceVersion()),
-            event.publicationState(),
-            Boolean.toString(event.tombstone()),
-            event.occurredTime(),
-            event.content().question(),
-            event.content().answer()));
-  }
-
   private static void validateDraft(
       String faqId, String question, String answer, long expectedDraftRevision) {
     if (!validFaqId(faqId)
@@ -224,21 +163,6 @@ public class FaqPublicationService {
         || !boundedText(answer, FaqKnowledgeEventCodec.MAX_ANSWER_LENGTH)
         || expectedDraftRevision < 0) {
       throw validation("FAQ draft is invalid");
-    }
-  }
-
-  private static String hash(List<String> values) {
-    try {
-      MessageDigest digest = MessageDigest.getInstance("SHA-256");
-      for (String value : values) {
-        byte[] encoded = value.getBytes(StandardCharsets.UTF_8);
-        digest.update(Integer.toString(encoded.length).getBytes(StandardCharsets.US_ASCII));
-        digest.update((byte) ':');
-        digest.update(encoded);
-      }
-      return HexFormat.of().formatHex(digest.digest());
-    } catch (NoSuchAlgorithmException exception) {
-      throw new IllegalStateException("SHA-256 is unavailable", exception);
     }
   }
 

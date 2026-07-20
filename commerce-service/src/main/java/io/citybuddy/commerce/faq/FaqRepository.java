@@ -185,6 +185,69 @@ public class FaqRepository {
         limit);
   }
 
+  public List<PendingPublication> pendingPublications(int limit) {
+    return jdbc.query(
+        """
+        SELECT c.idempotency_key, c.event_id AS command_event_id, c.faq_id,
+               c.expected_draft_revision, c.expected_published_version, c.source_version,
+               c.intent_hash, c.occurred_at,
+               o.event_id AS outbox_event_id, o.aggregate_type, o.aggregate_id,
+               o.aggregate_version, o.event_type, o.payload
+        FROM faq_publication_command c
+        LEFT JOIN commerce_outbox o ON o.event_id = c.event_id
+        WHERE o.event_id IS NULL OR o.publication_state = 'PENDING'
+        ORDER BY COALESCE(o.created_at, c.occurred_at), c.event_id
+        LIMIT ?
+        """,
+        (result, row) -> {
+          PublicationCommand command =
+              new PublicationCommand(
+                  result.getString("idempotency_key"),
+                  result.getString("command_event_id"),
+                  result.getString("faq_id"),
+                  result.getLong("expected_draft_revision"),
+                  result.getLong("expected_published_version"),
+                  result.getLong("source_version"),
+                  result.getString("intent_hash"),
+                  result.getTimestamp("occurred_at").toInstant());
+          String outboxEventId = result.getString("outbox_event_id");
+          OutboxEvent outbox =
+              outboxEventId == null
+                  ? null
+                  : new OutboxEvent(
+                      outboxEventId,
+                      result.getString("aggregate_type"),
+                      result.getString("aggregate_id"),
+                      result.getLong("aggregate_version"),
+                      result.getString("event_type"),
+                      result.getString("payload"));
+          return new PendingPublication(command, outbox);
+        },
+        limit);
+  }
+
+  public Optional<OutboxEvent> findPendingOrphan() {
+    return jdbc
+        .query(
+            """
+            SELECT o.event_id, o.aggregate_type, o.aggregate_id, o.aggregate_version,
+                   o.event_type, o.payload
+            FROM commerce_outbox o
+            LEFT JOIN faq_publication_command c ON c.event_id = o.event_id
+            WHERE o.publication_state = 'PENDING'
+              AND o.aggregate_type = ?
+              AND o.event_type = ?
+              AND c.event_id IS NULL
+            ORDER BY o.created_at, o.event_id
+            LIMIT 1
+            """,
+            FaqRepository::mapOutbox,
+            AGGREGATE_TYPE,
+            EVENT_TYPE)
+        .stream()
+        .findFirst();
+  }
+
   public void recordPublishFailure(String eventId) {
     int changed =
         jdbc.update(
@@ -281,4 +344,6 @@ public class FaqRepository {
       long aggregateVersion,
       String eventType,
       String payload) {}
+
+  public record PendingPublication(PublicationCommand command, OutboxEvent outbox) {}
 }
