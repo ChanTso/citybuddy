@@ -174,6 +174,14 @@ class FaqPublicationIntegrationTest {
         () -> service.publish(command("faq-main", "faq-main-stale", 1, 0)),
         FaqPublicationException.Code.STALE_VERSION);
 
+    proveCommittedOutboxColumnsRejectCorruptReplay(first, published);
+    assertCode(
+        () -> service.publish(command("faq-main", "faq-main-repeat-revision", 1, 1)),
+        FaqPublicationException.Code.STALE_VERSION);
+    assertSource("faq-main", 1, 1, "PUBLISHED", "How do returns work?");
+    assertThat(faqCommandCount("faq-main")).isEqualTo(1);
+    assertThat(faqOutboxCount("faq-main")).isEqualTo(1);
+
     FaqRepository.FaqSource revised =
         service.saveDraft("faq-main", "Can I return an item?", "Yes, within five days.", 1);
     assertThat(revised.workingState()).isEqualTo("DRAFT");
@@ -246,6 +254,102 @@ class FaqPublicationIntegrationTest {
     assertThat(faqOutboxCount("faq-rollback-outbox")).isZero();
   }
 
+  private void proveCommittedOutboxColumnsRejectCorruptReplay(
+      FaqPublicationService.PublicationCommand command,
+      FaqPublicationService.PublicationResult originalResult) {
+    FaqRepository.OutboxEvent original = repository.findOutbox(command.eventId()).orElseThrow();
+    String changedEventId = UUID.randomUUID().toString();
+    List<OutboxCorruption> corruptions =
+        List.of(
+            new OutboxCorruption(
+                () ->
+                    updateOne(
+                        "UPDATE commerce_outbox SET event_id = ? WHERE event_id = ?",
+                        changedEventId,
+                        original.eventId()),
+                changedEventId),
+            new OutboxCorruption(
+                () ->
+                    updateOne(
+                        "UPDATE commerce_outbox SET aggregate_type = 'FAQ_CORRUPT' WHERE event_id = ?",
+                        original.eventId()),
+                original.eventId()),
+            new OutboxCorruption(
+                () ->
+                    updateOne(
+                        "UPDATE commerce_outbox SET aggregate_id = 'faq-corrupt' WHERE event_id = ?",
+                        original.eventId()),
+                original.eventId()),
+            new OutboxCorruption(
+                () ->
+                    updateOne(
+                        "UPDATE commerce_outbox SET aggregate_version = aggregate_version + 1 WHERE event_id = ?",
+                        original.eventId()),
+                original.eventId()),
+            new OutboxCorruption(
+                () ->
+                    updateOne(
+                        "UPDATE commerce_outbox SET event_type = 'FAQ_CORRUPT' WHERE event_id = ?",
+                        original.eventId()),
+                original.eventId()),
+            jsonCorruption(original, "$.eventId", UUID.randomUUID().toString()),
+            jsonCorruption(original, "$.sourceId", "faq-corrupt"),
+            jsonCorruption(original, "$.sourceType", "product"),
+            jsonCorruption(original, "$.sourceVersion", 99),
+            jsonCorruption(original, "$.publicationState", "DRAFT"),
+            jsonCorruption(original, "$.tombstone", true),
+            jsonCorruption(original, "$.occurredTime", "2026-07-20T09:00:00Z"),
+            jsonCorruption(original, "$.content.question", "Changed but bounded question?"),
+            jsonCorruption(original, "$.content.answer", "Changed but bounded answer."));
+
+    for (OutboxCorruption corruption : corruptions) {
+      corruption.inject().run();
+      try {
+        assertCode(
+            () -> service.publish(command),
+            FaqPublicationException.Code.INCONSISTENT_DURABLE_STATE);
+      } finally {
+        restoreOutbox(original, corruption.currentEventId());
+      }
+      FaqPublicationService.PublicationResult replay = service.publish(command);
+      assertThat(replay.replayed()).isTrue();
+      assertThat(replay.event()).isEqualTo(originalResult.event());
+    }
+  }
+
+  private OutboxCorruption jsonCorruption(
+      FaqRepository.OutboxEvent original, String path, Object value) {
+    return new OutboxCorruption(
+        () ->
+            updateOne(
+                "UPDATE commerce_outbox SET payload = JSON_SET(payload, ?, ?) WHERE event_id = ?",
+                path,
+                value,
+                original.eventId()),
+        original.eventId());
+  }
+
+  private void restoreOutbox(FaqRepository.OutboxEvent original, String currentEventId) {
+    updateOne(
+        """
+        UPDATE commerce_outbox
+        SET event_id = ?, aggregate_type = ?, aggregate_id = ?, aggregate_version = ?,
+            event_type = ?, payload = CAST(? AS JSON)
+        WHERE event_id = ?
+        """,
+        original.eventId(),
+        original.aggregateType(),
+        original.aggregateId(),
+        original.aggregateVersion(),
+        original.eventType(),
+        original.payload(),
+        currentEventId);
+  }
+
+  private void updateOne(String sql, Object... arguments) {
+    assertThat(jdbc.update(sql, arguments)).isEqualTo(1);
+  }
+
   private void proveConcurrentReplayAndConflictingIdentityConvergence() throws Exception {
     service.saveDraft("faq-concurrent-replay", "Concurrent replay?", "Converges.", 0);
     FaqPublicationService.PublicationCommand shared =
@@ -277,6 +381,42 @@ class FaqPublicationIntegrationTest {
     assertSource("faq-concurrent-replay", 1, 1, "PUBLISHED", "Concurrent replay?");
     assertThat(faqCommandCount("faq-concurrent-replay")).isEqualTo(1);
     assertThat(faqOutboxCount("faq-concurrent-replay")).isEqualTo(1);
+
+    service.saveDraft("faq-concurrent-publish", "Publish once?", "Exactly once.", 0);
+    FaqPublicationService.PublicationCommand publishLeft =
+        command("faq-concurrent-publish", "faq-concurrent-publish-left", 1, 0);
+    FaqPublicationService.PublicationCommand publishRight =
+        command("faq-concurrent-publish", "faq-concurrent-publish-right", 1, 0);
+    CountDownLatch publishReady = new CountDownLatch(2);
+    CountDownLatch publishStart = new CountDownLatch(1);
+    var publishExecutor = Executors.newFixedThreadPool(2);
+    List<java.util.concurrent.Future<String>> publications = new ArrayList<>();
+    for (FaqPublicationService.PublicationCommand candidate : List.of(publishLeft, publishRight)) {
+      publications.add(
+          publishExecutor.submit(
+              () -> {
+                publishReady.countDown();
+                publishStart.await();
+                try {
+                  service.publish(candidate);
+                  return "SUCCESS";
+                } catch (FaqPublicationException exception) {
+                  return exception.code().name();
+                }
+              }));
+    }
+    assertThat(publishReady.await(5, TimeUnit.SECONDS)).isTrue();
+    publishStart.countDown();
+    List<String> publicationResults = new ArrayList<>();
+    for (var publication : publications) {
+      publicationResults.add(publication.get(20, TimeUnit.SECONDS));
+    }
+    publishExecutor.shutdownNow();
+    assertThat(publicationResults)
+        .containsExactlyInAnyOrder("SUCCESS", FaqPublicationException.Code.STALE_VERSION.name());
+    assertSource("faq-concurrent-publish", 1, 1, "PUBLISHED", "Publish once?");
+    assertThat(faqCommandCount("faq-concurrent-publish")).isEqualTo(1);
+    assertThat(faqOutboxCount("faq-concurrent-publish")).isEqualTo(1);
 
     service.saveDraft("faq-concurrent-conflict", "Concurrent conflict?", "One wins.", 0);
     FaqPublicationService.PublicationCommand left =
@@ -517,4 +657,6 @@ class FaqPublicationIntegrationTest {
     }
     return value;
   }
+
+  private record OutboxCorruption(Runnable inject, String currentEventId) {}
 }

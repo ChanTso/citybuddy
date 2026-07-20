@@ -50,6 +50,7 @@ CREATE TABLE faq_publication_command (
   created_at TIMESTAMP(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6),
   CONSTRAINT uq_faq_publication_event UNIQUE (event_id),
   CONSTRAINT uq_faq_publication_version UNIQUE (faq_id, source_version),
+  CONSTRAINT uq_faq_publication_draft UNIQUE (faq_id, expected_draft_revision),
   CONSTRAINT fk_faq_publication_source
     FOREIGN KEY (faq_id) REFERENCES faq_source (faq_id),
   CONSTRAINT chk_faq_publication_expected_draft CHECK (expected_draft_revision > 0),

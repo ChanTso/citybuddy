@@ -15,6 +15,7 @@ import org.springframework.transaction.annotation.Transactional;
 import org.springframework.transaction.support.TransactionSynchronizationManager;
 
 public class FaqPublicationService {
+  private static final String INTENT_COMMITMENT_FORMAT = "FAQ_PUBLICATION_INTENT_V1";
   private static final Pattern FAQ_ID = Pattern.compile("[a-z0-9][a-z0-9-]{0,63}");
   private static final int MAX_IDEMPOTENCY_KEY_LENGTH = 128;
 
@@ -63,9 +64,10 @@ public class FaqPublicationService {
     if (!existing.isEmpty()) {
       return replay(existing, valid);
     }
-    if (source.draftRevision() != valid.expectedDraftRevision()
+    if (!"DRAFT".equals(source.workingState())
+        || source.draftRevision() != valid.expectedDraftRevision()
         || source.publishedVersion() != valid.expectedPublishedVersion()) {
-      throw stale("FAQ draft or published version is stale");
+      throw stale("FAQ draft is not publishable or its version is stale");
     }
 
     long sourceVersion;
@@ -86,6 +88,15 @@ public class FaqPublicationService {
             occurredAt.toString(),
             new FaqKnowledgeEvent.PublicContent(source.draftQuestion(), source.draftAnswer()));
     String payload = codec.encode(event);
+    String intentHash =
+        intentHash(
+            valid,
+            valid.eventId(),
+            FaqRepository.AGGREGATE_TYPE,
+            valid.faqId(),
+            sourceVersion,
+            FaqRepository.EVENT_TYPE,
+            event);
     FaqRepository.PublicationCommand durable =
         new FaqRepository.PublicationCommand(
             valid.idempotencyKey(),
@@ -94,7 +105,7 @@ public class FaqPublicationService {
             valid.expectedDraftRevision(),
             valid.expectedPublishedVersion(),
             sourceVersion,
-            valid.intentHash(),
+            intentHash,
             occurredAt);
     try {
       repository.publishSource(source, sourceVersion, occurredAt);
@@ -117,20 +128,41 @@ public class FaqPublicationService {
         || !durable.eventId().equals(valid.eventId())
         || !durable.faqId().equals(valid.faqId())
         || durable.expectedDraftRevision() != valid.expectedDraftRevision()
-        || durable.expectedPublishedVersion() != valid.expectedPublishedVersion()
-        || !durable.intentHash().equals(valid.intentHash())) {
+        || durable.expectedPublishedVersion() != valid.expectedPublishedVersion()) {
       throw conflict("FAQ event or idempotency identity has conflicting intent");
     }
     FaqRepository.OutboxEvent outbox =
         repository
             .findOutbox(durable.eventId())
             .orElseThrow(() -> inconsistent("FAQ publication command has no matching Outbox"));
-    FaqKnowledgeEvent event = codec.decode(outbox.payload());
+    FaqKnowledgeEvent event;
+    try {
+      event = codec.decode(outbox.payload());
+    } catch (FaqPublicationException exception) {
+      throw inconsistent("FAQ publication Outbox payload is invalid", exception);
+    }
     if (!event.eventId().equals(durable.eventId())
+        || !FaqRepository.AGGREGATE_TYPE.equals(outbox.aggregateType())
+        || !outbox.aggregateId().equals(durable.faqId())
+        || outbox.aggregateVersion() != durable.sourceVersion()
+        || !FaqRepository.EVENT_TYPE.equals(outbox.eventType())
         || !event.sourceId().equals(durable.faqId())
         || event.sourceVersion() != durable.sourceVersion()
         || !event.occurredTime().equals(durable.occurredAt().toString())) {
       throw inconsistent("FAQ publication command and Outbox payload disagree");
+    }
+    if (!durable
+        .intentHash()
+        .equals(
+            intentHash(
+                valid,
+                outbox.eventId(),
+                outbox.aggregateType(),
+                outbox.aggregateId(),
+                outbox.aggregateVersion(),
+                outbox.eventType(),
+                event))) {
+      throw inconsistent("FAQ publication event content no longer matches its commitment");
     }
     requireTransaction();
     return new PublicationResult(event, true);
@@ -145,21 +177,44 @@ public class FaqPublicationService {
         || command.expectedPublishedVersion() < 0) {
       throw validation("FAQ publication command is invalid");
     }
-    String intentHash =
-        hash(
-            List.of(
-                command.faqId(),
-                command.idempotencyKey(),
-                command.eventId(),
-                Long.toString(command.expectedDraftRevision()),
-                Long.toString(command.expectedPublishedVersion())));
     return new ValidatedCommand(
         command.faqId(),
         command.idempotencyKey(),
         command.eventId(),
         command.expectedDraftRevision(),
-        command.expectedPublishedVersion(),
-        intentHash);
+        command.expectedPublishedVersion());
+  }
+
+  private static String intentHash(
+      ValidatedCommand command,
+      String outboxEventId,
+      String aggregateType,
+      String aggregateId,
+      long aggregateVersion,
+      String eventType,
+      FaqKnowledgeEvent event) {
+    return hash(
+        List.of(
+            INTENT_COMMITMENT_FORMAT,
+            command.faqId(),
+            command.idempotencyKey(),
+            command.eventId(),
+            Long.toString(command.expectedDraftRevision()),
+            Long.toString(command.expectedPublishedVersion()),
+            outboxEventId,
+            aggregateType,
+            aggregateId,
+            Long.toString(aggregateVersion),
+            eventType,
+            event.eventId(),
+            event.sourceId(),
+            event.sourceType(),
+            Long.toString(event.sourceVersion()),
+            event.publicationState(),
+            Boolean.toString(event.tombstone()),
+            event.occurredTime(),
+            event.content().question(),
+            event.content().answer()));
   }
 
   private static void validateDraft(
@@ -242,6 +297,12 @@ public class FaqPublicationService {
         FaqPublicationException.Code.INCONSISTENT_DURABLE_STATE, message);
   }
 
+  private static FaqPublicationException inconsistent(String message, Throwable cause) {
+    FaqPublicationException exception = inconsistent(message);
+    exception.initCause(cause);
+    return exception;
+  }
+
   public record PublicationCommand(
       String faqId,
       String idempotencyKey,
@@ -256,6 +317,5 @@ public class FaqPublicationService {
       String idempotencyKey,
       String eventId,
       long expectedDraftRevision,
-      long expectedPublishedVersion,
-      String intentHash) {}
+      long expectedPublishedVersion) {}
 }

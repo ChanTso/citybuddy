@@ -9,6 +9,8 @@ import java.util.Optional;
 import org.springframework.jdbc.core.JdbcTemplate;
 
 public class FaqRepository {
+  static final String AGGREGATE_TYPE = "FAQ";
+  static final String EVENT_TYPE = "FAQ_KNOWLEDGE_SYNCHRONIZATION";
   private static final String SOURCE_COLUMNS =
       "faq_id, draft_question, draft_answer, draft_revision, working_state, "
           + "published_question, published_answer, published_version, published_at";
@@ -84,6 +86,7 @@ public class FaqRepository {
             WHERE faq_id = ?
               AND draft_revision = ?
               AND published_version = ?
+              AND working_state = 'DRAFT'
             """,
             sourceVersion,
             Timestamp.from(occurredAt),
@@ -141,11 +144,13 @@ public class FaqRepository {
         """
         INSERT INTO commerce_outbox
           (event_id, aggregate_type, aggregate_id, aggregate_version, event_type, payload)
-        VALUES (?, 'FAQ', ?, ?, 'FAQ_KNOWLEDGE_SYNCHRONIZATION', CAST(? AS JSON))
+        VALUES (?, ?, ?, ?, ?, CAST(? AS JSON))
         """,
         command.eventId(),
+        AGGREGATE_TYPE,
         command.faqId(),
         command.sourceVersion(),
+        EVENT_TYPE,
         payload);
   }
 
@@ -153,14 +158,11 @@ public class FaqRepository {
     return jdbc
         .query(
             """
-            SELECT event_id, payload
+            SELECT event_id, aggregate_type, aggregate_id, aggregate_version, event_type, payload
             FROM commerce_outbox
             WHERE event_id = ?
-              AND aggregate_type = 'FAQ'
-              AND event_type = 'FAQ_KNOWLEDGE_SYNCHRONIZATION'
             """,
-            (result, row) ->
-                new OutboxEvent(result.getString("event_id"), result.getString("payload")),
+            FaqRepository::mapOutbox,
             eventId)
         .stream()
         .findFirst();
@@ -169,15 +171,17 @@ public class FaqRepository {
   public List<OutboxEvent> pendingOutbox(int limit) {
     return jdbc.query(
         """
-        SELECT event_id, payload
+        SELECT event_id, aggregate_type, aggregate_id, aggregate_version, event_type, payload
         FROM commerce_outbox
         WHERE publication_state = 'PENDING'
-          AND aggregate_type = 'FAQ'
-          AND event_type = 'FAQ_KNOWLEDGE_SYNCHRONIZATION'
+          AND aggregate_type = ?
+          AND event_type = ?
         ORDER BY created_at, event_id
         LIMIT ?
         """,
-        (result, row) -> new OutboxEvent(result.getString("event_id"), result.getString("payload")),
+        FaqRepository::mapOutbox,
+        AGGREGATE_TYPE,
+        EVENT_TYPE,
         limit);
   }
 
@@ -188,11 +192,13 @@ public class FaqRepository {
             UPDATE commerce_outbox
             SET publish_attempts = publish_attempts + 1
             WHERE event_id = ?
-              AND aggregate_type = 'FAQ'
-              AND event_type = 'FAQ_KNOWLEDGE_SYNCHRONIZATION'
+              AND aggregate_type = ?
+              AND event_type = ?
               AND publication_state = 'PENDING'
             """,
-            eventId);
+            eventId,
+            AGGREGATE_TYPE,
+            EVENT_TYPE);
     if (changed != 1) {
       throw inconsistent("FAQ Outbox event is not pending after delivery failure");
     }
@@ -206,11 +212,13 @@ public class FaqRepository {
             SET publication_state = 'PUBLISHED', publish_attempts = publish_attempts + 1,
                 published_at = CURRENT_TIMESTAMP(6)
             WHERE event_id = ?
-              AND aggregate_type = 'FAQ'
-              AND event_type = 'FAQ_KNOWLEDGE_SYNCHRONIZATION'
+              AND aggregate_type = ?
+              AND event_type = ?
               AND publication_state = 'PENDING'
             """,
-            eventId);
+            eventId,
+            AGGREGATE_TYPE,
+            EVENT_TYPE);
     if (changed != 1) {
       throw inconsistent("FAQ Outbox event is not pending after broker acceptance");
     }
@@ -228,6 +236,16 @@ public class FaqRepository {
         result.getString("published_answer"),
         result.getLong("published_version"),
         publishedAt == null ? null : publishedAt.toInstant());
+  }
+
+  private static OutboxEvent mapOutbox(ResultSet result, int row) throws SQLException {
+    return new OutboxEvent(
+        result.getString("event_id"),
+        result.getString("aggregate_type"),
+        result.getString("aggregate_id"),
+        result.getLong("aggregate_version"),
+        result.getString("event_type"),
+        result.getString("payload"));
   }
 
   private static FaqPublicationException inconsistent(String message) {
@@ -256,5 +274,11 @@ public class FaqRepository {
       String intentHash,
       Instant occurredAt) {}
 
-  public record OutboxEvent(String eventId, String payload) {}
+  public record OutboxEvent(
+      String eventId,
+      String aggregateType,
+      String aggregateId,
+      long aggregateVersion,
+      String eventType,
+      String payload) {}
 }
