@@ -306,9 +306,7 @@ def main() -> None:
             (b"{" + b" " * 8192 + b"}", {}, "invalid_payload"),
             (b"[" * 1000 + b"]" * 1000, {}, "invalid_payload"),
             (
-                encode(event(9)).replace(
-                    b'"sourceVersion":9', b'"sourceVersion":' + b"1" * 5000
-                ),
+                encode(event(9)).replace(b'"sourceVersion":9', b'"sourceVersion":' + b"1" * 5000),
                 {},
                 "invalid_payload",
             ),
