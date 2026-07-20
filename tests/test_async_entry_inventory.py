@@ -152,13 +152,20 @@ def test_inventory_closes_all_runtime_rocketmq_builders_and_outbox_readers() -> 
     )
     assert product_query.casefold().count("from commerce_outbox") == 1
     assert "event_type = 'PRODUCT_PUBLICATION_CHANGED'" in product_query
-    assert faq_query.casefold().count("from commerce_outbox") == 2
+    assert faq_query.casefold().count("from commerce_outbox") == 3
     assert 'static final String AGGREGATE_TYPE = "FAQ"' in faq_query
     assert 'static final String EVENT_TYPE = "FAQ_KNOWLEDGE_SYNCHRONIZATION"' in faq_query
-    assert faq_query.count("AGGREGATE_TYPE") == 5
-    assert faq_query.count("EVENT_TYPE") == 5
+    assert faq_query.count("AGGREGATE_TYPE") == 6
+    assert faq_query.count("EVENT_TYPE") == 6
     assert "aggregate_type = ?" in faq_query
     assert "event_type = ?" in faq_query
+    assert (
+        "FROM faq_publication_command c\n"
+        "        LEFT JOIN commerce_outbox o ON o.event_id = c.event_id" in faq_query
+    )
+    assert "WHERE o.event_id IS NULL OR o.publication_state = 'PENDING'" in faq_query
+    assert "LEFT JOIN faq_publication_command c ON c.event_id = o.event_id" in faq_query
+    assert "AND c.event_id IS NULL" in faq_query
     for outbox_query in (product_query, faq_query):
         assert "STANDARD_ORDER" not in outbox_query[outbox_query.index("FROM commerce_outbox") :]
         assert "REFUND_" not in outbox_query[outbox_query.index("FROM commerce_outbox") :]
