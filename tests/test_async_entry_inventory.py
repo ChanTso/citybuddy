@@ -96,7 +96,7 @@ def test_outbox_and_non_commerce_paths_are_not_hidden_async_carriers() -> None:
         for path in sorted((ROOT / "agent-service/src").rglob("*.py"))
     )
     assert "event_type = 'PRODUCT_PUBLICATION_CHANGED'" in products
-    assert "event_type = 'FAQ_KNOWLEDGE_SYNCHRONIZATION'" in faq
+    assert 'static final String EVENT_TYPE = "FAQ_KNOWLEDGE_SYNCHRONIZATION"' in faq
     assert "sandbox" not in spike_event.lower()
     assert "without messaging" in indexer_worker
     assert "rocketmq" not in agent_files.lower()
@@ -153,8 +153,12 @@ def test_inventory_closes_all_runtime_rocketmq_builders_and_outbox_readers() -> 
     assert product_query.casefold().count("from commerce_outbox") == 1
     assert "event_type = 'PRODUCT_PUBLICATION_CHANGED'" in product_query
     assert faq_query.casefold().count("from commerce_outbox") == 2
-    assert "aggregate_type = 'FAQ'" in faq_query
-    assert "event_type = 'FAQ_KNOWLEDGE_SYNCHRONIZATION'" in faq_query
+    assert 'static final String AGGREGATE_TYPE = "FAQ"' in faq_query
+    assert 'static final String EVENT_TYPE = "FAQ_KNOWLEDGE_SYNCHRONIZATION"' in faq_query
+    assert faq_query.count("AGGREGATE_TYPE") == 5
+    assert faq_query.count("EVENT_TYPE") == 5
+    assert "aggregate_type = ?" in faq_query
+    assert "event_type = ?" in faq_query
     for outbox_query in (product_query, faq_query):
         assert "STANDARD_ORDER" not in outbox_query[outbox_query.index("FROM commerce_outbox") :]
         assert "REFUND_" not in outbox_query[outbox_query.index("FROM commerce_outbox") :]
