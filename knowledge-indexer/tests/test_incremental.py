@@ -86,6 +86,24 @@ def test_duplicate_json_field_and_oversized_payload_are_rejected() -> None:
         FaqKnowledgeEvent.from_bytes(b"{" + b" " * 8192 + b"}")
 
 
+@pytest.mark.parametrize(
+    "payload",
+    [
+        b"\xff",
+        b"null",
+        b"[]",
+        b'"text"',
+        b"1",
+        b"true",
+        b'{"eventId":null}',
+        b'{"eventId":"line\\u0000break"}',
+    ],
+)
+def test_all_parsing_and_framing_failures_are_bounded(payload: bytes) -> None:
+    with pytest.raises(KnowledgeEventError):
+        FaqKnowledgeEvent.from_bytes(payload)
+
+
 def test_projection_sources_are_bounded_public_and_cosine_safe() -> None:
     event = FaqKnowledgeEvent.from_bytes(encoded(event_payload()))
 

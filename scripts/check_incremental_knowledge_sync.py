@@ -169,16 +169,54 @@ def main() -> None:
         assert isinstance(second_content, dict)
         assert document(args.elasticsearch_url, args.index)["content"] == second_content["answer"]
 
-        rebound = deepcopy(first)
-        rebound["sourceVersion"] = 9
-        send(producer, args.topic, encode(rebound), event_id=cast(str, rebound["eventId"]))
-        consume_expected(consumer, DeliveryAction.ACK, "conflicting_event_identity")
+        equal_other_event = deepcopy(second)
+        equal_other_event["eventId"] = str(uuid4())
+        send(
+            producer,
+            args.topic,
+            encode(equal_other_event),
+            event_id=cast(str, equal_other_event["eventId"]),
+        )
+        consume_expected(consumer, DeliveryAction.ACK, "conflicting_source_version")
+
+        rebound_variants = []
+        for field, replacement in (
+            ("sourceId", "faq-cb111-other"),
+            ("sourceVersion", 9),
+            ("tombstone", True),
+            ("occurredTime", "2026-07-21T12:00:09Z"),
+        ):
+            rebound = deepcopy(first)
+            rebound[field] = replacement
+            rebound_variants.append(rebound)
+        for content_field, replacement in (
+            ("question", "A rebound question?"),
+            ("answer", "A rebound answer."),
+        ):
+            rebound = deepcopy(first)
+            rebound_content = rebound["content"]
+            assert isinstance(rebound_content, dict)
+            rebound_content[content_field] = replacement
+            rebound_variants.append(rebound)
+        for rebound in rebound_variants:
+            send(producer, args.topic, encode(rebound), event_id=cast(str, rebound["eventId"]))
+            consume_expected(consumer, DeliveryAction.ACK, "conflicting_event_identity")
 
         deleted = event(3, tombstone=True)
         send(producer, args.topic, encode(deleted), event_id=cast(str, deleted["eventId"]))
         consume_expected(consumer, DeliveryAction.ACK, "applied")
         deleted_doc = document(args.elasticsearch_url, args.index)
         assert deleted_doc["deleted"] is True and deleted_doc["published"] is False
+        send(producer, args.topic, encode(deleted), event_id=cast(str, deleted["eventId"]))
+        consume_expected(consumer, DeliveryAction.ACK, "replayed")
+        older_tombstone = event(2, tombstone=True)
+        send(
+            producer,
+            args.topic,
+            encode(older_tombstone),
+            event_id=cast(str, older_tombstone["eventId"]),
+        )
+        consume_expected(consumer, DeliveryAction.ACK, "stale")
         stale_after_delete = event(2)
         send(
             producer,
