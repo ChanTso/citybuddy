@@ -304,6 +304,17 @@ def main() -> None:
         malformed_cases: list[tuple[bytes, dict[str, str], str]] = [
             (b"not-json", {}, "invalid_payload"),
             (b"{" + b" " * 8192 + b"}", {}, "invalid_payload"),
+            (b"[" * 1000 + b"]" * 1000, {}, "invalid_payload"),
+            (
+                encode(
+                    {
+                        **event(9),
+                        "content": {"question": "public", "answer": "\ud800"},
+                    }
+                ),
+                {},
+                "invalid_values",
+            ),
             (
                 encode({**event(9), "privateCustomer": "must-not-pass"}),
                 {},

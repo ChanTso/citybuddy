@@ -90,6 +90,7 @@ def test_duplicate_json_field_and_oversized_payload_are_rejected() -> None:
     "payload",
     [
         b"\xff",
+        b"[" * 1000 + b"]" * 1000,
         b"null",
         b"[]",
         b'"text"',
@@ -97,6 +98,12 @@ def test_duplicate_json_field_and_oversized_payload_are_rejected() -> None:
         b"true",
         b'{"eventId":null}',
         b'{"eventId":"line\\u0000break"}',
+        encoded(
+            {
+                **event_payload(),
+                "content": {"question": "public", "answer": "\ud800"},
+            }
+        ),
     ],
 )
 def test_all_parsing_and_framing_failures_are_bounded(payload: bytes) -> None:

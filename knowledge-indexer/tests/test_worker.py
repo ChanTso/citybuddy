@@ -94,7 +94,14 @@ def test_worker_acknowledgement_is_determined_by_projection_outcome(
 
 @pytest.mark.parametrize(
     "body",
-    [None, "text", b"not-json", b"{}"],
+    [
+        None,
+        "text",
+        b"not-json",
+        b"{}",
+        b"[" * 1000 + b"]" * 1000,
+        valid_body().replace(b'"Tomorrow."', b'"\\ud800"'),
+    ],
 )
 def test_permanent_malformed_payload_is_acknowledged(body: object) -> None:
     projection = Projection(ProjectionOutcome.APPLIED)

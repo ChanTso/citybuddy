@@ -106,7 +106,12 @@ class FaqKnowledgeEvent:
             raise KnowledgeEventError("invalid_payload")
         try:
             decoded = json.loads(payload.decode("utf-8"), object_pairs_hook=_unique_object)
-        except (UnicodeDecodeError, json.JSONDecodeError, _DuplicateField) as error:
+        except (
+            UnicodeDecodeError,
+            json.JSONDecodeError,
+            _DuplicateField,
+            RecursionError,
+        ) as error:
             raise KnowledgeEventError("invalid_payload") from error
         if not isinstance(decoded, dict) or set(decoded) != _EVENT_FIELDS:
             raise KnowledgeEventError("invalid_envelope")
@@ -194,11 +199,13 @@ def _canonical_uuid(value: str) -> bool:
 
 
 def _valid_text(value: object, maximum: int) -> bool:
-    return (
-        isinstance(value, str)
-        and bool(value.strip())
-        and len(value.encode("utf-16-le")) // 2 <= maximum
-    )
+    if not isinstance(value, str) or not value.strip():
+        return False
+    try:
+        code_units = len(value.encode("utf-16-le")) // 2
+    except UnicodeEncodeError:
+        return False
+    return code_units <= maximum
 
 
 def _valid_instant(value: str) -> bool:
