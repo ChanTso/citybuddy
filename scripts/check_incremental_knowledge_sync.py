@@ -306,6 +306,13 @@ def main() -> None:
             (b"{" + b" " * 8192 + b"}", {}, "invalid_payload"),
             (b"[" * 1000 + b"]" * 1000, {}, "invalid_payload"),
             (
+                encode(event(9)).replace(
+                    b'"sourceVersion":9', b'"sourceVersion":' + b"1" * 5000
+                ),
+                {},
+                "invalid_payload",
+            ),
+            (
                 encode(
                     {
                         **event(9),
@@ -364,7 +371,7 @@ def main() -> None:
         json.dumps(
             {
                 "aliasUnchanged": True,
-                "boundedPermanentRejections": 4,
+                "boundedPermanentRejections": len(malformed_cases),
                 "event": "cb111-incremental-knowledge-sync-evidence",
                 "finalSourceVersion": 8,
                 "restartRedelivery": True,

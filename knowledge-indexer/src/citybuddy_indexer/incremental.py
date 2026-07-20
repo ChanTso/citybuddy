@@ -108,8 +108,7 @@ class FaqKnowledgeEvent:
             decoded = json.loads(payload.decode("utf-8"), object_pairs_hook=_unique_object)
         except (
             UnicodeDecodeError,
-            json.JSONDecodeError,
-            _DuplicateField,
+            ValueError,
             RecursionError,
         ) as error:
             raise KnowledgeEventError("invalid_payload") from error

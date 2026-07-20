@@ -100,6 +100,9 @@ def test_worker_acknowledgement_is_determined_by_projection_outcome(
         b"not-json",
         b"{}",
         b"[" * 1000 + b"]" * 1000,
+        valid_body().replace(
+            b'"sourceVersion":3', b'"sourceVersion":' + b"1" * 5000
+        ),
         valid_body().replace(b'"Tomorrow."', b'"\\ud800"'),
     ],
 )

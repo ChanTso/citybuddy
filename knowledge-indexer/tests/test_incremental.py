@@ -91,6 +91,9 @@ def test_duplicate_json_field_and_oversized_payload_are_rejected() -> None:
     [
         b"\xff",
         b"[" * 1000 + b"]" * 1000,
+        encoded(event_payload()).replace(
+            b'"sourceVersion":3', b'"sourceVersion":' + b"1" * 5000
+        ),
         b"null",
         b"[]",
         b'"text"',
