@@ -1,12 +1,10 @@
 package io.citybuddy.commerce.evaluation;
 
-import java.nio.charset.StandardCharsets;
-import java.security.MessageDigest;
-import java.security.NoSuchAlgorithmException;
 import java.sql.ResultSet;
 import java.sql.SQLException;
+import java.sql.Timestamp;
 import java.time.Clock;
-import java.util.HexFormat;
+import java.time.Instant;
 import java.util.List;
 import org.springframework.dao.DuplicateKeyException;
 import org.springframework.jdbc.core.JdbcTemplate;
@@ -39,7 +37,7 @@ public class EvaluationCommerceAuditService {
             """
             SELECT sandbox_id FROM eval_sandbox
             WHERE sandbox_id = ? AND lifecycle_state = 'ACTIVE' AND expires_at > ?
-            FOR SHARE
+            FOR UPDATE
             """,
             (result, row) -> result.getString("sandbox_id"),
             sandboxId,
@@ -63,30 +61,58 @@ public class EvaluationCommerceAuditService {
     }
     ProductObservation product = products.getFirst();
     String referenceId =
-        digest(
+        EvaluationAuditReferenceIdentity.productFixture(
             sandboxId,
             supportSessionId,
             traceId,
             operationId,
-            "PRODUCT_FIXTURE",
             product.productId(),
-            Long.toString(product.publicationVersion()),
-            "OBSERVED");
-    try {
-      jdbc.update(
-          """
-          INSERT INTO eval_commerce_audit_reference
-            (audit_reference_id, sandbox_id, support_session_id, trace_id, operation_id,
-             entity_type, entity_id, entity_version, outcome)
-          VALUES (?, ?, ?, ?, ?, 'PRODUCT_FIXTURE', ?, ?, 'OBSERVED')
-          """,
+            product.publicationVersion());
+    StoredReference existingReference = referenceForOperation(sandboxId, operationId);
+    if (existingReference != null && "LEGACY_CUTOFF".equals(existingReference.createdAtAnchor())) {
+      Instant legacyCreatedAt =
+          requireLegacyReplay(
+              existingReference,
+              referenceId,
+              sandboxId,
+              supportSessionId,
+              traceId,
+              operationId,
+              product.productId(),
+              product.publicationVersion());
+      insertOrVerifyObservation(
           referenceId,
           sandboxId,
           supportSessionId,
           traceId,
           operationId,
           product.productId(),
-          product.publicationVersion());
+          product.publicationVersion(),
+          legacyCreatedAt);
+      return product;
+    }
+    Instant observedAt =
+        insertOrVerifyObservation(
+            referenceId,
+            sandboxId,
+            supportSessionId,
+            traceId,
+            operationId,
+            product.productId(),
+            product.publicationVersion(),
+            EvaluationAuditReferenceWriter.monotonicCreatedAt(jdbc, sandboxId, clock.instant()));
+    try {
+      EvaluationAuditReferenceWriter.insert(
+          jdbc,
+          referenceId,
+          sandboxId,
+          supportSessionId,
+          traceId,
+          operationId,
+          EvaluationAuditEntityType.PRODUCT_FIXTURE,
+          product.productId(),
+          product.publicationVersion(),
+          observedAt);
     } catch (DuplicateKeyException exception) {
       requireSameReference(
           referenceId,
@@ -95,9 +121,74 @@ public class EvaluationCommerceAuditService {
           traceId,
           operationId,
           product.productId(),
-          product.publicationVersion());
+          product.publicationVersion(),
+          observedAt);
     }
     return product;
+  }
+
+  private Instant insertOrVerifyObservation(
+      String referenceId,
+      String sandboxId,
+      String supportSessionId,
+      String traceId,
+      String operationId,
+      String productId,
+      long version,
+      Instant observedAt) {
+    jdbc.update(
+        """
+        INSERT IGNORE INTO eval_commerce_product_observation
+          (observation_id, sandbox_id, support_session_id, trace_id, operation_id,
+           product_id, product_version, outcome, created_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, 'OBSERVED', ?)
+        """,
+        referenceId,
+        sandboxId,
+        supportSessionId,
+        traceId,
+        operationId,
+        productId,
+        version,
+        Timestamp.from(observedAt));
+    List<ProductObservationTruth> existing =
+        jdbc.query(
+            """
+            SELECT observation_id, sandbox_id, support_session_id, trace_id, operation_id,
+                   product_id, product_version, outcome, created_at
+            FROM eval_commerce_product_observation
+            WHERE observation_id = ? OR (sandbox_id = ? AND operation_id = ?)
+            FOR SHARE
+            """,
+            (result, row) ->
+                new ProductObservationTruth(
+                    result.getString("observation_id"),
+                    result.getString("sandbox_id"),
+                    result.getString("support_session_id"),
+                    result.getString("trace_id"),
+                    result.getString("operation_id"),
+                    result.getString("product_id"),
+                    result.getLong("product_version"),
+                    result.getString("outcome"),
+                    result.getTimestamp("created_at").toInstant()),
+            referenceId,
+            sandboxId,
+            operationId);
+    ProductObservationTruth expected =
+        new ProductObservationTruth(
+            referenceId,
+            sandboxId,
+            supportSessionId,
+            traceId,
+            operationId,
+            productId,
+            version,
+            "OBSERVED",
+            existing.isEmpty() ? observedAt : existing.getFirst().createdAt());
+    if (existing.size() != 1 || !expected.equals(existing.getFirst())) {
+      throw new EvaluationSandboxException(409, "Conflicting evaluation operation");
+    }
+    return existing.getFirst().createdAt();
   }
 
   private void requireSameReference(
@@ -107,39 +198,108 @@ public class EvaluationCommerceAuditService {
       String traceId,
       String operationId,
       String productId,
-      long version) {
+      long version,
+      Instant createdAt) {
+    StoredReference existing = referenceForOperation(sandboxId, operationId);
+    if (existing == null
+        || !matchesProductReference(
+            existing,
+            referenceId,
+            sandboxId,
+            supportSessionId,
+            traceId,
+            operationId,
+            productId,
+            version,
+            createdAt,
+            "BUSINESS_EVENT")) {
+      throw new EvaluationSandboxException(409, "Conflicting evaluation operation");
+    }
+  }
+
+  private StoredReference referenceForOperation(String sandboxId, String operationId) {
     List<StoredReference> existing =
         jdbc.query(
             """
-            SELECT audit_reference_id, support_session_id, trace_id, entity_type, entity_id,
-                   entity_version, outcome
+            SELECT sequence_id, audit_reference_id, sandbox_id, support_session_id, trace_id,
+                   operation_id, entity_type, entity_id, entity_version, outcome, created_at,
+                   created_at_anchor
             FROM eval_commerce_audit_reference
             WHERE sandbox_id = ? AND operation_id = ?
             FOR SHARE
             """,
             (result, row) ->
                 new StoredReference(
+                    result.getLong("sequence_id"),
                     result.getString("audit_reference_id"),
+                    result.getString("sandbox_id"),
                     result.getString("support_session_id"),
                     result.getString("trace_id"),
+                    result.getString("operation_id"),
                     result.getString("entity_type"),
                     result.getString("entity_id"),
                     result.getLong("entity_version"),
-                    result.getString("outcome")),
+                    result.getString("outcome"),
+                    result.getTimestamp("created_at").toInstant(),
+                    result.getString("created_at_anchor")),
             sandboxId,
             operationId);
-    StoredReference expected =
-        new StoredReference(
-            referenceId,
-            supportSessionId,
-            traceId,
-            "PRODUCT_FIXTURE",
-            productId,
-            version,
-            "OBSERVED");
-    if (existing.size() != 1 || !expected.equals(existing.getFirst())) {
+    if (existing.size() > 1) {
       throw new EvaluationSandboxException(409, "Conflicting evaluation operation");
     }
+    return existing.isEmpty() ? null : existing.getFirst();
+  }
+
+  private Instant requireLegacyReplay(
+      StoredReference existing,
+      String referenceId,
+      String sandboxId,
+      String supportSessionId,
+      String traceId,
+      String operationId,
+      String productId,
+      long version) {
+    EvaluationLegacyAuditCommitmentStore.Snapshot commitment =
+        EvaluationLegacyAuditCommitmentStore.load(jdbc);
+    if (!commitment.contains(existing.sequenceId(), existing.referenceId())
+        || !matchesProductReference(
+            existing,
+            referenceId,
+            sandboxId,
+            supportSessionId,
+            traceId,
+            operationId,
+            productId,
+            version,
+            existing.createdAt(),
+            "LEGACY_CUTOFF")) {
+      throw new EvaluationSandboxException(409, "Conflicting evaluation operation");
+    }
+    return existing.createdAt();
+  }
+
+  private static boolean matchesProductReference(
+      StoredReference existing,
+      String referenceId,
+      String sandboxId,
+      String supportSessionId,
+      String traceId,
+      String operationId,
+      String productId,
+      long version,
+      Instant createdAt,
+      String createdAtAnchor) {
+    return existing.referenceId().equals(referenceId)
+        && existing.sandboxId().equals(sandboxId)
+        && existing.supportSessionId().equals(supportSessionId)
+        && existing.traceId().equals(traceId)
+        && existing.operationId().equals(operationId)
+        && existing.entityType().equals(EvaluationAuditEntityType.PRODUCT_FIXTURE.name())
+        && existing.entityId().equals(productId)
+        && existing.entityVersion() == version
+        && "OBSERVED".equals(existing.outcome())
+        && existing.createdAt().equals(createdAt)
+        && existing.createdAtAnchor().equals(createdAtAnchor);
   }
 
   private static ProductObservation mapProduct(ResultSet result, int row) throws SQLException {
@@ -152,22 +312,6 @@ public class EvaluationCommerceAuditService {
         result.getLong("publication_version"));
   }
 
-  private static String digest(String... values) {
-    try {
-      MessageDigest digest = MessageDigest.getInstance("SHA-256");
-      for (String value : values) {
-        byte[] bytes = value.getBytes(StandardCharsets.UTF_8);
-        digest.update(Integer.toString(bytes.length).getBytes(StandardCharsets.UTF_8));
-        digest.update((byte) ':');
-        digest.update(bytes);
-        digest.update((byte) ';');
-      }
-      return HexFormat.of().formatHex(digest.digest());
-    } catch (NoSuchAlgorithmException exception) {
-      throw new IllegalStateException("SHA-256 is unavailable", exception);
-    }
-  }
-
   public record ProductObservation(
       String productId,
       String name,
@@ -177,11 +321,27 @@ public class EvaluationCommerceAuditService {
       long publicationVersion) {}
 
   private record StoredReference(
+      long sequenceId,
       String referenceId,
+      String sandboxId,
       String supportSessionId,
       String traceId,
+      String operationId,
       String entityType,
       String entityId,
       long entityVersion,
-      String outcome) {}
+      String outcome,
+      Instant createdAt,
+      String createdAtAnchor) {}
+
+  private record ProductObservationTruth(
+      String observationId,
+      String sandboxId,
+      String supportSessionId,
+      String traceId,
+      String operationId,
+      String productId,
+      long productVersion,
+      String outcome,
+      Instant createdAt) {}
 }

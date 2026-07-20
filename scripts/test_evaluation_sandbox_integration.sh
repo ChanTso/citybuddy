@@ -4,6 +4,12 @@ set -euo pipefail
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$repo_root"
 
+v013_only="${CITYBUDDY_V013_ONLY:-false}"
+if [[ "$v013_only" != true && "$v013_only" != false ]]; then
+  echo "CITYBUDDY_V013_ONLY must be true or false." >&2
+  exit 1
+fi
+
 tmp_dir="$(mktemp -d)"
 env_file="$tmp_dir/.env"
 project="citybuddy-cb101-test-$$"
@@ -76,6 +82,70 @@ assert_mysql_integrity_fails() {
   echo "Verified MySQL integrity rejection: $label"
 }
 
+wait_for_mysql_value() {
+  local expected="$1"
+  local statement="$2"
+  local label="$3"
+  local actual=""
+  for _ in {1..200}; do
+    actual="$(mysql_query root "$root_password" commerce_db "$statement")"
+    if [[ "$actual" == "$expected" ]]; then
+      echo "Verified MySQL transition: $label"
+      return 0
+    fi
+    sleep 0.1
+  done
+  echo "Timed out waiting for $label: expected '$expected', got '$actual'" >&2
+  return 1
+}
+
+kill_active_commerce_migration() {
+  local container_id=""
+  for _ in {1..100}; do
+    container_id="$(docker ps --quiet \
+      --filter "label=com.docker.compose.project=$project" \
+      --filter 'label=com.docker.compose.service=commerce-migrate')"
+    if [[ -n "$container_id" ]]; then
+      docker kill "$container_id" >/dev/null
+      echo "Killed controlled commerce migration container $container_id."
+      return 0
+    fi
+    sleep 0.1
+  done
+  echo "No active commerce migration container was found for controlled interruption." >&2
+  return 1
+}
+
+kill_mysql_sessions_matching() {
+  local predicate="$1"
+  local connection_ids
+  connection_ids="$(mysql_query root "$root_password" commerce_db \
+    "SELECT id FROM information_schema.processlist WHERE $predicate")"
+  while IFS= read -r connection_id; do
+    if [[ -n "$connection_id" ]]; then
+      mysql_query root "$root_password" commerce_db "KILL CONNECTION $connection_id" || true
+    fi
+  done <<<"$connection_ids"
+}
+
+assert_v013_migration_grants_absent() {
+  local label="$1"
+  local grants
+  grants="$(mysql_query commerce_migration "$commerce_migration_password" '' \
+    'SHOW GRANTS FOR CURRENT_USER')"
+  if grep -Eq 'ON `commerce_db`\.`eval_commerce_audit_(reference|legacy_watermark)`' \
+    <<<"$grants"; then
+    echo "V013 exact migration grants remained after $label." >&2
+    exit 1
+  fi
+  assert_mysql_fails "$label denies audit source read" \
+    mysql_query commerce_migration "$commerce_migration_password" commerce_db \
+    'SELECT * FROM eval_commerce_audit_reference'
+  assert_mysql_fails "$label denies watermark insert" \
+    mysql_query commerce_migration "$commerce_migration_password" commerce_db \
+    "INSERT INTO eval_commerce_audit_legacy_watermark (watermark_key, commitment_format, legacy_set_digest, cutoff_sequence_id, legacy_row_count, recorded_at) VALUES ('V013', 'CITYBUDDY_EVAL_AUDIT_LEGACY_LPUTF8_SHA256_CHAIN_V1', REPEAT('0', 64), 0, 0, CURRENT_TIMESTAMP(6))"
+}
+
 assert_equal() {
   local expected="$1"
   local actual="$2"
@@ -91,6 +161,22 @@ assert_equal() {
     exit 1
   fi
   echo "Verified value: $label"
+}
+
+evaluation_product_reference() {
+  uv run python -c '
+import hashlib
+import sys
+
+digest = hashlib.sha256()
+for value in sys.argv[1:]:
+    encoded = value.encode()
+    digest.update(str(len(encoded)).encode())
+    digest.update(b":")
+    digest.update(encoded)
+    digest.update(b";")
+print(digest.hexdigest())
+' "$@"
 }
 
 request_status() {
@@ -117,6 +203,40 @@ assert_status() {
     exit 1
   fi
   echo "Verified HTTP $expected: $label"
+}
+
+assert_legacy_commitment_fails_closed() {
+  local label="$1"
+  assert_status 409 "$label rejects migrated legacy state" \
+    --request GET "http://127.0.0.1:$commerce_port/api/eval/state" \
+    --user "evaluation-manager:$management_password" \
+    --header "X-Eval-Sandbox-Id: $legacy_sandbox_id"
+  assert_status 409 "$label rejects migrated legacy audit" \
+    --request GET "http://127.0.0.1:$commerce_port/api/eval/audit/$legacy_session" \
+    --user "evaluation-manager:$management_password" \
+    --header "X-Eval-Sandbox-Id: $legacy_sandbox_id"
+}
+
+assert_legacy_commitment_recovers() {
+  local label="$1"
+  assert_status 200 "$label restores migrated legacy state" \
+    --request GET "http://127.0.0.1:$commerce_port/api/eval/state" \
+    --user "evaluation-manager:$management_password" \
+    --header "X-Eval-Sandbox-Id: $legacy_sandbox_id"
+  assert_status 200 "$label restores migrated legacy audit" \
+    --request GET "http://127.0.0.1:$commerce_port/api/eval/audit/$legacy_session" \
+    --user "evaluation-manager:$management_password" \
+    --header "X-Eval-Sandbox-Id: $legacy_sandbox_id"
+}
+
+tamper_legacy_column() {
+  local label="$1"
+  local corrupt_sql="$2"
+  local restore_sql="$3"
+  mysql_query root "$root_password" commerce_db "$corrupt_sql"
+  assert_legacy_commitment_fails_closed "$label"
+  mysql_query root "$root_password" commerce_db "$restore_sql"
+  assert_legacy_commitment_recovers "$label"
 }
 
 wait_http() {
@@ -314,6 +434,7 @@ sign_payment_callback() {
 ENV_FILE="$env_file" ./scripts/init_local.sh
 auth_app_password="$(read_value MYSQL_AUTH_APP_PASSWORD)"
 commerce_app_password="$(read_value MYSQL_COMMERCE_APP_PASSWORD)"
+commerce_migration_password="$(read_value MYSQL_COMMERCE_MIGRATION_PASSWORD)"
 agent_app_password="$(read_value MYSQL_AGENT_APP_PASSWORD)"
 root_password="$(read_value MYSQL_BOOTSTRAP_PASSWORD)"
 commerce_service_password="$(openssl rand -hex 24)"
@@ -323,15 +444,326 @@ management_password="$(openssl rand -hex 24)"
 invalid_management_password="$(openssl rand -hex 24)"
 mock_payment_key="cb105-$(openssl rand -hex 12)"
 mock_payment_secret="$(openssl rand -hex 32)"
+legacy_sandbox_id='sandbox-legacy-upgrade'
+legacy_case='case-legacy-upgrade'
+legacy_handle="$(openssl rand -base64 32 | tr '+/' '-_' | tr -d '=')"
+legacy_session='legacy-upgrade-session'
+legacy_trace='legacy-upgrade-trace'
+legacy_operation="$(printf '1%.0s' {1..64})"
+legacy_product_id='legacy-product'
+legacy_reference_id="$(evaluation_product_reference \
+  "$legacy_sandbox_id" "$legacy_session" "$legacy_trace" "$legacy_operation" \
+  PRODUCT_FIXTURE "$legacy_product_id" 1 OBSERVED)"
+legacy_trace_2='legacy-upgrade-trace-2'
+legacy_operation_2="$(printf '2%.0s' {1..64})"
+legacy_product_id_2='legacy-product-2'
+legacy_reference_id_2="$(evaluation_product_reference \
+  "$legacy_sandbox_id" "$legacy_session" "$legacy_trace_2" "$legacy_operation_2" \
+  PRODUCT_FIXTURE "$legacy_product_id_2" 1 OBSERVED)"
+legacy_other_sandbox_id='sandbox-legacy-upgrade-other'
+legacy_other_case='case-legacy-upgrade-other'
+legacy_other_handle="$(openssl rand -base64 32 | tr '+/' '-_' | tr -d '=')"
+legacy_other_session='legacy-upgrade-other-session'
+legacy_other_trace='legacy-upgrade-other-trace'
+legacy_other_operation="$(printf '3%.0s' {1..64})"
+legacy_other_product_id='legacy-other-product'
+legacy_other_reference_id="$(evaluation_product_reference \
+  "$legacy_other_sandbox_id" "$legacy_other_session" "$legacy_other_trace" \
+  "$legacy_other_operation" PRODUCT_FIXTURE "$legacy_other_product_id" 1 OBSERVED)"
+legacy_other_trace_2='legacy-upgrade-other-trace-2'
+legacy_other_operation_2="$(printf '4%.0s' {1..64})"
+legacy_other_product_id_2='legacy-other-product-2'
+legacy_other_reference_id_2="$(evaluation_product_reference \
+  "$legacy_other_sandbox_id" "$legacy_other_session" "$legacy_other_trace_2" \
+  "$legacy_other_operation_2" PRODUCT_FIXTURE "$legacy_other_product_id_2" 1 OBSERVED)"
 commerce_service_hash="$(uv run python scripts/hash_test_credential.py "$commerce_service_password")"
 evaluator_hash="$(uv run python scripts/hash_test_credential.py "$evaluator_password")"
 agent_service_hash="$(uv run python scripts/hash_test_credential.py "$agent_service_password")"
 
 "${compose[@]}" up --detach --wait --wait-timeout 60 mysql
 make ENV_FILE="$env_file" COMPOSE_PROJECT_NAME="$project" grant-access
-make ENV_FILE="$env_file" COMPOSE_PROJECT_NAME="$project" \
-  migrate-auth migrate-commerce migrate-agent
+make ENV_FILE="$env_file" COMPOSE_PROJECT_NAME="$project" migrate-auth migrate-agent
+pre_totality_migrations="$tmp_dir/pre-totality-commerce-migrations"
+mkdir -p "$pre_totality_migrations"
+cp infra/mysql/migrations/commerce/V00*.sql \
+  infra/mysql/migrations/commerce/V010__evaluation_sandbox_lifecycle.sql \
+  infra/mysql/migrations/commerce/V011__evaluation_commerce_audit_reference.sql \
+  infra/mysql/migrations/commerce/V012__evaluation_mock_payment_callback.sql \
+  "$pre_totality_migrations/"
+"${compose[@]}" run --rm \
+  --volume "$pre_totality_migrations:/opt/citybuddy/migrations:ro" commerce-migrate
 make ENV_FILE="$env_file" COMPOSE_PROJECT_NAME="$project" grant-access
+mysql_query root "$root_password" commerce_db "
+INSERT INTO eval_sandbox (
+  sandbox_id, case_correlation, reset_idempotency_key, fixture_digest, fixture_count,
+  test_user_label, requested_ttl_seconds, auth_provision_idempotency_key,
+  auth_revoke_idempotency_key, opaque_handle, lifecycle_state, auth_invalidation_state,
+  provisioning_due_at, auth_expiry_upper_bound, expires_at, activated_at
+) VALUES
+(
+  '$legacy_sandbox_id', '$legacy_case', 'reset-legacy-upgrade', REPEAT('a', 64), 2,
+  'legacy-upgrade-user', 3600, 'provision-legacy-upgrade', 'revoke-legacy-upgrade',
+  '$legacy_handle', 'ACTIVE', 'PROVISIONED', TIMESTAMPADD(MINUTE, 1, CURRENT_TIMESTAMP(6)),
+  TIMESTAMPADD(HOUR, 25, CURRENT_TIMESTAMP(6)), TIMESTAMPADD(HOUR, 24, CURRENT_TIMESTAMP(6)),
+  CURRENT_TIMESTAMP(6)
+),
+(
+  '$legacy_other_sandbox_id', '$legacy_other_case', 'reset-legacy-upgrade-other',
+  REPEAT('b', 64), 2, 'legacy-upgrade-other-user', 3600,
+  'provision-legacy-upgrade-other', 'revoke-legacy-upgrade-other',
+  '$legacy_other_handle', 'ACTIVE', 'PROVISIONED',
+  TIMESTAMPADD(MINUTE, 1, CURRENT_TIMESTAMP(6)),
+  TIMESTAMPADD(HOUR, 25, CURRENT_TIMESTAMP(6)),
+  TIMESTAMPADD(HOUR, 24, CURRENT_TIMESTAMP(6)), CURRENT_TIMESTAMP(6)
+);
+INSERT INTO eval_sandbox_product_fixture (
+  sandbox_id, product_id, name, description, price_minor, currency, stock_quantity,
+  available, publication_version
+) VALUES
+(
+  '$legacy_sandbox_id', '$legacy_product_id', 'Legacy product', 'pre-V013 product fixture',
+  700, 'CNY', 2, TRUE, 1
+),
+(
+  '$legacy_sandbox_id', '$legacy_product_id_2', 'Legacy product 2',
+  'second pre-V013 product fixture', 701, 'CNY', 2, TRUE, 1
+),
+(
+  '$legacy_other_sandbox_id', '$legacy_other_product_id', 'Other legacy product',
+  'other sandbox pre-V013 product fixture', 702, 'CNY', 2, TRUE, 1
+),
+(
+  '$legacy_other_sandbox_id', '$legacy_other_product_id_2', 'Other legacy product 2',
+  'other sandbox second pre-V013 product fixture', 703, 'CNY', 2, TRUE, 1
+);
+INSERT INTO eval_commerce_audit_reference (
+  audit_reference_id, sandbox_id, support_session_id, trace_id, operation_id,
+  entity_type, entity_id, entity_version, outcome
+) VALUES
+(
+  '$legacy_reference_id', '$legacy_sandbox_id', '$legacy_session', '$legacy_trace',
+  '$legacy_operation', 'PRODUCT_FIXTURE', '$legacy_product_id', 1, 'OBSERVED'
+),
+(
+  '$legacy_reference_id_2', '$legacy_sandbox_id', '$legacy_session', '$legacy_trace_2',
+  '$legacy_operation_2', 'PRODUCT_FIXTURE', '$legacy_product_id_2', 1, 'OBSERVED'
+),
+(
+  '$legacy_other_reference_id', '$legacy_other_sandbox_id', '$legacy_other_session',
+  '$legacy_other_trace', '$legacy_other_operation', 'PRODUCT_FIXTURE',
+  '$legacy_other_product_id', 1, 'OBSERVED'
+),
+(
+  '$legacy_other_reference_id_2', '$legacy_other_sandbox_id', '$legacy_other_session',
+  '$legacy_other_trace_2', '$legacy_other_operation_2', 'PRODUCT_FIXTURE',
+  '$legacy_other_product_id_2', 1, 'OBSERVED'
+);
+"
+legacy_created_at="$(mysql_query root "$root_password" commerce_db \
+  "SELECT DATE_FORMAT(created_at, '%Y-%m-%d %H:%i:%s.%f') FROM eval_commerce_audit_reference WHERE audit_reference_id = '$legacy_reference_id'")"
+
+# Prove a crash before the exact grant barrier cannot publish AWAITING or skip unfinished DDL.
+pre_barrier_interrupt_migrations="$tmp_dir/pre-barrier-interrupt-migrations"
+mkdir -p "$pre_barrier_interrupt_migrations"
+cp infra/mysql/migrations/commerce/*.sql "$pre_barrier_interrupt_migrations/"
+awk '
+  /^ALTER TABLE mock_payment_callback$/ { print "DO SLEEP(60);" }
+  { print }
+' infra/mysql/migrations/commerce/V013__evaluation_audit_totality.sql \
+  >"$pre_barrier_interrupt_migrations/V013__evaluation_audit_totality.sql"
+set +e
+"${compose[@]}" run --rm -e MIGRATION_PREPARE_V013=true \
+  --volume "$pre_barrier_interrupt_migrations:/opt/citybuddy/migrations:ro" commerce-migrate \
+  >"$tmp_dir/v013-pre-barrier-migration.log" 2>&1 &
+pre_barrier_migration_pid=$!
+set -e
+wait_for_mysql_value V013_DDL_PREPARING \
+  "SELECT table_comment FROM information_schema.tables WHERE table_schema = 'commerce_db' AND table_name = 'eval_commerce_audit_legacy_watermark'" \
+  "V013 partial pre-barrier phase remains DDL_PREPARING"
+kill_active_commerce_migration
+if wait "$pre_barrier_migration_pid"; then
+  echo "Expected the controlled pre-barrier migration interruption to fail." >&2
+  exit 1
+fi
+assert_equal "0:V013_DDL_PREPARING:CURRENT_TIMESTAMP(6)" \
+  "$(mysql_query root "$root_password" commerce_db \
+    "SELECT CONCAT(h.success, ':', t.table_comment, ':', c.column_default) FROM commerce_schema_history h JOIN information_schema.tables t ON t.table_schema = 'commerce_db' AND t.table_name = 'eval_commerce_audit_legacy_watermark' JOIN information_schema.columns c ON c.table_schema = 'commerce_db' AND c.table_name = 'mock_payment_callback' AND c.column_name = 'created_at' WHERE h.version = '013'")" \
+  "partial pre-barrier history, phase, and unfinished callback DDL"
+assert_v013_migration_grants_absent "partial pre-barrier cleanup"
+if make ENV_FILE="$env_file" COMPOSE_PROJECT_NAME="$project" migrate-commerce \
+  >"$tmp_dir/v013-pre-barrier-retry.log" 2>&1; then
+  echo "Partial DDL_PREPARING migration resumed unexpectedly." >&2
+  exit 1
+fi
+assert_v013_migration_grants_absent "partial pre-barrier retry cleanup"
+
+# Reset only the controlled partial prefix so the same historical fixture can exercise later phases.
+mysql_query root "$root_password" commerce_db "
+DROP TABLE eval_commerce_product_observation;
+DROP TABLE eval_commerce_audit_legacy_watermark;
+ALTER TABLE eval_commerce_audit_reference
+  DROP COLUMN created_at_anchor,
+  MODIFY COLUMN created_at TIMESTAMP(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6);
+DELETE FROM commerce_schema_history WHERE version = '013';
+"
+
+# Prepare the exact barrier, then interrupt the grant client only after both table grants commit.
+# The failed orchestration must use the phase-independent cleanup path rather than re-granting in
+# AWAITING.
+"${compose[@]}" run --rm -e MIGRATION_PREPARE_V013=true commerce-migrate
+grant_interrupt_script="$tmp_dir/apply-mysql-grants-interrupted.sh"
+awk '
+  { print }
+  /echo "migration-v013-grants=exact-prepared"/ { print "      sleep 60" }
+' scripts/apply_mysql_grants.sh >"$grant_interrupt_script"
+grant_interrupt_override="$tmp_dir/v013-grant-interrupt-compose.yaml"
+printf '%s\n' \
+  'services:' \
+  '  mysql-grants:' \
+  '    volumes:' \
+  "      - $grant_interrupt_script:/opt/citybuddy/apply-grants.sh:ro" \
+  >"$grant_interrupt_override"
+fault_compose_command="docker compose --project-name $project --env-file $env_file --file compose.yaml --file $grant_interrupt_override"
+set +e
+make ENV_FILE="$env_file" COMPOSE_PROJECT_NAME="$project" COMPOSE="$fault_compose_command" \
+  migrate-commerce >"$tmp_dir/v013-grant-interruption.log" 2>&1 &
+grant_interruption_pid=$!
+set -e
+wait_for_mysql_value 2 \
+  "SELECT COUNT(*) FROM mysql.tables_priv WHERE Db = 'commerce_db' AND User = 'commerce_migration' AND Table_name IN ('eval_commerce_audit_reference', 'eval_commerce_audit_legacy_watermark')" \
+  "V013 exact grants are committed before the grant-client interruption"
+grant_container_id="$(docker compose --project-name "$project" --env-file "$env_file" \
+  --file compose.yaml --file "$grant_interrupt_override" ps --all --quiet mysql-grants)"
+if [[ -z "$grant_container_id" ]]; then
+  echo "Could not locate the controlled V013 grant client." >&2
+  exit 1
+fi
+docker kill "$grant_container_id" >/dev/null
+if wait "$grant_interruption_pid"; then
+  echo "Expected the controlled V013 exact-grant interruption to fail." >&2
+  exit 1
+fi
+grep -Fq 'migration-v013-grants=force-revoked' "$tmp_dir/v013-grant-interruption.log"
+assert_v013_migration_grants_absent "AWAITING exact-grant client interruption cleanup"
+
+# Continue from the unchanged AWAITING barrier, then prove a POPULATING interruption is cleaned up.
+make ENV_FILE="$env_file" COMPOSE_PROJECT_NAME="$project" grant-access
+mysql_query root "$root_password" commerce_db \
+  'LOCK TABLES eval_commerce_audit_reference WRITE; SELECT SLEEP(60) /* CB105_POPULATING_LOCK */' \
+  >"$tmp_dir/v013-populating-lock.log" 2>&1 &
+populating_lock_pid=$!
+sleep 0.5
+set +e
+make ENV_FILE="$env_file" COMPOSE_PROJECT_NAME="$project" migrate-commerce \
+  >"$tmp_dir/v013-populating-migration.log" 2>&1 &
+populating_migration_pid=$!
+set -e
+wait_for_mysql_value V013_COMMITMENT_POPULATING \
+  "SELECT table_comment FROM information_schema.tables WHERE table_schema = 'commerce_db' AND table_name = 'eval_commerce_audit_legacy_watermark'" \
+  "V013 commitment enters POPULATING before the controlled read block"
+kill_active_commerce_migration
+kill_mysql_sessions_matching \
+  "USER = 'commerce_migration' AND DB = 'commerce_db' AND INFO LIKE 'INSERT INTO eval_commerce_audit_legacy_watermark%'"
+kill_mysql_sessions_matching \
+  "USER = 'root' AND INFO LIKE 'SELECT SLEEP(60) /* CB105_POPULATING_LOCK */%'"
+kill "$populating_lock_pid" >/dev/null 2>&1 || true
+if wait "$populating_migration_pid"; then
+  echo "Expected the controlled POPULATING migration interruption to fail." >&2
+  exit 1
+fi
+assert_v013_migration_grants_absent "POPULATING interruption cleanup"
+if make ENV_FILE="$env_file" COMPOSE_PROJECT_NAME="$project" migrate-commerce \
+  >"$tmp_dir/v013-populating-retry.log" 2>&1; then
+  echo "Interrupted POPULATING migration resumed unexpectedly." >&2
+  exit 1
+fi
+assert_v013_migration_grants_absent "POPULATING retry preflight cleanup"
+wait_for_mysql_value 0 \
+  "SELECT COUNT(*) FROM information_schema.processlist WHERE db = 'commerce_db' AND info LIKE 'INSERT INTO eval_commerce_audit_legacy_watermark%'" \
+  "interrupted POPULATING server work is quiescent before fixture reset"
+mysql_query root "$root_password" commerce_db "
+DELETE FROM eval_commerce_audit_legacy_watermark WHERE watermark_key = 'V013';
+ALTER TABLE eval_commerce_audit_legacy_watermark COMMENT='V013_AWAITING_COMMITMENT';
+"
+
+# An unknown phase must revoke before it fails, not preserve transient authority.
+make ENV_FILE="$env_file" COMPOSE_PROJECT_NAME="$project" grant-access
+mysql_query root "$root_password" commerce_db \
+  "ALTER TABLE eval_commerce_audit_legacy_watermark COMMENT='V013_UNKNOWN_CORRUPTED_PHASE'"
+if make ENV_FILE="$env_file" COMPOSE_PROJECT_NAME="$project" migrate-commerce \
+  >"$tmp_dir/v013-unknown-phase.log" 2>&1; then
+  echo "Unknown V013 phase was accepted unexpectedly." >&2
+  exit 1
+fi
+assert_v013_migration_grants_absent "unknown phase cleanup"
+mysql_query root "$root_password" commerce_db "
+DELETE FROM eval_commerce_audit_legacy_watermark WHERE watermark_key = 'V013';
+ALTER TABLE eval_commerce_audit_legacy_watermark COMMENT='V013_AWAITING_COMMITMENT';
+"
+
+# Delay only the history UPDATE so the process can be killed after SEALED but before success=true.
+mysql_query root "$root_password" commerce_db \
+  "CREATE TRIGGER cb105_v013_history_pause BEFORE UPDATE ON commerce_schema_history FOR EACH ROW DO SLEEP(60)"
+set +e
+make ENV_FILE="$env_file" COMPOSE_PROJECT_NAME="$project" migrate-commerce \
+  >"$tmp_dir/v013-sealed-history-migration.log" 2>&1 &
+sealed_migration_pid=$!
+set -e
+if ! wait_for_mysql_value V013_COMMITMENT_SEALED \
+  "SELECT table_comment FROM information_schema.tables WHERE table_schema = 'commerce_db' AND table_name = 'eval_commerce_audit_legacy_watermark'" \
+  "V013 reaches SEALED before the controlled history interruption"; then
+  cat "$tmp_dir/v013-sealed-history-migration.log" >&2
+  exit 1
+fi
+kill_mysql_sessions_matching \
+  "USER = 'root' AND DB = 'commerce_db' AND INFO = 'DO SLEEP(60)'"
+if wait "$sealed_migration_pid"; then
+  echo "Expected the controlled SEALED/history=false migration interruption to fail." >&2
+  exit 1
+fi
+mysql_query root "$root_password" commerce_db 'DROP TRIGGER cb105_v013_history_pause'
+assert_equal 0 "$(mysql_query root "$root_password" commerce_db \
+  "SELECT success FROM commerce_schema_history WHERE version = '013'")" \
+  "SEALED interruption keeps migration history incomplete"
+assert_v013_migration_grants_absent "SEALED/history=false interruption cleanup"
+mysql_query root "$root_password" commerce_db "
+DELETE FROM eval_commerce_audit_legacy_watermark WHERE watermark_key = 'V013';
+ALTER TABLE eval_commerce_audit_legacy_watermark COMMENT='V013_AWAITING_COMMITMENT';
+"
+
+make ENV_FILE="$env_file" COMPOSE_PROJECT_NAME="$project" migrate-commerce
+
+commerce_migration_grants="$(mysql_query commerce_migration "$commerce_migration_password" '' \
+  'SHOW GRANTS FOR CURRENT_USER')"
+if grep -Eq 'SELECT, INSERT.*ON `commerce_db`\.\*|ON `commerce_db`\.`eval_commerce_audit_(reference|legacy_watermark)`' \
+  <<<"$commerce_migration_grants"; then
+  echo "Commerce migration retained forbidden data access after V013 sealed." >&2
+  exit 1
+fi
+assert_mysql_fails "commerce migration cannot read auth-private truth after V013" \
+  mysql_query commerce_migration "$commerce_migration_password" commerce_db \
+  'SELECT * FROM auth_eval_test_principal'
+assert_mysql_fails "commerce migration cannot append audit truth after V013" \
+  mysql_query commerce_migration "$commerce_migration_password" commerce_db \
+  "INSERT INTO eval_commerce_audit_reference (audit_reference_id, sandbox_id, support_session_id, trace_id, operation_id, entity_type, entity_id, entity_version, outcome, created_at, created_at_anchor) VALUES (REPEAT('f', 64), '$legacy_sandbox_id', '$legacy_session', '$legacy_trace', REPEAT('e', 64), 'PRODUCT_FIXTURE', '$legacy_product_id', 1, 'OBSERVED', CURRENT_TIMESTAMP(6), 'LEGACY_CUTOFF')"
+assert_equal "1:V013_COMMITMENT_SEALED" \
+  "$(mysql_query commerce_migration "$commerce_migration_password" commerce_db \
+    "SELECT CONCAT(success, ':', (SELECT table_comment FROM information_schema.tables WHERE table_schema = 'commerce_db' AND table_name = 'eval_commerce_audit_legacy_watermark')) FROM commerce_schema_history WHERE version = '013'")" \
+  "V013 exact-grant barrier sealed and history complete"
+
+assert_equal "4:$legacy_other_reference_id_2:4:CITYBUDDY_EVAL_AUDIT_LEGACY_LPUTF8_SHA256_CHAIN_V1:64" \
+  "$(mysql_query commerce_app "$commerce_app_password" commerce_db \
+    "SELECT CONCAT(cutoff_sequence_id, ':', cutoff_audit_reference_id, ':', legacy_row_count, ':', commitment_format, ':', LENGTH(legacy_set_digest)) FROM eval_commerce_audit_legacy_watermark WHERE watermark_key = 'V013'")" \
+  "V013 immutable complete-set legacy commitment"
+assert_equal "$legacy_created_at:LEGACY_CUTOFF" \
+  "$(mysql_query commerce_app "$commerce_app_password" commerce_db \
+    "SELECT CONCAT(DATE_FORMAT(created_at, '%Y-%m-%d %H:%i:%s.%f'), ':', created_at_anchor) FROM eval_commerce_audit_reference WHERE audit_reference_id = '$legacy_reference_id'")" \
+  "pre-V013 audit classification"
+
+if [[ "$v013_only" == true ]]; then
+  echo "CB-105 V013 interrupted-authority integration passed."
+  exit 0
+fi
 
 mysql_query auth_app "$auth_app_password" commerce_db "
 INSERT INTO auth_service_identity (service_id, client_id, credential_hash, state, allowed_scopes) VALUES
@@ -352,6 +784,12 @@ assert_mysql_fails "auth runtime cannot read commerce evaluation audit" \
 assert_mysql_fails "agent runtime cannot read commerce evaluation audit" \
   mysql_query agent_app "$agent_app_password" commerce_db \
   'SELECT * FROM eval_commerce_audit_reference'
+assert_mysql_fails "auth runtime cannot read commerce product observation truth" \
+  mysql_query auth_app "$auth_app_password" commerce_db \
+  'SELECT * FROM eval_commerce_product_observation'
+assert_mysql_fails "agent runtime cannot read commerce product observation truth" \
+  mysql_query agent_app "$agent_app_password" commerce_db \
+  'SELECT * FROM eval_commerce_product_observation'
 assert_mysql_fails "auth runtime cannot read agent evidence truth" \
   mysql_query auth_app "$auth_app_password" cs_db 'SELECT * FROM support_event'
 assert_mysql_fails "commerce runtime cannot read agent evidence truth" \
@@ -379,12 +817,31 @@ grep -Fq 'GRANT SELECT, INSERT, UPDATE, DELETE ON `commerce_db`.`eval_sandbox_pr
 grep -Fq 'GRANT SELECT, INSERT ON `commerce_db`.`eval_sandbox_effect_stub`' <<<"$commerce_grants"
 grep -Fq 'GRANT SELECT, INSERT ON `commerce_db`.`eval_commerce_audit_reference`' \
   <<<"$commerce_grants"
+grep -Fq 'GRANT SELECT, INSERT ON `commerce_db`.`eval_commerce_product_observation`' \
+  <<<"$commerce_grants"
+grep -Fq 'GRANT SELECT ON `commerce_db`.`eval_commerce_audit_legacy_watermark`' \
+  <<<"$commerce_grants"
 assert_mysql_fails "commerce audit references are append-only" \
   mysql_query commerce_app "$commerce_app_password" commerce_db \
   "UPDATE eval_commerce_audit_reference SET outcome = 'OBSERVED' WHERE sequence_id = 1"
 assert_mysql_fails "commerce audit references cannot be deleted by runtime" \
   mysql_query commerce_app "$commerce_app_password" commerce_db \
   'DELETE FROM eval_commerce_audit_reference WHERE sequence_id = 1'
+assert_mysql_fails "commerce product observations are append-only" \
+  mysql_query commerce_app "$commerce_app_password" commerce_db \
+  "UPDATE eval_commerce_product_observation SET outcome = 'OBSERVED' WHERE observation_id = REPEAT('0', 64)"
+assert_mysql_fails "commerce product observations cannot be deleted by runtime" \
+  mysql_query commerce_app "$commerce_app_password" commerce_db \
+  'DELETE FROM eval_commerce_product_observation WHERE observation_id = REPEAT("0", 64)'
+assert_mysql_fails "commerce runtime cannot insert a legacy watermark" \
+  mysql_query commerce_app "$commerce_app_password" commerce_db \
+  "INSERT INTO eval_commerce_audit_legacy_watermark (watermark_key, commitment_format, legacy_set_digest, cutoff_sequence_id, legacy_row_count, recorded_at) VALUES ('V013', 'CITYBUDDY_EVAL_AUDIT_LEGACY_LPUTF8_SHA256_CHAIN_V1', REPEAT('0', 64), 0, 0, CURRENT_TIMESTAMP(6))"
+assert_mysql_fails "commerce runtime cannot update the legacy watermark" \
+  mysql_query commerce_app "$commerce_app_password" commerce_db \
+  "UPDATE eval_commerce_audit_legacy_watermark SET legacy_row_count = 0 WHERE watermark_key = 'V013'"
+assert_mysql_fails "commerce runtime cannot delete the legacy watermark" \
+  mysql_query commerce_app "$commerce_app_password" commerce_db \
+  "DELETE FROM eval_commerce_audit_legacy_watermark WHERE watermark_key = 'V013'"
 explain_audit="$(mysql_query commerce_app "$commerce_app_password" commerce_db \
   "EXPLAIN SELECT sequence_id, audit_reference_id, sandbox_id, support_session_id, trace_id, operation_id, entity_type, entity_id, entity_version, outcome, created_at FROM eval_commerce_audit_reference WHERE sandbox_id = 'sandbox-main' AND support_session_id = 'session-main' AND sequence_id > 0 ORDER BY sequence_id LIMIT 21")"
 grep -Fq 'ix_eval_audit_session_page' <<<"$explain_audit"
@@ -453,6 +910,202 @@ assert_status 400 "version rejects caller capability override" \
   --request GET "http://127.0.0.1:$commerce_port/api/eval/version?capability=all" \
   --user "evaluation-manager:$management_password"
 curl --silent --show-error "http://127.0.0.1:$auth_port/auth/jwks" >"$tmp_dir/jwks.json"
+assert_status 200 "provision migrated legacy sandbox identity through the real auth boundary" \
+  --request POST "http://127.0.0.1:$auth_port/internal/eval/test-principals/provision" \
+  --user "commerce-service:$commerce_service_password" \
+  --header 'Idempotency-Key: provision-legacy-upgrade' \
+  --header 'Content-Type: application/json' \
+  --data "{\"sandboxId\":\"$legacy_sandbox_id\",\"caseCorrelation\":\"$legacy_case\",\"testUserLabel\":\"legacy-upgrade-user\",\"ttlSeconds\":3600}"
+legacy_handle="$(uv run python scripts/read_json_field.py "$tmp_dir/http-response.json" handle)"
+legacy_subject="$(mysql_query auth_app "$auth_app_password" commerce_db \
+  "SELECT subject FROM auth_eval_test_principal WHERE opaque_handle = '$legacy_handle'")"
+mysql_query root "$root_password" commerce_db \
+  "UPDATE eval_sandbox SET opaque_handle = '$legacy_handle' WHERE sandbox_id = '$legacy_sandbox_id'"
+assert_status 200 "issue migrated legacy sandbox token" \
+  --request POST "http://127.0.0.1:$auth_port/auth/eval/test-token" \
+  --user "evaluation-client:$evaluator_password" \
+  --header "X-Eval-Sandbox-Id: $legacy_sandbox_id" \
+  --header 'Content-Type: application/json' \
+  --data "{\"handle\":\"$legacy_handle\"}"
+legacy_direct_token="$(uv run python scripts/read_json_field.py "$tmp_dir/http-response.json" accessToken)"
+assert_status 200 "exchange migrated legacy sandbox OBO token" \
+  --request POST "http://127.0.0.1:$auth_port/auth/token/exchange" \
+  --user "agent-service:$agent_service_password" \
+  --header "X-User-Authorization: Bearer $legacy_direct_token" \
+  --header "X-Eval-Sandbox-Id: $legacy_sandbox_id" \
+  --header 'Content-Type: application/json' \
+  --data "{\"sessionId\":\"$legacy_session\",\"userSubject\":\"$legacy_subject\",\"scope\":\"catalog:read\"}"
+legacy_obo_token="$(uv run python scripts/read_json_field.py "$tmp_dir/http-response.json" accessToken)"
+assert_equal 1 \
+  "$(mysql_query commerce_app "$commerce_app_password" commerce_db \
+    "SELECT COUNT(*) FROM eval_sandbox WHERE sandbox_id = '$legacy_sandbox_id' AND lifecycle_state = 'ACTIVE' AND expires_at > CURRENT_TIMESTAMP(6)")" \
+  "migrated legacy sandbox active truth"
+assert_equal "$legacy_reference_id:$legacy_session:$legacy_trace:$legacy_operation:$legacy_product_id:1:OBSERVED:LEGACY_CUTOFF" \
+  "$(mysql_query commerce_app "$commerce_app_password" commerce_db \
+    "SELECT CONCAT(audit_reference_id, ':', support_session_id, ':', trace_id, ':', operation_id, ':', entity_id, ':', entity_version, ':', outcome, ':', created_at_anchor) FROM eval_commerce_audit_reference WHERE audit_reference_id = '$legacy_reference_id'")" \
+  "migrated legacy audit identity"
+assert_status 200 "pre-replay migrated legacy audit is accepted only under its watermark" \
+  --request GET "http://127.0.0.1:$commerce_port/api/eval/state" \
+  --user "evaluation-manager:$management_password" \
+  --header "X-Eval-Sandbox-Id: $legacy_sandbox_id"
+assert_status 200 "second sandbox multi-row legacy set is accepted under one commitment" \
+  --request GET "http://127.0.0.1:$commerce_port/api/eval/state" \
+  --user "evaluation-manager:$management_password" \
+  --header "X-Eval-Sandbox-Id: $legacy_other_sandbox_id"
+
+legacy_sequence_id="$(mysql_query root "$root_password" commerce_db \
+  "SELECT sequence_id FROM eval_commerce_audit_reference WHERE audit_reference_id = '$legacy_reference_id'")"
+legacy_created_at_2="$(mysql_query root "$root_password" commerce_db \
+  "SELECT DATE_FORMAT(created_at, '%Y-%m-%d %H:%i:%s.%f') FROM eval_commerce_audit_reference WHERE audit_reference_id = '$legacy_reference_id_2'")"
+legacy_sequence_id_2="$(mysql_query root "$root_password" commerce_db \
+  "SELECT sequence_id FROM eval_commerce_audit_reference WHERE audit_reference_id = '$legacy_reference_id_2'")"
+assert_equal 1 "$legacy_sequence_id" "first legacy row is below the cutoff"
+assert_equal 2 "$legacy_sequence_id_2" "second legacy row is below the cutoff"
+
+forged_legacy_operation="$(printf '5%.0s' {1..64})"
+forged_legacy_reference="$(evaluation_product_reference \
+  "$legacy_sandbox_id" "$legacy_session" forged-legacy-trace "$forged_legacy_operation" \
+  PRODUCT_FIXTURE forged-product 1 OBSERVED)"
+mysql_query root "$root_password" commerce_db "
+DELETE FROM eval_commerce_audit_reference WHERE audit_reference_id = '$legacy_reference_id';
+INSERT INTO eval_commerce_audit_reference (
+  sequence_id, audit_reference_id, sandbox_id, support_session_id, trace_id, operation_id,
+  entity_type, entity_id, entity_version, outcome, created_at, created_at_anchor
+) VALUES (
+  $legacy_sequence_id, '$forged_legacy_reference', '$legacy_sandbox_id', '$legacy_session',
+  'forged-legacy-trace', '$forged_legacy_operation', 'PRODUCT_FIXTURE', 'forged-product',
+  1, 'OBSERVED', '$legacy_created_at', 'LEGACY_CUTOFF'
+);"
+assert_legacy_commitment_fails_closed \
+  "lower-sequence deletion plus a digest-self-consistent replacement in the same hole"
+mysql_query root "$root_password" commerce_db "
+DELETE FROM eval_commerce_audit_reference WHERE audit_reference_id = '$forged_legacy_reference';
+INSERT INTO eval_commerce_audit_reference (
+  sequence_id, audit_reference_id, sandbox_id, support_session_id, trace_id, operation_id,
+  entity_type, entity_id, entity_version, outcome, created_at, created_at_anchor
+) VALUES (
+  $legacy_sequence_id, '$legacy_reference_id', '$legacy_sandbox_id', '$legacy_session',
+  '$legacy_trace', '$legacy_operation', 'PRODUCT_FIXTURE', '$legacy_product_id',
+  1, 'OBSERVED', '$legacy_created_at', 'LEGACY_CUTOFF'
+);"
+assert_legacy_commitment_recovers "exact restoration after lower-sequence replacement"
+
+tamper_legacy_column "legacy sequence_id mutation" \
+  "UPDATE eval_commerce_audit_reference SET sequence_id = 20 WHERE audit_reference_id = '$legacy_reference_id_2'" \
+  "UPDATE eval_commerce_audit_reference SET sequence_id = $legacy_sequence_id_2 WHERE audit_reference_id = '$legacy_reference_id_2'"
+tamper_legacy_column "legacy audit_reference_id mutation" \
+  "UPDATE eval_commerce_audit_reference SET audit_reference_id = REPEAT('e', 64) WHERE audit_reference_id = '$legacy_reference_id_2'" \
+  "UPDATE eval_commerce_audit_reference SET audit_reference_id = '$legacy_reference_id_2' WHERE audit_reference_id = REPEAT('e', 64)"
+tamper_legacy_column "legacy sandbox_id cross-sandbox redistribution" \
+  "UPDATE eval_commerce_audit_reference SET sandbox_id = '$legacy_other_sandbox_id' WHERE audit_reference_id = '$legacy_reference_id_2'" \
+  "UPDATE eval_commerce_audit_reference SET sandbox_id = '$legacy_sandbox_id' WHERE audit_reference_id = '$legacy_reference_id_2'"
+tamper_legacy_column "legacy support_session_id mutation" \
+  "UPDATE eval_commerce_audit_reference SET support_session_id = 'tampered-legacy-session' WHERE audit_reference_id = '$legacy_reference_id_2'" \
+  "UPDATE eval_commerce_audit_reference SET support_session_id = '$legacy_session' WHERE audit_reference_id = '$legacy_reference_id_2'"
+tamper_legacy_column "legacy trace_id mutation" \
+  "UPDATE eval_commerce_audit_reference SET trace_id = 'tampered-legacy-trace' WHERE audit_reference_id = '$legacy_reference_id_2'" \
+  "UPDATE eval_commerce_audit_reference SET trace_id = '$legacy_trace_2' WHERE audit_reference_id = '$legacy_reference_id_2'"
+tamper_legacy_column "legacy operation_id mutation" \
+  "UPDATE eval_commerce_audit_reference SET operation_id = REPEAT('6', 64) WHERE audit_reference_id = '$legacy_reference_id_2'" \
+  "UPDATE eval_commerce_audit_reference SET operation_id = '$legacy_operation_2' WHERE audit_reference_id = '$legacy_reference_id_2'"
+tamper_legacy_column "legacy entity_type mutation" \
+  "UPDATE eval_commerce_audit_reference SET entity_type = 'PAYMENT_CALLBACK' WHERE audit_reference_id = '$legacy_reference_id_2'" \
+  "UPDATE eval_commerce_audit_reference SET entity_type = 'PRODUCT_FIXTURE' WHERE audit_reference_id = '$legacy_reference_id_2'"
+tamper_legacy_column "legacy entity_id mutation" \
+  "UPDATE eval_commerce_audit_reference SET entity_id = 'tampered-legacy-product' WHERE audit_reference_id = '$legacy_reference_id_2'" \
+  "UPDATE eval_commerce_audit_reference SET entity_id = '$legacy_product_id_2' WHERE audit_reference_id = '$legacy_reference_id_2'"
+tamper_legacy_column "legacy entity_version mutation" \
+  "UPDATE eval_commerce_audit_reference SET entity_version = 2 WHERE audit_reference_id = '$legacy_reference_id_2'" \
+  "UPDATE eval_commerce_audit_reference SET entity_version = 1 WHERE audit_reference_id = '$legacy_reference_id_2'"
+tamper_legacy_column "legacy outcome mutation" \
+  "SET SESSION sql_mode = 'NO_ENGINE_SUBSTITUTION'; UPDATE eval_commerce_audit_reference SET outcome = 'FUTURE_OUTCOME' WHERE audit_reference_id = '$legacy_reference_id_2'" \
+  "UPDATE eval_commerce_audit_reference SET outcome = 'OBSERVED' WHERE audit_reference_id = '$legacy_reference_id_2'"
+tamper_legacy_column "legacy created_at mutation" \
+  "UPDATE eval_commerce_audit_reference SET created_at = TIMESTAMPADD(MICROSECOND, 1, created_at) WHERE audit_reference_id = '$legacy_reference_id_2'" \
+  "UPDATE eval_commerce_audit_reference SET created_at = '$legacy_created_at_2' WHERE audit_reference_id = '$legacy_reference_id_2'"
+tamper_legacy_column "legacy created_at_anchor mutation" \
+  "UPDATE eval_commerce_audit_reference SET created_at_anchor = 'BUSINESS_EVENT' WHERE audit_reference_id = '$legacy_reference_id_2'" \
+  "UPDATE eval_commerce_audit_reference SET created_at_anchor = 'LEGACY_CUTOFF' WHERE audit_reference_id = '$legacy_reference_id_2'"
+
+assert_status 200 "other sandbox also recovers after cross-sandbox commitment matrix" \
+  --request GET "http://127.0.0.1:$commerce_port/api/eval/state" \
+  --user "evaluation-manager:$management_password" \
+  --header "X-Eval-Sandbox-Id: $legacy_other_sandbox_id"
+assert_status 200 "pre-V013 product operation replays from migrated audit truth" \
+  --request POST "http://127.0.0.1:$commerce_port/internal/tools/catalog.product.get" \
+  --header "Authorization: Bearer $legacy_obo_token" \
+  --header "X-Support-Session-Id: $legacy_session" \
+  --header "X-Eval-Sandbox-Id: $legacy_sandbox_id" \
+  --header "X-Agent-Trace-Id: $legacy_trace" \
+  --header "X-Agent-Operation-Id: $legacy_operation" \
+  --header 'Content-Type: application/json' \
+  --data "{\"productId\":\"$legacy_product_id\"}"
+assert_equal "$legacy_created_at" \
+  "$(mysql_query commerce_app "$commerce_app_password" commerce_db \
+    "SELECT DATE_FORMAT(created_at, '%Y-%m-%d %H:%i:%s.%f') FROM eval_commerce_product_observation WHERE observation_id = '$legacy_reference_id'")" \
+  "legacy replay observation time reconstructed from audit truth"
+assert_status 200 "migrated legacy replay is idempotent" \
+  --request POST "http://127.0.0.1:$commerce_port/internal/tools/catalog.product.get" \
+  --header "Authorization: Bearer $legacy_obo_token" \
+  --header "X-Support-Session-Id: $legacy_session" \
+  --header "X-Eval-Sandbox-Id: $legacy_sandbox_id" \
+  --header "X-Agent-Trace-Id: $legacy_trace" \
+  --header "X-Agent-Operation-Id: $legacy_operation" \
+  --header 'Content-Type: application/json' \
+  --data "{\"productId\":\"$legacy_product_id\"}"
+assert_status 403 "migrated legacy operation rejects conflicting replay intent" \
+  --request POST "http://127.0.0.1:$commerce_port/internal/tools/catalog.product.get" \
+  --header "Authorization: Bearer $legacy_obo_token" \
+  --header "X-Support-Session-Id: $legacy_session" \
+  --header "X-Eval-Sandbox-Id: $legacy_sandbox_id" \
+  --header 'X-Agent-Trace-Id: conflicting-legacy-trace' \
+  --header "X-Agent-Operation-Id: $legacy_operation" \
+  --header 'Content-Type: application/json' \
+  --data "{\"productId\":\"$legacy_product_id\"}"
+assert_equal '1:1' \
+  "$(mysql_query commerce_app "$commerce_app_password" commerce_db \
+    "SELECT CONCAT((SELECT COUNT(*) FROM eval_commerce_audit_reference WHERE operation_id = '$legacy_operation'), ':', (SELECT COUNT(*) FROM eval_commerce_product_observation WHERE operation_id = '$legacy_operation'))")" \
+  "legacy replay keeps one audit and one reconstructed truth"
+assert_status 200 "migrated legacy sandbox remains reconcilable" \
+  --request GET "http://127.0.0.1:$commerce_port/api/eval/state" \
+  --user "evaluation-manager:$management_password" \
+  --header "X-Eval-Sandbox-Id: $legacy_sandbox_id"
+assert_status 200 "migrated legacy audit remains observable" \
+  --request GET "http://127.0.0.1:$commerce_port/api/eval/audit/$legacy_session" \
+  --user "evaluation-manager:$management_password" \
+  --header "X-Eval-Sandbox-Id: $legacy_sandbox_id"
+concurrent_pids=()
+for index in {1..12}; do
+  concurrent_operation="$(printf '%064x' "$((4096 + index))")"
+  (
+    request_status "$tmp_dir/concurrent-product-$index.json" \
+      --request POST "http://127.0.0.1:$commerce_port/internal/tools/catalog.product.get" \
+      --header "Authorization: Bearer $legacy_obo_token" \
+      --header "X-Support-Session-Id: $legacy_session" \
+      --header "X-Eval-Sandbox-Id: $legacy_sandbox_id" \
+      --header "X-Agent-Trace-Id: concurrent-trace-$index" \
+      --header "X-Agent-Operation-Id: $concurrent_operation" \
+      --header 'Content-Type: application/json' \
+      --data "{\"productId\":\"$legacy_product_id\"}" \
+      >"$tmp_dir/concurrent-product-$index.status"
+  ) &
+  concurrent_pids+=("$!")
+done
+for pid in "${concurrent_pids[@]}"; do
+  wait "$pid"
+done
+for index in {1..12}; do
+  assert_equal 200 "$(cat "$tmp_dir/concurrent-product-$index.status")" \
+    "concurrent product observation $index"
+done
+assert_equal 0 \
+  "$(mysql_query commerce_app "$commerce_app_password" commerce_db \
+    "SELECT COUNT(*) FROM eval_commerce_audit_reference earlier JOIN eval_commerce_audit_reference later ON earlier.sandbox_id = later.sandbox_id AND earlier.sequence_id < later.sequence_id AND earlier.created_at > later.created_at WHERE earlier.sandbox_id = '$legacy_sandbox_id'")" \
+  "sandbox-serialized audit sequence/time inversions after concurrent writes"
+assert_status 200 "legal concurrent writes cannot leave a persistent inconsistent sandbox" \
+  --request GET "http://127.0.0.1:$commerce_port/api/eval/state" \
+  --user "evaluation-manager:$management_password" \
+  --header "X-Eval-Sandbox-Id: $legacy_sandbox_id"
 assert_status 401 "reset rejects substituted management credential" \
   --request POST "http://127.0.0.1:$commerce_port/api/eval/reset" \
   --user "evaluation-client:$invalid_management_password" \
@@ -852,24 +1505,39 @@ assert_payment_truth_fails_closed() {
 
 assert_payment_audit_reconciliation_fails_closed() {
   local description="$1"
+  assert_audit_totality_fails_closed sandbox-payment "$payment_session" "$description"
+}
+
+assert_audit_totality_fails_closed() {
+  local sandbox_id="$1"
+  local support_session_id="$2"
+  local description="$3"
   assert_status 409 "$description rejects evaluation state" \
     --request GET "http://127.0.0.1:$commerce_port/api/eval/state" \
     --user "evaluation-manager:$management_password" \
-    --header 'X-Eval-Sandbox-Id: sandbox-payment'
+    --header "X-Eval-Sandbox-Id: $sandbox_id"
   assert_status 409 "$description rejects evaluation audit" \
-    --request GET "http://127.0.0.1:$commerce_port/api/eval/audit/$payment_session" \
+    --request GET "http://127.0.0.1:$commerce_port/api/eval/audit/$support_session_id" \
     --user "evaluation-manager:$management_password" \
-    --header 'X-Eval-Sandbox-Id: sandbox-payment'
+    --header "X-Eval-Sandbox-Id: $sandbox_id"
 }
 
 payment_audit_reference_id="$(mysql_query commerce_app "$commerce_app_password" commerce_db \
   "SELECT audit_reference_id FROM eval_commerce_audit_reference WHERE entity_type = 'PAYMENT_CALLBACK' AND entity_id = '$payment_event_id'")"
+payment_audit_sequence_id="$(mysql_query root "$root_password" commerce_db \
+  "SELECT sequence_id FROM eval_commerce_audit_reference WHERE audit_reference_id = '$payment_audit_reference_id'")"
+payment_audit_created_at="$(mysql_query root "$root_password" commerce_db \
+  "SELECT DATE_FORMAT(created_at, '%Y-%m-%d %H:%i:%s.%f') FROM mock_payment_callback WHERE callback_event_id = '$payment_event_id'")"
+payment_movement_id="$(mysql_query root "$root_password" commerce_db \
+  "SELECT movement_id FROM inventory_ledger WHERE business_event_key = 'mock-payment:$payment_attempt_id'")"
+payment_product_id="$(mysql_query commerce_app "$commerce_app_password" commerce_db \
+  "SELECT product_id FROM standard_order WHERE order_id = '$payment_order_id'")"
 
 mysql_query root "$root_password" commerce_db \
   "DELETE FROM eval_commerce_audit_reference WHERE audit_reference_id = '$payment_audit_reference_id'"
 assert_payment_audit_reconciliation_fails_closed "missing payment audit reference"
 mysql_query root "$root_password" commerce_db \
-  "INSERT INTO eval_commerce_audit_reference (audit_reference_id, sandbox_id, support_session_id, trace_id, operation_id, entity_type, entity_id, entity_version, outcome) VALUES ('$payment_audit_reference_id', 'sandbox-payment', '$payment_session', '$payment_trace', '$payment_operation', 'PAYMENT_CALLBACK', '$payment_event_id', 2, 'OBSERVED')"
+  "INSERT INTO eval_commerce_audit_reference (sequence_id, audit_reference_id, sandbox_id, support_session_id, trace_id, operation_id, entity_type, entity_id, entity_version, outcome, created_at, created_at_anchor) VALUES ($payment_audit_sequence_id, '$payment_audit_reference_id', 'sandbox-payment', '$payment_session', '$payment_trace', '$payment_operation', 'PAYMENT_CALLBACK', '$payment_event_id', 2, 'OBSERVED', '$payment_audit_created_at', 'BUSINESS_EVENT')"
 
 mysql_query root "$root_password" commerce_db \
   "UPDATE eval_commerce_audit_reference SET audit_reference_id = REPEAT('f', 64) WHERE audit_reference_id = '$payment_audit_reference_id'"
@@ -916,17 +1584,33 @@ mysql_query root "$root_password" commerce_db \
 assert_payment_audit_reconciliation_fails_closed "corrupted payment audit outcome"
 mysql_query root "$root_password" commerce_db \
   "UPDATE eval_commerce_audit_reference SET outcome = 'OBSERVED' WHERE audit_reference_id = '$payment_audit_reference_id'"
+mysql_query root "$root_password" commerce_db \
+  "UPDATE eval_commerce_audit_reference SET created_at = TIMESTAMPADD(SECOND, 1, created_at) WHERE audit_reference_id = '$payment_audit_reference_id'"
+assert_payment_audit_reconciliation_fails_closed "corrupted payment audit business event time"
+mysql_query root "$root_password" commerce_db \
+  "UPDATE eval_commerce_audit_reference SET created_at = '$payment_audit_created_at' WHERE audit_reference_id = '$payment_audit_reference_id'"
 
 mysql_query root "$root_password" commerce_db \
-  "INSERT INTO eval_commerce_audit_reference (audit_reference_id, sandbox_id, support_session_id, trace_id, operation_id, entity_type, entity_id, entity_version, outcome) VALUES (REPEAT('d', 64), 'sandbox-payment', '$payment_session', '$payment_trace', REPEAT('e', 64), 'PAYMENT_CALLBACK', '$payment_event_id', 2, 'OBSERVED')"
+  "INSERT INTO eval_commerce_audit_reference (audit_reference_id, sandbox_id, support_session_id, trace_id, operation_id, entity_type, entity_id, entity_version, outcome, created_at, created_at_anchor) VALUES (REPEAT('d', 64), 'sandbox-payment', '$payment_session', '$payment_trace', REPEAT('e', 64), 'PAYMENT_CALLBACK', '$payment_event_id', 2, 'OBSERVED', CURRENT_TIMESTAMP(6), 'BUSINESS_EVENT')"
 assert_payment_audit_reconciliation_fails_closed "duplicate payment audit reference"
 mysql_query root "$root_password" commerce_db \
   "DELETE FROM eval_commerce_audit_reference WHERE audit_reference_id = REPEAT('d', 64)"
 mysql_query root "$root_password" commerce_db \
-  "INSERT INTO eval_commerce_audit_reference (audit_reference_id, sandbox_id, support_session_id, trace_id, operation_id, entity_type, entity_id, entity_version, outcome) VALUES (REPEAT('c', 64), 'sandbox-payment', '$payment_session', '$payment_trace', REPEAT('a', 64), 'PAYMENT_CALLBACK', '00000000-0000-0000-0000-000000000197', 2, 'OBSERVED')"
+  "INSERT INTO eval_commerce_audit_reference (audit_reference_id, sandbox_id, support_session_id, trace_id, operation_id, entity_type, entity_id, entity_version, outcome, created_at, created_at_anchor) VALUES (REPEAT('c', 64), 'sandbox-payment', '$payment_session', '$payment_trace', REPEAT('a', 64), 'PAYMENT_CALLBACK', '00000000-0000-0000-0000-000000000197', 2, 'OBSERVED', CURRENT_TIMESTAMP(6), 'BUSINESS_EVENT')"
 assert_payment_audit_reconciliation_fails_closed "orphan payment audit reference"
 mysql_query root "$root_password" commerce_db \
   "DELETE FROM eval_commerce_audit_reference WHERE audit_reference_id = REPEAT('c', 64)"
+mysql_query root "$root_password" commerce_db \
+  "INSERT INTO eval_commerce_audit_reference (audit_reference_id, sandbox_id, support_session_id, trace_id, operation_id, entity_type, entity_id, entity_version, outcome, created_at, created_at_anchor) VALUES (REPEAT('9', 64), 'sandbox-payment', '$payment_session', '$payment_trace', REPEAT('8', 64), 'PRODUCT_FIXTURE', '$payment_event_id', 2, 'OBSERVED', CURRENT_TIMESTAMP(6), 'BUSINESS_EVENT')"
+assert_payment_audit_reconciliation_fails_closed \
+  "correct payment audit plus cross-type product pseudo-duplicate"
+mysql_query root "$root_password" commerce_db \
+  "DELETE FROM eval_commerce_audit_reference WHERE audit_reference_id = REPEAT('9', 64)"
+mysql_query root "$root_password" commerce_db \
+  "SET SESSION sql_mode = 'NO_ENGINE_SUBSTITUTION'; INSERT INTO eval_commerce_audit_reference (audit_reference_id, sandbox_id, support_session_id, trace_id, operation_id, entity_type, entity_id, entity_version, outcome, created_at, created_at_anchor) VALUES (REPEAT('7', 64), 'sandbox-payment', '$payment_session', '$payment_trace', REPEAT('6', 64), 'FUTURE_AUDIT_TYPE', '$payment_event_id', 2, 'OBSERVED', CURRENT_TIMESTAMP(6), 'BUSINESS_EVENT')"
+assert_payment_audit_reconciliation_fails_closed "unknown audit entity type"
+mysql_query root "$root_password" commerce_db \
+  "DELETE FROM eval_commerce_audit_reference WHERE audit_reference_id = REPEAT('7', 64)"
 
 tampered_payment_correlation='00000000-0000-0000-0000-000000000107'
 mysql_query root "$root_password" commerce_db \
@@ -974,6 +1658,210 @@ payment_intent_hash="$(printf '%s\n%s\n%s\n%s\n%s\n%s\n%s\n%s\n%s\n%s\n%s' \
   "$payment_callback_key" | openssl dgst -sha256 -hex | awk '{print $NF}')"
 mysql_query root "$root_password" commerce_db \
   "UPDATE mock_payment_callback SET intent_hash = '$payment_intent_hash' WHERE callback_event_id = '$payment_event_id'"
+
+mysql_query root "$root_password" commerce_db \
+  "DELETE FROM eval_commerce_audit_reference WHERE audit_reference_id = '$payment_audit_reference_id'; UPDATE mock_payment_callback SET intent_hash = REPEAT('f', 64) WHERE callback_event_id = '$payment_event_id'"
+assert_payment_audit_reconciliation_fails_closed \
+  "combined missing payment audit and corrupted callback intent"
+mysql_query root "$root_password" commerce_db \
+  "UPDATE mock_payment_callback SET intent_hash = '$payment_intent_hash' WHERE callback_event_id = '$payment_event_id'; INSERT INTO eval_commerce_audit_reference (sequence_id, audit_reference_id, sandbox_id, support_session_id, trace_id, operation_id, entity_type, entity_id, entity_version, outcome, created_at, created_at_anchor) VALUES ($payment_audit_sequence_id, '$payment_audit_reference_id', 'sandbox-payment', '$payment_session', '$payment_trace', '$payment_operation', 'PAYMENT_CALLBACK', '$payment_event_id', 2, 'OBSERVED', '$payment_audit_created_at', 'BUSINESS_EVENT')"
+
+mysql_query root "$root_password" commerce_db \
+  "DELETE FROM mock_payment_callback WHERE callback_event_id = '$payment_event_id'"
+assert_payment_audit_reconciliation_fails_closed "missing succeeded callback truth"
+mysql_query root "$root_password" commerce_db \
+  "INSERT INTO mock_payment_callback (callback_event_id, callback_idempotency_key, attempt_id, callback_correlation_id, sandbox_id, support_session_id, trace_id, operation_id, intent_hash, requested_outcome, result_state, created_at) VALUES ('$payment_event_id', '$payment_callback_key', '$payment_attempt_id', '$payment_correlation_id', 'sandbox-payment', '$payment_session', '$payment_trace', '$payment_operation', '$payment_intent_hash', 'SUCCEEDED', 'APPLIED', '$payment_audit_created_at')"
+
+mysql_query root "$root_password" commerce_db \
+  "DELETE FROM inventory_ledger WHERE movement_id = '$payment_movement_id'"
+assert_payment_audit_reconciliation_fails_closed "missing payment ledger truth"
+mysql_query root "$root_password" commerce_db \
+  "INSERT INTO inventory_ledger (movement_id, business_event_key, movement_type, order_id, reservation_id, activity_id, product_id, sandbox_id, inventory_delta, activity_quota_delta, payment_amount_minor, payment_currency) VALUES ('$payment_movement_id', 'mock-payment:$payment_attempt_id', 'STANDARD_PAYMENT', '$payment_order_id', NULL, NULL, '$payment_product_id', 'sandbox-payment', 0, 0, 1800, 'CNY')"
+
+payment_attempt_succeeded_at="$(mysql_query root "$root_password" commerce_db \
+  "SELECT DATE_FORMAT(succeeded_at, '%Y-%m-%d %H:%i:%s.%f') FROM mock_payment_attempt WHERE attempt_id = '$payment_attempt_id'")"
+tampered_callback_event_id='00000000-0000-0000-0000-000000000181'
+tampered_callback_attempt_id='00000000-0000-0000-0000-000000000182'
+tampered_attempt_id='00000000-0000-0000-0000-000000000183'
+tampered_attempt_order_id='00000000-0000-0000-0000-000000000184'
+tampered_order_id='00000000-0000-0000-0000-000000000185'
+
+restore_complete_payment_truth() {
+  mysql_query root "$root_password" commerce_db "
+UPDATE mock_payment_attempt SET attempt_id = '$payment_attempt_id'
+  WHERE attempt_id = '$tampered_attempt_id';
+UPDATE standard_order SET order_id = '$payment_order_id'
+  WHERE order_id = '$tampered_order_id';
+UPDATE standard_order SET user_subject = '$payment_subject', product_id = '$payment_product_id',
+  total_price_minor = 1800, currency = 'CNY', status = 'PAID', state_version = 2,
+  sandbox_id = 'sandbox-payment' WHERE order_id = '$payment_order_id';
+UPDATE mock_payment_attempt SET callback_correlation_id = '$payment_correlation_id',
+  user_subject = '$payment_subject', order_id = '$payment_order_id', order_kind = 'STANDARD',
+  sandbox_id = 'sandbox-payment', amount_minor = 1800, currency = 'CNY',
+  state = 'SUCCEEDED', state_version = 2, succeeded_at = '$payment_attempt_succeeded_at'
+  WHERE attempt_id = '$payment_attempt_id';
+DELETE FROM mock_payment_callback
+  WHERE callback_event_id IN ('$payment_event_id', '$tampered_callback_event_id')
+     OR callback_idempotency_key IN ('$payment_callback_key', 'tampered-callback-key')
+     OR attempt_id IN ('$payment_attempt_id', '$tampered_callback_attempt_id');
+INSERT INTO mock_payment_callback (callback_event_id, callback_idempotency_key, attempt_id,
+  callback_correlation_id, sandbox_id, support_session_id, trace_id, operation_id, intent_hash,
+  requested_outcome, result_state, created_at)
+VALUES ('$payment_event_id', '$payment_callback_key', '$payment_attempt_id',
+  '$payment_correlation_id', 'sandbox-payment', '$payment_session', '$payment_trace',
+  '$payment_operation', '$payment_intent_hash', 'SUCCEEDED', 'APPLIED', '$payment_audit_created_at');
+INSERT INTO inventory_ledger (movement_id, business_event_key, movement_type, order_id,
+  reservation_id, activity_id, product_id, sandbox_id, inventory_delta, activity_quota_delta,
+  payment_amount_minor, payment_currency)
+VALUES ('$payment_movement_id', 'mock-payment:$payment_attempt_id', 'STANDARD_PAYMENT',
+  '$payment_order_id', NULL, NULL, '$payment_product_id', 'sandbox-payment', 0, 0, 1800, 'CNY')
+ON DUPLICATE KEY UPDATE business_event_key = VALUES(business_event_key),
+  movement_type = VALUES(movement_type), order_id = VALUES(order_id),
+  reservation_id = VALUES(reservation_id), activity_id = VALUES(activity_id),
+  product_id = VALUES(product_id), sandbox_id = VALUES(sandbox_id),
+  inventory_delta = VALUES(inventory_delta), activity_quota_delta = VALUES(activity_quota_delta),
+  payment_amount_minor = VALUES(payment_amount_minor), payment_currency = VALUES(payment_currency);
+INSERT INTO eval_commerce_audit_reference (sequence_id, audit_reference_id, sandbox_id,
+  support_session_id, trace_id, operation_id, entity_type, entity_id, entity_version, outcome,
+  created_at, created_at_anchor)
+VALUES ($payment_audit_sequence_id, '$payment_audit_reference_id', 'sandbox-payment',
+  '$payment_session', '$payment_trace', '$payment_operation', 'PAYMENT_CALLBACK',
+  '$payment_event_id', 2, 'OBSERVED', '$payment_audit_created_at', 'BUSINESS_EVENT')
+ON DUPLICATE KEY UPDATE sandbox_id = VALUES(sandbox_id),
+  support_session_id = VALUES(support_session_id), trace_id = VALUES(trace_id),
+  operation_id = VALUES(operation_id), entity_type = VALUES(entity_type),
+  entity_id = VALUES(entity_id), entity_version = VALUES(entity_version),
+  outcome = VALUES(outcome), created_at = VALUES(created_at),
+  created_at_anchor = VALUES(created_at_anchor);
+"
+}
+
+mysql_query root "$root_password" commerce_db \
+  "ALTER TABLE inventory_ledger DROP CHECK chk_inventory_ledger_movement"
+
+payment_callback_fault_locator="callback_event_id IN ('$payment_event_id', '$tampered_callback_event_id') OR callback_idempotency_key IN ('$payment_callback_key', 'tampered-callback-key') OR attempt_id IN ('$payment_attempt_id', '$tampered_callback_attempt_id')"
+payment_attempt_fault_locator="request_idempotency_key = 'payment-evaluation'"
+payment_order_fault_locator="order_id IN ('$payment_order_id', '$tampered_order_id')"
+
+payment_predicate_labels=(
+  audit-row callback-row ledger-row
+  callback-event callback-idempotency-key callback-attempt callback-correlation callback-sandbox
+  callback-session callback-trace callback-operation callback-intent callback-outcome callback-result
+  attempt-id attempt-correlation attempt-owner attempt-order attempt-order-kind attempt-sandbox
+  attempt-amount attempt-currency attempt-state
+  order-id order-sandbox order-owner order-product order-amount order-currency order-state
+  ledger-key ledger-sandbox ledger-movement ledger-order ledger-product ledger-reservation
+  ledger-activity ledger-inventory-delta ledger-activity-delta ledger-amount ledger-currency
+)
+payment_predicate_mutations=(
+  "DELETE FROM eval_commerce_audit_reference WHERE audit_reference_id = '$payment_audit_reference_id'"
+  "DELETE FROM mock_payment_callback WHERE $payment_callback_fault_locator"
+  "DELETE FROM inventory_ledger WHERE movement_id = '$payment_movement_id'"
+  "UPDATE mock_payment_callback SET callback_event_id = '$tampered_callback_event_id' WHERE $payment_callback_fault_locator"
+  "UPDATE mock_payment_callback SET callback_idempotency_key = 'tampered-callback-key' WHERE $payment_callback_fault_locator"
+  "UPDATE mock_payment_callback SET attempt_id = '$tampered_callback_attempt_id' WHERE $payment_callback_fault_locator"
+  "UPDATE mock_payment_callback SET callback_correlation_id = '00000000-0000-0000-0000-000000000107' WHERE $payment_callback_fault_locator"
+  "UPDATE mock_payment_callback SET sandbox_id = 'sandbox-main' WHERE $payment_callback_fault_locator"
+  "UPDATE mock_payment_callback SET support_session_id = 'tampered-payment-session' WHERE $payment_callback_fault_locator"
+  "UPDATE mock_payment_callback SET trace_id = '00000000-0000-0000-0000-000000000186' WHERE $payment_callback_fault_locator"
+  "UPDATE mock_payment_callback SET operation_id = REPEAT('f', 64) WHERE $payment_callback_fault_locator"
+  "UPDATE mock_payment_callback SET intent_hash = REPEAT('f', 64) WHERE $payment_callback_fault_locator"
+  "SET SESSION sql_mode = 'NO_ENGINE_SUBSTITUTION'; UPDATE mock_payment_callback SET requested_outcome = 'CORRUPTED' WHERE $payment_callback_fault_locator"
+  "SET SESSION sql_mode = 'NO_ENGINE_SUBSTITUTION'; UPDATE mock_payment_callback SET result_state = 'CORRUPTED' WHERE $payment_callback_fault_locator"
+  "UPDATE mock_payment_attempt SET attempt_id = '$tampered_attempt_id' WHERE $payment_attempt_fault_locator"
+  "UPDATE mock_payment_attempt SET callback_correlation_id = '00000000-0000-0000-0000-000000000194' WHERE $payment_attempt_fault_locator"
+  "UPDATE mock_payment_attempt SET user_subject = 'tampered-attempt-owner' WHERE $payment_attempt_fault_locator"
+  "UPDATE mock_payment_attempt SET order_id = '$tampered_attempt_order_id' WHERE $payment_attempt_fault_locator"
+  "UPDATE mock_payment_attempt SET order_kind = 'SECKILL' WHERE $payment_attempt_fault_locator"
+  "UPDATE mock_payment_attempt SET sandbox_id = 'sandbox-main' WHERE $payment_attempt_fault_locator"
+  "UPDATE mock_payment_attempt SET amount_minor = 1801 WHERE $payment_attempt_fault_locator"
+  "UPDATE mock_payment_attempt SET currency = 'AUD' WHERE $payment_attempt_fault_locator"
+  "UPDATE mock_payment_attempt SET state = 'FAILED', state_version = 2, succeeded_at = NULL WHERE $payment_attempt_fault_locator"
+  "UPDATE standard_order SET order_id = '$tampered_order_id' WHERE $payment_order_fault_locator"
+  "UPDATE standard_order SET sandbox_id = 'sandbox-main' WHERE $payment_order_fault_locator"
+  "UPDATE standard_order SET user_subject = 'tampered-order-user' WHERE $payment_order_fault_locator"
+  "UPDATE standard_order SET product_id = 'tampered-order-product' WHERE $payment_order_fault_locator"
+  "UPDATE standard_order SET total_price_minor = 1801 WHERE $payment_order_fault_locator"
+  "UPDATE standard_order SET currency = 'AUD' WHERE $payment_order_fault_locator"
+  "UPDATE standard_order SET status = 'UNPAID', state_version = 1 WHERE $payment_order_fault_locator"
+  "UPDATE inventory_ledger SET business_event_key = 'tampered-payment-event-key' WHERE movement_id = '$payment_movement_id'"
+  "UPDATE inventory_ledger SET sandbox_id = 'sandbox-main' WHERE movement_id = '$payment_movement_id'"
+  "UPDATE inventory_ledger SET movement_type = 'STANDARD_REFUND' WHERE movement_id = '$payment_movement_id'"
+  "UPDATE inventory_ledger SET order_id = '00000000-0000-0000-0000-000000000108' WHERE movement_id = '$payment_movement_id'"
+  "UPDATE inventory_ledger SET product_id = 'tampered-ledger-product' WHERE movement_id = '$payment_movement_id'"
+  "UPDATE inventory_ledger SET reservation_id = '00000000-0000-0000-0000-000000000187' WHERE movement_id = '$payment_movement_id'"
+  "UPDATE inventory_ledger SET activity_id = 'tampered-activity' WHERE movement_id = '$payment_movement_id'"
+  "UPDATE inventory_ledger SET inventory_delta = 1 WHERE movement_id = '$payment_movement_id'"
+  "UPDATE inventory_ledger SET activity_quota_delta = 1 WHERE movement_id = '$payment_movement_id'"
+  "UPDATE inventory_ledger SET payment_amount_minor = 1801 WHERE movement_id = '$payment_movement_id'"
+  "UPDATE inventory_ledger SET payment_currency = 'AUD' WHERE movement_id = '$payment_movement_id'"
+)
+
+assert_equal 41 "${#payment_predicate_labels[@]}" \
+  "complete physical JOIN/WHERE corruption label matrix"
+assert_equal "${#payment_predicate_labels[@]}" "${#payment_predicate_mutations[@]}" \
+  "physical JOIN/WHERE corruption labels and mutations stay aligned"
+
+for ((predicate_index = 0; predicate_index < ${#payment_predicate_mutations[@]}; predicate_index++)); do
+  mutation_count="$(mysql_query root "$root_password" commerce_db \
+    "${payment_predicate_mutations[$predicate_index]}; SELECT ROW_COUNT()")"
+  assert_equal 1 "$mutation_count" \
+    "single consistency fault injection changed exactly one row: ${payment_predicate_labels[$predicate_index]}"
+  assert_payment_audit_reconciliation_fails_closed \
+    "single enumerator predicate corruption ${payment_predicate_labels[$predicate_index]}"
+  restore_complete_payment_truth
+done
+
+for ((left_index = 0; left_index < ${#payment_predicate_mutations[@]}; left_index++)); do
+  for ((right_index = left_index + 1; right_index < ${#payment_predicate_mutations[@]}; right_index++)); do
+    left_mutation="${payment_predicate_mutations[$left_index]}"
+    right_mutation="${payment_predicate_mutations[$right_index]}"
+    if [[ "${payment_predicate_labels[$left_index]}" == callback-row \
+        && "${payment_predicate_labels[$right_index]}" == callback-* ]] \
+      || [[ "${payment_predicate_labels[$left_index]}" == ledger-row \
+        && "${payment_predicate_labels[$right_index]}" == ledger-* ]]; then
+      first_mutation="$right_mutation"
+      second_mutation="$left_mutation"
+    else
+      first_mutation="$left_mutation"
+      second_mutation="$right_mutation"
+    fi
+    mutation_counts="$(mysql_query root "$root_password" commerce_db \
+      "$first_mutation; SELECT ROW_COUNT(); $second_mutation; SELECT ROW_COUNT()")"
+    assert_equal $'1\n1' "$mutation_counts" \
+      "paired consistency fault injection changed one row per fault: ${payment_predicate_labels[$left_index]} + ${payment_predicate_labels[$right_index]}"
+    assert_payment_audit_reconciliation_fails_closed \
+      "paired enumerator predicate corruption ${payment_predicate_labels[$left_index]} + ${payment_predicate_labels[$right_index]}"
+    restore_complete_payment_truth
+  done
+done
+
+mysql_query root "$root_password" commerce_db "
+ALTER TABLE inventory_ledger ADD CONSTRAINT chk_inventory_ledger_movement CHECK (
+  (movement_type = 'SECKILL_ORDER_CREATE'
+    AND reservation_id IS NOT NULL AND activity_id IS NOT NULL
+    AND inventory_delta < 0 AND activity_quota_delta = inventory_delta
+    AND payment_amount_minor IS NULL AND payment_currency IS NULL)
+  OR
+  (movement_type = 'SECKILL_UNPAID_CANCEL'
+    AND reservation_id IS NOT NULL AND activity_id IS NOT NULL
+    AND inventory_delta > 0 AND activity_quota_delta = inventory_delta
+    AND payment_amount_minor IS NULL AND payment_currency IS NULL)
+  OR
+  (movement_type IN ('STANDARD_PAYMENT', 'STANDARD_REFUND')
+    AND reservation_id IS NULL AND activity_id IS NULL
+    AND inventory_delta = 0 AND activity_quota_delta = 0
+    AND payment_amount_minor IS NOT NULL AND payment_amount_minor > 0
+    AND payment_currency IS NOT NULL)
+  OR
+  (movement_type IN ('SECKILL_PAYMENT', 'SECKILL_REFUND')
+    AND reservation_id IS NOT NULL AND activity_id IS NOT NULL
+    AND inventory_delta = 0 AND activity_quota_delta = 0
+    AND payment_amount_minor IS NOT NULL AND payment_amount_minor > 0
+    AND payment_currency IS NOT NULL)
+);
+"
+
 mysql_query root "$root_password" commerce_db \
   "UPDATE mock_payment_attempt SET callback_correlation_id = '00000000-0000-0000-0000-000000000194' WHERE attempt_id = '$payment_attempt_id'"
 assert_payment_truth_fails_closed "corrupted attempt correlation" 404
@@ -1014,8 +1902,6 @@ mysql_query root "$root_password" commerce_db \
 assert_payment_truth_fails_closed "corrupted order sandbox"
 mysql_query root "$root_password" commerce_db \
   "UPDATE standard_order SET sandbox_id = 'sandbox-payment' WHERE order_id = '$payment_order_id'"
-payment_product_id="$(mysql_query commerce_app "$commerce_app_password" commerce_db \
-  "SELECT product_id FROM standard_order WHERE order_id = '$payment_order_id'")"
 mysql_query root "$root_password" commerce_db \
   "UPDATE standard_order SET product_id = 'tampered-order-product' WHERE order_id = '$payment_order_id'"
 assert_payment_truth_fails_closed "corrupted order product"
@@ -1206,6 +2092,8 @@ assert_status 503 "tool read cannot report success when audit persistence fails"
   --data '{"productId":"product-1"}'
 test "$(mysql_query root "$root_password" commerce_db \
   "SELECT COUNT(*) FROM eval_commerce_audit_reference WHERE operation_id = '$failed_operation'")" = 0
+test "$(mysql_query root "$root_password" commerce_db \
+  "SELECT COUNT(*) FROM eval_commerce_product_observation WHERE operation_id = '$failed_operation'")" = 0
 mysql_query root "$root_password" '' \
   "GRANT INSERT ON commerce_db.eval_commerce_audit_reference TO 'commerce_app'@'%'"
 assert_status 200 "OBO tool reads only the exact sandbox fixture" \
@@ -1229,6 +2117,8 @@ assert_status 200 "same evaluation operation replays one audit identity" \
   --data '{"productId":"product-1"}'
 test "$(mysql_query commerce_app "$commerce_app_password" commerce_db \
   "SELECT COUNT(*) FROM eval_commerce_audit_reference WHERE operation_id = '$direct_operation'")" = 1
+test "$(mysql_query commerce_app "$commerce_app_password" commerce_db \
+  "SELECT COUNT(*) FROM eval_commerce_product_observation WHERE operation_id = '$direct_operation'")" = 1
 assert_status 403 "same operation rejects conflicting trace reuse" \
   --request POST "http://127.0.0.1:$commerce_port/internal/tools/catalog.product.get" \
   --header "Authorization: Bearer $obo_token" \
@@ -1529,14 +2419,143 @@ assert_status 200 "version identifiers persist across commerce restart" \
   --request GET "http://127.0.0.1:$commerce_port/api/eval/version" \
   --user "evaluation-manager:$management_password"
 cmp "$tmp_dir/version.json" "$tmp_dir/http-response.json"
+product_audit_reference_id="$(mysql_query commerce_app "$commerce_app_password" commerce_db \
+  "SELECT audit_reference_id FROM eval_commerce_audit_reference WHERE sandbox_id = 'sandbox-main' AND operation_id = '$direct_operation'")"
+product_audit_sequence_id="$(mysql_query root "$root_password" commerce_db \
+  "SELECT sequence_id FROM eval_commerce_audit_reference WHERE audit_reference_id = '$product_audit_reference_id'")"
+product_audit_created_at="$(mysql_query root "$root_password" commerce_db \
+  "SELECT DATE_FORMAT(created_at, '%Y-%m-%d %H:%i:%s.%f') FROM eval_commerce_product_observation WHERE observation_id = '$product_audit_reference_id'")"
+
 mysql_query root "$root_password" commerce_db \
-  "UPDATE eval_commerce_audit_reference SET entity_version = 2 WHERE sandbox_id = 'sandbox-main' AND support_session_id = '$session_id' LIMIT 1"
-assert_status 409 "audit fails closed on mismatched authoritative version" \
+  "DELETE FROM eval_commerce_audit_reference WHERE audit_reference_id = '$product_audit_reference_id'"
+assert_audit_totality_fails_closed sandbox-main "$session_id" "missing product audit reference"
+mysql_query root "$root_password" commerce_db \
+  "INSERT INTO eval_commerce_audit_reference (sequence_id, audit_reference_id, sandbox_id, support_session_id, trace_id, operation_id, entity_type, entity_id, entity_version, outcome, created_at, created_at_anchor) VALUES ($product_audit_sequence_id, '$product_audit_reference_id', 'sandbox-main', '$session_id', '$direct_trace', '$direct_operation', 'PRODUCT_FIXTURE', 'product-1', 1, 'OBSERVED', '$product_audit_created_at', 'BUSINESS_EVENT')"
+
+mysql_query root "$root_password" commerce_db \
+  "UPDATE eval_commerce_audit_reference SET audit_reference_id = REPEAT('f', 64) WHERE audit_reference_id = '$product_audit_reference_id'"
+assert_audit_totality_fails_closed sandbox-main "$session_id" \
+  "corrupted product audit reference identity"
+mysql_query root "$root_password" commerce_db \
+  "UPDATE eval_commerce_audit_reference SET audit_reference_id = '$product_audit_reference_id' WHERE audit_reference_id = REPEAT('f', 64)"
+mysql_query root "$root_password" commerce_db \
+  "UPDATE eval_commerce_audit_reference SET sandbox_id = 'sandbox-payment' WHERE audit_reference_id = '$product_audit_reference_id'"
+assert_audit_totality_fails_closed sandbox-main "$session_id" \
+  "corrupted product audit sandbox identity"
+mysql_query root "$root_password" commerce_db \
+  "UPDATE eval_commerce_audit_reference SET sandbox_id = 'sandbox-main' WHERE audit_reference_id = '$product_audit_reference_id'"
+mysql_query root "$root_password" commerce_db \
+  "UPDATE eval_commerce_audit_reference SET support_session_id = 'tampered-product-session' WHERE audit_reference_id = '$product_audit_reference_id'"
+assert_audit_totality_fails_closed sandbox-main "$session_id" \
+  "corrupted product audit session identity"
+mysql_query root "$root_password" commerce_db \
+  "UPDATE eval_commerce_audit_reference SET support_session_id = '$session_id' WHERE audit_reference_id = '$product_audit_reference_id'"
+mysql_query root "$root_password" commerce_db \
+  "UPDATE eval_commerce_audit_reference SET trace_id = 'tampered-product-trace' WHERE audit_reference_id = '$product_audit_reference_id'"
+assert_audit_totality_fails_closed sandbox-main "$session_id" \
+  "corrupted product audit trace identity"
+mysql_query root "$root_password" commerce_db \
+  "UPDATE eval_commerce_audit_reference SET trace_id = '$direct_trace' WHERE audit_reference_id = '$product_audit_reference_id'"
+mysql_query root "$root_password" commerce_db \
+  "UPDATE eval_commerce_audit_reference SET operation_id = REPEAT('5', 64) WHERE audit_reference_id = '$product_audit_reference_id'"
+assert_audit_totality_fails_closed sandbox-main "$session_id" \
+  "corrupted product audit operation identity"
+mysql_query root "$root_password" commerce_db \
+  "UPDATE eval_commerce_audit_reference SET operation_id = '$direct_operation' WHERE audit_reference_id = '$product_audit_reference_id'"
+mysql_query root "$root_password" commerce_db \
+  "UPDATE eval_commerce_audit_reference SET entity_type = 'PAYMENT_CALLBACK' WHERE audit_reference_id = '$product_audit_reference_id'"
+assert_audit_totality_fails_closed sandbox-main "$session_id" \
+  "corrupted product audit entity-type identity"
+mysql_query root "$root_password" commerce_db \
+  "UPDATE eval_commerce_audit_reference SET entity_type = 'PRODUCT_FIXTURE' WHERE audit_reference_id = '$product_audit_reference_id'"
+mysql_query root "$root_password" commerce_db \
+  "UPDATE eval_commerce_audit_reference SET entity_id = 'missing-product' WHERE audit_reference_id = '$product_audit_reference_id'"
+assert_audit_totality_fails_closed sandbox-main "$session_id" \
+  "corrupted product audit entity identity"
+mysql_query root "$root_password" commerce_db \
+  "UPDATE eval_commerce_audit_reference SET entity_id = 'product-1' WHERE audit_reference_id = '$product_audit_reference_id'"
+mysql_query root "$root_password" commerce_db \
+  "UPDATE eval_commerce_audit_reference SET entity_version = 2 WHERE audit_reference_id = '$product_audit_reference_id'"
+assert_audit_totality_fails_closed sandbox-main "$session_id" \
+  "corrupted product audit entity version"
+mysql_query root "$root_password" commerce_db \
+  "UPDATE eval_commerce_audit_reference SET entity_version = 1 WHERE audit_reference_id = '$product_audit_reference_id'"
+mysql_query root "$root_password" commerce_db \
+  "SET SESSION sql_mode = 'NO_ENGINE_SUBSTITUTION'; UPDATE eval_commerce_audit_reference SET outcome = 'CORRUPTED' WHERE audit_reference_id = '$product_audit_reference_id'"
+assert_audit_totality_fails_closed sandbox-main "$session_id" \
+  "corrupted product audit outcome"
+mysql_query root "$root_password" commerce_db \
+  "UPDATE eval_commerce_audit_reference SET outcome = 'OBSERVED' WHERE audit_reference_id = '$product_audit_reference_id'"
+mysql_query root "$root_password" commerce_db \
+  "UPDATE eval_commerce_audit_reference SET created_at = TIMESTAMPADD(SECOND, 1, created_at) WHERE audit_reference_id = '$product_audit_reference_id'"
+assert_audit_totality_fails_closed sandbox-main "$session_id" \
+  "corrupted product audit business event time"
+mysql_query root "$root_password" commerce_db \
+  "UPDATE eval_commerce_audit_reference SET created_at = '$product_audit_created_at' WHERE audit_reference_id = '$product_audit_reference_id'"
+
+mysql_query root "$root_password" commerce_db \
+  "INSERT INTO eval_commerce_audit_reference (audit_reference_id, sandbox_id, support_session_id, trace_id, operation_id, entity_type, entity_id, entity_version, outcome, created_at, created_at_anchor) VALUES (REPEAT('4', 64), 'sandbox-main', '$session_id', '$direct_trace', REPEAT('3', 64), 'PRODUCT_FIXTURE', 'product-1', 1, 'OBSERVED', CURRENT_TIMESTAMP(6), 'BUSINESS_EVENT')"
+assert_audit_totality_fails_closed sandbox-main "$session_id" \
+  "orphan product audit pseudo-duplicate"
+mysql_query root "$root_password" commerce_db \
+  "DELETE FROM eval_commerce_audit_reference WHERE audit_reference_id = REPEAT('4', 64)"
+mysql_query root "$root_password" commerce_db \
+  "INSERT INTO eval_commerce_audit_reference (audit_reference_id, sandbox_id, support_session_id, trace_id, operation_id, entity_type, entity_id, entity_version, outcome, created_at, created_at_anchor) VALUES (REPEAT('2', 64), 'sandbox-main', '$session_id', '$direct_trace', REPEAT('1', 64), 'PAYMENT_CALLBACK', 'product-1', 1, 'OBSERVED', CURRENT_TIMESTAMP(6), 'BUSINESS_EVENT')"
+assert_audit_totality_fails_closed sandbox-main "$session_id" \
+  "correct product audit plus cross-type payment pseudo-duplicate"
+mysql_query root "$root_password" commerce_db \
+  "DELETE FROM eval_commerce_audit_reference WHERE audit_reference_id = REPEAT('2', 64)"
+mysql_query root "$root_password" commerce_db \
+  "INSERT INTO eval_commerce_audit_reference (audit_reference_id, sandbox_id, support_session_id, trace_id, operation_id, entity_type, entity_id, entity_version, outcome, created_at, created_at_anchor) VALUES (REPEAT('0', 64), 'sandbox-main', '$session_id', '$direct_trace', REPEAT('9', 64), 'PRODUCT_FIXTURE', 'missing-product', 1, 'OBSERVED', CURRENT_TIMESTAMP(6), 'BUSINESS_EVENT')"
+assert_audit_totality_fails_closed sandbox-main "$session_id" "orphan product audit reference"
+mysql_query root "$root_password" commerce_db \
+  "DELETE FROM eval_commerce_audit_reference WHERE audit_reference_id = REPEAT('0', 64)"
+fake_legacy_operation="$(printf '7%.0s' {1..64})"
+fake_legacy_reference_id="$(uv run python -c '
+import hashlib
+import sys
+
+digest = hashlib.sha256()
+for value in sys.argv[1:]:
+    encoded = value.encode()
+    digest.update(str(len(encoded)).encode())
+    digest.update(b":")
+    digest.update(encoded)
+    digest.update(b";")
+print(digest.hexdigest())
+' sandbox-main "$session_id" "$direct_trace" "$fake_legacy_operation" \
+  PRODUCT_FIXTURE missing-product 1 OBSERVED)"
+mysql_query root "$root_password" commerce_db \
+  "INSERT INTO eval_commerce_audit_reference (audit_reference_id, sandbox_id, support_session_id, trace_id, operation_id, entity_type, entity_id, entity_version, outcome, created_at, created_at_anchor) VALUES ('$fake_legacy_reference_id', 'sandbox-main', '$session_id', '$direct_trace', '$fake_legacy_operation', 'PRODUCT_FIXTURE', 'missing-product', 1, 'OBSERVED', CURRENT_TIMESTAMP(6), 'LEGACY_CUTOFF')"
+assert_audit_totality_fails_closed sandbox-main "$session_id" \
+  "post-V013 self-declared legacy orphan beyond the immutable watermark"
+mysql_query root "$root_password" commerce_db \
+  "DELETE FROM eval_commerce_audit_reference WHERE audit_reference_id = '$fake_legacy_reference_id'"
+sequence_source_reference_id="$(mysql_query root "$root_password" commerce_db \
+  "SELECT audit_reference_id FROM eval_commerce_audit_reference WHERE sandbox_id = 'sandbox-main' AND created_at < (SELECT MAX(created_at) FROM eval_commerce_audit_reference WHERE sandbox_id = 'sandbox-main') ORDER BY created_at, sequence_id LIMIT 1")"
+if [[ -z "$sequence_source_reference_id" ]]; then
+  echo "Sequence-order corruption fixture requires two distinct anchored audit times." >&2
+  exit 1
+fi
+sequence_original="$(mysql_query root "$root_password" commerce_db \
+  "SELECT sequence_id FROM eval_commerce_audit_reference WHERE audit_reference_id = '$sequence_source_reference_id'")"
+sequence_max="$(mysql_query root "$root_password" commerce_db \
+  "SELECT MAX(sequence_id) FROM eval_commerce_audit_reference WHERE sandbox_id = 'sandbox-main'")"
+sequence_tampered="$((sequence_max + 1000))"
+mysql_query root "$root_password" commerce_db \
+  "UPDATE eval_commerce_audit_reference SET sequence_id = $sequence_tampered WHERE audit_reference_id = '$sequence_source_reference_id'"
+assert_audit_totality_fails_closed sandbox-main "$session_id" \
+  "audit sequence contradicts anchored business event time"
+mysql_query root "$root_password" commerce_db \
+  "UPDATE eval_commerce_audit_reference SET sequence_id = $sequence_original WHERE audit_reference_id = '$sequence_source_reference_id'"
+assert_status 200 "state recovers after the complete product audit matrix" \
+  --request GET "http://127.0.0.1:$commerce_port/api/eval/state" \
+  --user "evaluation-manager:$management_password" \
+  --header 'X-Eval-Sandbox-Id: sandbox-main'
+assert_status 200 "audit recovers after the complete product audit matrix" \
   --request GET "http://127.0.0.1:$commerce_port/api/eval/audit/$session_id" \
   --user "evaluation-manager:$management_password" \
   --header 'X-Eval-Sandbox-Id: sandbox-main'
-mysql_query root "$root_password" commerce_db \
-  "UPDATE eval_commerce_audit_reference SET entity_version = 1 WHERE sandbox_id = 'sandbox-main' AND support_session_id = '$session_id'"
 assert_status 401 "evaluation chat rejects sandbox header substitution" \
   --request POST "http://127.0.0.1:$agent_port/api/chat" \
   --header "Authorization: Bearer $direct_token" \

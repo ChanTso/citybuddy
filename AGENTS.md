@@ -28,6 +28,8 @@
 4. Every non-trivial pull request records the commands actually run, their results, exercised rejection paths, and known incomplete or out-of-scope work.
 5. Never commit secrets, personal data, private URLs, internal accounts, or private planning material.
 6. A failed `gh auth status` inside the sandbox is inconclusive because the sandbox may not expose the host keyring, credential helper, network, or GitHub session. Retry the same non-mutating authentication check outside the sandbox with approval before claiming that credentials are invalid or asking the user to run `gh auth login`; only report an authentication blocker when the outside-sandbox check also fails.
+7. Before every independent review request, the primary implementer executes every item in `docs/REVIEW_CHECKLIST.md` against the complete current diff and records each conclusion, its concrete evidence, or a precise not-applicable rationale in the pull request. Any later semantic diff change invalidates both that self-review and the independent review and requires both to be repeated on the revised complete diff.
+8. At every slice or authorized non-slice closeout, append to `docs/REVIEW_CHECKLIST.md` every newly evidenced recurring defect class that is not already covered. When the evidence contains no new class, record that explicit conclusion in the pull request; do not add a placeholder check, weaken an existing check, or turn the checklist into a status or review log.
 
 ## Implementation and comment style
 

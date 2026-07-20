@@ -67,6 +67,10 @@ def test_payment_schema_and_code_keep_production_and_evaluation_truth_separate()
     assert service.index("fenceSandbox(request.sandboxId());") < service.index(
         "findAttemptByCorrelationForUpdate"
     )
+    assert "monotonicEvaluationAuditCreatedAt" in service
+    assert service.index("fenceSandbox(request.sandboxId());") < service.index(
+        "monotonicEvaluationAuditCreatedAt"
+    )
     for field in ("sandboxId()", "supportSessionId()", "traceId()", "operationId()"):
         assert field in authenticator
     assert "insertPaymentAuditReference" in repository
@@ -89,3 +93,13 @@ def test_auth_provision_response_remains_minimally_disclosing() -> None:
     response = contract["components"]["schemas"]["EvaluationProvisionResponse"]
     assert set(response["properties"]) == {"handle", "expiresAt"}
     assert "userSubject" not in json.dumps(response)
+
+
+def test_all_audit_inserts_use_the_shared_typed_writer() -> None:
+    writers = []
+    java_root = ROOT / "commerce-service/src/main/java"
+    for path in java_root.rglob("*.java"):
+        if "INSERT INTO eval_commerce_audit_reference" in path.read_text(encoding="utf-8"):
+            writers.append(path.name)
+
+    assert writers == ["EvaluationAuditReferenceWriter.java"]

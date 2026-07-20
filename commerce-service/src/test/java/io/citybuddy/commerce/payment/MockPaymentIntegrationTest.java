@@ -11,6 +11,7 @@ import io.citybuddy.commerce.seckill.SeckillCancellationService;
 import io.citybuddy.commerce.seckill.SeckillOrderRepository;
 import io.citybuddy.commerce.seckill.SeckillReservationRepository;
 import io.citybuddy.commerce.seckill.SeckillTimeoutMessage;
+import java.nio.charset.StandardCharsets;
 import java.sql.SQLException;
 import java.time.Clock;
 import java.time.Instant;
@@ -38,6 +39,7 @@ import org.springframework.http.HttpEntity;
 import org.springframework.http.HttpHeaders;
 import org.springframework.http.HttpMethod;
 import org.springframework.http.HttpStatus;
+import org.springframework.http.MediaType;
 import org.springframework.http.ResponseEntity;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.test.context.DynamicPropertyRegistry;
@@ -262,6 +264,47 @@ class MockPaymentIntegrationTest {
   }
 
   @Test
+  void callbackParsingFailuresConvergeAtOnePublicBoundary() {
+    List<byte[]> malformedBodies =
+        List.of(
+            "{".getBytes(StandardCharsets.UTF_8),
+            "[]".getBytes(StandardCharsets.UTF_8),
+            "{\"amountMinor\":{}}".getBytes(StandardCharsets.UTF_8),
+            "{\"amountMinor\":999999999999999999999999999999}".getBytes(StandardCharsets.UTF_8),
+            "{\"callbackEventId\":\"a\u0001b\"}".getBytes(StandardCharsets.UTF_8),
+            new byte[] {'{', '"', 'x', '"', ':', '"', (byte) 0xc3, 0x28, '"', '}'});
+
+    String expected = null;
+    for (int index = 0; index < malformedBodies.size(); index++) {
+      ResponseEntity<String> response =
+          callbackRawPayload("callback-parse-failure-" + index, malformedBodies.get(index));
+      assertThat(response.getStatusCode()).isEqualTo(HttpStatus.BAD_REQUEST);
+      if (expected == null) {
+        expected = response.getBody();
+      } else {
+        assertThat(response.getBody()).isEqualTo(expected);
+      }
+    }
+    assertThat(expected).contains("\"category\":\"VALIDATION\"");
+    assertThat(expected).contains("\"message\":\"Payment callback is invalid\"");
+
+    String orderId = seedStandardOrder(USER, 1701);
+    MockPaymentResult attempt =
+        payments.start(
+            USER,
+            orderId,
+            "payment-non-ascii-callback",
+            new MockPaymentRequest(1701L, "AUD", null));
+    MockPaymentCallbackRequest nonAscii = callback(attempt, UUID.randomUUID().toString());
+    nonAscii.setCurrency("澳元");
+    ResponseEntity<String> decoded =
+        callbackRaw(nonAscii, "callback-non-ascii", callbackBody(nonAscii));
+    assertThat(decoded.getStatusCode()).isEqualTo(HttpStatus.BAD_REQUEST);
+    assertThat(decoded.getBody()).isEqualTo(expected);
+    assertThat(attemptState(attempt.attemptId())).containsExactly("PENDING", "1");
+  }
+
+  @Test
   void evaluationLookupsConcealOtherActiveSandboxAndReplayRequiresExactFullIntent() {
     EvaluationPaymentFixture first = seedEvaluationPayment("full-intent-first");
     EvaluationPaymentFixture second = seedEvaluationPayment("full-intent-second");
@@ -446,7 +489,7 @@ class MockPaymentIntegrationTest {
     MockPaymentRepository failingRepository =
         new MockPaymentRepository(jdbc) {
           @Override
-          public void insertCallback(CallbackRecord record) {
+          public void insertCallback(CallbackRecord record, Instant createdAt) {
             throw new DataAccessResourceFailureException("injected callback persistence failure");
           }
         };
@@ -1123,6 +1166,20 @@ class MockPaymentIntegrationTest {
         String.class);
   }
 
+  private ResponseEntity<String> callbackRawPayload(String idempotencyKey, byte[] requestBody) {
+    HttpHeaders headers = new HttpHeaders();
+    headers.setContentType(MediaType.APPLICATION_JSON);
+    headers.set("Idempotency-Key", idempotencyKey);
+    headers.set("X-Mock-Payment-Key-Id", CALLBACK_KEY);
+    headers.set("X-Mock-Payment-Timestamp", Long.toString(Instant.now().getEpochSecond()));
+    headers.set("X-Mock-Payment-Signature", "0".repeat(64));
+    return http.exchange(
+        "/internal/mock-payments/callback",
+        HttpMethod.POST,
+        new HttpEntity<>(requestBody, headers),
+        String.class);
+  }
+
   private String seedStandardOrder(String user, long amount) {
     String orderId = UUID.randomUUID().toString();
     jdbc.update(
@@ -1298,15 +1355,15 @@ class MockPaymentIntegrationTest {
       }
 
       @Override
-      public void insertCallback(CallbackRecord callback) {
-        super.insertCallback(callback);
+      public void insertCallback(CallbackRecord callback, Instant createdAt) {
+        super.insertCallback(callback, createdAt);
         fail(FailurePoint.CALLBACK);
       }
 
       @Override
       public void insertPaymentAuditReference(
-          String auditReferenceId, CallbackRecord callback, long entityVersion) {
-        super.insertPaymentAuditReference(auditReferenceId, callback, entityVersion);
+          String auditReferenceId, CallbackRecord callback, long entityVersion, Instant createdAt) {
+        super.insertPaymentAuditReference(auditReferenceId, callback, entityVersion, createdAt);
         fail(FailurePoint.AUDIT);
       }
     };

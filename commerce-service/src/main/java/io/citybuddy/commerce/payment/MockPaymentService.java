@@ -1,10 +1,13 @@
 package io.citybuddy.commerce.payment;
 
+import io.citybuddy.commerce.evaluation.EvaluationAuditReferenceIdentity;
 import io.citybuddy.commerce.evaluation.EvaluationSandboxRepository;
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
 import java.sql.SQLException;
 import java.time.Clock;
+import java.time.Instant;
+import java.time.temporal.ChronoUnit;
 import java.util.HexFormat;
 import java.util.UUID;
 import java.util.regex.Pattern;
@@ -207,8 +210,12 @@ public final class MockPaymentService {
       throw conflict("Cancelled or final order cannot be paid");
     }
 
+    Instant paymentEventTime =
+        attempt.sandboxId() == null
+            ? clock.instant().truncatedTo(ChronoUnit.MICROS)
+            : repository.monotonicEvaluationAuditCreatedAt(attempt.sandboxId(), clock.instant());
     repository.markOrderPaid(order);
-    repository.markAttemptSucceeded(attempt, clock.instant());
+    repository.markAttemptSucceeded(attempt, paymentEventTime);
     repository.insertPaymentMovement(attempt, order);
     MockPaymentRepository.CallbackRecord callback =
         new MockPaymentRepository.CallbackRecord(
@@ -221,20 +228,19 @@ public final class MockPaymentService {
             request.traceId(),
             request.operationId(),
             intentHash);
-    repository.insertCallback(callback);
+    repository.insertCallback(callback, paymentEventTime);
     if (attempt.sandboxId() != null) {
       repository.insertPaymentAuditReference(
-          hash(
-              String.join(
-                  "\n",
-                  attempt.sandboxId(),
-                  callback.supportSessionId(),
-                  callback.traceId(),
-                  callback.operationId(),
-                  callback.callbackEventId(),
-                  "2")),
+          EvaluationAuditReferenceIdentity.paymentCallback(
+              attempt.sandboxId(),
+              callback.supportSessionId(),
+              callback.traceId(),
+              callback.operationId(),
+              callback.callbackEventId(),
+              2),
           callback,
-          2);
+          2,
+          paymentEventTime);
     }
     MockPaymentRepository.AttemptRecord succeeded =
         repository

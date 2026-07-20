@@ -1,5 +1,7 @@
 package io.citybuddy.commerce.payment;
 
+import io.citybuddy.commerce.evaluation.EvaluationAuditEntityType;
+import io.citybuddy.commerce.evaluation.EvaluationAuditReferenceWriter;
 import java.sql.Timestamp;
 import java.time.Instant;
 import java.util.List;
@@ -257,14 +259,14 @@ public class MockPaymentRepository {
         attempt.currency());
   }
 
-  public void insertCallback(CallbackRecord callback) {
+  public void insertCallback(CallbackRecord callback, Instant createdAt) {
     jdbc.update(
         """
         INSERT INTO mock_payment_callback
           (callback_event_id, callback_idempotency_key, attempt_id,
            callback_correlation_id, sandbox_id, support_session_id, trace_id, operation_id,
-           intent_hash, requested_outcome, result_state)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'SUCCEEDED', 'APPLIED')
+           intent_hash, requested_outcome, result_state, created_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'SUCCEEDED', 'APPLIED', ?)
         """,
         callback.callbackEventId(),
         callback.callbackIdempotencyKey(),
@@ -274,25 +276,27 @@ public class MockPaymentRepository {
         callback.supportSessionId(),
         callback.traceId(),
         callback.operationId(),
-        callback.intentHash());
+        callback.intentHash(),
+        Timestamp.from(createdAt));
   }
 
   public void insertPaymentAuditReference(
-      String auditReferenceId, CallbackRecord callback, long entityVersion) {
-    jdbc.update(
-        """
-        INSERT INTO eval_commerce_audit_reference
-          (audit_reference_id, sandbox_id, support_session_id, trace_id, operation_id,
-           entity_type, entity_id, entity_version, outcome)
-        VALUES (?, ?, ?, ?, ?, 'PAYMENT_CALLBACK', ?, ?, 'OBSERVED')
-        """,
+      String auditReferenceId, CallbackRecord callback, long entityVersion, Instant createdAt) {
+    EvaluationAuditReferenceWriter.insert(
+        jdbc,
         auditReferenceId,
         callback.sandboxId(),
         callback.supportSessionId(),
         callback.traceId(),
         callback.operationId(),
+        EvaluationAuditEntityType.PAYMENT_CALLBACK,
         callback.callbackEventId(),
-        entityVersion);
+        entityVersion,
+        createdAt);
+  }
+
+  public Instant monotonicEvaluationAuditCreatedAt(String sandboxId, Instant candidate) {
+    return EvaluationAuditReferenceWriter.monotonicCreatedAt(jdbc, sandboxId, candidate);
   }
 
   public boolean hasPaymentMovement(AttemptRecord attempt, OrderTruth order) {

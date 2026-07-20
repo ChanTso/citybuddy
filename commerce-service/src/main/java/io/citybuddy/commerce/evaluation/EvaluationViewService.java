@@ -26,7 +26,7 @@ public class EvaluationViewService {
     List<EvaluationViewRepository.ProductView> products = repository.products(sandboxId);
     List<EvaluationViewRepository.EffectView> effects = repository.effects(sandboxId);
     List<EvaluationViewRepository.PaymentView> payments = repository.payments(sandboxId);
-    if (!repository.paymentAuditReferencesConsistent(sandboxId)) {
+    if (!repository.auditReferencesConsistent(sandboxId)) {
       throw new EvaluationSandboxException(409, "Evaluation payment truth is inconsistent");
     }
     if ("ACTIVE".equals(sandbox.lifecycleState()) && products.size() != sandbox.fixtureCount()) {
@@ -60,7 +60,7 @@ public class EvaluationViewService {
       String supportSessionId,
       EvaluationViewRequestParser.AuditPageRequest page) {
     observableSandbox(sandboxId);
-    if (!repository.paymentAuditReferencesConsistent(sandboxId)) {
+    if (!repository.auditReferencesConsistent(sandboxId)) {
       throw new EvaluationSandboxException(409, "Evaluation audit truth is inconsistent");
     }
     List<EvaluationViewRepository.AuditReference> fetched =
@@ -72,22 +72,9 @@ public class EvaluationViewService {
     List<EvaluationViewRepository.AuditReference> entries =
         List.copyOf(fetched.subList(0, Math.min(fetched.size(), page.limit())));
     for (EvaluationViewRepository.AuditReference reference : entries) {
-      boolean product =
-          "PRODUCT_FIXTURE".equals(reference.entityType())
-              && repository.productVersionExists(
-                  sandboxId, reference.entityId(), reference.entityVersion());
-      boolean payment =
-          "PAYMENT_CALLBACK".equals(reference.entityType())
-              && repository.paymentCallbackVersionExists(
-                  sandboxId,
-                  reference.supportSessionId(),
-                  reference.traceId(),
-                  reference.operationId(),
-                  reference.entityId(),
-                  reference.entityVersion());
       if (!sandboxId.equals(reference.sandboxId())
           || !supportSessionId.equals(reference.supportSessionId())
-          || (!product && !payment)) {
+          || EvaluationAuditEntityType.fromStored(reference.entityType()).isEmpty()) {
         throw new EvaluationSandboxException(409, "Evaluation audit truth is inconsistent");
       }
     }
