@@ -171,6 +171,20 @@ request. A later semantic diff change requires the checklist to be executed and 
   predefine the sequential disposition if it recurs. A later failure must be attributed from its own
   assertion, response, timestamps, durable truth, and service logs before reusing the parked label.
 
+### Phase-bound controlled failure injection
+
+- Bind every controlled failure to the exact operation phase it claims to exercise: method, target,
+  attempt, and the observable trigger must all be explicit. A path-only proxy rule is insufficient
+  when reads and writes share that path, because dropping the read can falsely claim a post-mutation
+  indeterminate response without executing the mutation.
+- Distinguish pre-mutation unavailability from post-acceptance response loss. For the latter, prove
+  the authoritative mutation became durable before suppressing its response, then prove retry or
+  redelivery reconstructs the accepted result from durable state rather than applying a second
+  semantic mutation. Record the trigger evidence and the final durable postcondition.
+- Keep the injector fail-closed: if the intended method/phase is never reached, the test must fail
+  rather than consume its failure budget on another operation or pass only because a later retry
+  happens to converge.
+
 ## Closeout maintenance
 
 At each slice or authorized non-slice closeout, append every newly evidenced recurring defect
