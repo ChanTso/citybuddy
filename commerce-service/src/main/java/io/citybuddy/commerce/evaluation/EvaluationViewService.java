@@ -25,10 +25,33 @@ public class EvaluationViewService {
     EvaluationViewRepository.SandboxView sandbox = observableSandbox(sandboxId);
     List<EvaluationViewRepository.ProductView> products = repository.products(sandboxId);
     List<EvaluationViewRepository.EffectView> effects = repository.effects(sandboxId);
+    List<EvaluationViewRepository.PaymentView> payments = repository.payments(sandboxId);
+    if (!repository.auditReferencesConsistent(sandboxId)) {
+      throw new EvaluationSandboxException(409, "Evaluation payment truth is inconsistent");
+    }
     if ("ACTIVE".equals(sandbox.lifecycleState()) && products.size() != sandbox.fixtureCount()) {
       throw new EvaluationSandboxException(409, "Evaluation sandbox truth is inconsistent");
     }
-    return new StateView(sandbox, products, effects);
+    for (EvaluationViewRepository.PaymentView payment : payments) {
+      boolean pending =
+          "PENDING".equals(payment.state())
+              && payment.stateVersion() == 1
+              && payment.callbackEventId() == null
+              && "UNPAID".equals(payment.orderStatus())
+              && payment.orderStateVersion() == 1
+              && payment.movementCount() == 0;
+      boolean succeeded =
+          "SUCCEEDED".equals(payment.state())
+              && payment.stateVersion() == 2
+              && isUuid(payment.callbackEventId())
+              && "PAID".equals(payment.orderStatus())
+              && payment.orderStateVersion() == 2
+              && payment.movementCount() == 1;
+      if (!pending && !succeeded) {
+        throw new EvaluationSandboxException(409, "Evaluation payment truth is inconsistent");
+      }
+    }
+    return new StateView(sandbox, products, effects, payments);
   }
 
   @Transactional(readOnly = true)
@@ -37,6 +60,9 @@ public class EvaluationViewService {
       String supportSessionId,
       EvaluationViewRequestParser.AuditPageRequest page) {
     observableSandbox(sandboxId);
+    if (!repository.auditReferencesConsistent(sandboxId)) {
+      throw new EvaluationSandboxException(409, "Evaluation audit truth is inconsistent");
+    }
     List<EvaluationViewRepository.AuditReference> fetched =
         repository.audit(sandboxId, supportSessionId, page.after(), page.limit() + 1);
     if (fetched.isEmpty()) {
@@ -48,9 +74,7 @@ public class EvaluationViewService {
     for (EvaluationViewRepository.AuditReference reference : entries) {
       if (!sandboxId.equals(reference.sandboxId())
           || !supportSessionId.equals(reference.supportSessionId())
-          || !"PRODUCT_FIXTURE".equals(reference.entityType())
-          || !repository.productVersionExists(
-              sandboxId, reference.entityId(), reference.entityVersion())) {
+          || EvaluationAuditEntityType.fromStored(reference.entityType()).isEmpty()) {
         throw new EvaluationSandboxException(409, "Evaluation audit truth is inconsistent");
       }
     }
@@ -77,10 +101,19 @@ public class EvaluationViewService {
     return sandbox;
   }
 
+  private static boolean isUuid(String value) {
+    try {
+      return value != null && java.util.UUID.fromString(value).toString().equals(value);
+    } catch (IllegalArgumentException exception) {
+      return false;
+    }
+  }
+
   public record StateView(
       EvaluationViewRepository.SandboxView sandbox,
       List<EvaluationViewRepository.ProductView> products,
-      List<EvaluationViewRepository.EffectView> effects) {}
+      List<EvaluationViewRepository.EffectView> effects,
+      List<EvaluationViewRepository.PaymentView> payments) {}
 
   public record AuditPage(List<EvaluationViewRepository.AuditReference> entries, Long nextCursor) {}
 

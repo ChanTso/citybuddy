@@ -1,2 +1,4 @@
 # Synthetic rejection credential from the first CB-101 branch commit; not a secret.
 b91dbf4990575be84912cdae2dbb1242e78bf7a7:scripts/test_evaluation_sandbox_integration.sh:curl-auth-user:316
+# Synthetic mock-payment integration key from the first CB-105 branch commit; not a secret.
+5b6ad5655df58fcbee44482f91ad55c142ace10d:scripts/test_evaluation_sandbox_integration.sh:generic-api-key:324

@@ -29,7 +29,8 @@ public final class EvaluationSandboxService {
   public ResetResult reset(EvaluationResetRequest request, String idempotencyKey) {
     String boundedKey =
         EvaluationRequestParser.boundedHeader(idempotencyKey, 128, "Invalid reset idempotency key");
-    String digest = EvaluationRequestParser.fixtureDigest(request.products());
+    String digest =
+        EvaluationRequestParser.fixtureDigest(request.products(), request.paymentOrder());
     Instant now = clock.instant();
     Instant provisioningDue = now.plus(properties.provisioningTimeout());
     String provisionKey =
@@ -58,6 +59,7 @@ public final class EvaluationSandboxService {
       if (sandbox.expiresAt() == null || !sandbox.expiresAt().isAfter(now)) {
         throw new EvaluationSandboxException(409, "Evaluation sandbox is no longer active");
       }
+      repository.verifyPaymentOrder(request.sandboxId(), sandbox.handle(), request.paymentOrder());
       return result(sandbox);
     }
     if (!"PROVISIONING".equals(sandbox.lifecycleState())) {
@@ -67,7 +69,7 @@ public final class EvaluationSandboxService {
     try {
       List<EvaluationResetRequest.ProductFixture> persisted =
           repository.createOrVerifyFixtures(request.sandboxId(), request.products());
-      verifyFixtureClosure(sandbox, persisted);
+      verifyFixtureClosure(sandbox, request, persisted);
       repository.recordSuppressedSms(request.sandboxId(), sandbox.resetIdempotencyKey());
       if (!repository.hasSuppressedSms(request.sandboxId(), sandbox.resetIdempotencyKey())) {
         throw new IllegalStateException("Evaluation effect stub did not persist");
@@ -111,11 +113,13 @@ public final class EvaluationSandboxService {
       Sandbox bound =
           repository.recordProvisioned(
               request.sandboxId(), provisioned.handle(), provisioned.expiresAt());
-      verifyFixtureClosure(bound, repository.fixtures(request.sandboxId()));
+      verifyFixtureClosure(bound, request, repository.fixtures(request.sandboxId()));
       if (!repository.hasSuppressedSms(request.sandboxId(), bound.resetIdempotencyKey())) {
         throw new IllegalStateException("Evaluation effect stub is incomplete");
       }
-      return result(repository.activate(request.sandboxId(), clock.instant()));
+      return result(
+          repository.activateWithPaymentOrder(
+              request.sandboxId(), provisioned.handle(), request.paymentOrder(), clock.instant()));
     } catch (RuntimeException exception) {
       repository.failAfterProvisionAttempt(request.sandboxId(), clock.instant());
       cleanup.cleanupNow(request.sandboxId());
@@ -149,9 +153,12 @@ public final class EvaluationSandboxService {
   }
 
   private static void verifyFixtureClosure(
-      Sandbox sandbox, List<EvaluationResetRequest.ProductFixture> fixtures) {
+      Sandbox sandbox,
+      EvaluationResetRequest request,
+      List<EvaluationResetRequest.ProductFixture> fixtures) {
     if (fixtures.size() != sandbox.fixtureCount()
-        || !EvaluationRequestParser.fixtureDigest(fixtures).equals(sandbox.fixtureDigest())) {
+        || !EvaluationRequestParser.fixtureDigest(fixtures, request.paymentOrder())
+            .equals(sandbox.fixtureDigest())) {
       throw new EvaluationSandboxException(409, "Conflicting evaluation fixtures");
     }
   }

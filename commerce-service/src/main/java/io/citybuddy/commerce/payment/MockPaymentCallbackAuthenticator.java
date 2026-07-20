@@ -65,7 +65,11 @@ public final class MockPaymentCallbackAuthenticator {
         request.orderId(),
         Long.toString(request.amountMinor()),
         request.currency(),
-        request.outcome());
+        request.outcome(),
+        nullable(request.sandboxId()),
+        nullable(request.supportSessionId()),
+        nullable(request.traceId()),
+        nullable(request.operationId()));
   }
 
   static byte[] hmac(String secret, String canonical) {
@@ -89,6 +93,10 @@ public final class MockPaymentCallbackAuthenticator {
       throw unauthorized();
     }
     return request;
+  }
+
+  private static String nullable(String value) {
+    return value == null ? "" : value;
   }
 
   private static void require(boolean condition) {

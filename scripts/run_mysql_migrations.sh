@@ -18,6 +18,16 @@ case "$MIGRATION_STREAM:$MYSQL_DATABASE:$MYSQL_USER" in
     ;;
 esac
 
+prepare_v013="${MIGRATION_PREPARE_V013:-false}"
+if [[ "$prepare_v013" != true && "$prepare_v013" != false ]]; then
+  echo "MIGRATION_PREPARE_V013 must be true or false." >&2
+  exit 1
+fi
+if [[ "$prepare_v013" == true && "$MIGRATION_STREAM" != commerce ]]; then
+  echo "The V013 grant barrier is available only to the commerce migration stream." >&2
+  exit 1
+fi
+
 migration_dir="/opt/citybuddy/migrations"
 if [[ ! -d "$migration_dir" ]]; then
   echo "Missing migration directory: $migration_dir" >&2
@@ -51,12 +61,24 @@ CREATE TABLE IF NOT EXISTS ${history_table} (
   success BOOLEAN NOT NULL
 ) ENGINE=InnoDB;"
 
+v013_barrier='CITYBUDDY_V013_EXACT_GRANT_BARRIER'
+v013_awaiting_comment='V013_AWAITING_COMMITMENT'
+
+v013_comment() {
+  mysql "${mysql_args[@]}" --execute="
+    SELECT table_comment FROM information_schema.tables
+    WHERE table_schema = 'commerce_db'
+      AND table_name = 'eval_commerce_audit_legacy_watermark'"
+}
+
 shopt -s nullglob
 migrations=("$migration_dir"/V*__*.sql)
 if (( ${#migrations[@]} == 0 )); then
   echo "Migration stream '$MIGRATION_STREAM' contains no versioned migrations." >&2
   exit 1
 fi
+
+prepared_v013=false
 
 for migration in "${migrations[@]}"; do
   filename="$(basename "$migration")"
@@ -80,11 +102,51 @@ for migration in "${migrations[@]}"; do
       exit 1
     fi
     if [[ "$recorded_success" != "1" ]]; then
+      if [[ "$MIGRATION_STREAM" == commerce && "$version" == 013 ]]; then
+        phase="$(v013_comment)"
+        if [[ "$phase" != "$v013_awaiting_comment" ]]; then
+          echo "Migration commerce/$filename is incomplete outside its exact grant barrier; refusing automatic retry." >&2
+          exit 1
+        fi
+        if [[ "$prepare_v013" == true ]]; then
+          echo "[commerce] prepared exact grant barrier: $filename"
+          prepared_v013=true
+          break
+        fi
+        echo "[commerce] resuming after exact grant barrier: $filename"
+        awk -v marker="$v013_barrier" 'seen { print } index($0, marker) { seen = 1 }' \
+          "$migration" | mysql "${mysql_args[@]}"
+        mysql "${mysql_args[@]}" --execute="
+          UPDATE ${history_table} SET success = TRUE WHERE version = '${version}';"
+        continue
+      fi
       echo "Migration $MIGRATION_STREAM/$filename previously failed or is incomplete; refusing automatic retry." >&2
       exit 1
     fi
     echo "[$MIGRATION_STREAM] already applied: $filename"
+    if [[ "$prepare_v013" == true && "$MIGRATION_STREAM" == commerce && "$version" == 013 ]]; then
+      break
+    fi
     continue
+  fi
+
+  if [[ "$prepare_v013" == true && "$MIGRATION_STREAM" == commerce && "$version" == 013 ]]; then
+    if ! grep -Fq -- "-- $v013_barrier" "$migration"; then
+      echo "Commerce V013 is missing its exact grant barrier." >&2
+      exit 1
+    fi
+    echo "[commerce] preparing exact grant barrier: $filename"
+    mysql "${mysql_args[@]}" --execute="
+      INSERT INTO ${history_table} (version, description, checksum, success)
+      VALUES ('${version}', '${description}', '${checksum}', FALSE);"
+    awk -v marker="$v013_barrier" 'index($0, marker) { exit } { print }' \
+      "$migration" | mysql "${mysql_args[@]}"
+    if [[ "$(v013_comment)" != "$v013_awaiting_comment" ]]; then
+      echo "Commerce V013 did not reach its exact grant barrier cleanly." >&2
+      exit 1
+    fi
+    prepared_v013=true
+    break
   fi
 
   echo "[$MIGRATION_STREAM] applying: $filename"
@@ -95,6 +157,11 @@ for migration in "${migrations[@]}"; do
   mysql "${mysql_args[@]}" --execute="
     UPDATE ${history_table} SET success = TRUE WHERE version = '${version}';"
 done
+
+if [[ "$prepared_v013" == true ]]; then
+  echo "[commerce] V013 schema prepared; exact table grants are required before commitment."
+  exit 0
+fi
 
 failed="$(mysql "${mysql_args[@]}" --execute="SELECT COUNT(*) FROM ${history_table} WHERE success = FALSE")"
 if [[ "$failed" != "0" ]]; then

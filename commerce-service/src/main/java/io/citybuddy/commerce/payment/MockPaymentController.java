@@ -2,9 +2,11 @@ package io.citybuddy.commerce.payment;
 
 import io.citybuddy.commerce.catalog.CatalogException;
 import io.citybuddy.commerce.catalog.DirectUserAuthorizer;
+import io.citybuddy.commerce.evaluation.EvaluationSandboxException;
 import jakarta.servlet.http.HttpServletRequest;
 import java.util.Map;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
+import org.springframework.dao.DataAccessException;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
 import org.springframework.http.converter.HttpMessageNotReadableException;
@@ -39,19 +41,19 @@ public final class MockPaymentController {
       @RequestHeader(value = "Idempotency-Key", required = false) String idempotencyKey,
       @PathVariable String orderId,
       @RequestBody(required = false) MockPaymentRequest request) {
-    String subject;
+    DirectUserAuthorizer.DirectPrincipal subject;
     try {
       subject =
-          authorizer
-              .authorize(authorization, evalSandbox, properties.requiredPermission())
-              .subject();
+          authorizer.authorizeEvaluation(
+              authorization, evalSandbox, properties.requiredPermission());
     } catch (CatalogException exception) {
       throw new MockPaymentException(
           exception.status(),
           exception.status() == 403 ? "AUTHORIZATION" : "AUTHENTICATION",
           "Direct-user payment authorization failed");
     }
-    MockPaymentResult result = service.start(subject, orderId, idempotencyKey, request);
+    MockPaymentResult result =
+        service.start(subject.subject(), subject.sandboxId(), orderId, idempotencyKey, request);
     return ResponseEntity.status(result.replayed() ? HttpStatus.OK : HttpStatus.CREATED)
         .body(result);
   }
@@ -98,5 +100,17 @@ final class MockPaymentExceptionHandler {
             ? "Payment callback is invalid"
             : "Payment request is invalid";
     return ResponseEntity.badRequest().body(Map.of("category", "VALIDATION", "message", message));
+  }
+
+  @ExceptionHandler(EvaluationSandboxException.class)
+  ResponseEntity<Map<String, String>> handleSandbox() {
+    return ResponseEntity.status(403)
+        .body(Map.of("category", "AUTHORIZATION", "message", "Evaluation payment is unavailable"));
+  }
+
+  @ExceptionHandler(DataAccessException.class)
+  ResponseEntity<Map<String, String>> handleUnavailable() {
+    return ResponseEntity.status(503)
+        .body(Map.of("category", "UNAVAILABLE", "message", "Payment service is unavailable"));
   }
 }

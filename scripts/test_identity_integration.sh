@@ -85,7 +85,11 @@ assert_mysql_rejects() {
     echo "Expected MySQL rejection succeeded: $label" >&2
     exit 1
   fi
-  grep -Eq "$pattern" "$tmp_dir/mysql-rejection.log"
+  if ! grep -Eq "$pattern" "$tmp_dir/mysql-rejection.log"; then
+    echo "MySQL rejection used an unexpected error for $label:" >&2
+    cat "$tmp_dir/mysql-rejection.log" >&2
+    exit 1
+  fi
   echo "Verified MySQL rejection: $label"
 }
 
@@ -136,7 +140,9 @@ wait_http() {
 
 ENV_FILE="$env_file" ./scripts/init_local.sh
 auth_app_password="$(read_value MYSQL_AUTH_APP_PASSWORD)"
+bootstrap_password="$(read_value MYSQL_BOOTSTRAP_PASSWORD)"
 commerce_app_password="$(read_value MYSQL_COMMERCE_APP_PASSWORD)"
+commerce_migration_password="$(read_value MYSQL_COMMERCE_MIGRATION_PASSWORD)"
 agent_app_password="$(read_value MYSQL_AGENT_APP_PASSWORD)"
 agent_migration_password="$(read_value MYSQL_AGENT_MIGRATION_PASSWORD)"
 user_password="$(openssl rand -hex 24)"
@@ -150,7 +156,44 @@ service_hash="$(uv run python scripts/hash_test_credential.py "$service_password
 
 "${compose[@]}" up --detach --wait --wait-timeout 60 mysql
 make ENV_FILE="$env_file" COMPOSE_PROJECT_NAME="$project" grant-access
-make ENV_FILE="$env_file" COMPOSE_PROJECT_NAME="$project" migrate-auth migrate-commerce migrate-agent
+make ENV_FILE="$env_file" COMPOSE_PROJECT_NAME="$project" migrate-auth
+
+# A complete-looking evaluation table chain without the commerce runtime schema must not be
+# normalized into the auth-only state or receive any optional commerce/migration authority.
+mysql_query root "$bootstrap_password" commerce_db "
+CREATE TABLE eval_sandbox (id INT);
+CREATE TABLE eval_sandbox_effect_stub (id INT);
+CREATE TABLE eval_sandbox_product_fixture (id INT);
+CREATE TABLE eval_commerce_audit_reference (id INT);
+CREATE TABLE eval_commerce_product_observation (id INT);
+CREATE TABLE eval_commerce_audit_legacy_watermark (id INT) COMMENT='V013_AWAITING_COMMITMENT';
+"
+assert_mysql_rejects "auth-only schema rejects commerce evaluation table chain" \
+  'rejects commerce evaluation tables without the commerce runtime schema' \
+  make ENV_FILE="$env_file" COMPOSE_PROJECT_NAME="$project" grant-access
+commerce_grants_after_schema_rejection="$(mysql_query commerce_app "$commerce_app_password" '' \
+  'SHOW GRANTS FOR CURRENT_USER')"
+if grep -Eq 'eval_(sandbox|commerce)' <<<"$commerce_grants_after_schema_rejection"; then
+  echo "Auth-only schema rejection granted commerce evaluation authority." >&2
+  exit 1
+fi
+migration_grants_after_schema_rejection="$(mysql_query commerce_migration \
+  "$commerce_migration_password" '' 'SHOW GRANTS FOR CURRENT_USER')"
+if grep -Eq 'eval_commerce_audit_(reference|legacy_watermark)' \
+  <<<"$migration_grants_after_schema_rejection"; then
+  echo "Auth-only schema rejection granted V013 migration authority." >&2
+  exit 1
+fi
+mysql_query root "$bootstrap_password" commerce_db "
+DROP TABLE eval_commerce_audit_legacy_watermark;
+DROP TABLE eval_commerce_product_observation;
+DROP TABLE eval_commerce_audit_reference;
+DROP TABLE eval_sandbox_product_fixture;
+DROP TABLE eval_sandbox_effect_stub;
+DROP TABLE eval_sandbox;
+"
+
+make ENV_FILE="$env_file" COMPOSE_PROJECT_NAME="$project" migrate-commerce migrate-agent
 make ENV_FILE="$env_file" COMPOSE_PROJECT_NAME="$project" grant-access
 
 mysql_query auth_app "$auth_app_password" commerce_db "

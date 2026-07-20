@@ -189,6 +189,25 @@ assert_fails "auth migration cannot read commerce migration history" 'SELECT com
   mysql_query auth_migration "$auth_migration_password" commerce_db 'SELECT * FROM commerce_schema_history'
 assert_fails "commerce migration cannot read auth migration history" 'SELECT command denied' \
   mysql_query commerce_migration "$commerce_migration_password" commerce_db 'SELECT * FROM auth_schema_history'
+assert_fails "commerce migration cannot insert auth-private truth" 'INSERT command denied' \
+  mysql_query commerce_migration "$commerce_migration_password" commerce_db \
+  "INSERT INTO auth_eval_test_principal (provisioning_id, opaque_handle, subject, sandbox_id, case_correlation, test_user_label, permissions, provision_idempotency_key, ttl_seconds, state, expires_at) VALUES ('00000000-0000-0000-0000-000000000000', 'forbidden', 'forbidden', 'forbidden', 'forbidden', 'forbidden', 'forbidden', 'forbidden', 60, 'PROVISIONED', TIMESTAMPADD(MINUTE, 2, CURRENT_TIMESTAMP(6)))"
+assert_fails "commerce migration cannot read ordinary commerce truth after V013" \
+  'SELECT command denied' \
+  mysql_query commerce_migration "$commerce_migration_password" commerce_db 'SELECT * FROM product'
+assert_fails "commerce migration cannot insert ordinary commerce truth after V013" \
+  'INSERT command denied' \
+  mysql_query commerce_migration "$commerce_migration_password" commerce_db \
+  "INSERT INTO eval_commerce_audit_legacy_watermark (watermark_key, commitment_format, legacy_set_digest, cutoff_sequence_id, legacy_row_count, recorded_at) VALUES ('V013', 'CITYBUDDY_EVAL_AUDIT_LEGACY_LPUTF8_SHA256_CHAIN_V1', REPEAT('0', 64), 0, 0, CURRENT_TIMESTAMP(6))"
+commerce_migration_grants="$(mysql_query commerce_migration "$commerce_migration_password" '' 'SHOW GRANTS FOR CURRENT_USER')"
+if grep -Eq 'SELECT, INSERT.*ON `commerce_db`\.\*|ON `commerce_db`\.`eval_commerce_audit_(reference|legacy_watermark)`' \
+  <<<"$commerce_migration_grants"; then
+  echo "Commerce migration retained forbidden data access after V013 sealed." >&2
+  exit 1
+fi
+test "$(mysql_query commerce_migration "$commerce_migration_password" commerce_db \
+  "SELECT CONCAT(success, ':', (SELECT table_comment FROM information_schema.tables WHERE table_schema = 'commerce_db' AND table_name = 'eval_commerce_audit_legacy_watermark')) FROM commerce_schema_history WHERE version = '013'")" = "1:V013_COMMITMENT_SEALED"
+echo "Verified V013 exact migration grants are revoked after the commitment is sealed."
 assert_fails "auth runtime cannot execute DDL" '(Access denied|command denied).*auth_app' \
   mysql_query auth_app "$auth_app_password" "" 'CREATE TABLE commerce_db.cb010_forbidden (id INT)'
 assert_fails "commerce runtime cannot execute DDL" '(Access denied|command denied).*commerce_app' \

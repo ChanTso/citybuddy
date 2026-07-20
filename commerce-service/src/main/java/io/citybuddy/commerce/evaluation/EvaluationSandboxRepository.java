@@ -94,6 +94,96 @@ public class EvaluationSandboxRepository {
     return fixtures(sandboxId, false);
   }
 
+  public void verifyPaymentOrder(
+      String sandboxId,
+      String ownerHandle,
+      EvaluationResetRequest.PaymentOrderFixture paymentOrder) {
+    if (paymentOrder == null) {
+      return;
+    }
+    PaymentOrderTruth expected = expectedPaymentOrder(sandboxId, ownerHandle, paymentOrder, false);
+    verifyPaymentOrder(expected);
+  }
+
+  private void createOrVerifyPaymentOrder(
+      String sandboxId,
+      String ownerHandle,
+      EvaluationResetRequest.PaymentOrderFixture paymentOrder) {
+    if (paymentOrder == null) {
+      return;
+    }
+    PaymentOrderTruth expected = expectedPaymentOrder(sandboxId, ownerHandle, paymentOrder, true);
+    jdbc.update(
+        """
+        INSERT IGNORE INTO standard_order
+          (order_id, user_subject, sandbox_id, evaluation_owner_handle, product_id, product_name,
+           unit_price_minor, currency, quantity, total_price_minor, product_version, status,
+           state_version)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, 'UNPAID', 1)
+        """,
+        expected.orderId(),
+        fixtureOwner(ownerHandle),
+        sandboxId,
+        ownerHandle,
+        expected.productId(),
+        expected.productName(),
+        expected.unitPriceMinor(),
+        expected.currency(),
+        expected.quantity(),
+        expected.totalPriceMinor());
+    verifyPaymentOrder(expected);
+  }
+
+  private PaymentOrderTruth expectedPaymentOrder(
+      String sandboxId,
+      String ownerHandle,
+      EvaluationResetRequest.PaymentOrderFixture paymentOrder,
+      boolean lockFixture) {
+    EvaluationResetRequest.ProductFixture product =
+        fixtures(sandboxId, lockFixture).stream()
+            .filter(item -> item.productId().equals(paymentOrder.productId()))
+            .findFirst()
+            .orElseThrow(() -> new EvaluationSandboxException(409, "Payment fixture is missing"));
+    long total = Math.multiplyExact(product.priceMinor(), paymentOrder.quantity());
+    return new PaymentOrderTruth(
+        paymentOrder.orderId(),
+        sandboxId,
+        ownerHandle,
+        product.productId(),
+        product.name(),
+        product.priceMinor(),
+        product.currency(),
+        paymentOrder.quantity(),
+        total,
+        1);
+  }
+
+  private void verifyPaymentOrder(PaymentOrderTruth expected) {
+    List<PaymentOrderTruth> orders =
+        jdbc.query(
+            """
+            SELECT order_id, sandbox_id, evaluation_owner_handle, product_id, product_name,
+                   unit_price_minor, currency, quantity, total_price_minor, product_version
+            FROM standard_order WHERE order_id = ? FOR SHARE
+            """,
+            (result, row) ->
+                new PaymentOrderTruth(
+                    result.getString("order_id"),
+                    result.getString("sandbox_id"),
+                    result.getString("evaluation_owner_handle"),
+                    result.getString("product_id"),
+                    result.getString("product_name"),
+                    result.getLong("unit_price_minor"),
+                    result.getString("currency"),
+                    result.getInt("quantity"),
+                    result.getLong("total_price_minor"),
+                    result.getLong("product_version")),
+            expected.orderId());
+    if (orders.size() != 1 || !expected.equals(orders.getFirst())) {
+      throw new EvaluationSandboxException(409, "Conflicting payment order fixture");
+    }
+  }
+
   public void recordSuppressedSms(String sandboxId, String correlationKey) {
     jdbc.update(
         """
@@ -152,9 +242,14 @@ public class EvaluationSandboxRepository {
   }
 
   @Transactional
-  public Sandbox activate(String sandboxId, Instant now) {
+  public Sandbox activateWithPaymentOrder(
+      String sandboxId,
+      String ownerHandle,
+      EvaluationResetRequest.PaymentOrderFixture paymentOrder,
+      Instant now) {
     Sandbox sandbox = lock(sandboxId);
     if ("ACTIVE".equals(sandbox.lifecycleState())) {
+      verifyPaymentOrder(sandboxId, ownerHandle, paymentOrder);
       return sandbox;
     }
     if (!"PROVISIONING".equals(sandbox.lifecycleState())
@@ -165,6 +260,7 @@ public class EvaluationSandboxRepository {
         || !sandbox.provisioningDueAt().isAfter(now)) {
       throw new EvaluationSandboxException(409, "Evaluation sandbox cannot activate");
     }
+    createOrVerifyPaymentOrder(sandboxId, ownerHandle, paymentOrder);
     int changed =
         jdbc.update(
             """
@@ -252,6 +348,18 @@ public class EvaluationSandboxRepository {
             sandboxId,
             Timestamp.from(now));
     return count != null && count == 1;
+  }
+
+  public Sandbox lockForPayment(String sandboxId) {
+    List<Sandbox> matches =
+        jdbc.query(
+            "SELECT " + COLUMNS + " FROM eval_sandbox WHERE sandbox_id = ? FOR UPDATE",
+            EvaluationSandboxRepository::mapSandbox,
+            sandboxId);
+    if (matches.size() != 1) {
+      throw new EvaluationSandboxException(403, "Evaluation sandbox is inactive");
+    }
+    return matches.getFirst();
   }
 
   public Optional<Sandbox> find(String sandboxId) {
@@ -542,4 +650,23 @@ public class EvaluationSandboxRepository {
       Instant deadAt,
       Instant closedAt,
       long version) {}
+
+  private record PaymentOrderTruth(
+      String orderId,
+      String sandboxId,
+      String ownerHandle,
+      String productId,
+      String productName,
+      long unitPriceMinor,
+      String currency,
+      int quantity,
+      long totalPriceMinor,
+      long productVersion) {}
+
+  public static String fixtureOwner(String ownerHandle) {
+    if (ownerHandle == null || ownerHandle.length() != 43) {
+      throw new EvaluationSandboxException(409, "Evaluation identity handle is invalid");
+    }
+    return "eval-handle:" + ownerHandle;
+  }
 }

@@ -6,6 +6,12 @@ if (( $# != 0 )); then
   exit 1
 fi
 
+v013_force_revoke="${V013_FORCE_REVOKE:-false}"
+if [[ "$v013_force_revoke" != true && "$v013_force_revoke" != false ]]; then
+  echo "V013_FORCE_REVOKE must be true or false." >&2
+  exit 1
+fi
+
 : "${MYSQL_HOST:?MYSQL_HOST is required}"
 : "${MYSQL_PORT:?MYSQL_PORT is required}"
 : "${MYSQL_USER:?MYSQL_USER is required}"
@@ -69,6 +75,12 @@ expected=(
   "GRANT SELECT, INSERT, UPDATE, DELETE ON commerce_db.eval_sandbox_product_fixture TO 'commerce_app'@'%';"
   "GRANT SELECT, INSERT ON commerce_db.eval_sandbox_effect_stub TO 'commerce_app'@'%';"
   "GRANT SELECT, INSERT ON commerce_db.eval_commerce_audit_reference TO 'commerce_app'@'%';"
+  "GRANT SELECT, INSERT ON commerce_db.eval_commerce_product_observation TO 'commerce_app'@'%';"
+  "GRANT SELECT ON commerce_db.eval_commerce_audit_legacy_watermark TO 'commerce_app'@'%';"
+  "GRANT SELECT ON commerce_db.eval_commerce_audit_reference TO 'commerce_migration'@'%';"
+  "GRANT INSERT ON commerce_db.eval_commerce_audit_legacy_watermark TO 'commerce_migration'@'%';"
+  "REVOKE IF EXISTS SELECT ON commerce_db.eval_commerce_audit_reference FROM 'commerce_migration'@'%';"
+  "REVOKE IF EXISTS INSERT ON commerce_db.eval_commerce_audit_legacy_watermark FROM 'commerce_migration'@'%';"
 )
 mapfile -t actual < <(sed -e '/^[[:space:]]*$/d' -e '/^[[:space:]]*--/d' "$manifest")
 
@@ -148,6 +160,19 @@ legacy_runtime_sql="$(printf '%s\n' "${actual[@]:5:4}" "$support_grant")"
 evaluation_grant="${actual[30]}"
 sandbox_grants="$(printf '%s\n' "${actual[@]:31:3}")"
 evaluation_audit_grant="${actual[34]}"
+evaluation_product_observation_grant="${actual[35]}"
+evaluation_audit_watermark_grant="${actual[36]}"
+v013_migration_grants="$(printf '%s\n' "${actual[37]}" "${actual[38]}")"
+v013_migration_revokes="$(printf '%s\n' "${actual[39]}" "${actual[40]}")"
+
+if [[ "$v013_force_revoke" == true ]]; then
+  mysql "${mysql_args[@]}" --execute="
+    SET ROLE 'bootstrap_grant_role';
+    $v013_migration_revokes
+    SET ROLE NONE;"
+  echo "migration-v013-grants=force-revoked"
+  exit 0
+fi
 
 sql="SET ROLE 'bootstrap_grant_role';
 SELECT CONCAT('role-active=', CURRENT_ROLE());
@@ -185,6 +210,8 @@ runtime_table_state="$(mysql "${mysql_args[@]}" --execute="
       'eval_sandbox_product_fixture',
       'eval_sandbox_effect_stub',
       'eval_commerce_audit_reference',
+      'eval_commerce_product_observation',
+      'eval_commerce_audit_legacy_watermark',
       'crm_profile',
       'product',
       'catalog_metadata',
@@ -207,10 +234,24 @@ runtime_table_state="$(mysql "${mysql_args[@]}" --execute="
       'retrieval_evidence'
     );
   SET ROLE NONE;")"
+
+remove_runtime_table() {
+  local table_list="$1"
+  local table_name="$2"
+  table_list=",$table_list,"
+  table_list="${table_list/,${table_name},/,}"
+  table_list="${table_list#,}"
+  table_list="${table_list%,}"
+  printf '%s\n' "$table_list"
+}
+
 normalized_runtime_table_state="$runtime_table_state"
+auth_runtime_table_state="4:commerce_db.auth_login_credential,commerce_db.auth_service_identity,commerce_db.auth_signing_key_metadata,commerce_db.auth_user_principal"
 evaluation_table_present=false
 sandbox_tables_present=false
 evaluation_audit_table_present=false
+evaluation_product_observation_table_present=false
+evaluation_audit_watermark_table_present=false
 feedback_table_present=false
 retrieval_tables_present=false
 retrieval_decision_present=false
@@ -218,7 +259,8 @@ retrieval_evidence_present=false
 if [[ "$normalized_runtime_table_state" == *"commerce_db.auth_eval_test_principal"* ]]; then
   runtime_table_count="${normalized_runtime_table_state%%:*}"
   runtime_table_list="${normalized_runtime_table_state#*:}"
-  runtime_table_list="${runtime_table_list/commerce_db.auth_eval_test_principal,/}"
+  runtime_table_list="$(remove_runtime_table "$runtime_table_list" \
+    commerce_db.auth_eval_test_principal)"
   normalized_runtime_table_state="$((runtime_table_count - 1)):$runtime_table_list"
   evaluation_table_present=true
 fi
@@ -237,9 +279,12 @@ if (( sandbox_table_count != 0 && sandbox_table_count != 3 )); then
 elif (( sandbox_table_count == 3 )); then
   runtime_table_count="${normalized_runtime_table_state%%:*}"
   runtime_table_list="${normalized_runtime_table_state#*:}"
-  runtime_table_list="${runtime_table_list/commerce_db.eval_sandbox,/}"
-  runtime_table_list="${runtime_table_list/commerce_db.eval_sandbox_effect_stub,/}"
-  runtime_table_list="${runtime_table_list/commerce_db.eval_sandbox_product_fixture,/}"
+  runtime_table_list="$(remove_runtime_table "$runtime_table_list" \
+    commerce_db.eval_sandbox)"
+  runtime_table_list="$(remove_runtime_table "$runtime_table_list" \
+    commerce_db.eval_sandbox_effect_stub)"
+  runtime_table_list="$(remove_runtime_table "$runtime_table_list" \
+    commerce_db.eval_sandbox_product_fixture)"
   normalized_runtime_table_state="$((runtime_table_count - 3)):$runtime_table_list"
   sandbox_tables_present=true
 fi
@@ -250,9 +295,81 @@ if [[ ",$normalized_runtime_table_state," == *",commerce_db.eval_commerce_audit_
   fi
   runtime_table_count="${normalized_runtime_table_state%%:*}"
   runtime_table_list="${normalized_runtime_table_state#*:}"
-  runtime_table_list="${runtime_table_list/commerce_db.eval_commerce_audit_reference,/}"
+  runtime_table_list="$(remove_runtime_table "$runtime_table_list" \
+    commerce_db.eval_commerce_audit_reference)"
   normalized_runtime_table_state="$((runtime_table_count - 1)):$runtime_table_list"
   evaluation_audit_table_present=true
+fi
+if [[ ",$normalized_runtime_table_state," == *",commerce_db.eval_commerce_product_observation,"* ]]; then
+  if [[ "$evaluation_audit_table_present" != true ]]; then
+    echo "Grant job found product observation truth without the prerequisite audit schema." >&2
+    exit 1
+  fi
+  runtime_table_count="${normalized_runtime_table_state%%:*}"
+  runtime_table_list="${normalized_runtime_table_state#*:}"
+  runtime_table_list="$(remove_runtime_table "$runtime_table_list" \
+    commerce_db.eval_commerce_product_observation)"
+  normalized_runtime_table_state="$((runtime_table_count - 1)):$runtime_table_list"
+  evaluation_product_observation_table_present=true
+fi
+if [[ ",$normalized_runtime_table_state," == *",commerce_db.eval_commerce_audit_legacy_watermark,"* ]]; then
+  if [[ "$evaluation_product_observation_table_present" != true ]]; then
+    echo "Grant job found audit legacy watermark without totality truth." >&2
+    exit 1
+  fi
+  runtime_table_count="${normalized_runtime_table_state%%:*}"
+  runtime_table_list="${normalized_runtime_table_state#*:}"
+  runtime_table_list="$(remove_runtime_table "$runtime_table_list" \
+    commerce_db.eval_commerce_audit_legacy_watermark)"
+  normalized_runtime_table_state="$((runtime_table_count - 1)):$runtime_table_list"
+  evaluation_audit_watermark_table_present=true
+fi
+if [[ "$normalized_runtime_table_state" == "$auth_runtime_table_state" ]] && \
+  [[ "$sandbox_tables_present" == true || "$evaluation_audit_table_present" == true || \
+    "$evaluation_product_observation_table_present" == true || \
+    "$evaluation_audit_watermark_table_present" == true ]]; then
+  echo "Grant job rejects commerce evaluation tables without the commerce runtime schema." >&2
+  exit 1
+fi
+if [[ "$evaluation_audit_watermark_table_present" == true ]]; then
+  v013_phase="$(mysql "${mysql_args[@]}" --execute="
+    SET ROLE 'bootstrap_grant_role';
+    SELECT table_comment FROM information_schema.tables
+    WHERE table_schema = 'commerce_db'
+      AND table_name = 'eval_commerce_audit_legacy_watermark';
+    SET ROLE NONE;")"
+  case "$v013_phase" in
+    V013_AWAITING_COMMITMENT)
+      mysql "${mysql_args[@]}" --execute="
+        SET ROLE 'bootstrap_grant_role';
+        $v013_migration_grants
+        SET ROLE NONE;"
+      echo "migration-v013-grants=exact-prepared"
+      ;;
+    V013_COMMITMENT_SEALED)
+      mysql "${mysql_args[@]}" --execute="
+        SET ROLE 'bootstrap_grant_role';
+        $v013_migration_revokes
+        SET ROLE NONE;"
+      echo "migration-v013-grants=revoked"
+      ;;
+    V013_COMMITMENT_POPULATING)
+      mysql "${mysql_args[@]}" --execute="
+        SET ROLE 'bootstrap_grant_role';
+        $v013_migration_revokes
+        SET ROLE NONE;"
+      echo "Grant job found an interrupted V013 commitment; exact grants were removed." >&2
+      exit 1
+      ;;
+    *)
+      mysql "${mysql_args[@]}" --execute="
+        SET ROLE 'bootstrap_grant_role';
+        $v013_migration_revokes
+        SET ROLE NONE;"
+      echo "Grant job found an unknown V013 commitment phase: $v013_phase" >&2
+      exit 1
+      ;;
+  esac
 fi
 if [[ "$runtime_table_state" == *"cs_db.retrieval_decision"* ]]; then
   retrieval_decision_present=true
@@ -266,15 +383,17 @@ if [[ "$retrieval_decision_present" != "$retrieval_evidence_present" ]]; then
 elif [[ "$retrieval_decision_present" == true ]]; then
   runtime_table_count="${normalized_runtime_table_state%%:*}"
   runtime_table_list="${normalized_runtime_table_state#*:}"
-  runtime_table_list="${runtime_table_list/,cs_db.retrieval_decision/}"
-  runtime_table_list="${runtime_table_list/,cs_db.retrieval_evidence/}"
+  runtime_table_list="$(remove_runtime_table "$runtime_table_list" \
+    cs_db.retrieval_decision)"
+  runtime_table_list="$(remove_runtime_table "$runtime_table_list" \
+    cs_db.retrieval_evidence)"
   normalized_runtime_table_state="$((runtime_table_count - 2)):$runtime_table_list"
   retrieval_tables_present=true
 fi
 if [[ ",$normalized_runtime_table_state," == *",cs_db.support_feedback,"* ]]; then
   runtime_table_count="${normalized_runtime_table_state%%:*}"
   runtime_table_list="${normalized_runtime_table_state#*:}"
-  runtime_table_list="${runtime_table_list/,cs_db.support_feedback/}"
+  runtime_table_list="$(remove_runtime_table "$runtime_table_list" cs_db.support_feedback)"
   normalized_runtime_table_state="$((runtime_table_count - 1)):$runtime_table_list"
   feedback_table_present=true
 fi
@@ -293,6 +412,7 @@ cb080_transaction_runtime_table_state="18:commerce_db.auth_login_credential,comm
 payment_runtime_table_state="17:commerce_db.auth_login_credential,commerce_db.auth_service_identity,commerce_db.auth_signing_key_metadata,commerce_db.auth_user_principal,commerce_db.catalog_metadata,commerce_db.commerce_outbox,commerce_db.crm_profile,commerce_db.inventory_ledger,commerce_db.mock_payment_attempt,commerce_db.mock_payment_callback,commerce_db.order_idempotency,commerce_db.product,commerce_db.seckill_activity,commerce_db.seckill_order,commerce_db.seckill_reservation,commerce_db.standard_order,cs_db.support_session"
 cb080_payment_runtime_table_state="20:commerce_db.auth_login_credential,commerce_db.auth_service_identity,commerce_db.auth_signing_key_metadata,commerce_db.auth_user_principal,commerce_db.catalog_metadata,commerce_db.commerce_outbox,commerce_db.crm_profile,commerce_db.inventory_ledger,commerce_db.mock_payment_attempt,commerce_db.mock_payment_callback,commerce_db.order_idempotency,commerce_db.product,commerce_db.seckill_activity,commerce_db.seckill_order,commerce_db.seckill_reservation,commerce_db.standard_order,cs_db.support_conversation,cs_db.support_event,cs_db.support_session,cs_db.support_turn"
 complete_runtime_table_state="18:commerce_db.auth_login_credential,commerce_db.auth_service_identity,commerce_db.auth_signing_key_metadata,commerce_db.auth_user_principal,commerce_db.catalog_metadata,commerce_db.commerce_outbox,commerce_db.crm_profile,commerce_db.inventory_ledger,commerce_db.mock_payment_attempt,commerce_db.mock_payment_callback,commerce_db.mock_refund,commerce_db.order_idempotency,commerce_db.product,commerce_db.seckill_activity,commerce_db.seckill_order,commerce_db.seckill_reservation,commerce_db.standard_order,cs_db.support_session"
+commerce_complete_runtime_table_state="17:commerce_db.auth_login_credential,commerce_db.auth_service_identity,commerce_db.auth_signing_key_metadata,commerce_db.auth_user_principal,commerce_db.catalog_metadata,commerce_db.commerce_outbox,commerce_db.crm_profile,commerce_db.inventory_ledger,commerce_db.mock_payment_attempt,commerce_db.mock_payment_callback,commerce_db.mock_refund,commerce_db.order_idempotency,commerce_db.product,commerce_db.seckill_activity,commerce_db.seckill_order,commerce_db.seckill_reservation,commerce_db.standard_order"
 cb080_runtime_table_state="21:commerce_db.auth_login_credential,commerce_db.auth_service_identity,commerce_db.auth_signing_key_metadata,commerce_db.auth_user_principal,commerce_db.catalog_metadata,commerce_db.commerce_outbox,commerce_db.crm_profile,commerce_db.inventory_ledger,commerce_db.mock_payment_attempt,commerce_db.mock_payment_callback,commerce_db.mock_refund,commerce_db.order_idempotency,commerce_db.product,commerce_db.seckill_activity,commerce_db.seckill_order,commerce_db.seckill_reservation,commerce_db.standard_order,cs_db.support_conversation,cs_db.support_event,cs_db.support_session,cs_db.support_turn"
 optional_evaluation_grants=""
 if [[ "$evaluation_table_present" == true ]]; then
@@ -304,7 +424,23 @@ fi
 if [[ "$evaluation_audit_table_present" == true ]]; then
   optional_evaluation_grants="$(printf '%s\n' "$optional_evaluation_grants" "$evaluation_audit_grant")"
 fi
-if [[ "$normalized_runtime_table_state" == "$cb080_runtime_table_state" ]]; then
+if [[ "$evaluation_product_observation_table_present" == true ]]; then
+  optional_evaluation_grants="$(printf '%s\n' "$optional_evaluation_grants" "$evaluation_product_observation_grant")"
+fi
+if [[ "$evaluation_audit_watermark_table_present" == true ]]; then
+  optional_evaluation_grants="$(printf '%s\n' "$optional_evaluation_grants" "$evaluation_audit_watermark_grant")"
+fi
+if [[ "$normalized_runtime_table_state" == "$commerce_complete_runtime_table_state" ]]; then
+  selected_runtime_sql="$(printf '%s\n' "${actual[@]:5:18}")"
+  if [[ -n "$optional_evaluation_grants" ]]; then
+    selected_runtime_sql="$(printf '%s\n' "$selected_runtime_sql" "$optional_evaluation_grants")"
+  fi
+  mysql "${mysql_args[@]}" --execute="
+    SET ROLE 'bootstrap_grant_role';
+    $selected_runtime_sql
+    SET ROLE NONE;"
+  echo "runtime-grants=commerce-applied-awaiting-support-migration"
+elif [[ "$normalized_runtime_table_state" == "$cb080_runtime_table_state" ]]; then
   selected_runtime_sql="$(printf '%s\n' "${actual[@]:5:22}")"
   if [[ "$retrieval_tables_present" == true ]]; then
     if [[ "$feedback_table_present" != true ]]; then
@@ -438,6 +574,16 @@ elif [[ "$normalized_runtime_table_state" == "$legacy_runtime_table_state" || "$
     $selected_legacy_runtime_sql
     SET ROLE NONE;"
   echo "runtime-grants=legacy-applied-awaiting-migrations"
+elif [[ "$normalized_runtime_table_state" == "$auth_runtime_table_state" ]]; then
+  selected_auth_runtime_sql="$(printf '%s\n' "${actual[@]:5:4}")"
+  if [[ "$evaluation_table_present" == true ]]; then
+    selected_auth_runtime_sql="$(printf '%s\n' "$selected_auth_runtime_sql" "$evaluation_grant")"
+  fi
+  mysql "${mysql_args[@]}" --execute="
+    SET ROLE 'bootstrap_grant_role';
+    $selected_auth_runtime_sql
+    SET ROLE NONE;"
+  echo "runtime-grants=auth-applied-awaiting-commerce-and-support-migrations"
 elif [[ "$normalized_runtime_table_state" == "0:none" ]]; then
   echo "runtime-grants=deferred-until-migrations"
 else

@@ -10,7 +10,7 @@ COMPOSE_BUILD ?= --build
 COMPOSE := docker compose --project-name "$(COMPOSE_PROJECT_NAME)" --env-file "$(ENV_FILE)" --file compose.yaml
 
 .DEFAULT_GOAL := ci
-.PHONY: setup setup-java setup-python setup-web setup-repo format lint typecheck test build docs-check secret-scan java-ci python-ci web-ci repo-ci ci guard-layout init-local up down reset-local grant-access migrate-auth migrate-commerce migrate-agent rocketmq-store-init rocketmq-init test-integration test-runtime-integration test-mysql-integration test-identity-integration test-evaluation-identity-integration test-evaluation-sandbox-integration test-catalog-integration test-redis-integration test-elasticsearch-integration test-knowledge-search-integration test-retrieval-evidence-integration test-rocketmq-integration test-knowledge-indexer-rocketmq-spike
+.PHONY: setup setup-java setup-python setup-web setup-repo format lint typecheck test build docs-check secret-scan java-ci python-ci web-ci repo-ci ci guard-layout init-local up down reset-local grant-access revoke-v013-migration-access migrate-auth migrate-commerce migrate-agent rocketmq-store-init rocketmq-init test-integration test-runtime-integration test-mysql-integration test-identity-integration test-evaluation-identity-integration test-evaluation-sandbox-integration test-catalog-integration test-redis-integration test-elasticsearch-integration test-knowledge-search-integration test-retrieval-evidence-integration test-rocketmq-integration test-knowledge-indexer-rocketmq-spike
 
 guard-layout:
 	test -x ./mvnw
@@ -73,13 +73,40 @@ grant-access:
 		exit $$status; \
 	fi
 
+revoke-v013-migration-access:
+	ENV_FILE="$(ENV_FILE)" ./scripts/require_local_env.sh
+	$(COMPOSE) run --rm -e V013_FORCE_REVOKE=true mysql-grants
+
 migrate-auth:
 	ENV_FILE="$(ENV_FILE)" ./scripts/require_local_env.sh
 	$(COMPOSE) run --rm auth-migrate
 
 migrate-commerce:
 	ENV_FILE="$(ENV_FILE)" ./scripts/require_local_env.sh
-	$(COMPOSE) run --rm commerce-migrate
+	@preflight_status=0; \
+	$(MAKE) ENV_FILE=$(ENV_FILE) COMPOSE_PROJECT_NAME=$(COMPOSE_PROJECT_NAME) grant-access || preflight_status=$$?; \
+	if (( preflight_status != 0 )); then \
+	  $(MAKE) ENV_FILE=$(ENV_FILE) COMPOSE_PROJECT_NAME=$(COMPOSE_PROJECT_NAME) revoke-v013-migration-access || true; \
+	  exit $$preflight_status; \
+	fi; \
+	prepare_status=0; \
+	$(COMPOSE) run --rm -e MIGRATION_PREPARE_V013=true commerce-migrate || prepare_status=$$?; \
+	if (( prepare_status != 0 )); then \
+	  $(MAKE) ENV_FILE=$(ENV_FILE) COMPOSE_PROJECT_NAME=$(COMPOSE_PROJECT_NAME) revoke-v013-migration-access || true; \
+	  exit $$prepare_status; \
+	fi; \
+	grant_status=0; \
+	$(MAKE) ENV_FILE=$(ENV_FILE) COMPOSE_PROJECT_NAME=$(COMPOSE_PROJECT_NAME) grant-access || grant_status=$$?; \
+	if (( grant_status != 0 )); then \
+	  $(MAKE) ENV_FILE=$(ENV_FILE) COMPOSE_PROJECT_NAME=$(COMPOSE_PROJECT_NAME) revoke-v013-migration-access || true; \
+	  exit $$grant_status; \
+	fi; \
+	migration_status=0; \
+	$(COMPOSE) run --rm commerce-migrate || migration_status=$$?; \
+	cleanup_status=0; \
+	$(MAKE) ENV_FILE=$(ENV_FILE) COMPOSE_PROJECT_NAME=$(COMPOSE_PROJECT_NAME) revoke-v013-migration-access || cleanup_status=$$?; \
+	if (( migration_status != 0 )); then exit $$migration_status; fi; \
+	exit $$cleanup_status
 
 migrate-agent:
 	ENV_FILE="$(ENV_FILE)" ./scripts/require_local_env.sh
