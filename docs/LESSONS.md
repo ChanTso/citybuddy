@@ -225,3 +225,11 @@ This file records only factual pitfalls supported by merged pull-request, commit
 - 根因：发布类幂等与对账没有先定义可枚举的完整责任域；受承诺列进入枚举过滤器会把不一致变成不存在，集合成员资格又弱于与最新权威 command 的相等性。散文规则、人工分类表和源码正则都无法对语法变形或隐藏调用作静态完备性承诺；仅枚举 schema 列仍未覆盖状态机这一正交轴。
 - 解决：发布命令以长度前缀规范序列化摘要承诺全部内容承载列，状态转换以条件更新和聚合根锁保证同意图重放、冲突拒绝与并发单推进。新增不可变 draft command，使每次合法 draft 推进都有真值锚；current source 在 `DRAFT` 下精确匹配最新 draft command 的 question、answer、revision 和事件时间，在 `PUBLISHED` 下精确匹配最新已生效 publication command。双向枚举仅以稳定键定位，类型、所有权和内容全部在枚举后断言。真实集成从 `information_schema` 取得 11 个 source、9 个 publication command、8 个 draft command 与 10 个 Outbox 物理列，并在状态机唯一可达的 `DRAFT`、`PUBLISHED` 两种状态下执行状态 × 38 列行为矩阵；schema 新列、状态枚举漂移、缺 command、孤儿或任一承诺列损坏均失败关闭。
 - 结论：发布类幂等承诺同样必须覆盖全部内容承载列；CB-105 类在新业务表面首次复发即被复核抓住，说明清单门在生效，但同一类跨表面复发也说明规则必须落到可执行行为证据。对代码文本的静态完备性承诺不可闭合；可闭合的全集只有 schema，把“证明写不出坏代码”换成“证明坏数据必被观察到”。本轮 schema 驱动矩阵先于复核发现逃逸：集合成员资格是比相等性弱的锚，回滚伪装是其标准逃逸。完备性必须定义在可枚举的地面真值上（状态机 × schema）；第二个正交维度的出现是要求封闭全集、而非继续逐维追补的信号。`docs/REVIEW_CHECKLIST.md` 已覆盖该新类；本次 closeout 没有其他尚未登记的复发缺陷类。
+
+## CB-111 — Incremental knowledge synchronization and version/tombstone convergence
+
+- 现象：首版无效消息边界只处理常见 JSON/编码错误，深层嵌套触发的 `RecursionError`、转义后未配对 surrogate 在 UTF-8 校验时触发的 `UnicodeEncodeError`、以及 Python 3.11 对超长整数字面量触发的 `ValueError` 都可越过永久拒绝路径；最初的响应丢失夹具又只按 URL path 注入，可能先命中同路径读取而没有证明写入已持久化。RocketMQ Python SDK 的模块级导入还会在非消费者进程初始化日志副作用。
+- 证据链接：[slice PR #44](https://github.com/ChanTso/citybuddy/pull/44)、[解析边界提交 `92ae5a9`](https://github.com/ChanTso/citybuddy/commit/92ae5a9e3bc39efcdc9e01c11ef070c2ca45be44)、[超长数字提交 `e519754`](https://github.com/ChanTso/citybuddy/commit/e519754797d4fddcb27fadf270a48436fdc3fbb8)、[最终格式提交 `0825a24`](https://github.com/ChanTso/citybuddy/commit/0825a2434156b0a41c96c582bed2c0284b887e92)
+- 根因：实现按已知异常名称列举解析失败，而没有把整个不可信解析操作视为总失败边界；故障注入只绑定 path，未绑定方法、目标和尝试阶段，因此无法区分写前不可用与写后响应丢失；运行时 SDK 的导入副作用没有延迟到真实消费者启动边界。
+- 解决：JSON/文本边界统一吸收解码、数值转换和递归资源限制错误，并对全部字符串执行可编码性验证；真实 Broker 回归证明七类永久无效消息均一次 ACK 且不重投，独立复核另以 314 个不超过 8192 字节的对抗输入验证全部收敛到固定 `KnowledgeEventError`。响应丢失代理精确绑定方法、目标和指定尝试，先证明 Elasticsearch 变更持久化再抑制响应，随后由重投从持久版本承诺重建结果；SDK 改为消费者运行时惰性导入。
+- 结论：总解析边界必须覆盖运行时和库施加的资源限制异常，不能只覆盖语法异常；一致性故障注入必须绑定精确阶段并证明权威持久后置条件。`docs/REVIEW_CHECKLIST.md` 已覆盖总解析与阶段绑定两类规则，本次 closeout 没有新的未登记复发缺陷类。
