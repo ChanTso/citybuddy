@@ -1,7 +1,11 @@
 package io.citybuddy.commerce.faq;
 
 import java.util.ArrayList;
+import java.util.HashMap;
+import java.util.HashSet;
 import java.util.List;
+import java.util.Map;
+import java.util.Set;
 
 public final class FaqOutboxPublisher {
   private final FaqRepository repository;
@@ -19,18 +23,49 @@ public final class FaqOutboxPublisher {
     if (limit < 1 || limit > 100) {
       throw new IllegalArgumentException("Outbox publish limit must be between 1 and 100");
     }
-    for (FaqRepository.OutboxEvent orphan : repository.pendingOrphans()) {
-      if (FaqPublicationCommitment.hasFaqOwnershipSignal(orphan, codec)) {
-        throw inconsistent("Pending FAQ Outbox event has no immutable command");
-      }
-    }
+    Set<String> commandEventIds = new HashSet<>();
+    Map<String, VerifiedPublication> latestBySource = new HashMap<>();
     List<FaqRepository.OutboxEvent> verified = new ArrayList<>();
-    for (FaqRepository.PendingPublication pending : repository.pendingPublications(limit)) {
-      if (pending.outbox() == null) {
+    for (FaqRepository.PublicationTruth truth : repository.publicationTruths()) {
+      commandEventIds.add(truth.command().eventId());
+      if (truth.source() == null) {
+        throw inconsistent("FAQ publication command has no source truth");
+      }
+      if (truth.outbox() == null) {
         throw inconsistent("FAQ publication command has no matching Outbox event");
       }
-      FaqPublicationCommitment.verify(pending.command(), pending.outbox(), codec);
-      verified.add(pending.outbox());
+      FaqKnowledgeEvent event =
+          FaqPublicationCommitment.verify(truth.command(), truth.outbox(), codec);
+      VerifiedPublication candidate = new VerifiedPublication(truth.command(), event);
+      latestBySource.merge(
+          truth.command().faqId(),
+          candidate,
+          (current, replacement) ->
+              current.command().sourceVersion() > replacement.command().sourceVersion()
+                  ? current
+                  : replacement);
+      if ("PENDING".equals(truth.outbox().publicationState()) && verified.size() < limit) {
+        verified.add(truth.outbox());
+      }
+    }
+    for (FaqRepository.FaqSource source : repository.allSources()) {
+      VerifiedPublication latest = latestBySource.remove(source.faqId());
+      if (source.publishedVersion() == 0 && latest == null) {
+        continue;
+      }
+      if (latest == null) {
+        throw inconsistent("Published FAQ source has no applied publication command");
+      }
+      FaqPublicationCommitment.verifyCurrentSource(latest.command(), source, latest.event());
+    }
+    if (!latestBySource.isEmpty()) {
+      throw inconsistent("FAQ publication command has no source truth");
+    }
+    for (FaqRepository.OutboxEvent event : repository.allOutboxEvents()) {
+      if (!commandEventIds.contains(event.eventId())
+          && FaqPublicationCommitment.hasFaqOwnershipSignal(event, codec)) {
+        throw inconsistent("FAQ Outbox event has no immutable command");
+      }
     }
 
     int published = 0;
@@ -56,4 +91,7 @@ public final class FaqOutboxPublisher {
   public interface FaqEventSender {
     void send(FaqRepository.OutboxEvent event) throws Exception;
   }
+
+  private record VerifiedPublication(
+      FaqRepository.PublicationCommand command, FaqKnowledgeEvent event) {}
 }

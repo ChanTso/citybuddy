@@ -14,19 +14,17 @@ LEGACY_COMMITMENT_STORE = (
     "EvaluationLegacyAuditCommitmentStore.java"
 )
 
-# Values document why each physical column is allowed to limit an integrity enumeration.
-# The executable assertion below rejects every predicate column absent from this registry.
-INTEGRITY_ENUMERATOR_PREDICATE_ALLOWLISTS = {
-    (FAQ_REPOSITORY, "pendingPublications"): {
+# This registry is a cheap review heuristic for direct SQL predicates, not a completeness proof.
+# Behavioral totality is proved by the information_schema-driven real integration matrix.
+INTEGRITY_ENUMERATOR_PREDICATE_HEURISTICS = {
+    (FAQ_REPOSITORY, "publicationTruths"): {
         "c.event_id": "stable command/outbox correlation key",
         "o.event_id": "stable command/outbox correlation key and missing-face signal",
-        "o.publication_state": "delivery eligibility classifier",
+        "c.faq_id": "stable command/source correlation key",
+        "s.faq_id": "stable command/source correlation key and missing-face signal",
     },
-    (FAQ_REPOSITORY, "pendingOrphans"): {
-        "c.event_id": "stable command/outbox correlation key and missing-face signal",
-        "o.event_id": "stable command/outbox correlation key",
-        "o.publication_state": "delivery eligibility classifier",
-    },
+    (FAQ_REPOSITORY, "allOutboxEvents"): {},
+    (FAQ_REPOSITORY, "allSources"): {},
     (EVALUATION_VIEW_REPOSITORY, "allAuditReferences"): {
         "sandbox_id": "stable sandbox scope",
     },
@@ -275,21 +273,23 @@ def test_inventory_closes_all_runtime_rocketmq_builders_and_outbox_readers() -> 
         "FROM faq_publication_command c\n"
         "        LEFT JOIN commerce_outbox o ON o.event_id = c.event_id" in faq_query
     )
-    assert "WHERE o.event_id IS NULL OR o.publication_state = 'PENDING'" in faq_query
-    assert "LEFT JOIN faq_publication_command c ON c.event_id = o.event_id" in faq_query
-    assert "AND c.event_id IS NULL" in faq_query
+    assert "LEFT JOIN faq_source s ON s.faq_id = c.faq_id" in faq_query
+    assert "public List<PublicationTruth> publicationTruths()" in faq_query
+    assert "public List<OutboxEvent> allOutboxEvents()" in faq_query
+    assert "public List<FaqSource> allSources()" in faq_query
     for outbox_query in (product_query, faq_query):
         assert "STANDARD_ORDER" not in outbox_query[outbox_query.index("FROM commerce_outbox") :]
         assert "REFUND_" not in outbox_query[outbox_query.index("FROM commerce_outbox") :]
 
 
-def test_integrity_enumerators_use_only_registered_predicate_columns() -> None:
-    for (path, method_name), allowlist in INTEGRITY_ENUMERATOR_PREDICATE_ALLOWLISTS.items():
+def test_direct_integrity_predicates_match_the_review_heuristic() -> None:
+    for (path, method_name), allowlist in INTEGRITY_ENUMERATOR_PREDICATE_HEURISTICS.items():
         body = java_method_body(source(path), method_name)
         actual = sql_predicate_columns(body)
         assert actual == set(allowlist), (
             f"{path}::{method_name} predicate columns changed; every WHERE/ON column "
-            "must be explicitly classified as a stable key/scope or terminal face"
+            "must be reviewed as a stable key/scope or terminal face; this textual "
+            "heuristic is not totality evidence"
         )
         assert all(reason.strip() for reason in allowlist.values())
 
@@ -302,7 +302,7 @@ def test_integrity_enumerators_use_only_registered_predicate_columns() -> None:
     faq_enumerators = set(re.findall(r"repository\.(\w+)\s*\(", before_first_send))
     registered_faq = {
         method
-        for path, method in INTEGRITY_ENUMERATOR_PREDICATE_ALLOWLISTS
+        for path, method in INTEGRITY_ENUMERATOR_PREDICATE_HEURISTICS
         if path == FAQ_REPOSITORY
     }
     assert faq_enumerators == registered_faq
@@ -323,7 +323,7 @@ def test_integrity_enumerators_use_only_registered_predicate_columns() -> None:
     }
     registered_evaluation = {
         method
-        for path, method in INTEGRITY_ENUMERATOR_PREDICATE_ALLOWLISTS
+        for path, method in INTEGRITY_ENUMERATOR_PREDICATE_HEURISTICS
         if path == EVALUATION_VIEW_REPOSITORY
     }
     assert reachable_sql_enumerators == registered_evaluation

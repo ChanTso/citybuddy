@@ -8,6 +8,7 @@ import java.util.List;
 
 final class FaqPublicationCommitment {
   private static final String FORMAT = "FAQ_PUBLICATION_INTENT_V1";
+  private static final long MAX_DELIVERY_ATTEMPTS = 1_000_000;
 
   private FaqPublicationCommitment() {}
 
@@ -57,7 +58,9 @@ final class FaqPublicationCommitment {
     } catch (FaqPublicationException exception) {
       throw inconsistent("FAQ publication Outbox payload is invalid", exception);
     }
-    if (!outbox.eventId().equals(command.eventId())
+    if (!command.createdAt().equals(command.occurredAt())
+        || !outbox.createdAt().equals(command.occurredAt())
+        || !outbox.eventId().equals(command.eventId())
         || !FaqRepository.AGGREGATE_TYPE.equals(outbox.aggregateType())
         || !outbox.aggregateId().equals(command.faqId())
         || outbox.aggregateVersion() != command.sourceVersion()
@@ -68,6 +71,7 @@ final class FaqPublicationCommitment {
         || !event.occurredTime().equals(command.occurredAt().toString())) {
       throw inconsistent("FAQ publication command and Outbox payload disagree");
     }
+    verifyDelivery(outbox);
     String expected =
         create(
             command.faqId(),
@@ -85,6 +89,55 @@ final class FaqPublicationCommitment {
       throw inconsistent("FAQ publication event content no longer matches its commitment");
     }
     return event;
+  }
+
+  static void verifyCurrentSource(
+      FaqRepository.PublicationCommand command,
+      FaqRepository.FaqSource source,
+      FaqKnowledgeEvent event) {
+    if (source == null) {
+      throw inconsistent("FAQ publication command has no source truth");
+    }
+    if (source.publishedVersion() != command.sourceVersion()) {
+      throw inconsistent("Current FAQ source is not anchored to its latest applied command");
+    }
+    if (!source.faqId().equals(command.faqId())
+        || !source.publishedQuestion().equals(event.content().question())
+        || !source.publishedAnswer().equals(event.content().answer())
+        || !source.publishedAt().equals(command.occurredAt())
+        || source.createdAt().isAfter(source.updatedAt())
+        || source.createdAt().isAfter(source.publishedAt())
+        || source.updatedAt().isBefore(source.publishedAt())) {
+      throw inconsistent("Current FAQ source and publication commitment disagree");
+    }
+    if ("PUBLISHED".equals(source.workingState())) {
+      if (source.draftRevision() != command.expectedDraftRevision()
+          || !source.draftQuestion().equals(source.publishedQuestion())
+          || !source.draftAnswer().equals(source.publishedAnswer())) {
+        throw inconsistent("Published FAQ source is not its committed draft");
+      }
+    } else if (!"DRAFT".equals(source.workingState())
+        || source.draftRevision() <= command.expectedDraftRevision()) {
+      throw inconsistent("Current FAQ source has an invalid working-state transition");
+    }
+  }
+
+  private static void verifyDelivery(FaqRepository.OutboxEvent outbox) {
+    if (outbox.publishAttempts() > MAX_DELIVERY_ATTEMPTS) {
+      throw inconsistent("FAQ Outbox delivery attempts exceed the bounded invariant");
+    }
+    if ("PENDING".equals(outbox.publicationState())) {
+      if (outbox.publishedAt() != null) {
+        throw inconsistent("Pending FAQ Outbox event has a publication timestamp");
+      }
+      return;
+    }
+    if (!"PUBLISHED".equals(outbox.publicationState())
+        || outbox.publishAttempts() < 1
+        || outbox.publishedAt() == null
+        || outbox.publishedAt().isBefore(outbox.createdAt())) {
+      throw inconsistent("Published FAQ Outbox delivery evidence is invalid");
+    }
   }
 
   static boolean hasFaqOwnershipSignal(

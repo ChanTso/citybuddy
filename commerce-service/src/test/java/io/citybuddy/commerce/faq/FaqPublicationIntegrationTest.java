@@ -15,7 +15,9 @@ import java.time.Instant;
 import java.time.ZoneOffset;
 import java.util.ArrayList;
 import java.util.Collections;
+import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.UUID;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.Executors;
@@ -118,11 +120,15 @@ class FaqPublicationIntegrationTest {
                 0),
         FaqPublicationException.Code.VALIDATION);
 
-    Instant boundaryTime = Instant.parse("2026-07-20T08:00:00.123456Z");
-    FaqPublicationService boundaryService =
-        new FaqPublicationService(repository, codec, Clock.fixed(boundaryTime, ZoneOffset.UTC));
+    Instant boundaryTime =
+        Clock.systemUTC()
+            .instant()
+            .plusSeconds(60)
+            .truncatedTo(java.time.temporal.ChronoUnit.MICROS);
     FaqPublicationService.PublicationCommand boundaryCommand =
         command("faq-json-boundary-a", "faq-json-boundary-a", 1, 0);
+    FaqPublicationService boundaryService =
+        new FaqPublicationService(repository, codec, Clock.fixed(boundaryTime, ZoneOffset.UTC));
     BoundaryAnswers boundary = boundaryAnswers(boundaryCommand, boundaryTime);
     service.saveDraft("faq-json-boundary-a", "q", boundary.accepted(), 0);
     FaqPublicationService.PublicationResult boundaryPublished =
@@ -230,7 +236,6 @@ class FaqPublicationIntegrationTest {
         () -> service.publish(command("faq-main", "faq-main-stale", 1, 0)),
         FaqPublicationException.Code.STALE_VERSION);
 
-    proveCommittedOutboxColumnsRejectCorruptReplay(first, published);
     assertCode(
         () -> service.publish(command("faq-main", "faq-main-repeat-revision", 1, 1)),
         FaqPublicationException.Code.STALE_VERSION);
@@ -249,12 +254,15 @@ class FaqPublicationIntegrationTest {
         () -> service.saveDraft("faq-main", "Stale edit", "Must reject", 1),
         FaqPublicationException.Code.STALE_VERSION);
 
-    FaqPublicationService.PublicationResult second =
-        service.publish(command("faq-main", "faq-main-second", 2, 1));
+    FaqPublicationService.PublicationCommand secondCommand =
+        command("faq-main", "faq-main-second", 2, 1);
+    FaqPublicationService.PublicationResult second = service.publish(secondCommand);
     assertThat(second.event().sourceVersion()).isEqualTo(2);
     assertThat(second.event().content().question()).isEqualTo("Can I return an item?");
     assertSource("faq-main", 2, 2, "PUBLISHED", "Can I return an item?");
     assertThat(faqOutboxCount("faq-main")).isEqualTo(2);
+
+    proveCommittedOutboxColumnsRejectCorruptReplay(secondCommand, second);
 
     FaqPublicationService.PublicationResult historicalReplay = service.publish(first);
     assertThat(historicalReplay.replayed()).isTrue();
@@ -318,40 +326,218 @@ class FaqPublicationIntegrationTest {
     FaqRepository.OutboxEvent original = repository.findOutbox(command.eventId()).orElseThrow();
     FaqRepository.PublicationCommand durableCommand =
         repository.findCommandsByIdentity(command.idempotencyKey(), command.eventId()).getFirst();
+    FaqRepository.FaqSource durableSource = repository.findSource(command.faqId()).orElseThrow();
     String changedEventId = UUID.randomUUID().toString();
-    List<OutboxCorruption> corruptions =
+    String changedCommandEventId = UUID.randomUUID().toString();
+    String changedIdempotencyKey = durableCommand.idempotencyKey() + "-corrupt";
+    List<SchemaCorruption> physicalCorruptions =
         List.of(
-            new OutboxCorruption(
+            sourceCorruption(
+                "faq_id",
+                "anchored source identity",
+                "faq_id = 'faq-corrupt-source'",
+                durableSource,
+                "faq-corrupt-source"),
+            sourceCorruption(
+                "draft_question",
+                "published-state draft/public pair is database-bound and anchored to the event",
+                "draft_question = 'Corrupt question?', published_question = 'Corrupt question?'",
+                durableSource,
+                durableSource.faqId()),
+            sourceCorruption(
+                "draft_answer",
+                "published-state draft/public pair is database-bound and anchored to the event",
+                "draft_answer = 'Corrupt answer.', published_answer = 'Corrupt answer.'",
+                durableSource,
+                durableSource.faqId()),
+            sourceCorruption(
+                "draft_revision",
+                "published-state draft revision is anchored to the command",
+                "draft_revision = draft_revision + 1",
+                durableSource,
+                durableSource.faqId()),
+            sourceCorruption(
+                "working_state",
+                "state-machine predecessor is anchored to the revision transition",
+                "working_state = 'DRAFT'",
+                durableSource,
+                durableSource.faqId()),
+            sourceCorruption(
+                "published_question",
+                "published content and its database-bound draft pair are anchored to the event",
+                "published_question = 'Corrupt question?', draft_question = 'Corrupt question?'",
+                durableSource,
+                durableSource.faqId()),
+            sourceCorruption(
+                "published_answer",
+                "published content and its database-bound draft pair are anchored to the event",
+                "published_answer = 'Corrupt answer.', draft_answer = 'Corrupt answer.'",
+                durableSource,
+                durableSource.faqId()),
+            sourceCorruption(
+                "published_version",
+                "published version is anchored exactly to the latest applied command and event",
+                "published_version = published_version + 1",
+                durableSource,
+                durableSource.faqId()),
+            sourceCorruption(
+                "published_at",
+                "publication time is anchored to command and event",
+                "published_at = TIMESTAMPADD(SECOND, 1, published_at)",
+                durableSource,
+                durableSource.faqId()),
+            sourceCorruption(
+                "created_at",
+                "database time obeys created_at <= published_at <= updated_at",
+                "created_at = TIMESTAMPADD(DAY, 1, updated_at)",
+                durableSource,
+                durableSource.faqId()),
+            sourceCorruption(
+                "updated_at",
+                "database time obeys created_at <= published_at <= updated_at",
+                "updated_at = TIMESTAMPADD(DAY, -1, created_at)",
+                durableSource,
+                durableSource.faqId()),
+            commandCorruption(
+                "idempotency_key",
+                "committed command identity",
+                "idempotency_key = '" + changedIdempotencyKey + "'",
+                durableCommand),
+            commandCorruption(
+                "event_id",
+                "stable command/Outbox correlation identity",
+                "event_id = '" + changedCommandEventId + "'",
+                durableCommand),
+            commandCorruption(
+                "faq_id",
+                "committed source identity",
+                "faq_id = 'faq-corrupt-source'",
+                durableCommand),
+            commandCorruption(
+                "expected_draft_revision",
+                "committed publication intent",
+                "expected_draft_revision = expected_draft_revision + 1",
+                durableCommand),
+            commandCorruption(
+                "expected_published_version",
+                "committed publication intent",
+                "expected_published_version = expected_published_version + 1, source_version = source_version + 1",
+                durableCommand),
+            commandCorruption(
+                "source_version",
+                "committed event version",
+                "source_version = source_version + 1, expected_published_version = expected_published_version + 1",
+                durableCommand),
+            commandCorruption(
+                "intent_hash",
+                "canonical content commitment",
+                "intent_hash = REPEAT('0', 64)",
+                durableCommand),
+            commandCorruption(
+                "occurred_at",
+                "business event time anchor",
+                "occurred_at = TIMESTAMPADD(SECOND, 1, occurred_at)",
+                durableCommand),
+            commandCorruption(
+                "created_at",
+                "database-generated column is invariant-bound to occurred_at",
+                "created_at = TIMESTAMPADD(SECOND, 1, created_at)",
+                durableCommand),
+            outboxCorruption(
+                "event_id",
+                "stable command/Outbox correlation identity",
                 () ->
-                    updateOne(
+                    corruptionUpdateOne(
                         "UPDATE commerce_outbox SET event_id = ? WHERE event_id = ?",
                         changedEventId,
                         original.eventId()),
+                original,
                 changedEventId),
-            new OutboxCorruption(
+            outboxCorruption(
+                "aggregate_type",
+                "committed ownership type asserted after enumeration; COALESCE predicate probe",
                 () ->
-                    updateOne(
+                    corruptionUpdateOne(
                         "UPDATE commerce_outbox SET aggregate_type = 'FAQ_CORRUPT' WHERE event_id = ?",
                         original.eventId()),
+                original,
                 original.eventId()),
-            new OutboxCorruption(
+            outboxCorruption(
+                "aggregate_id",
+                "committed aggregate identity",
                 () ->
-                    updateOne(
+                    corruptionUpdateOne(
                         "UPDATE commerce_outbox SET aggregate_id = 'faq-corrupt' WHERE event_id = ?",
                         original.eventId()),
+                original,
                 original.eventId()),
-            new OutboxCorruption(
+            outboxCorruption(
+                "aggregate_version",
+                "committed aggregate version",
                 () ->
-                    updateOne(
+                    corruptionUpdateOne(
                         "UPDATE commerce_outbox SET aggregate_version = aggregate_version + 1 WHERE event_id = ?",
                         original.eventId()),
+                original,
                 original.eventId()),
-            new OutboxCorruption(
+            outboxCorruption(
+                "event_type",
+                "committed ownership event type asserted after enumeration; hidden-helper probe",
                 () ->
-                    updateOne(
+                    corruptionUpdateOne(
                         "UPDATE commerce_outbox SET event_type = 'FAQ_CORRUPT' WHERE event_id = ?",
                         original.eventId()),
+                original,
                 original.eventId()),
+            outboxCorruption(
+                "payload",
+                "closed event content commitment",
+                () ->
+                    corruptionUpdateOne(
+                        "UPDATE commerce_outbox SET payload = JSON_SET(payload, '$.content.answer', 'Corrupt payload') WHERE event_id = ?",
+                        original.eventId()),
+                original,
+                original.eventId()),
+            outboxCorruption(
+                "publication_state",
+                "delivery state is bound to attempts and publication time",
+                () ->
+                    corruptionUpdateOne(
+                        "UPDATE commerce_outbox SET publication_state = 'PUBLISHED' WHERE event_id = ?",
+                        original.eventId()),
+                original,
+                original.eventId()),
+            outboxCorruption(
+                "publish_attempts",
+                "database counter has a bounded internal invariant",
+                () ->
+                    corruptionUpdateOne(
+                        "UPDATE commerce_outbox SET publish_attempts = 1000001 WHERE event_id = ?",
+                        original.eventId()),
+                original,
+                original.eventId()),
+            outboxCorruption(
+                "created_at",
+                "ordering time is anchored to the business event time",
+                () ->
+                    corruptionUpdateOne(
+                        "UPDATE commerce_outbox SET created_at = TIMESTAMPADD(SECOND, 1, created_at) WHERE event_id = ?",
+                        original.eventId()),
+                original,
+                original.eventId()),
+            outboxCorruption(
+                "published_at",
+                "pending delivery requires no publication timestamp",
+                () ->
+                    corruptionUpdateOne(
+                        "UPDATE commerce_outbox SET published_at = created_at WHERE event_id = ?",
+                        original.eventId()),
+                original,
+                original.eventId()));
+    assertSchemaDispositionCoverage(physicalCorruptions);
+
+    List<SchemaCorruption> payloadCorruptions =
+        List.of(
             jsonCorruption(original, "$.eventId", UUID.randomUUID().toString()),
             jsonCorruption(original, "$.sourceId", "faq-corrupt"),
             jsonCorruption(original, "$.sourceType", "product"),
@@ -361,55 +547,194 @@ class FaqPublicationIntegrationTest {
             jsonCorruption(original, "$.occurredTime", "2026-07-20T09:00:00Z"),
             jsonCorruption(original, "$.content.question", "Changed but bounded question?"),
             jsonCorruption(original, "$.content.answer", "Changed but bounded answer."));
+    SchemaCorruption historicalVersionMembership =
+        sourceCorruption(
+            "published_version",
+            "current source must equal the latest applied command, not any historical command",
+            "published_version = published_version - 1",
+            durableSource,
+            durableSource.faqId());
 
     try (SimpleConsumer consumer = faqConsumer()) {
-      for (OutboxCorruption corruption : corruptions) {
-        corruption.inject().run();
-        try {
-          assertCode(
-              () -> new FaqOutboxPublisher(repository, codec, messaging).publishPending(100),
-              FaqPublicationException.Code.INCONSISTENT_DURABLE_STATE);
-          assertThat(consumer.receive(1, Duration.ofSeconds(10))).isEmpty();
-          assertThat(outboxState(corruption.currentEventId())).isEqualTo("PENDING:0");
-          assertCode(
-              () -> service.publish(command),
-              FaqPublicationException.Code.INCONSISTENT_DURABLE_STATE);
-        } finally {
-          restoreOutbox(original, corruption.currentEventId());
-        }
-        FaqPublicationService.PublicationResult replay = service.publish(command);
-        assertThat(replay.replayed()).isTrue();
-        assertThat(replay.event()).isEqualTo(originalResult.event());
-
-        deleteCommand(durableCommand);
-        corruption.inject().run();
-        try {
-          assertCode(
-              () -> new FaqOutboxPublisher(repository, codec, messaging).publishPending(100),
-              FaqPublicationException.Code.INCONSISTENT_DURABLE_STATE);
-          assertThat(consumer.receive(1, Duration.ofSeconds(10))).isEmpty();
-          assertThat(outboxState(corruption.currentEventId())).isEqualTo("PENDING:0");
-        } finally {
-          restoreOutbox(original, corruption.currentEventId());
-          restoreCommand(durableCommand);
-        }
-        replay = service.publish(command);
-        assertThat(replay.replayed()).isTrue();
-        assertThat(replay.event()).isEqualTo(originalResult.event());
+      for (SchemaCorruption corruption : physicalCorruptions) {
+        exerciseSchemaCorruption(corruption, command, originalResult, durableCommand);
       }
+      for (SchemaCorruption corruption : payloadCorruptions) {
+        exerciseSchemaCorruption(corruption, command, originalResult, durableCommand);
+      }
+      exerciseSchemaCorruption(
+          historicalVersionMembership, command, originalResult, durableCommand);
+      deleteCommand(durableCommand);
+      try {
+        assertPublisherRejects(null);
+      } finally {
+        restoreCommand(durableCommand);
+      }
+      assertThat(consumer.receive(1, Duration.ofSeconds(10))).isEmpty();
+      assertThat(outboxState(original.eventId())).isEqualTo("PENDING:0");
     }
   }
 
-  private OutboxCorruption jsonCorruption(
-      FaqRepository.OutboxEvent original, String path, Object value) {
-    return new OutboxCorruption(
+  private void exerciseSchemaCorruption(
+      SchemaCorruption corruption,
+      FaqPublicationService.PublicationCommand command,
+      FaqPublicationService.PublicationResult originalResult,
+      FaqRepository.PublicationCommand durableCommand) {
+    corruption.inject().run();
+    try {
+      assertPublisherRejects(corruption);
+      if (corruption.table().startsWith("commerce_outbox")) {
+        assertCode(
+            () -> service.publish(command),
+            FaqPublicationException.Code.INCONSISTENT_DURABLE_STATE);
+      }
+    } finally {
+      corruption.restore().run();
+    }
+    FaqPublicationService.PublicationResult replay = service.publish(command);
+    assertThat(replay.replayed()).isTrue();
+    assertThat(replay.event()).isEqualTo(originalResult.event());
+
+    if (!"faq_publication_command".equals(corruption.table())) {
+      deleteCommand(durableCommand);
+      corruption.inject().run();
+      try {
+        assertPublisherRejects(corruption);
+      } finally {
+        corruption.restore().run();
+        restoreCommand(durableCommand);
+      }
+      replay = service.publish(command);
+      assertThat(replay.replayed()).isTrue();
+      assertThat(replay.event()).isEqualTo(originalResult.event());
+    }
+  }
+
+  private void assertPublisherRejects(SchemaCorruption corruption) {
+    int[] sendAttempts = {0};
+    String label =
+        corruption == null
+            ? "missing command face"
+            : corruption.table() + "." + corruption.column();
+    assertThatThrownBy(
+            () ->
+                new FaqOutboxPublisher(
+                        repository,
+                        codec,
+                        event -> {
+                          sendAttempts[0]++;
+                          messaging.send(event);
+                        })
+                    .publishPending(100))
+        .as(label)
+        .isInstanceOfSatisfying(
+            FaqPublicationException.class,
+            exception ->
+                assertThat(exception.code())
+                    .isEqualTo(FaqPublicationException.Code.INCONSISTENT_DURABLE_STATE));
+    assertThat(sendAttempts[0]).isZero();
+  }
+
+  private SchemaCorruption sourceCorruption(
+      String column,
+      String reason,
+      String assignment,
+      FaqRepository.FaqSource original,
+      String currentFaqId) {
+    String disposition =
+        List.of("created_at", "updated_at").contains(column) ? "INVARIANT" : "ANCHORED";
+    String preserveUpdatedAt = "updated_at".equals(column) ? "" : ", updated_at = updated_at";
+    return new SchemaCorruption(
+        "faq_source",
+        column,
+        disposition,
+        reason,
         () ->
-            updateOne(
+            corruptionUpdateOne(
+                "UPDATE faq_source SET " + assignment + preserveUpdatedAt + " WHERE faq_id = ?",
+                original.faqId()),
+        () -> restoreSource(original, currentFaqId),
+        original.faqId());
+  }
+
+  private SchemaCorruption commandCorruption(
+      String column, String reason, String assignment, FaqRepository.PublicationCommand original) {
+    return new SchemaCorruption(
+        "faq_publication_command",
+        column,
+        "ANCHORED",
+        reason,
+        () ->
+            corruptionUpdateOne(
+                "UPDATE faq_publication_command SET " + assignment + " WHERE idempotency_key = ?",
+                original.idempotencyKey()),
+        () -> restoreCommand(original),
+        original.eventId());
+  }
+
+  private SchemaCorruption outboxCorruption(
+      String column,
+      String reason,
+      Runnable inject,
+      FaqRepository.OutboxEvent original,
+      String currentEventId) {
+    String disposition =
+        List.of("publication_state", "publish_attempts", "published_at").contains(column)
+            ? "INVARIANT"
+            : "ANCHORED";
+    return new SchemaCorruption(
+        "commerce_outbox",
+        column,
+        disposition,
+        reason,
+        inject,
+        () -> restoreOutbox(original, currentEventId),
+        currentEventId);
+  }
+
+  private SchemaCorruption jsonCorruption(
+      FaqRepository.OutboxEvent original, String path, Object value) {
+    return new SchemaCorruption(
+        "commerce_outbox_payload",
+        path,
+        "ANCHORED",
+        "closed payload member",
+        () ->
+            corruptionUpdateOne(
                 "UPDATE commerce_outbox SET payload = JSON_SET(payload, ?, ?) WHERE event_id = ?",
                 path,
                 value,
                 original.eventId()),
+        () -> restoreOutbox(original, original.eventId()),
         original.eventId());
+  }
+
+  private void assertSchemaDispositionCoverage(List<SchemaCorruption> corruptions) {
+    Map<String, List<String>> actual = new LinkedHashMap<>();
+    for (Map<String, Object> row :
+        corruptionJdbc()
+            .queryForList(
+                """
+            SELECT table_name, column_name
+            FROM information_schema.columns
+            WHERE table_schema = DATABASE()
+              AND table_name IN ('faq_source', 'faq_publication_command', 'commerce_outbox')
+            ORDER BY FIELD(table_name, 'faq_source', 'faq_publication_command', 'commerce_outbox'),
+                     ordinal_position
+            """)) {
+      actual
+          .computeIfAbsent((String) row.get("table_name"), ignored -> new ArrayList<>())
+          .add((String) row.get("column_name"));
+    }
+    Map<String, List<String>> dispositions = new LinkedHashMap<>();
+    for (SchemaCorruption corruption : corruptions) {
+      dispositions
+          .computeIfAbsent(corruption.table(), ignored -> new ArrayList<>())
+          .add(corruption.column());
+      assertThat(corruption.disposition()).isIn("ANCHORED", "INVARIANT");
+      assertThat(corruption.reason()).isNotBlank();
+    }
+    assertThat(dispositions).isEqualTo(actual);
   }
 
   private void restoreOutbox(FaqRepository.OutboxEvent original, String currentEventId) {
@@ -417,7 +742,8 @@ class FaqPublicationIntegrationTest {
         """
         UPDATE commerce_outbox
         SET event_id = ?, aggregate_type = ?, aggregate_id = ?, aggregate_version = ?,
-            event_type = ?, payload = CAST(? AS JSON)
+            event_type = ?, payload = CAST(? AS JSON), publication_state = ?,
+            publish_attempts = ?, created_at = ?, published_at = ?
         WHERE event_id = ?
         """,
         original.eventId(),
@@ -426,7 +752,34 @@ class FaqPublicationIntegrationTest {
         original.aggregateVersion(),
         original.eventType(),
         original.payload(),
+        original.publicationState(),
+        original.publishAttempts(),
+        Timestamp.from(original.createdAt()),
+        original.publishedAt() == null ? null : Timestamp.from(original.publishedAt()),
         currentEventId);
+  }
+
+  private void restoreSource(FaqRepository.FaqSource source, String currentFaqId) {
+    corruptionUpdateOne(
+        """
+        UPDATE faq_source
+        SET faq_id = ?, draft_question = ?, draft_answer = ?, draft_revision = ?,
+            working_state = ?, published_question = ?, published_answer = ?,
+            published_version = ?, published_at = ?, created_at = ?, updated_at = ?
+        WHERE faq_id = ?
+        """,
+        source.faqId(),
+        source.draftQuestion(),
+        source.draftAnswer(),
+        source.draftRevision(),
+        source.workingState(),
+        source.publishedQuestion(),
+        source.publishedAnswer(),
+        source.publishedVersion(),
+        source.publishedAt() == null ? null : Timestamp.from(source.publishedAt()),
+        Timestamp.from(source.createdAt()),
+        Timestamp.from(source.updatedAt()),
+        currentFaqId);
   }
 
   private void deleteCommand(FaqRepository.PublicationCommand command) {
@@ -435,12 +788,23 @@ class FaqPublicationIntegrationTest {
   }
 
   private void restoreCommand(FaqRepository.PublicationCommand command) {
+    corruptionJdbc()
+        .update(
+            """
+            DELETE FROM faq_publication_command
+            WHERE idempotency_key IN (?, ?)
+               OR event_id = ?
+               OR faq_id = 'faq-corrupt-source'
+            """,
+            command.idempotencyKey(),
+            command.idempotencyKey() + "-corrupt",
+            command.eventId());
     corruptionUpdateOne(
         """
         INSERT INTO faq_publication_command
           (idempotency_key, event_id, faq_id, expected_draft_revision,
-           expected_published_version, source_version, intent_hash, occurred_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+           expected_published_version, source_version, intent_hash, occurred_at, created_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         command.idempotencyKey(),
         command.eventId(),
@@ -449,10 +813,11 @@ class FaqPublicationIntegrationTest {
         command.expectedPublishedVersion(),
         command.sourceVersion(),
         command.intentHash(),
-        Timestamp.from(command.occurredAt()));
+        Timestamp.from(command.occurredAt()),
+        Timestamp.from(command.createdAt()));
   }
 
-  private void corruptionUpdateOne(String sql, Object... arguments) {
+  private JdbcTemplate corruptionJdbc() {
     if (corruptionJdbc == null) {
       corruptionDataSource =
           new SingleConnectionDataSource(
@@ -462,8 +827,13 @@ class FaqPublicationIntegrationTest {
               true);
       corruptionJdbc = new JdbcTemplate(corruptionDataSource);
       corruptionJdbc.execute("SET ROLE bootstrap_grant_role");
+      corruptionJdbc.execute("SET SESSION FOREIGN_KEY_CHECKS = 0");
     }
-    assertThat(corruptionJdbc.update(sql, arguments)).isEqualTo(1);
+    return corruptionJdbc;
+  }
+
+  private void corruptionUpdateOne(String sql, Object... arguments) {
+    assertThat(corruptionJdbc().update(sql, arguments)).isEqualTo(1);
   }
 
   private void updateOne(String sql, Object... arguments) {
@@ -831,7 +1201,14 @@ class FaqPublicationIntegrationTest {
     return value;
   }
 
-  private record OutboxCorruption(Runnable inject, String currentEventId) {}
+  private record SchemaCorruption(
+      String table,
+      String column,
+      String disposition,
+      String reason,
+      Runnable inject,
+      Runnable restore,
+      String currentEventId) {}
 
   private record BoundaryAnswers(
       String accepted, String rejected, int acceptedCompactBytes, int rejectedCompactBytes) {}

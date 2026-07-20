@@ -60,13 +60,17 @@ request. A later semantic diff change requires the checklist to be executed and 
   other validity predicates run only after enumeration; placing one in the enumerator turns an
   inconsistency into an apparent absence. Treat an unclassified predicate, or a predicate classified
   as an assertion but retained in `JOIN`/`WHERE`, as incomplete review evidence.
-- Treat prose rules and a manually reviewed predicate table as necessary but not sufficient. Register
-  every reconciliation, orphan, and integrity enumerator in an executable predicate-column allowlist;
-  permit only explicitly classified stable scope/key columns and required terminal/delivery face
-  classifiers in `WHERE`/`ON`. Static contract tests must parse the physical predicate columns, fail
-  on any unregistered column, and discover enumerators reachable from each reconciliation or outbound
-  side-effect root so a newly added enumerator without a registered allowlist also fails. Type,
-  ownership, intent, content, and other committed columns remain post-enumeration assertions.
+- Treat prose rules, manually reviewed predicate tables, and source-text parsing as useful heuristics,
+  not totality evidence. SQL and Java text admit function wrapping, aliases, subqueries, and indirect
+  helper calls that a bounded textual checker cannot enumerate completely. Prove totality at the
+  observable behavior boundary with a real integration matrix generated from `information_schema`:
+  every physical column in each audited durable face must have an explicit anchored-content or
+  mechanism-backed-invariant disposition and a controlled data-consistency fault. A new schema
+  column without a disposition must make matrix construction fail closed. Exercise every applicable
+  corruption with each companion truth face present and absent; normal publication/state behavior
+  must reject rather than silently report zero work. Text-level predicate allowlists may remain as a
+  cheap review signal, but their success is never evidence that all predicates or reachable
+  enumerators were found.
 - Enumerate every overlapping authoritative truth face independently and require equality of their
   stable key sets before comparing row content. For a successful standard payment, independently
   enumerate `PAID` orders, `STANDARD_PAYMENT` ledger movements, terminal successful callbacks, and

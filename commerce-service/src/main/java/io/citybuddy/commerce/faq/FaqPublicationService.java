@@ -71,7 +71,8 @@ public class FaqPublicationService {
     } catch (ArithmeticException exception) {
       throw validation("FAQ published version cannot advance", exception);
     }
-    Instant occurredAt = clock.instant().truncatedTo(ChronoUnit.MICROS);
+    Instant observedAt = clock.instant().truncatedTo(ChronoUnit.MICROS);
+    Instant occurredAt = observedAt.isBefore(source.createdAt()) ? source.createdAt() : observedAt;
     FaqKnowledgeEvent event =
         new FaqKnowledgeEvent(
             valid.eventId(),
@@ -105,6 +106,7 @@ public class FaqPublicationService {
             valid.expectedPublishedVersion(),
             sourceVersion,
             intentHash,
+            occurredAt,
             occurredAt);
     try {
       repository.publishSource(source, sourceVersion, occurredAt);
