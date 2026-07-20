@@ -1,8 +1,8 @@
 # CityBuddy implementation index
 
-**Document version:** v0.29\
-**Verification date:** 2026-07-20\
-**Repository phase:** FAQ publication truth and transactional Outbox ready
+**Document version:** v0.30\
+**Verification date:** 2026-07-21\
+**Repository phase:** Incremental knowledge synchronization ready
 
 ## How to use this index
 
@@ -17,7 +17,7 @@
 
 CityBuddy targets local-commerce transactions and text-only AI customer support with independent identity, side-effect, retrieval, and evaluation boundaries.
 
-The repository contains the verified local-runtime foundations, identity vertical slice, product catalog vertical slice, standard-ordering vertical slice, seckill reservation, durable-order, cancellation, mock-payment, refund, and reconciliation mainline, support conversation lifecycle, bounded agent/tool control, filtered SSE, append-only feedback, versioned hybrid public-knowledge retrieval, calibrated durable retrieval evidence, evaluation identity and sandbox lifecycles, and sandbox-bound evaluation payment callbacks:
+The repository contains the verified local-runtime foundations, identity vertical slice, product catalog vertical slice, standard-ordering vertical slice, seckill reservation, durable-order, cancellation, mock-payment, refund, and reconciliation mainline, support conversation lifecycle, bounded agent/tool control, filtered SSE, append-only feedback, versioned hybrid public-knowledge retrieval, calibrated durable retrieval evidence, evaluation identity and sandbox lifecycles, sandbox-bound evaluation payment callbacks, and commerce-owned FAQ publication truth with transactional Outbox:
 
 - executable non-business skeletons for `auth-service`, `commerce-service`, `agent-service`, `knowledge-indexer`, and `web`;
 - one Maven reactor and wrapper, one locked `uv` workspace, and one npm lockfile;
@@ -39,6 +39,7 @@ The repository contains the verified local-runtime foundations, identity vertica
 - one bounded ReAct agent with deterministic routing signals, server-owned business-tier selection, one shared attempt budget, provider-isolated finite circuit breakers, role-alias-only fake-provider routing, executable fixed ToolSpec mediation, just-in-time exact-scope OBO, and ordered durable routing/model/budget/circuit/tool/terminal evidence;
 - filtered owner-scoped SSE over the same durable turn truth, with fixed public event schemas, bounded safety buffering, single-terminal ordering, disconnect-safe replay, and owner-scoped append-only feedback in `cs_db`;
 - commerce-owned product and CRM truth, authenticated published-product reads, a non-authoritative Redis cache with bounded penetration and hot-key protection, and transactional Outbox plus idempotent RocketMQ invalidation;
+- commerce-owned FAQ draft and publication truth with immutable draft/publication command commitments, exact current-state reconciliation across the closed `DRAFT`/`PUBLISHED` state machine and every physical durable column, and atomic normal-message Outbox publication;
 - direct-user standard ordering with server-authoritative product and price snapshots, user-scoped idempotency, atomic MySQL stock/order/Outbox commit, bounded recognized-conflict retries, and least-privilege runtime grants;
 - MySQL-authoritative seckill activity allocation with versioned post-commit Commerce Redis projection, stale/conflicting/malformed write rejection, MySQL-only rebuild, and exact least-privilege activity grants;
 - MySQL-authoritative seckill reservation intent/status with owner-scoped idempotency and polling, atomic Commerce Redis Lua admission and deterministic decisions, bounded TTL/version/number invariants, MySQL-only reservation rebuild, and exact least-privilege reservation grants;
@@ -107,8 +108,8 @@ The linked slice name is the canonical detailed specification. Target outcomes a
 | [CB-103 — Agent evaluation evidence API](docs/slices/CB-103.md) | P0 | `VERIFIED` | `CB-102` |
 | [CB-104 — Asynchronous evaluation-entry inventory and production-only closure](docs/slices/CB-104.md) | P0 | `VERIFIED` | `CB-103` |
 | [CB-105 — Sandbox-bound idempotent mock-payment callbacks](docs/slices/CB-105.md) | P0 | `VERIFIED` | `CB-104` |
-| [CB-110 — FAQ publication truth and transactional Outbox](docs/slices/CB-110.md) | P1 | `IN_PROGRESS` | `CB-030`, `CB-085`, `CB-091` |
-| [CB-111 — Incremental knowledge synchronization and version/tombstone convergence](docs/slices/CB-111.md) | P1 | `PLANNED` | `CB-110` |
+| [CB-110 — FAQ publication truth and transactional Outbox](docs/slices/CB-110.md) | P1 | `VERIFIED` | `CB-030`, `CB-085`, `CB-091` |
+| [CB-111 — Incremental knowledge synchronization and version/tombstone convergence](docs/slices/CB-111.md) | P1 | `READY` | `CB-110` |
 | [CB-112 — Versioned two-level FAQ cache](docs/slices/CB-112.md) | P1 | `PLANNED` | `CB-111` |
 | [CB-113 — Knowledge rebuild validation and atomic alias switch](docs/slices/CB-113.md) | P1 | `PLANNED` | `CB-112` |
 | [CB-114 — Knowledge rollback catch-up and atomic restoration](docs/slices/CB-114.md) | P1 | `PLANNED` | `CB-113` |
