@@ -328,6 +328,9 @@ class FaqPublicationIntegrationTest {
     List<FaqRepository.OutboxEvent> pending = repository.pendingOutbox(100);
     assertThat(pending).isNotEmpty();
     FaqRepository.OutboxEvent firstPending = pending.getFirst();
+    FaqKnowledgeEvent failedEvent = codec.decode(firstPending.payload());
+    FaqRepository.FaqSource failedSourceBefore =
+        repository.findSource(failedEvent.sourceId()).orElseThrow();
 
     CatalogProperties closedProperties =
         new CatalogProperties(
@@ -349,6 +352,7 @@ class FaqPublicationIntegrationTest {
     assertThatThrownBy(() -> new FaqOutboxPublisher(repository, closed).publishPending(1))
         .isInstanceOf(Exception.class);
     assertThat(outboxState(firstPending.eventId())).isEqualTo("PENDING:1");
+    assertThat(repository.findSource(failedEvent.sourceId())).contains(failedSourceBefore);
     assertSource("faq-delivery", 1, 1, "PUBLISHED", "Will delivery retry?");
 
     try (SimpleConsumer consumer = faqConsumer()) {

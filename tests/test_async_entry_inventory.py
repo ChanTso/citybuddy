@@ -55,9 +55,7 @@ def test_commerce_message_schemas_cannot_encode_sandbox_context() -> None:
     catalog = source(
         "commerce-service/src/main/java/io/citybuddy/commerce/catalog/ProductRepository.java"
     )
-    faq = source(
-        "commerce-service/src/main/java/io/citybuddy/commerce/faq/FaqKnowledgeEvent.java"
-    )
+    faq = source("commerce-service/src/main/java/io/citybuddy/commerce/faq/FaqKnowledgeEvent.java")
     assert "sandbox" not in transaction.lower()
     assert "sandbox" not in timeout.lower()
     catalog_event = catalog[catalog.index("public record CatalogEvent") :]
@@ -90,9 +88,7 @@ def test_outbox_and_non_commerce_paths_are_not_hidden_async_carriers() -> None:
     products = source(
         "commerce-service/src/main/java/io/citybuddy/commerce/catalog/ProductRepository.java"
     )
-    faq = source(
-        "commerce-service/src/main/java/io/citybuddy/commerce/faq/FaqRepository.java"
-    )
+    faq = source("commerce-service/src/main/java/io/citybuddy/commerce/faq/FaqRepository.java")
     indexer_worker = source("knowledge-indexer/src/citybuddy_indexer/worker.py")
     spike_event = source("knowledge-indexer/src/citybuddy_indexer/spike_event.py")
     agent_files = "\n".join(
@@ -111,9 +107,7 @@ def test_faq_publication_has_no_early_api_projection_or_fixture_promotion() -> N
     faq_sources = "\n".join(
         path.read_text(encoding="utf-8") for path in sorted(faq_root.glob("*.java"))
     )
-    migration = source(
-        "infra/mysql/migrations/commerce/V014__faq_publication_outbox.sql"
-    )
+    migration = source("infra/mysql/migrations/commerce/V014__faq_publication_outbox.sql")
     assert "Controller" not in faq_sources
     assert "Elasticsearch" not in faq_sources
     assert "Redis" not in faq_sources
