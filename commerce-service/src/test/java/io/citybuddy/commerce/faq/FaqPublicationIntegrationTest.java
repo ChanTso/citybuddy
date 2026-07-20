@@ -8,6 +8,7 @@ import io.citybuddy.commerce.catalog.CatalogProperties;
 import io.citybuddy.commerce.catalog.RocketMqCatalogMessaging;
 import java.nio.ByteBuffer;
 import java.nio.charset.StandardCharsets;
+import java.sql.Timestamp;
 import java.time.Clock;
 import java.time.Duration;
 import java.time.Instant;
@@ -25,11 +26,13 @@ import org.apache.rocketmq.client.apis.consumer.FilterExpression;
 import org.apache.rocketmq.client.apis.consumer.FilterExpressionType;
 import org.apache.rocketmq.client.apis.consumer.SimpleConsumer;
 import org.apache.rocketmq.client.apis.message.MessageView;
+import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.condition.EnabledIfEnvironmentVariable;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.jdbc.core.JdbcTemplate;
+import org.springframework.jdbc.datasource.SingleConnectionDataSource;
 import org.springframework.test.context.DynamicPropertyRegistry;
 import org.springframework.test.context.DynamicPropertySource;
 import org.springframework.transaction.support.TransactionTemplate;
@@ -63,6 +66,15 @@ class FaqPublicationIntegrationTest {
   @Autowired private FaqPublicationService service;
   @Autowired private RocketMqCatalogMessaging messaging;
   @Autowired private TransactionTemplate transactions;
+  private SingleConnectionDataSource corruptionDataSource;
+  private JdbcTemplate corruptionJdbc;
+
+  @AfterEach
+  void closeCorruptionConnection() {
+    if (corruptionDataSource != null) {
+      corruptionDataSource.destroy();
+    }
+  }
 
   @Test
   void provesFaqPublicationTruthAtomicityIdempotencyAndNormalOutboxRecovery() throws Exception {
@@ -304,6 +316,8 @@ class FaqPublicationIntegrationTest {
       FaqPublicationService.PublicationResult originalResult)
       throws Exception {
     FaqRepository.OutboxEvent original = repository.findOutbox(command.eventId()).orElseThrow();
+    FaqRepository.PublicationCommand durableCommand =
+        repository.findCommandsByIdentity(command.idempotencyKey(), command.eventId()).getFirst();
     String changedEventId = UUID.randomUUID().toString();
     List<OutboxCorruption> corruptions =
         List.of(
@@ -366,6 +380,22 @@ class FaqPublicationIntegrationTest {
         FaqPublicationService.PublicationResult replay = service.publish(command);
         assertThat(replay.replayed()).isTrue();
         assertThat(replay.event()).isEqualTo(originalResult.event());
+
+        deleteCommand(durableCommand);
+        corruption.inject().run();
+        try {
+          assertCode(
+              () -> new FaqOutboxPublisher(repository, codec, messaging).publishPending(100),
+              FaqPublicationException.Code.INCONSISTENT_DURABLE_STATE);
+          assertThat(consumer.receive(1, Duration.ofSeconds(10))).isEmpty();
+          assertThat(outboxState(corruption.currentEventId())).isEqualTo("PENDING:0");
+        } finally {
+          restoreOutbox(original, corruption.currentEventId());
+          restoreCommand(durableCommand);
+        }
+        replay = service.publish(command);
+        assertThat(replay.replayed()).isTrue();
+        assertThat(replay.event()).isEqualTo(originalResult.event());
       }
     }
   }
@@ -397,6 +427,43 @@ class FaqPublicationIntegrationTest {
         original.eventType(),
         original.payload(),
         currentEventId);
+  }
+
+  private void deleteCommand(FaqRepository.PublicationCommand command) {
+    corruptionUpdateOne(
+        "DELETE FROM faq_publication_command WHERE event_id = ?", command.eventId());
+  }
+
+  private void restoreCommand(FaqRepository.PublicationCommand command) {
+    corruptionUpdateOne(
+        """
+        INSERT INTO faq_publication_command
+          (idempotency_key, event_id, faq_id, expected_draft_revision,
+           expected_published_version, source_version, intent_hash, occurred_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        command.idempotencyKey(),
+        command.eventId(),
+        command.faqId(),
+        command.expectedDraftRevision(),
+        command.expectedPublishedVersion(),
+        command.sourceVersion(),
+        command.intentHash(),
+        Timestamp.from(command.occurredAt()));
+  }
+
+  private void corruptionUpdateOne(String sql, Object... arguments) {
+    if (corruptionJdbc == null) {
+      corruptionDataSource =
+          new SingleConnectionDataSource(
+              required("CATALOG_MYSQL_URL"),
+              "bootstrap_admin",
+              required("MYSQL_BOOTSTRAP_PASSWORD"),
+              true);
+      corruptionJdbc = new JdbcTemplate(corruptionDataSource);
+      corruptionJdbc.execute("SET ROLE bootstrap_grant_role");
+    }
+    assertThat(corruptionJdbc.update(sql, arguments)).isEqualTo(1);
   }
 
   private void updateOne(String sql, Object... arguments) {

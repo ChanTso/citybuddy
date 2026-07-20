@@ -113,6 +113,7 @@ wait_http() {
 ENV_FILE="$env_file" ./scripts/init_local.sh
 auth_app_password="$(read_value MYSQL_AUTH_APP_PASSWORD)"
 commerce_app_password="$(read_value MYSQL_COMMERCE_APP_PASSWORD)"
+mysql_bootstrap_password="$(read_value MYSQL_BOOTSTRAP_PASSWORD)"
 agent_app_password="$(read_value MYSQL_AGENT_APP_PASSWORD)"
 redis_password="$(read_value REDIS_COMMERCE_PASSWORD)"
 
@@ -470,6 +471,7 @@ docker run --rm \
   --env CATALOG_INTEGRATION=true \
   --env CATALOG_MYSQL_URL='jdbc:mysql://mysql:3306/commerce_db?useSSL=false&allowPublicKeyRetrieval=true' \
   --env MYSQL_COMMERCE_APP_PASSWORD="$commerce_app_password" \
+  --env MYSQL_BOOTSTRAP_PASSWORD="$mysql_bootstrap_password" \
   --env CATALOG_REDIS_URL="redis://:$redis_password@redis-commerce:6379" \
   --env IDENTITY_JWKS_URL="http://$project-auth:8080/auth/jwks" \
   --env CATALOG_DIRECT_TOKEN="$direct_token" \

@@ -19,12 +19,11 @@ public final class FaqOutboxPublisher {
     if (limit < 1 || limit > 100) {
       throw new IllegalArgumentException("Outbox publish limit must be between 1 and 100");
     }
-    repository
-        .findPendingOrphan()
-        .ifPresent(
-            ignored -> {
-              throw inconsistent("Pending FAQ Outbox event has no immutable command");
-            });
+    for (FaqRepository.OutboxEvent orphan : repository.pendingOrphans()) {
+      if (FaqPublicationCommitment.hasFaqOwnershipSignal(orphan, codec)) {
+        throw inconsistent("Pending FAQ Outbox event has no immutable command");
+      }
+    }
     List<FaqRepository.OutboxEvent> verified = new ArrayList<>();
     for (FaqRepository.PendingPublication pending : repository.pendingPublications(limit)) {
       if (pending.outbox() == null) {

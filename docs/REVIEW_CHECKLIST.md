@@ -60,6 +60,13 @@ request. A later semantic diff change requires the checklist to be executed and 
   other validity predicates run only after enumeration; placing one in the enumerator turns an
   inconsistency into an apparent absence. Treat an unclassified predicate, or a predicate classified
   as an assertion but retained in `JOIN`/`WHERE`, as incomplete review evidence.
+- Treat prose rules and a manually reviewed predicate table as necessary but not sufficient. Register
+  every reconciliation, orphan, and integrity enumerator in an executable predicate-column allowlist;
+  permit only explicitly classified stable scope/key columns and required terminal/delivery face
+  classifiers in `WHERE`/`ON`. Static contract tests must parse the physical predicate columns, fail
+  on any unregistered column, and discover enumerators reachable from each reconciliation or outbound
+  side-effect root so a newly added enumerator without a registered allowlist also fails. Type,
+  ownership, intent, content, and other committed columns remain post-enumeration assertions.
 - Enumerate every overlapping authoritative truth face independently and require equality of their
   stable key sets before comparing row content. For a successful standard payment, independently
   enumerate `PAID` orders, `STANDARD_PAYMENT` ledger movements, terminal successful callbacks, and

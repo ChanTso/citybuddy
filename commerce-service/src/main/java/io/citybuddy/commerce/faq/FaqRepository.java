@@ -226,26 +226,18 @@ public class FaqRepository {
         limit);
   }
 
-  public Optional<OutboxEvent> findPendingOrphan() {
-    return jdbc
-        .query(
-            """
-            SELECT o.event_id, o.aggregate_type, o.aggregate_id, o.aggregate_version,
-                   o.event_type, o.payload
-            FROM commerce_outbox o
-            LEFT JOIN faq_publication_command c ON c.event_id = o.event_id
-            WHERE o.publication_state = 'PENDING'
-              AND o.aggregate_type = ?
-              AND o.event_type = ?
-              AND c.event_id IS NULL
-            ORDER BY o.created_at, o.event_id
-            LIMIT 1
-            """,
-            FaqRepository::mapOutbox,
-            AGGREGATE_TYPE,
-            EVENT_TYPE)
-        .stream()
-        .findFirst();
+  public List<OutboxEvent> pendingOrphans() {
+    return jdbc.query(
+        """
+        SELECT o.event_id, o.aggregate_type, o.aggregate_id, o.aggregate_version,
+               o.event_type, o.payload
+        FROM commerce_outbox o
+        LEFT JOIN faq_publication_command c ON c.event_id = o.event_id
+        WHERE o.publication_state = 'PENDING'
+          AND c.event_id IS NULL
+        ORDER BY o.created_at, o.event_id
+        """,
+        FaqRepository::mapOutbox);
   }
 
   public void recordPublishFailure(String eventId) {

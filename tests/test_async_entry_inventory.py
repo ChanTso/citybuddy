@@ -1,8 +1,57 @@
 import json
+import re
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 INVENTORY = ROOT / "commerce-service/src/main/resources/async-entry-inventory.json"
+
+FAQ_REPOSITORY = "commerce-service/src/main/java/io/citybuddy/commerce/faq/FaqRepository.java"
+EVALUATION_VIEW_REPOSITORY = (
+    "commerce-service/src/main/java/io/citybuddy/commerce/evaluation/EvaluationViewRepository.java"
+)
+LEGACY_COMMITMENT_STORE = (
+    "commerce-service/src/main/java/io/citybuddy/commerce/evaluation/"
+    "EvaluationLegacyAuditCommitmentStore.java"
+)
+
+# Values document why each physical column is allowed to limit an integrity enumeration.
+# The executable assertion below rejects every predicate column absent from this registry.
+INTEGRITY_ENUMERATOR_PREDICATE_ALLOWLISTS = {
+    (FAQ_REPOSITORY, "pendingPublications"): {
+        "c.event_id": "stable command/outbox correlation key",
+        "o.event_id": "stable command/outbox correlation key and missing-face signal",
+        "o.publication_state": "delivery eligibility classifier",
+    },
+    (FAQ_REPOSITORY, "pendingOrphans"): {
+        "c.event_id": "stable command/outbox correlation key and missing-face signal",
+        "o.event_id": "stable command/outbox correlation key",
+        "o.publication_state": "delivery eligibility classifier",
+    },
+    (EVALUATION_VIEW_REPOSITORY, "allAuditReferences"): {
+        "sandbox_id": "stable sandbox scope",
+    },
+    (EVALUATION_VIEW_REPOSITORY, "productObservationTruths"): {
+        "sandbox_id": "stable sandbox scope",
+    },
+    (EVALUATION_VIEW_REPOSITORY, "paidOrderTruths"): {
+        "sandbox_id": "stable sandbox scope",
+        "status": "terminal truth-face classifier",
+    },
+    (EVALUATION_VIEW_REPOSITORY, "paymentLedgerTruths"): {
+        "movement_type": "terminal truth-face classifier",
+        "sandbox_id": "stable sandbox scope",
+    },
+    (EVALUATION_VIEW_REPOSITORY, "succeededCallbackTruths"): {
+        "a.attempt_id": "stable callback/attempt correlation key",
+        "c.attempt_id": "stable callback/attempt correlation key",
+        "c.requested_outcome": "terminal truth-face classifier",
+        "c.result_state": "terminal truth-face classifier",
+        "c.sandbox_id": "stable sandbox scope",
+    },
+    (LEGACY_COMMITMENT_STORE, "load"): {
+        "created_at_anchor": "fixed committed legacy-set classifier",
+    },
+}
 
 
 def source(path: str) -> str:
@@ -24,6 +73,69 @@ def relative_sources_with(
             else path.read_text(encoding="utf-8")
         )
     }
+
+
+def java_method_body(java_source: str, method_name: str) -> str:
+    signature = re.search(
+        rf"\b{re.escape(method_name)}\s*\([^)]*\)\s*"
+        rf"(?:throws\s+[\w., ]+\s*)?\{{",
+        java_source,
+        re.DOTALL,
+    )
+    assert signature is not None, f"Java method not found: {method_name}"
+    opening = java_source.index("{", signature.start())
+    depth = 0
+    for index in range(opening, len(java_source)):
+        if java_source[index] == "{":
+            depth += 1
+        elif java_source[index] == "}":
+            depth -= 1
+            if depth == 0:
+                return java_source[opening + 1 : index]
+    raise AssertionError(f"Unclosed Java method: {method_name}")
+
+
+def sql_predicate_columns(method_body: str) -> set[str]:
+    columns: set[str] = set()
+    clause_pattern = re.compile(
+        r"\b(?:ON|WHERE)\b(.*?)(?="
+        r"\b(?:LEFT|RIGHT|INNER|FULL|CROSS)?\s*JOIN\b|\bWHERE\b|"
+        r"\bGROUP\s+BY\b|\bORDER\s+BY\b|\bLIMIT\b|"
+        r"\bFOR\s+(?:UPDATE|SHARE)\b|$)",
+        re.IGNORECASE | re.DOTALL,
+    )
+    for sql in re.findall(r'"""(.*?)"""', method_body, re.DOTALL):
+        without_literals = re.sub(r"'(?:''|[^'])*'", "''", sql)
+        for clause in clause_pattern.findall(without_literals):
+            columns.update(
+                f"{table.casefold()}.{column.casefold()}"
+                for table, column in re.findall(
+                    r"\b([a-z_][a-z0-9_]*)\.([a-z_][a-z0-9_]*)\b",
+                    clause,
+                    re.IGNORECASE,
+                )
+            )
+            columns.update(
+                column.casefold()
+                for column in re.findall(
+                    r"(?<![.\w])([a-z_][a-z0-9_]*)\b\s*"
+                    r"(?:=|<>|!=|<=|>=|<|>|\bIS\b|\bIN\b|\bLIKE\b)",
+                    clause,
+                    re.IGNORECASE,
+                )
+            )
+    return columns
+
+
+def java_methods(java_source: str) -> dict[str, str]:
+    method_names = set(
+        re.findall(
+            r"\b(?:public|private|protected)\s+(?:static\s+)?"
+            r"[\w<>,.?\[\] ]+\s+(\w+)\s*\(",
+            java_source,
+        )
+    )
+    return {name: java_method_body(java_source, name) for name in method_names}
 
 
 def test_inventory_is_complete_and_has_no_evaluation_reachable_path() -> None:
@@ -155,8 +267,8 @@ def test_inventory_closes_all_runtime_rocketmq_builders_and_outbox_readers() -> 
     assert faq_query.casefold().count("from commerce_outbox") == 3
     assert 'static final String AGGREGATE_TYPE = "FAQ"' in faq_query
     assert 'static final String EVENT_TYPE = "FAQ_KNOWLEDGE_SYNCHRONIZATION"' in faq_query
-    assert faq_query.count("AGGREGATE_TYPE") == 6
-    assert faq_query.count("EVENT_TYPE") == 6
+    assert faq_query.count("AGGREGATE_TYPE") == 5
+    assert faq_query.count("EVENT_TYPE") == 5
     assert "aggregate_type = ?" in faq_query
     assert "event_type = ?" in faq_query
     assert (
@@ -169,6 +281,56 @@ def test_inventory_closes_all_runtime_rocketmq_builders_and_outbox_readers() -> 
     for outbox_query in (product_query, faq_query):
         assert "STANDARD_ORDER" not in outbox_query[outbox_query.index("FROM commerce_outbox") :]
         assert "REFUND_" not in outbox_query[outbox_query.index("FROM commerce_outbox") :]
+
+
+def test_integrity_enumerators_use_only_registered_predicate_columns() -> None:
+    for (path, method_name), allowlist in INTEGRITY_ENUMERATOR_PREDICATE_ALLOWLISTS.items():
+        body = java_method_body(source(path), method_name)
+        actual = sql_predicate_columns(body)
+        assert actual == set(allowlist), (
+            f"{path}::{method_name} predicate columns changed; every WHERE/ON column "
+            "must be explicitly classified as a stable key/scope or terminal face"
+        )
+        assert all(reason.strip() for reason in allowlist.values())
+
+    faq_publisher = source(
+        "commerce-service/src/main/java/io/citybuddy/commerce/faq/FaqOutboxPublisher.java"
+    )
+    before_first_send = java_method_body(faq_publisher, "publishPending").split(
+        "sender.send", maxsplit=1
+    )[0]
+    faq_enumerators = set(re.findall(r"repository\.(\w+)\s*\(", before_first_send))
+    registered_faq = {
+        method
+        for path, method in INTEGRITY_ENUMERATOR_PREDICATE_ALLOWLISTS
+        if path == FAQ_REPOSITORY
+    }
+    assert faq_enumerators == registered_faq
+
+    evaluation_source = source(EVALUATION_VIEW_REPOSITORY)
+    evaluation_methods = java_methods(evaluation_source)
+    reachable = {"auditReferencesConsistent"}
+    pending = ["auditReferencesConsistent"]
+    while pending:
+        method = pending.pop()
+        body = evaluation_methods[method]
+        for candidate in evaluation_methods:
+            if candidate not in reachable and re.search(rf"\b{re.escape(candidate)}\s*\(", body):
+                reachable.add(candidate)
+                pending.append(candidate)
+    reachable_sql_enumerators = {
+        method for method in reachable if sql_predicate_columns(evaluation_methods[method])
+    }
+    registered_evaluation = {
+        method
+        for path, method in INTEGRITY_ENUMERATOR_PREDICATE_ALLOWLISTS
+        if path == EVALUATION_VIEW_REPOSITORY
+    }
+    assert reachable_sql_enumerators == registered_evaluation
+    assert (
+        "EvaluationLegacyAuditCommitmentStore.load(jdbc)"
+        in evaluation_methods["auditReferencesConsistent"]
+    )
 
 
 def test_real_entries_are_production_only_and_guard_draft_is_absent() -> None:

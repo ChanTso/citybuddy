@@ -87,6 +87,20 @@ final class FaqPublicationCommitment {
     return event;
   }
 
+  static boolean hasFaqOwnershipSignal(
+      FaqRepository.OutboxEvent outbox, FaqKnowledgeEventCodec codec) {
+    if (FaqRepository.AGGREGATE_TYPE.equals(outbox.aggregateType())
+        || FaqRepository.EVENT_TYPE.equals(outbox.eventType())) {
+      return true;
+    }
+    try {
+      codec.decode(outbox.payload());
+      return true;
+    } catch (FaqPublicationException ignored) {
+      return false;
+    }
+  }
+
   private static String hash(List<String> values) {
     try {
       MessageDigest digest = MessageDigest.getInstance("SHA-256");
