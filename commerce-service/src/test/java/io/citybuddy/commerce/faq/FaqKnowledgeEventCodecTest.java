@@ -134,13 +134,23 @@ class FaqKnowledgeEventCodecTest {
   }
 
   @Test
-  void appliesTheSameUtf8PayloadBoundaryBeforeEncodingAndDecoding() {
+  void reservesMysqlNormalizationBytesAtTheProducerBoundary() throws Exception {
     FaqKnowledgeEvent valid = validEvent();
-    FaqKnowledgeEvent escapedWithinBoundary = withAnswer(valid, "x" + "\0".repeat(1000));
-    String encoded = codec.encode(escapedWithinBoundary);
-    assertThat(codec.decode(encoded)).isEqualTo(escapedWithinBoundary);
+    String acceptedAnswer = maximumNulAnswerWithinCompactBoundary(valid);
+    FaqKnowledgeEvent accepted = withAnswer(valid, acceptedAnswer);
+    String encoded = codec.encode(accepted);
 
-    assertEncodeValidation(withAnswer(valid, "x" + "\0".repeat(3999)));
+    assertThat(utf8Bytes(encoded))
+        .isLessThanOrEqualTo(FaqKnowledgeEventCodec.MAX_COMPACT_PAYLOAD_BYTES)
+        .isGreaterThan(FaqKnowledgeEventCodec.MAX_COMPACT_PAYLOAD_BYTES - 6);
+    assertThat(codec.decode(encoded)).isEqualTo(accepted);
+    assertThat(utf8Bytes(encoded) + FaqKnowledgeEventCodec.MYSQL_JSON_NORMALIZATION_OVERHEAD_BYTES)
+        .isLessThanOrEqualTo(FaqKnowledgeEventCodec.MAX_DURABLE_PAYLOAD_BYTES);
+
+    FaqKnowledgeEvent adjacentOverLimit = withAnswer(valid, acceptedAnswer + "\0");
+    assertThat(utf8Bytes(objectMapper.writeValueAsString(adjacentOverLimit)))
+        .isGreaterThan(FaqKnowledgeEventCodec.MAX_COMPACT_PAYLOAD_BYTES);
+    assertEncodeValidation(adjacentOverLimit);
     assertEncodeValidation(withAnswer(valid, "界".repeat(2800)));
   }
 
@@ -180,5 +190,26 @@ class FaqKnowledgeEventCodecTest {
         event.tombstone(),
         event.occurredTime(),
         new FaqKnowledgeEvent.PublicContent(event.content().question(), answer));
+  }
+
+  private String maximumNulAnswerWithinCompactBoundary(FaqKnowledgeEvent template)
+      throws Exception {
+    int acceptedCount = 0;
+    int rejectedCount = FaqKnowledgeEventCodec.MAX_ANSWER_LENGTH;
+    while (acceptedCount + 1 < rejectedCount) {
+      int candidateCount = (acceptedCount + rejectedCount) / 2;
+      String candidate = "x" + "\0".repeat(candidateCount);
+      if (utf8Bytes(objectMapper.writeValueAsString(withAnswer(template, candidate)))
+          <= FaqKnowledgeEventCodec.MAX_COMPACT_PAYLOAD_BYTES) {
+        acceptedCount = candidateCount;
+      } else {
+        rejectedCount = candidateCount;
+      }
+    }
+    return "x" + "\0".repeat(acceptedCount);
+  }
+
+  private static int utf8Bytes(String value) {
+    return value.getBytes(java.nio.charset.StandardCharsets.UTF_8).length;
   }
 }

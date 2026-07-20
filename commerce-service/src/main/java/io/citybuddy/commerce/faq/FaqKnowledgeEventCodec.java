@@ -18,7 +18,6 @@ public final class FaqKnowledgeEventCodec {
   public static final String PUBLICATION_STATE = "PUBLISHED";
   public static final int MAX_QUESTION_LENGTH = 500;
   public static final int MAX_ANSWER_LENGTH = 4000;
-  private static final int MAX_PAYLOAD_BYTES = 8192;
   private static final Pattern SOURCE_ID = Pattern.compile("[a-z0-9][a-z0-9-]{0,63}");
   private static final Set<String> EVENT_FIELDS =
       Set.of(
@@ -31,6 +30,13 @@ public final class FaqKnowledgeEventCodec {
           "occurredTime",
           "content");
   private static final Set<String> CONTENT_FIELDS = Set.of("question", "answer");
+  static final int MAX_DURABLE_PAYLOAD_BYTES = 8192;
+  // MySQL JSON text reads add one space after every object colon and comma. Deriving the reserve
+  // from both closed field sets makes a schema extension tighten the producer boundary as well.
+  static final int MYSQL_JSON_NORMALIZATION_OVERHEAD_BYTES =
+      mysqlJsonSeparatorBytes(EVENT_FIELDS.size()) + mysqlJsonSeparatorBytes(CONTENT_FIELDS.size());
+  static final int MAX_COMPACT_PAYLOAD_BYTES =
+      MAX_DURABLE_PAYLOAD_BYTES - MYSQL_JSON_NORMALIZATION_OVERHEAD_BYTES;
 
   private final ObjectMapper objectMapper;
 
@@ -42,7 +48,7 @@ public final class FaqKnowledgeEventCodec {
     validate(event);
     try {
       String payload = objectMapper.writeValueAsString(event);
-      validatePayloadBoundary(payload);
+      validatePayloadBoundary(payload, MAX_COMPACT_PAYLOAD_BYTES);
       return payload;
     } catch (JsonProcessingException exception) {
       throw new IllegalStateException("FAQ knowledge event serialization failed", exception);
@@ -50,7 +56,7 @@ public final class FaqKnowledgeEventCodec {
   }
 
   public FaqKnowledgeEvent decode(String payload) {
-    validatePayloadBoundary(payload);
+    validatePayloadBoundary(payload, MAX_DURABLE_PAYLOAD_BYTES);
     try (JsonParser parser = objectMapper.createParser(payload)) {
       parser.enable(StreamReadFeature.STRICT_DUPLICATE_DETECTION.mappedFeature());
       JsonNode root = objectMapper.readTree(parser);
@@ -89,12 +95,16 @@ public final class FaqKnowledgeEventCodec {
     }
   }
 
-  private static void validatePayloadBoundary(String payload) {
+  private static void validatePayloadBoundary(String payload, int maximumBytes) {
     if (payload == null
         || payload.isBlank()
-        || payload.getBytes(StandardCharsets.UTF_8).length > MAX_PAYLOAD_BYTES) {
+        || payload.getBytes(StandardCharsets.UTF_8).length > maximumBytes) {
       throw invalid("FAQ knowledge event payload is invalid");
     }
+  }
+
+  private static int mysqlJsonSeparatorBytes(int fieldCount) {
+    return fieldCount + Math.max(0, fieldCount - 1);
   }
 
   private static void requireText(JsonNode object, String field) {

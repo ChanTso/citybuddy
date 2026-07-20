@@ -10,6 +10,8 @@ import java.nio.ByteBuffer;
 import java.nio.charset.StandardCharsets;
 import java.time.Clock;
 import java.time.Duration;
+import java.time.Instant;
+import java.time.ZoneOffset;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
@@ -64,13 +66,15 @@ class FaqPublicationIntegrationTest {
 
   @Test
   void provesFaqPublicationTruthAtomicityIdempotencyAndNormalOutboxRecovery() throws Exception {
-    proveDraftIsolationBoundsAndFirstRevisedPublication();
+    FaqPublicationService.PublicationResult payloadBoundary =
+        proveDraftIsolationBoundsAndFirstRevisedPublication();
     proveRollbackAfterBusinessAndOutboxWrites();
     proveConcurrentReplayAndConflictingIdentityConvergence();
-    proveNormalMessageFailureRetryRestartAndDuplicateDelivery();
+    proveNormalMessageFailureRetryRestartAndDuplicateDelivery(payloadBoundary);
   }
 
-  private void proveDraftIsolationBoundsAndFirstRevisedPublication() {
+  private FaqPublicationService.PublicationResult
+      proveDraftIsolationBoundsAndFirstRevisedPublication() throws Exception {
     FaqRepository.FaqSource draft =
         service.saveDraft("faq-main", "How do returns work?", "Returns take five days.", 0);
     assertThat(draft.workingState()).isEqualTo("DRAFT");
@@ -102,19 +106,45 @@ class FaqPublicationIntegrationTest {
                 0),
         FaqPublicationException.Code.VALIDATION);
 
-    service.saveDraft("faq-escaped-bound", "Escaped answer?", "x" + "\0".repeat(1000), 0);
-    FaqPublicationService.PublicationCommand escaped =
-        command("faq-escaped-bound", "faq-escaped-bound", 1, 0);
-    FaqPublicationService.PublicationResult escapedPublished = service.publish(escaped);
-    assertThat(service.publish(escaped).event()).isEqualTo(escapedPublished.event());
+    Instant boundaryTime = Instant.parse("2026-07-20T08:00:00.123456Z");
+    FaqPublicationService boundaryService =
+        new FaqPublicationService(repository, codec, Clock.fixed(boundaryTime, ZoneOffset.UTC));
+    FaqPublicationService.PublicationCommand boundaryCommand =
+        command("faq-json-boundary-a", "faq-json-boundary-a", 1, 0);
+    BoundaryAnswers boundary = boundaryAnswers(boundaryCommand, boundaryTime);
+    service.saveDraft("faq-json-boundary-a", "q", boundary.accepted(), 0);
+    FaqPublicationService.PublicationResult boundaryPublished =
+        transactions.execute(ignored -> boundaryService.publish(boundaryCommand));
+    assertThat(boundaryPublished).isNotNull();
+    String compactPayload = codec.encode(boundaryPublished.event());
+    FaqRepository.OutboxEvent durableBoundary =
+        repository.findOutbox(boundaryCommand.eventId()).orElseThrow();
+    assertThat(utf8Bytes(compactPayload)).isEqualTo(boundary.acceptedCompactBytes());
+    assertThat(utf8Bytes(durableBoundary.payload()))
+        .isEqualTo(
+            boundary.acceptedCompactBytes()
+                + FaqKnowledgeEventCodec.MYSQL_JSON_NORMALIZATION_OVERHEAD_BYTES)
+        .isLessThanOrEqualTo(FaqKnowledgeEventCodec.MAX_DURABLE_PAYLOAD_BYTES);
+    assertThat(codec.decode(durableBoundary.payload())).isEqualTo(boundaryPublished.event());
+    FaqPublicationService.PublicationResult boundaryReplay =
+        transactions.execute(ignored -> boundaryService.publish(boundaryCommand));
+    assertThat(boundaryReplay).isNotNull();
+    assertThat(boundaryReplay.replayed()).isTrue();
+    assertThat(boundaryReplay.event()).isEqualTo(boundaryPublished.event());
 
-    service.saveDraft("faq-expanded-oversize", "Expanded answer?", "x" + "\0".repeat(3999), 0);
+    FaqPublicationService.PublicationCommand overLimitCommand =
+        command("faq-json-boundary-b", "faq-json-boundary-b", 1, 0);
+    BoundaryAnswers overLimitBoundary = boundaryAnswers(overLimitCommand, boundaryTime);
+    assertThat(overLimitBoundary.acceptedCompactBytes()).isEqualTo(boundary.acceptedCompactBytes());
+    assertThat(overLimitBoundary.rejectedCompactBytes())
+        .isGreaterThan(FaqKnowledgeEventCodec.MAX_COMPACT_PAYLOAD_BYTES);
+    service.saveDraft("faq-json-boundary-b", "q", overLimitBoundary.rejected(), 0);
     assertCode(
-        () -> service.publish(command("faq-expanded-oversize", "faq-expanded-oversize", 1, 0)),
+        () -> transactions.execute(ignored -> boundaryService.publish(overLimitCommand)),
         FaqPublicationException.Code.VALIDATION);
-    assertSource("faq-expanded-oversize", 1, 0, "DRAFT", null);
-    assertThat(faqCommandCount("faq-expanded-oversize")).isZero();
-    assertThat(faqOutboxCount("faq-expanded-oversize")).isZero();
+    assertSource("faq-json-boundary-b", 1, 0, "DRAFT", null);
+    assertThat(faqCommandCount("faq-json-boundary-b")).isZero();
+    assertThat(faqOutboxCount("faq-json-boundary-b")).isZero();
 
     FaqPublicationService.PublicationCommand first = command("faq-main", "faq-main-first", 1, 0);
     FaqPublicationService.PublicationResult published = service.publish(first);
@@ -219,6 +249,7 @@ class FaqPublicationIntegrationTest {
     assertThat(historicalReplay.event()).isEqualTo(published.event());
     assertSource("faq-main", 2, 2, "PUBLISHED", "Can I return an item?");
     assertThat(faqOutboxCount("faq-main")).isEqualTo(2);
+    return boundaryPublished;
   }
 
   private void proveRollbackAfterBusinessAndOutboxWrites() {
@@ -475,7 +506,8 @@ class FaqPublicationIntegrationTest {
     assertThat(faqOutboxCount("faq-concurrent-conflict")).isEqualTo(1);
   }
 
-  private void proveNormalMessageFailureRetryRestartAndDuplicateDelivery() throws Exception {
+  private void proveNormalMessageFailureRetryRestartAndDuplicateDelivery(
+      FaqPublicationService.PublicationResult payloadBoundary) throws Exception {
     service.saveDraft("faq-delivery", "Will delivery retry?", "Yes.", 0);
     FaqPublicationService.PublicationResult publication =
         service.publish(command("faq-delivery", "faq-delivery-first", 1, 0));
@@ -523,6 +555,8 @@ class FaqPublicationIntegrationTest {
                 assertThat(event.sourceId()).isEqualTo("faq-delivery");
                 assertThat(event.tombstone()).isFalse();
               });
+      assertThat(delivered)
+          .anySatisfy(event -> assertThat(event).isEqualTo(payloadBoundary.event()));
 
       FaqRepository.OutboxEvent duplicate =
           repository.findOutbox(publication.event().eventId()).orElseThrow();
@@ -655,6 +689,55 @@ class FaqPublicationIntegrationTest {
     return new String(bytes, StandardCharsets.UTF_8);
   }
 
+  private BoundaryAnswers boundaryAnswers(
+      FaqPublicationService.PublicationCommand command, Instant occurredAt) throws Exception {
+    FaqKnowledgeEvent template =
+        new FaqKnowledgeEvent(
+            command.eventId(),
+            command.faqId(),
+            FaqKnowledgeEventCodec.SOURCE_TYPE,
+            1,
+            FaqKnowledgeEventCodec.PUBLICATION_STATE,
+            false,
+            occurredAt.toString(),
+            new FaqKnowledgeEvent.PublicContent("q", "x"));
+    int acceptedCount = 0;
+    int rejectedCount = FaqKnowledgeEventCodec.MAX_ANSWER_LENGTH;
+    while (acceptedCount + 1 < rejectedCount) {
+      int candidateCount = (acceptedCount + rejectedCount) / 2;
+      FaqKnowledgeEvent candidate = withAnswer(template, "x" + "\0".repeat(candidateCount));
+      if (utf8Bytes(objectMapper.writeValueAsString(candidate))
+          <= FaqKnowledgeEventCodec.MAX_COMPACT_PAYLOAD_BYTES) {
+        acceptedCount = candidateCount;
+      } else {
+        rejectedCount = candidateCount;
+      }
+    }
+    String accepted = "x" + "\0".repeat(acceptedCount);
+    String rejected = accepted + "\0";
+    return new BoundaryAnswers(
+        accepted,
+        rejected,
+        utf8Bytes(objectMapper.writeValueAsString(withAnswer(template, accepted))),
+        utf8Bytes(objectMapper.writeValueAsString(withAnswer(template, rejected))));
+  }
+
+  private static FaqKnowledgeEvent withAnswer(FaqKnowledgeEvent event, String answer) {
+    return new FaqKnowledgeEvent(
+        event.eventId(),
+        event.sourceId(),
+        event.sourceType(),
+        event.sourceVersion(),
+        event.publicationState(),
+        event.tombstone(),
+        event.occurredTime(),
+        new FaqKnowledgeEvent.PublicContent(event.content().question(), answer));
+  }
+
+  private static int utf8Bytes(String value) {
+    return value.getBytes(StandardCharsets.UTF_8).length;
+  }
+
   private static void assertCode(
       org.assertj.core.api.ThrowableAssert.ThrowingCallable callable,
       FaqPublicationException.Code code) {
@@ -673,4 +756,7 @@ class FaqPublicationIntegrationTest {
   }
 
   private record OutboxCorruption(Runnable inject, String currentEventId) {}
+
+  private record BoundaryAnswers(
+      String accepted, String rejected, int acceptedCompactBytes, int rejectedCompactBytes) {}
 }
