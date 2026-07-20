@@ -216,6 +216,9 @@ report_audit_unavailability_misclassification() {
     "SELECT sandbox_id, lifecycle_state, expires_at, expires_at > CURRENT_TIMESTAMP(6), version FROM eval_sandbox WHERE sandbox_id = 'sandbox-main'" >&2
   echo "commerce-runtime-grants" >&2
   mysql_query commerce_app "$commerce_app_password" '' 'SHOW GRANTS FOR CURRENT_USER' >&2
+  echo "commerce-table-access-denials" >&2
+  mysql_query root "$root_password" performance_schema \
+    "SELECT user, host, error_number, error_name, sum_error_raised FROM events_errors_summary_by_account_by_error WHERE user = 'commerce_app' AND error_number = 1142" >&2
   if [[ -f "$tmp_dir/commerce.log" ]]; then
     echo "commerce-log-tail" >&2
     tail -n 160 "$tmp_dir/commerce.log" >&2
@@ -2099,6 +2102,8 @@ obo_token="$(uv run python scripts/read_json_field.py "$tmp_dir/http-response.js
 direct_trace="direct-trace-$(openssl rand -hex 8)"
 direct_operation="$(openssl rand -hex 32)"
 failed_operation="$(openssl rand -hex 32)"
+audit_denials_before="$(mysql_query root "$root_password" performance_schema \
+  "SELECT COALESCE(SUM(sum_error_raised), 0) FROM events_errors_summary_by_account_by_error WHERE user = 'commerce_app' AND error_number = 1142")"
 mysql_query root "$root_password" '' \
   "REVOKE INSERT ON commerce_db.eval_commerce_audit_reference FROM 'commerce_app'@'%'"
 assert_status 503 "tool read cannot report success when audit persistence fails" \
@@ -2181,6 +2186,10 @@ assert_equal 0 \
   "$(mysql_query root "$root_password" commerce_db \
     "SELECT COUNT(*) FROM eval_commerce_product_observation WHERE operation_id IN ($quoted_fault_operations)")" \
   "audit-unavailability pressure rolls back every product observation"
+audit_denials_after="$(mysql_query root "$root_password" performance_schema \
+  "SELECT COALESCE(SUM(sum_error_raised), 0) FROM events_errors_summary_by_account_by_error WHERE user = 'commerce_app' AND error_number = 1142")"
+assert_equal 17 "$((audit_denials_after - audit_denials_before))" \
+  "every unavailable tool request reached the revoked audit INSERT boundary"
 echo 'Verified 16 concurrent audit-persistence failures remained 503 while 16 liveness reads remained 204.'
 mysql_query root "$root_password" '' \
   "GRANT INSERT ON commerce_db.eval_commerce_audit_reference TO 'commerce_app'@'%'"
