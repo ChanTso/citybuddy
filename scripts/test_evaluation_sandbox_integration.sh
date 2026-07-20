@@ -205,6 +205,27 @@ assert_status() {
   echo "Verified HTTP $expected: $label"
 }
 
+report_audit_unavailability_misclassification() {
+  local label="$1"
+  local status_file="$2"
+  local response_file="$3"
+  echo "Unexpected audit-unavailability classification for $label: $(cat "$status_file")" >&2
+  cat "$response_file" >&2
+  echo "sandbox-classification-truth" >&2
+  mysql_query root "$root_password" commerce_db \
+    "SELECT sandbox_id, lifecycle_state, expires_at, expires_at > CURRENT_TIMESTAMP(6), version FROM eval_sandbox WHERE sandbox_id = 'sandbox-main'" >&2
+  echo "commerce-runtime-grants" >&2
+  mysql_query commerce_app "$commerce_app_password" '' 'SHOW GRANTS FOR CURRENT_USER' >&2
+  echo "commerce-table-access-denials" >&2
+  mysql_query root "$root_password" performance_schema \
+    "SELECT user, host, error_number, error_name, sum_error_raised FROM events_errors_summary_by_account_by_error WHERE user = 'commerce_app' AND error_number = 1142" >&2
+  if [[ -f "$tmp_dir/commerce.log" ]]; then
+    echo "commerce-log-tail" >&2
+    tail -n 160 "$tmp_dir/commerce.log" >&2
+  fi
+  exit 1
+}
+
 assert_legacy_commitment_fails_closed() {
   local label="$1"
   assert_status 409 "$label rejects migrated legacy state" \
@@ -2081,6 +2102,8 @@ obo_token="$(uv run python scripts/read_json_field.py "$tmp_dir/http-response.js
 direct_trace="direct-trace-$(openssl rand -hex 8)"
 direct_operation="$(openssl rand -hex 32)"
 failed_operation="$(openssl rand -hex 32)"
+audit_denials_before="$(mysql_query root "$root_password" performance_schema \
+  "SELECT COALESCE(SUM(sum_error_raised), 0) FROM events_errors_summary_by_account_by_error WHERE user = 'commerce_app' AND error_number = 1142")"
 mysql_query root "$root_password" '' \
   "REVOKE INSERT ON commerce_db.eval_commerce_audit_reference FROM 'commerce_app'@'%'"
 assert_status 503 "tool read cannot report success when audit persistence fails" \
@@ -2096,6 +2119,78 @@ test "$(mysql_query root "$root_password" commerce_db \
   "SELECT COUNT(*) FROM eval_commerce_audit_reference WHERE operation_id = '$failed_operation'")" = 0
 test "$(mysql_query root "$root_password" commerce_db \
   "SELECT COUNT(*) FROM eval_commerce_product_observation WHERE operation_id = '$failed_operation'")" = 0
+
+audit_fault_pids=()
+audit_fault_operations=()
+liveness_pids=()
+for index in {1..16}; do
+  fault_operation="$(openssl rand -hex 32)"
+  audit_fault_operations+=("$fault_operation")
+  (
+    if ! request_status "$tmp_dir/audit-unavailable-$index.json" \
+      --request POST "http://127.0.0.1:$commerce_port/internal/tools/catalog.product.get" \
+      --header "Authorization: Bearer $obo_token" \
+      --header "X-Support-Session-Id: $session_id" \
+      --header 'X-Eval-Sandbox-Id: sandbox-main' \
+      --header "X-Agent-Trace-Id: audit-unavailable-trace-$index" \
+      --header "X-Agent-Operation-Id: $fault_operation" \
+      --header 'Content-Type: application/json' \
+      --data '{"productId":"product-1"}' \
+      >"$tmp_dir/audit-unavailable-$index.status"; then
+      printf '000' >"$tmp_dir/audit-unavailable-$index.status"
+    fi
+  ) &
+  audit_fault_pids+=("$!")
+  (
+    if ! request_status "$tmp_dir/audit-liveness-$index.json" \
+      --request POST "http://127.0.0.1:$commerce_port/internal/eval/sandboxes/sandbox-main/liveness" \
+      --header "Authorization: Bearer $direct_token" \
+      --header 'X-Eval-Sandbox-Id: sandbox-main' \
+      >"$tmp_dir/audit-liveness-$index.status"; then
+      printf '000' >"$tmp_dir/audit-liveness-$index.status"
+    fi
+  ) &
+  liveness_pids+=("$!")
+done
+for pid in "${audit_fault_pids[@]}" "${liveness_pids[@]}"; do
+  wait "$pid"
+done
+for index in {1..16}; do
+  if [[ "$(cat "$tmp_dir/audit-unavailable-$index.status")" != 503 ]]; then
+    report_audit_unavailability_misclassification \
+      "concurrent audit write $index" \
+      "$tmp_dir/audit-unavailable-$index.status" \
+      "$tmp_dir/audit-unavailable-$index.json"
+  fi
+  assert_equal 'Service unavailable' \
+    "$(uv run python scripts/read_json_field.py "$tmp_dir/audit-unavailable-$index.json" error)" \
+    "concurrent audit write $index exposes only the fixed unavailable response"
+  if [[ "$(cat "$tmp_dir/audit-liveness-$index.status")" != 204 ]]; then
+    report_audit_unavailability_misclassification \
+      "concurrent liveness read $index" \
+      "$tmp_dir/audit-liveness-$index.status" \
+      "$tmp_dir/audit-liveness-$index.json"
+  fi
+done
+quoted_fault_operations="$(printf "'%s'," "${audit_fault_operations[@]}")"
+quoted_fault_operations="${quoted_fault_operations%,}"
+assert_equal 'ACTIVE:1' \
+  "$(mysql_query root "$root_password" commerce_db \
+    "SELECT CONCAT(lifecycle_state, ':', expires_at > CURRENT_TIMESTAMP(6)) FROM eval_sandbox WHERE sandbox_id = 'sandbox-main'")" \
+  "audit-unavailability pressure preserves authoritative sandbox liveness"
+assert_equal 0 \
+  "$(mysql_query root "$root_password" commerce_db \
+    "SELECT COUNT(*) FROM eval_commerce_audit_reference WHERE operation_id IN ($quoted_fault_operations)")" \
+  "audit-unavailability pressure leaves no audit reference"
+assert_equal 0 \
+  "$(mysql_query root "$root_password" commerce_db \
+    "SELECT COUNT(*) FROM eval_commerce_product_observation WHERE operation_id IN ($quoted_fault_operations)")" \
+  "audit-unavailability pressure rolls back every product observation"
+audit_denials_after="$(mysql_query root "$root_password" performance_schema \
+  "SELECT COALESCE(SUM(sum_error_raised), 0) FROM events_errors_summary_by_account_by_error WHERE user = 'commerce_app' AND error_number = 1142")"
+assert_equal 17 "$((audit_denials_after - audit_denials_before))" \
+  "every unavailable tool request reached the revoked audit INSERT boundary"
+echo 'Verified 16 concurrent audit-persistence failures remained 503 while 16 liveness reads remained 204.'
 mysql_query root "$root_password" '' \
   "GRANT INSERT ON commerce_db.eval_commerce_audit_reference TO 'commerce_app'@'%'"
 assert_status 200 "OBO tool reads only the exact sandbox fixture" \
