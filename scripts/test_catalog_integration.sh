@@ -37,6 +37,10 @@ cleanup() {
       admin deleteSubGroup --namesrvAddr rocketmq-namesrv:9876 --clusterName DefaultCluster \
         --groupName "$consumer_group-closed" --removeOffset true >/dev/null 2>&1 || true
       admin deleteSubGroup --namesrvAddr rocketmq-namesrv:9876 --clusterName DefaultCluster \
+        --groupName "$consumer_group-faq" --removeOffset true >/dev/null 2>&1 || true
+      admin deleteSubGroup --namesrvAddr rocketmq-namesrv:9876 --clusterName DefaultCluster \
+        --groupName "$consumer_group-faq-closed" --removeOffset true >/dev/null 2>&1 || true
+      admin deleteSubGroup --namesrvAddr rocketmq-namesrv:9876 --clusterName DefaultCluster \
         --groupName "$transaction_group" --removeOffset true >/dev/null 2>&1 || true
       admin deleteSubGroup --namesrvAddr rocketmq-namesrv:9876 --clusterName DefaultCluster \
         --groupName "$timeout_group" --removeOffset true >/dev/null 2>&1 || true
@@ -209,7 +213,7 @@ echo "Verified exact CB-070 seventeen-table grant state permits the CB-071 upgra
 make ENV_FILE="$env_file" COMPOSE_PROJECT_NAME="$project" migrate-commerce
 complete_grant_output="$(make ENV_FILE="$env_file" COMPOSE_PROJECT_NAME="$project" grant-access)"
 grep -q 'runtime-grants=applied' <<<"$complete_grant_output"
-echo "Verified CB-071 upgrade reaches the exact eighteen-table grant state."
+echo "Verified CB-110 upgrade reaches the exact FAQ-extended runtime grant state."
 
 test "$(mysql_query commerce_app "$commerce_app_password" commerce_db 'SELECT COUNT(*) FROM crm_profile')" = 0
 test "$(mysql_query commerce_app "$commerce_app_password" commerce_db 'SELECT COUNT(*) FROM product')" = 0
@@ -226,6 +230,24 @@ for table in crm_profile product commerce_outbox; do
   assert_mysql_fails "auth_app cannot read $table" '(SELECT command denied|Access denied)' \
     mysql_query auth_app "$auth_app_password" commerce_db "SELECT * FROM $table"
 done
+for table in faq_source faq_publication_command; do
+  test "$(mysql_query commerce_app "$commerce_app_password" commerce_db "SELECT COUNT(*) FROM $table")" = 0
+  assert_mysql_fails "auth_app cannot read $table" '(SELECT command denied|Access denied)' \
+    mysql_query auth_app "$auth_app_password" commerce_db "SELECT * FROM $table"
+  assert_mysql_fails "agent_app cannot read $table" '(SELECT command denied|Access denied)' \
+    mysql_query agent_app "$agent_app_password" commerce_db "SELECT * FROM $table"
+done
+assert_mysql_fails "commerce_app cannot delete FAQ source truth" '(DELETE command denied|Access denied)' \
+  mysql_query commerce_app "$commerce_app_password" commerce_db \
+  "DELETE FROM faq_source WHERE faq_id = 'none'"
+assert_mysql_fails "commerce_app cannot update immutable FAQ publication commands" \
+  '(UPDATE command denied|Access denied)' \
+  mysql_query commerce_app "$commerce_app_password" commerce_db \
+  "UPDATE faq_publication_command SET intent_hash = REPEAT('0', 64) WHERE idempotency_key = 'none'"
+if rg -n 'mysql|commerce_db|cs_db|spring.datasource' knowledge-indexer/src knowledge-indexer/pyproject.toml; then
+  echo "Knowledge indexer contains forbidden direct database access." >&2
+  exit 1
+fi
 for table in standard_order order_idempotency mock_payment_attempt mock_payment_callback mock_refund; do
   test "$(mysql_query commerce_app "$commerce_app_password" commerce_db "SELECT COUNT(*) FROM $table")" = 0
   assert_mysql_fails "auth_app cannot read $table" '(SELECT command denied|Access denied)' \
@@ -413,6 +435,10 @@ admin updateSubGroup --namesrvAddr rocketmq-namesrv:9876 --clusterName DefaultCl
   --groupName "$consumer_group" --consumeEnable true
 admin updateSubGroup --namesrvAddr rocketmq-namesrv:9876 --clusterName DefaultCluster \
   --groupName "$consumer_group-closed" --consumeEnable true
+admin updateSubGroup --namesrvAddr rocketmq-namesrv:9876 --clusterName DefaultCluster \
+  --groupName "$consumer_group-faq" --consumeEnable true
+admin updateSubGroup --namesrvAddr rocketmq-namesrv:9876 --clusterName DefaultCluster \
+  --groupName "$consumer_group-faq-closed" --consumeEnable true
 admin updateTopic \
   --namesrvAddr rocketmq-namesrv:9876 \
   --clusterName DefaultCluster \
@@ -462,7 +488,7 @@ docker run --rm \
   maven:3.9.11-eclipse-temurin-21@sha256:6fdc855a6ed81d288ca7ca37ac6ff5e9308b612485c0801d70b25a858c83d237 \
   mvn --batch-mode --no-transfer-progress -Dmaven.repo.local=/m2 \
   -pl commerce-service \
-  -Dtest=CatalogIntegrationTest,SeckillIntegrationTest,SeckillReservationIntegrationTest,SeckillTransactionIntegrationTest,MockPaymentIntegrationTest,RefundIntegrationTest test
+  -Dtest=CatalogIntegrationTest,FaqPublicationIntegrationTest,SeckillIntegrationTest,SeckillReservationIntegrationTest,SeckillTransactionIntegrationTest,MockPaymentIntegrationTest,RefundIntegrationTest test
 
 terminal_key='00000000-0000-0000-0000-000000000060'
 terminal_output=''
@@ -483,4 +509,4 @@ if ! grep -q "$terminal_key" <<<"$terminal_output"; then
 fi
 echo "Verified repeated UNKNOWN reached Broker terminal topic TRANS_CHECK_MAX_TIME_TOPIC."
 
-echo "CB-030 through CB-071 catalog, order, seckill, payment, refund lifecycle, reconciliation, atomic ledger/Outbox, failure, and permission evidence passed."
+echo "CB-030 through CB-110 catalog, FAQ publication, order, seckill, payment, refund lifecycle, reconciliation, atomic Outbox, failure, and permission evidence passed."

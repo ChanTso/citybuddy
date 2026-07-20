@@ -1,6 +1,11 @@
 package io.citybuddy.commerce.catalog;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
+import io.citybuddy.commerce.faq.FaqKnowledgeEventCodec;
+import io.citybuddy.commerce.faq.FaqOutboxPublisher;
+import io.citybuddy.commerce.faq.FaqOutboxWorker;
+import io.citybuddy.commerce.faq.FaqPublicationService;
+import io.citybuddy.commerce.faq.FaqRepository;
 import io.citybuddy.commerce.identity.JwksLoader;
 import java.time.Clock;
 import org.springframework.beans.factory.annotation.Qualifier;
@@ -61,6 +66,24 @@ public class CatalogConfiguration {
     return new ProductPublicationService(repository, productCache);
   }
 
+  @Bean
+  FaqKnowledgeEventCodec faqKnowledgeEventCodec(ObjectMapper objectMapper) {
+    return new FaqKnowledgeEventCodec(objectMapper);
+  }
+
+  @Bean
+  FaqRepository faqRepository(JdbcTemplate jdbcTemplate) {
+    return new FaqRepository(jdbcTemplate);
+  }
+
+  @Bean
+  FaqPublicationService faqPublicationService(
+      FaqRepository repository,
+      FaqKnowledgeEventCodec codec,
+      @Qualifier("catalogClock") Clock clock) {
+    return new FaqPublicationService(repository, codec, clock);
+  }
+
   @Bean(destroyMethod = "close")
   RocketMqCatalogMessaging rocketMqCatalogMessaging(CatalogProperties properties) throws Exception {
     return new RocketMqCatalogMessaging(properties);
@@ -70,6 +93,17 @@ public class CatalogConfiguration {
   CatalogOutboxPublisher catalogOutboxPublisher(
       ProductRepository repository, RocketMqCatalogMessaging messaging) {
     return new CatalogOutboxPublisher(repository, messaging);
+  }
+
+  @Bean
+  FaqOutboxPublisher faqOutboxPublisher(
+      FaqRepository repository, RocketMqCatalogMessaging messaging) {
+    return new FaqOutboxPublisher(repository, messaging);
+  }
+
+  @Bean
+  FaqOutboxWorker faqOutboxWorker(FaqOutboxPublisher publisher) {
+    return new FaqOutboxWorker(publisher);
   }
 
   @Bean

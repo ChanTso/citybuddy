@@ -35,6 +35,7 @@ def test_inventory_is_complete_and_has_no_evaluation_reachable_path() -> None:
         "seckill-order-transaction",
         "seckill-unpaid-timeout",
         "product-publication",
+        "faq-publication",
         "standard-order-and-refund-outbox",
         "knowledge-indexer-spike",
         "agent-service",
@@ -54,10 +55,14 @@ def test_commerce_message_schemas_cannot_encode_sandbox_context() -> None:
     catalog = source(
         "commerce-service/src/main/java/io/citybuddy/commerce/catalog/ProductRepository.java"
     )
+    faq = source(
+        "commerce-service/src/main/java/io/citybuddy/commerce/faq/FaqKnowledgeEvent.java"
+    )
     assert "sandbox" not in transaction.lower()
     assert "sandbox" not in timeout.lower()
     catalog_event = catalog[catalog.index("public record CatalogEvent") :]
     assert "sandbox" not in catalog_event.split(") {}", 1)[0].lower()
+    assert "sandbox" not in faq.lower()
 
 
 def test_production_consumers_reject_reserved_sandbox_envelope_property() -> None:
@@ -85,6 +90,9 @@ def test_outbox_and_non_commerce_paths_are_not_hidden_async_carriers() -> None:
     products = source(
         "commerce-service/src/main/java/io/citybuddy/commerce/catalog/ProductRepository.java"
     )
+    faq = source(
+        "commerce-service/src/main/java/io/citybuddy/commerce/faq/FaqRepository.java"
+    )
     indexer_worker = source("knowledge-indexer/src/citybuddy_indexer/worker.py")
     spike_event = source("knowledge-indexer/src/citybuddy_indexer/spike_event.py")
     agent_files = "\n".join(
@@ -92,9 +100,25 @@ def test_outbox_and_non_commerce_paths_are_not_hidden_async_carriers() -> None:
         for path in sorted((ROOT / "agent-service/src").rglob("*.py"))
     )
     assert "event_type = 'PRODUCT_PUBLICATION_CHANGED'" in products
+    assert "event_type = 'FAQ_KNOWLEDGE_SYNCHRONIZATION'" in faq
     assert "sandbox" not in spike_event.lower()
     assert "without messaging" in indexer_worker
     assert "rocketmq" not in agent_files.lower()
+
+
+def test_faq_publication_has_no_early_api_projection_or_fixture_promotion() -> None:
+    faq_root = ROOT / "commerce-service/src/main/java/io/citybuddy/commerce/faq"
+    faq_sources = "\n".join(
+        path.read_text(encoding="utf-8") for path in sorted(faq_root.glob("*.java"))
+    )
+    migration = source(
+        "infra/mysql/migrations/commerce/V014__faq_publication_outbox.sql"
+    )
+    assert "Controller" not in faq_sources
+    assert "Elasticsearch" not in faq_sources
+    assert "Redis" not in faq_sources
+    assert "INSERT INTO faq_source" not in migration
+    assert "bootstrap" not in migration.casefold()
 
 
 def test_inventory_closes_all_runtime_rocketmq_builders_and_outbox_readers() -> None:
@@ -123,13 +147,23 @@ def test_inventory_closes_all_runtime_rocketmq_builders_and_outbox_readers() -> 
         casefold=True,
     )
     assert outbox_readers == {
-        "commerce-service/src/main/java/io/citybuddy/commerce/catalog/ProductRepository.java"
+        "commerce-service/src/main/java/io/citybuddy/commerce/catalog/ProductRepository.java",
+        "commerce-service/src/main/java/io/citybuddy/commerce/faq/FaqRepository.java",
     }
-    outbox_query = source(next(iter(outbox_readers)))
-    assert outbox_query.casefold().count("from commerce_outbox") == 1
-    assert "event_type = 'PRODUCT_PUBLICATION_CHANGED'" in outbox_query
-    assert "STANDARD_ORDER" not in outbox_query[outbox_query.index("FROM commerce_outbox") :]
-    assert "REFUND_" not in outbox_query[outbox_query.index("FROM commerce_outbox") :]
+    product_query = source(
+        "commerce-service/src/main/java/io/citybuddy/commerce/catalog/ProductRepository.java"
+    )
+    faq_query = source(
+        "commerce-service/src/main/java/io/citybuddy/commerce/faq/FaqRepository.java"
+    )
+    assert product_query.casefold().count("from commerce_outbox") == 1
+    assert "event_type = 'PRODUCT_PUBLICATION_CHANGED'" in product_query
+    assert faq_query.casefold().count("from commerce_outbox") == 2
+    assert "aggregate_type = 'FAQ'" in faq_query
+    assert "event_type = 'FAQ_KNOWLEDGE_SYNCHRONIZATION'" in faq_query
+    for outbox_query in (product_query, faq_query):
+        assert "STANDARD_ORDER" not in outbox_query[outbox_query.index("FROM commerce_outbox") :]
+        assert "REFUND_" not in outbox_query[outbox_query.index("FROM commerce_outbox") :]
 
 
 def test_real_entries_are_production_only_and_guard_draft_is_absent() -> None:

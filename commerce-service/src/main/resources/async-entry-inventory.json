@@ -1,5 +1,5 @@
 {
-  "version": "cb104-v2",
+  "version": "cb110-v1",
   "reservedSandboxEnvelopeProperty": "citybuddy-eval-sandbox-id",
   "evaluationReachablePathCount": 0,
   "paths": [
@@ -37,6 +37,18 @@
         "the publisher selects only PRODUCT_PUBLICATION_CHANGED truth",
         "CatalogEvent has no sandbox field",
         "the real Broker consumer rejects the reserved sandbox envelope property before mutation"
+      ]
+    },
+    {
+      "id": "faq-publication",
+      "owner": "commerce-service",
+      "classification": "production-only",
+      "producer": "FaqPublicationService -> FaqOutboxPublisher -> RocketMqCatalogMessaging",
+      "consumer": "none until CB-111",
+      "evidence": [
+        "the bounded publication command has no HTTP or evaluation entry point",
+        "FaqKnowledgeEvent has no sandbox field and contains only allowlisted public content",
+        "the publisher selects only FAQ_KNOWLEDGE_SYNCHRONIZATION truth"
       ]
     },
     {
