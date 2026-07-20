@@ -82,6 +82,7 @@ expected=(
   "REVOKE IF EXISTS SELECT ON commerce_db.eval_commerce_audit_reference FROM 'commerce_migration'@'%';"
   "REVOKE IF EXISTS INSERT ON commerce_db.eval_commerce_audit_legacy_watermark FROM 'commerce_migration'@'%';"
   "GRANT SELECT, INSERT, UPDATE ON commerce_db.faq_source TO 'commerce_app'@'%';"
+  "GRANT SELECT, INSERT ON commerce_db.faq_draft_command TO 'commerce_app'@'%';"
   "GRANT SELECT, INSERT ON commerce_db.faq_publication_command TO 'commerce_app'@'%';"
 )
 mapfile -t actual < <(sed -e '/^[[:space:]]*$/d' -e '/^[[:space:]]*--/d' "$manifest")
@@ -166,7 +167,7 @@ evaluation_product_observation_grant="${actual[35]}"
 evaluation_audit_watermark_grant="${actual[36]}"
 v013_migration_grants="$(printf '%s\n' "${actual[37]}" "${actual[38]}")"
 v013_migration_revokes="$(printf '%s\n' "${actual[39]}" "${actual[40]}")"
-faq_runtime_grants="$(printf '%s\n' "${actual[41]}" "${actual[42]}")"
+faq_runtime_grants="$(printf '%s\n' "${actual[@]:41:3}")"
 
 if [[ "$v013_force_revoke" == true ]]; then
   mysql "${mysql_args[@]}" --execute="
@@ -190,6 +191,7 @@ grep -qx 'role-after=NONE' <<<"$output"
 
 runtime_table_state="$(mysql "${mysql_args[@]}" --execute="
   SET ROLE 'bootstrap_grant_role';
+  SET SESSION group_concat_max_len = 8192;
   SELECT CONCAT(
     COUNT(*),
     ':',
@@ -216,6 +218,7 @@ runtime_table_state="$(mysql "${mysql_args[@]}" --execute="
       'eval_commerce_product_observation',
       'eval_commerce_audit_legacy_watermark',
       'faq_source',
+      'faq_draft_command',
       'faq_publication_command',
       'crm_profile',
       'product',
@@ -339,23 +342,26 @@ if [[ "$normalized_runtime_table_state" == "$auth_runtime_table_state" ]] && \
 fi
 faq_table_count=0
 for faq_table in \
+  commerce_db.faq_draft_command \
   commerce_db.faq_publication_command \
   commerce_db.faq_source; do
   if [[ ",$normalized_runtime_table_state," == *",$faq_table,"* ]]; then
     faq_table_count=$((faq_table_count + 1))
   fi
 done
-if (( faq_table_count != 0 && faq_table_count != 2 )); then
+if (( faq_table_count != 0 && faq_table_count != 3 )); then
   echo "Grant job found a partial FAQ publication schema." >&2
   exit 1
-elif (( faq_table_count == 2 )); then
+elif (( faq_table_count == 3 )); then
   runtime_table_count="${normalized_runtime_table_state%%:*}"
   runtime_table_list="${normalized_runtime_table_state#*:}"
+  runtime_table_list="$(remove_runtime_table "$runtime_table_list" \
+    commerce_db.faq_draft_command)"
   runtime_table_list="$(remove_runtime_table "$runtime_table_list" \
     commerce_db.faq_publication_command)"
   runtime_table_list="$(remove_runtime_table "$runtime_table_list" \
     commerce_db.faq_source)"
-  normalized_runtime_table_state="$((runtime_table_count - 2)):$runtime_table_list"
+  normalized_runtime_table_state="$((runtime_table_count - 3)):$runtime_table_list"
   faq_tables_present=true
 fi
 if [[ "$evaluation_audit_watermark_table_present" == true ]]; then

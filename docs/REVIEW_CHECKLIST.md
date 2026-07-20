@@ -71,6 +71,16 @@ request. A later semantic diff change requires the checklist to be executed and 
   must reject rather than silently report zero work. Text-level predicate allowlists may remain as a
   cheap review signal, but their success is never evidence that all predicates or reachable
   enumerators were found.
+- Define behavioral completeness over the Cartesian product of two enumerable ground truths:
+  every lifecycle state reachable from the persisted state machine and every physical column from
+  `information_schema`. Construct a real fixture in each reachable state and execute every column
+  disposition there; a column matrix sampled in only one legal state is incomplete. Bind the state
+  inventory to the database state type and every production transition so an added state or schema
+  column fails closed. For the FAQ publication aggregate the closed state set is exactly `DRAFT`
+  and `PUBLISHED`; a mutable current draft is anchored to its latest immutable draft command, while
+  the latest applied publication command anchors only the published face. Any future completeness
+  objection must identify an omitted reachable state or physical column; a proposed third
+  orthogonal dimension triggers owner review rather than an unbounded implementation expansion.
 - Enumerate every overlapping authoritative truth face independently and require equality of their
   stable key sets before comparing row content. For a successful standard payment, independently
   enumerate `PAID` orders, `STANDARD_PAYMENT` ledger movements, terminal successful callbacks, and

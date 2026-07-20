@@ -25,6 +25,7 @@ INTEGRITY_ENUMERATOR_PREDICATE_HEURISTICS = {
     },
     (FAQ_REPOSITORY, "allOutboxEvents"): {},
     (FAQ_REPOSITORY, "allSources"): {},
+    (FAQ_REPOSITORY, "allDraftCommands"): {},
     (EVALUATION_VIEW_REPOSITORY, "allAuditReferences"): {
         "sandbox_id": "stable sandbox scope",
     },
@@ -277,6 +278,7 @@ def test_inventory_closes_all_runtime_rocketmq_builders_and_outbox_readers() -> 
     assert "public List<PublicationTruth> publicationTruths()" in faq_query
     assert "public List<OutboxEvent> allOutboxEvents()" in faq_query
     assert "public List<FaqSource> allSources()" in faq_query
+    assert "public List<DraftCommand> allDraftCommands()" in faq_query
     for outbox_query in (product_query, faq_query):
         assert "STANDARD_ORDER" not in outbox_query[outbox_query.index("FROM commerce_outbox") :]
         assert "REFUND_" not in outbox_query[outbox_query.index("FROM commerce_outbox") :]

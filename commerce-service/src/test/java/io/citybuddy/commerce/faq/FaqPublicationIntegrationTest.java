@@ -262,14 +262,29 @@ class FaqPublicationIntegrationTest {
     assertSource("faq-main", 2, 2, "PUBLISHED", "Can I return an item?");
     assertThat(faqOutboxCount("faq-main")).isEqualTo(2);
 
-    proveCommittedOutboxColumnsRejectCorruptReplay(secondCommand, second);
+    proveCommittedOutboxColumnsRejectCorruptReplay(secondCommand, second, "PUBLISHED");
 
     FaqPublicationService.PublicationResult historicalReplay = service.publish(first);
     assertThat(historicalReplay.replayed()).isTrue();
     assertThat(historicalReplay.event()).isEqualTo(published.event());
     assertSource("faq-main", 2, 2, "PUBLISHED", "Can I return an item?");
     assertThat(faqOutboxCount("faq-main")).isEqualTo(2);
+    proveDraftStateSchemaColumnClosure();
     return boundaryPublished;
+  }
+
+  private void proveDraftStateSchemaColumnClosure() throws Exception {
+    service.saveDraft("faq-draft-matrix", "Draft v1?", "Answer v1.", 0);
+    FaqPublicationService.PublicationCommand first =
+        command("faq-draft-matrix", "faq-draft-matrix-v1", 1, 0);
+    service.publish(first);
+    service.saveDraft("faq-draft-matrix", "Draft v2?", "Answer v2.", 1);
+    FaqPublicationService.PublicationCommand second =
+        command("faq-draft-matrix", "faq-draft-matrix-v2", 2, 1);
+    FaqPublicationService.PublicationResult published = service.publish(second);
+    service.saveDraft("faq-draft-matrix", "Draft v3?", "Answer v3.", 2);
+    assertSource("faq-draft-matrix", 3, 2, "DRAFT", "Draft v2?");
+    proveCommittedOutboxColumnsRejectCorruptReplay(second, published, "DRAFT");
   }
 
   private void proveRollbackAfterBusinessAndOutboxWrites() {
@@ -321,12 +336,20 @@ class FaqPublicationIntegrationTest {
 
   private void proveCommittedOutboxColumnsRejectCorruptReplay(
       FaqPublicationService.PublicationCommand command,
-      FaqPublicationService.PublicationResult originalResult)
+      FaqPublicationService.PublicationResult originalResult,
+      String reachableState)
       throws Exception {
     FaqRepository.OutboxEvent original = repository.findOutbox(command.eventId()).orElseThrow();
     FaqRepository.PublicationCommand durableCommand =
         repository.findCommandsByIdentity(command.idempotencyKey(), command.eventId()).getFirst();
     FaqRepository.FaqSource durableSource = repository.findSource(command.faqId()).orElseThrow();
+    assertThat(durableSource.workingState()).isEqualTo(reachableState);
+    FaqRepository.DraftCommand durableDraft =
+        repository.allDraftCommands().stream()
+            .filter(candidate -> candidate.faqId().equals(command.faqId()))
+            .max(java.util.Comparator.comparingLong(FaqRepository.DraftCommand::draftRevision))
+            .orElseThrow();
+    boolean draftState = "DRAFT".equals(reachableState);
     String changedEventId = UUID.randomUUID().toString();
     String changedCommandEventId = UUID.randomUUID().toString();
     String changedIdempotencyKey = durableCommand.idempotencyKey() + "-corrupt";
@@ -341,13 +364,17 @@ class FaqPublicationIntegrationTest {
             sourceCorruption(
                 "draft_question",
                 "published-state draft/public pair is database-bound and anchored to the event",
-                "draft_question = 'Corrupt question?', published_question = 'Corrupt question?'",
+                draftState
+                    ? "draft_question = 'Corrupt question?'"
+                    : "draft_question = 'Corrupt question?', published_question = 'Corrupt question?'",
                 durableSource,
                 durableSource.faqId()),
             sourceCorruption(
                 "draft_answer",
                 "published-state draft/public pair is database-bound and anchored to the event",
-                "draft_answer = 'Corrupt answer.', published_answer = 'Corrupt answer.'",
+                draftState
+                    ? "draft_answer = 'Corrupt answer.'"
+                    : "draft_answer = 'Corrupt answer.', published_answer = 'Corrupt answer.'",
                 durableSource,
                 durableSource.faqId()),
             sourceCorruption(
@@ -359,19 +386,25 @@ class FaqPublicationIntegrationTest {
             sourceCorruption(
                 "working_state",
                 "state-machine predecessor is anchored to the revision transition",
-                "working_state = 'DRAFT'",
+                draftState
+                    ? "working_state = 'PUBLISHED', draft_question = published_question, draft_answer = published_answer"
+                    : "working_state = 'DRAFT'",
                 durableSource,
                 durableSource.faqId()),
             sourceCorruption(
                 "published_question",
                 "published content and its database-bound draft pair are anchored to the event",
-                "published_question = 'Corrupt question?', draft_question = 'Corrupt question?'",
+                draftState
+                    ? "published_question = 'Corrupt question?'"
+                    : "published_question = 'Corrupt question?', draft_question = 'Corrupt question?'",
                 durableSource,
                 durableSource.faqId()),
             sourceCorruption(
                 "published_answer",
                 "published content and its database-bound draft pair are anchored to the event",
-                "published_answer = 'Corrupt answer.', draft_answer = 'Corrupt answer.'",
+                draftState
+                    ? "published_answer = 'Corrupt answer.'"
+                    : "published_answer = 'Corrupt answer.', draft_answer = 'Corrupt answer.'",
                 durableSource,
                 durableSource.faqId()),
             sourceCorruption(
@@ -443,6 +476,46 @@ class FaqPublicationIntegrationTest {
                 "database-generated column is invariant-bound to occurred_at",
                 "created_at = TIMESTAMPADD(SECOND, 1, created_at)",
                 durableCommand),
+            draftCommandCorruption(
+                "faq_id",
+                "stable draft/source identity",
+                "faq_id = 'faq-corrupt-source'",
+                durableDraft),
+            draftCommandCorruption(
+                "draft_revision",
+                "resulting draft revision",
+                "draft_revision = draft_revision + 1, expected_draft_revision = expected_draft_revision + 1",
+                durableDraft),
+            draftCommandCorruption(
+                "expected_draft_revision",
+                "draft state-machine predecessor",
+                "expected_draft_revision = expected_draft_revision + 1, draft_revision = draft_revision + 1",
+                durableDraft),
+            draftCommandCorruption(
+                "draft_question",
+                "committed current draft content",
+                "draft_question = 'Corrupt draft?'",
+                durableDraft),
+            draftCommandCorruption(
+                "draft_answer",
+                "committed current draft content",
+                "draft_answer = 'Corrupt draft.'",
+                durableDraft),
+            draftCommandCorruption(
+                "intent_hash",
+                "canonical draft commitment",
+                "intent_hash = REPEAT('0', 64)",
+                durableDraft),
+            draftCommandCorruption(
+                "occurred_at",
+                "draft business event time",
+                "occurred_at = TIMESTAMPADD(SECOND, 1, occurred_at)",
+                durableDraft),
+            draftCommandCorruption(
+                "created_at",
+                "draft persistence time anchored to event time",
+                "created_at = TIMESTAMPADD(SECOND, 1, created_at)",
+                durableDraft),
             outboxCorruption(
                 "event_id",
                 "stable command/Outbox correlation identity",
@@ -570,6 +643,12 @@ class FaqPublicationIntegrationTest {
       } finally {
         restoreCommand(durableCommand);
       }
+      deleteDraftCommand(durableDraft);
+      try {
+        assertPublisherRejects(null);
+      } finally {
+        restoreDraftCommand(durableDraft);
+      }
       assertThat(consumer.receive(1, Duration.ofSeconds(10))).isEmpty();
       assertThat(outboxState(original.eventId())).isEqualTo("PENDING:0");
     }
@@ -672,6 +751,24 @@ class FaqPublicationIntegrationTest {
         original.eventId());
   }
 
+  private SchemaCorruption draftCommandCorruption(
+      String column, String reason, String assignment, FaqRepository.DraftCommand original) {
+    return new SchemaCorruption(
+        "faq_draft_command",
+        column,
+        "ANCHORED",
+        reason,
+        () ->
+            corruptionUpdateOne(
+                "UPDATE faq_draft_command SET "
+                    + assignment
+                    + " WHERE faq_id = ? AND draft_revision = ?",
+                original.faqId(),
+                original.draftRevision()),
+        () -> restoreDraftCommand(original),
+        original.faqId());
+  }
+
   private SchemaCorruption outboxCorruption(
       String column,
       String reason,
@@ -710,6 +807,18 @@ class FaqPublicationIntegrationTest {
   }
 
   private void assertSchemaDispositionCoverage(List<SchemaCorruption> corruptions) {
+    assertThat(
+            corruptionJdbc()
+                .queryForObject(
+                    """
+                    SELECT column_type
+                    FROM information_schema.columns
+                    WHERE table_schema = DATABASE()
+                      AND table_name = 'faq_source'
+                      AND column_name = 'working_state'
+                    """,
+                    String.class))
+        .isEqualTo("enum('DRAFT','PUBLISHED')");
     Map<String, List<String>> actual = new LinkedHashMap<>();
     for (Map<String, Object> row :
         corruptionJdbc()
@@ -718,8 +827,13 @@ class FaqPublicationIntegrationTest {
             SELECT table_name, column_name
             FROM information_schema.columns
             WHERE table_schema = DATABASE()
-              AND table_name IN ('faq_source', 'faq_publication_command', 'commerce_outbox')
-            ORDER BY FIELD(table_name, 'faq_source', 'faq_publication_command', 'commerce_outbox'),
+              AND table_name IN (
+                'faq_source', 'faq_publication_command', 'faq_draft_command', 'commerce_outbox'
+              )
+            ORDER BY FIELD(
+                       table_name,
+                       'faq_source', 'faq_publication_command', 'faq_draft_command', 'commerce_outbox'
+                     ),
                      ordinal_position
             """)) {
       actual
@@ -815,6 +929,41 @@ class FaqPublicationIntegrationTest {
         command.intentHash(),
         Timestamp.from(command.occurredAt()),
         Timestamp.from(command.createdAt()));
+  }
+
+  private void restoreDraftCommand(FaqRepository.DraftCommand command) {
+    corruptionJdbc()
+        .update(
+            """
+            DELETE FROM faq_draft_command
+            WHERE (faq_id = ? AND draft_revision IN (?, ?))
+               OR faq_id = 'faq-corrupt-source'
+            """,
+            command.faqId(),
+            command.draftRevision(),
+            command.draftRevision() + 1);
+    corruptionUpdateOne(
+        """
+        INSERT INTO faq_draft_command
+          (faq_id, draft_revision, expected_draft_revision, draft_question, draft_answer,
+           intent_hash, occurred_at, created_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        command.faqId(),
+        command.draftRevision(),
+        command.expectedDraftRevision(),
+        command.draftQuestion(),
+        command.draftAnswer(),
+        command.intentHash(),
+        Timestamp.from(command.occurredAt()),
+        Timestamp.from(command.createdAt()));
+  }
+
+  private void deleteDraftCommand(FaqRepository.DraftCommand command) {
+    corruptionUpdateOne(
+        "DELETE FROM faq_draft_command WHERE faq_id = ? AND draft_revision = ?",
+        command.faqId(),
+        command.draftRevision());
   }
 
   private JdbcTemplate corruptionJdbc() {

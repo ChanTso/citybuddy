@@ -42,9 +42,29 @@ public class FaqPublicationService {
       repository.updateDraft(faqId, question, answer, expectedDraftRevision);
     }
     requireTransaction();
-    return repository
-        .findSource(faqId)
-        .orElseThrow(() -> inconsistent("FAQ draft disappeared inside its transaction"));
+    FaqRepository.FaqSource saved =
+        repository
+            .findSource(faqId)
+            .orElseThrow(() -> inconsistent("FAQ draft disappeared inside its transaction"));
+    String intentHash =
+        FaqPublicationCommitment.createDraft(
+            saved.faqId(),
+            saved.draftRevision(),
+            expectedDraftRevision,
+            saved.draftQuestion(),
+            saved.draftAnswer(),
+            saved.updatedAt().toString());
+    repository.insertDraftCommand(
+        new FaqRepository.DraftCommand(
+            saved.faqId(),
+            saved.draftRevision(),
+            expectedDraftRevision,
+            saved.draftQuestion(),
+            saved.draftAnswer(),
+            intentHash,
+            saved.updatedAt(),
+            saved.updatedAt()));
+    return saved;
   }
 
   @Transactional

@@ -38,6 +38,26 @@ CREATE TABLE faq_source (
   )
 ) ENGINE=InnoDB;
 
+CREATE TABLE faq_draft_command (
+  faq_id VARCHAR(64) CHARACTER SET ascii COLLATE ascii_bin NOT NULL,
+  draft_revision BIGINT UNSIGNED NOT NULL,
+  expected_draft_revision BIGINT UNSIGNED NOT NULL,
+  draft_question VARCHAR(500) NOT NULL,
+  draft_answer VARCHAR(4000) NOT NULL,
+  intent_hash CHAR(64) CHARACTER SET ascii COLLATE ascii_bin NOT NULL,
+  occurred_at TIMESTAMP(6) NOT NULL,
+  created_at TIMESTAMP(6) NOT NULL,
+  PRIMARY KEY (faq_id, draft_revision),
+  CONSTRAINT fk_faq_draft_command_source
+    FOREIGN KEY (faq_id) REFERENCES faq_source (faq_id),
+  CONSTRAINT chk_faq_draft_command_step CHECK (
+    draft_revision = expected_draft_revision + 1
+  ),
+  CONSTRAINT chk_faq_draft_command_hash CHECK (
+    REGEXP_LIKE(intent_hash, '^[0-9a-f]{64}$', 'c')
+  )
+) ENGINE=InnoDB;
+
 CREATE TABLE faq_publication_command (
   idempotency_key VARCHAR(128) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL PRIMARY KEY,
   event_id CHAR(36) CHARACTER SET ascii COLLATE ascii_bin NOT NULL,

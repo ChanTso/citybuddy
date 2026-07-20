@@ -231,7 +231,7 @@ for table in crm_profile product commerce_outbox; do
   assert_mysql_fails "auth_app cannot read $table" '(SELECT command denied|Access denied)' \
     mysql_query auth_app "$auth_app_password" commerce_db "SELECT * FROM $table"
 done
-for table in faq_source faq_publication_command; do
+for table in faq_source faq_draft_command faq_publication_command; do
   test "$(mysql_query commerce_app "$commerce_app_password" commerce_db "SELECT COUNT(*) FROM $table")" = 0
   assert_mysql_fails "auth_app cannot read $table" '(SELECT command denied|Access denied)' \
     mysql_query auth_app "$auth_app_password" commerce_db "SELECT * FROM $table"
@@ -245,6 +245,10 @@ assert_mysql_fails "commerce_app cannot update immutable FAQ publication command
   '(UPDATE command denied|Access denied)' \
   mysql_query commerce_app "$commerce_app_password" commerce_db \
   "UPDATE faq_publication_command SET intent_hash = REPEAT('0', 64) WHERE idempotency_key = 'none'"
+assert_mysql_fails "commerce_app cannot update immutable FAQ draft commands" \
+  '(UPDATE command denied|Access denied)' \
+  mysql_query commerce_app "$commerce_app_password" commerce_db \
+  "UPDATE faq_draft_command SET intent_hash = REPEAT('0', 64) WHERE faq_id = 'none'"
 if rg -n 'mysql|commerce_db|cs_db|spring.datasource' knowledge-indexer/src knowledge-indexer/pyproject.toml; then
   echo "Knowledge indexer contains forbidden direct database access." >&2
   exit 1

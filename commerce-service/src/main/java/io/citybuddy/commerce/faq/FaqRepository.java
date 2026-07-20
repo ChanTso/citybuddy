@@ -75,6 +75,24 @@ public class FaqRepository {
     }
   }
 
+  public void insertDraftCommand(DraftCommand command) {
+    jdbc.update(
+        """
+        INSERT INTO faq_draft_command
+          (faq_id, draft_revision, expected_draft_revision, draft_question, draft_answer,
+           intent_hash, occurred_at, created_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        command.faqId(),
+        command.draftRevision(),
+        command.expectedDraftRevision(),
+        command.draftQuestion(),
+        command.draftAnswer(),
+        command.intentHash(),
+        Timestamp.from(command.occurredAt()),
+        Timestamp.from(command.occurredAt()));
+  }
+
   public void publishSource(FaqSource source, long sourceVersion, Instant occurredAt) {
     int changed =
         jdbc.update(
@@ -250,6 +268,26 @@ public class FaqRepository {
         "SELECT " + SOURCE_COLUMNS + " FROM faq_source ORDER BY faq_id", FaqRepository::mapSource);
   }
 
+  public List<DraftCommand> allDraftCommands() {
+    return jdbc.query(
+        """
+        SELECT faq_id, draft_revision, expected_draft_revision, draft_question, draft_answer,
+               intent_hash, occurred_at, created_at
+        FROM faq_draft_command
+        ORDER BY faq_id, draft_revision
+        """,
+        (result, row) ->
+            new DraftCommand(
+                result.getString("faq_id"),
+                result.getLong("draft_revision"),
+                result.getLong("expected_draft_revision"),
+                result.getString("draft_question"),
+                result.getString("draft_answer"),
+                result.getString("intent_hash"),
+                result.getTimestamp("occurred_at").toInstant(),
+                result.getTimestamp("created_at").toInstant()));
+  }
+
   public List<OutboxEvent> allOutboxEvents() {
     return jdbc.query(
         """
@@ -361,6 +399,16 @@ public class FaqRepository {
       long expectedDraftRevision,
       long expectedPublishedVersion,
       long sourceVersion,
+      String intentHash,
+      Instant occurredAt,
+      Instant createdAt) {}
+
+  public record DraftCommand(
+      String faqId,
+      long draftRevision,
+      long expectedDraftRevision,
+      String draftQuestion,
+      String draftAnswer,
       String intentHash,
       Instant occurredAt,
       Instant createdAt) {}

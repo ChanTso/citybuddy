@@ -40,4 +40,5 @@ GRANT INSERT ON commerce_db.eval_commerce_audit_legacy_watermark TO 'commerce_mi
 REVOKE IF EXISTS SELECT ON commerce_db.eval_commerce_audit_reference FROM 'commerce_migration'@'%';
 REVOKE IF EXISTS INSERT ON commerce_db.eval_commerce_audit_legacy_watermark FROM 'commerce_migration'@'%';
 GRANT SELECT, INSERT, UPDATE ON commerce_db.faq_source TO 'commerce_app'@'%';
+GRANT SELECT, INSERT ON commerce_db.faq_draft_command TO 'commerce_app'@'%';
 GRANT SELECT, INSERT ON commerce_db.faq_publication_command TO 'commerce_app'@'%';

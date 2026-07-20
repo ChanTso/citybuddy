@@ -8,9 +8,44 @@ import java.util.List;
 
 final class FaqPublicationCommitment {
   private static final String FORMAT = "FAQ_PUBLICATION_INTENT_V1";
+  private static final String DRAFT_FORMAT = "FAQ_DRAFT_INTENT_V1";
   private static final long MAX_DELIVERY_ATTEMPTS = 1_000_000;
 
   private FaqPublicationCommitment() {}
+
+  static String createDraft(
+      String faqId,
+      long draftRevision,
+      long expectedDraftRevision,
+      String question,
+      String answer,
+      String occurredAt) {
+    return hash(
+        List.of(
+            DRAFT_FORMAT,
+            faqId,
+            Long.toString(draftRevision),
+            Long.toString(expectedDraftRevision),
+            question,
+            answer,
+            occurredAt));
+  }
+
+  static void verifyDraftCommand(FaqRepository.DraftCommand command) {
+    String expected =
+        createDraft(
+            command.faqId(),
+            command.draftRevision(),
+            command.expectedDraftRevision(),
+            command.draftQuestion(),
+            command.draftAnswer(),
+            command.occurredAt().toString());
+    if (command.draftRevision() != command.expectedDraftRevision() + 1
+        || !command.createdAt().equals(command.occurredAt())
+        || !command.intentHash().equals(expected)) {
+      throw inconsistent("FAQ draft command no longer matches its commitment");
+    }
+  }
 
   static String create(
       String faqId,
@@ -93,10 +128,30 @@ final class FaqPublicationCommitment {
 
   static void verifyCurrentSource(
       FaqRepository.PublicationCommand command,
+      FaqRepository.DraftCommand draftCommand,
       FaqRepository.FaqSource source,
       FaqKnowledgeEvent event) {
     if (source == null) {
       throw inconsistent("FAQ publication command has no source truth");
+    }
+    if (draftCommand == null
+        || !draftCommand.faqId().equals(source.faqId())
+        || draftCommand.draftRevision() != source.draftRevision()
+        || !draftCommand.draftQuestion().equals(source.draftQuestion())
+        || !draftCommand.draftAnswer().equals(source.draftAnswer())) {
+      throw inconsistent("Current FAQ draft is not anchored to its latest draft command");
+    }
+    if (command == null) {
+      if (source.publishedVersion() != 0
+          || source.publishedQuestion() != null
+          || source.publishedAnswer() != null
+          || source.publishedAt() != null
+          || !"DRAFT".equals(source.workingState())
+          || !source.updatedAt().equals(draftCommand.occurredAt())
+          || source.createdAt().isAfter(source.updatedAt())) {
+        throw inconsistent("Unpublished FAQ source has invalid publication state");
+      }
+      return;
     }
     if (source.publishedVersion() != command.sourceVersion()) {
       throw inconsistent("Current FAQ source is not anchored to its latest applied command");
@@ -113,12 +168,16 @@ final class FaqPublicationCommitment {
     if ("PUBLISHED".equals(source.workingState())) {
       if (source.draftRevision() != command.expectedDraftRevision()
           || !source.draftQuestion().equals(source.publishedQuestion())
-          || !source.draftAnswer().equals(source.publishedAnswer())) {
+          || !source.draftAnswer().equals(source.publishedAnswer())
+          || !source.updatedAt().equals(command.occurredAt())) {
         throw inconsistent("Published FAQ source is not its committed draft");
       }
-    } else if (!"DRAFT".equals(source.workingState())
-        || source.draftRevision() <= command.expectedDraftRevision()) {
-      throw inconsistent("Current FAQ source has an invalid working-state transition");
+    } else {
+      if (!"DRAFT".equals(source.workingState())
+          || source.draftRevision() <= command.expectedDraftRevision()
+          || !source.updatedAt().equals(draftCommand.occurredAt())) {
+        throw inconsistent("Current FAQ source has an invalid working-state transition");
+      }
     }
   }
 
