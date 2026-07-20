@@ -1,8 +1,11 @@
 package io.citybuddy.commerce.faq;
 
+import com.fasterxml.jackson.core.JsonParser;
 import com.fasterxml.jackson.core.JsonProcessingException;
+import com.fasterxml.jackson.core.StreamReadFeature;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import java.io.IOException;
 import java.time.Instant;
 import java.time.format.DateTimeParseException;
 import java.util.Set;
@@ -47,16 +50,29 @@ public final class FaqKnowledgeEventCodec {
     if (payload == null || payload.isBlank() || payload.length() > MAX_PAYLOAD_LENGTH) {
       throw invalid("FAQ knowledge event payload is invalid");
     }
-    try {
-      JsonNode root = objectMapper.readTree(payload);
+    try (JsonParser parser = objectMapper.createParser(payload)) {
+      parser.enable(StreamReadFeature.STRICT_DUPLICATE_DETECTION.mappedFeature());
+      JsonNode root = objectMapper.readTree(parser);
+      if (parser.nextToken() != null) {
+        throw invalid("FAQ knowledge event has trailing content");
+      }
       requireExactObject(root, EVENT_FIELDS);
       requireExactObject(root.get("content"), CONTENT_FIELDS);
+      requireText(root, "eventId");
+      requireText(root, "sourceId");
+      requireText(root, "sourceType");
+      requireIntegralLong(root, "sourceVersion");
+      requireText(root, "publicationState");
+      requireBoolean(root, "tombstone");
+      requireText(root, "occurredTime");
+      requireText(root.get("content"), "question");
+      requireText(root.get("content"), "answer");
       FaqKnowledgeEvent event = objectMapper.treeToValue(root, FaqKnowledgeEvent.class);
       validate(event);
       return event;
     } catch (FaqPublicationException exception) {
       throw exception;
-    } catch (JsonProcessingException exception) {
+    } catch (IOException exception) {
       throw invalid("FAQ knowledge event payload is invalid", exception);
     }
   }
@@ -69,6 +85,25 @@ public final class FaqKnowledgeEventCodec {
     node.fieldNames().forEachRemaining(actual::add);
     if (!actual.equals(expectedFields)) {
       throw invalid("FAQ knowledge event fields are not allowlisted");
+    }
+  }
+
+  private static void requireText(JsonNode object, String field) {
+    if (!object.get(field).isTextual()) {
+      throw invalid("FAQ knowledge event field types are invalid");
+    }
+  }
+
+  private static void requireIntegralLong(JsonNode object, String field) {
+    JsonNode value = object.get(field);
+    if (!value.isIntegralNumber() || !value.canConvertToLong()) {
+      throw invalid("FAQ knowledge event field types are invalid");
+    }
+  }
+
+  private static void requireBoolean(JsonNode object, String field) {
+    if (!object.get(field).isBoolean()) {
+      throw invalid("FAQ knowledge event field types are invalid");
     }
   }
 

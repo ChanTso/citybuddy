@@ -69,6 +69,25 @@ class FaqKnowledgeEventCodecTest {
   }
 
   @Test
+  void rejectsTypeCoercionDuplicateFieldsAndTrailingRoots() throws Exception {
+    String valid = codec.encode(validEvent());
+    JsonNode root = objectMapper.readTree(valid);
+    ((com.fasterxml.jackson.databind.node.ObjectNode) root).put("sourceVersion", "2");
+    assertValidation(root.toString());
+
+    root = objectMapper.readTree(valid);
+    ((com.fasterxml.jackson.databind.node.ObjectNode) root).put("tombstone", "false");
+    assertValidation(root.toString());
+
+    root = objectMapper.readTree(valid);
+    ((com.fasterxml.jackson.databind.node.ObjectNode) root.get("content")).put("question", 123);
+    assertValidation(root.toString());
+
+    assertValidation(valid.replaceFirst("\\{", "{\\\"eventId\\\":\\\"duplicate\\\","));
+    assertValidation(valid + "{}");
+  }
+
+  @Test
   void rejectsMalformedIdentifiersTimesAndOversizedPublicContent() {
     FaqKnowledgeEvent valid = validEvent();
     assertEncodeValidation(
