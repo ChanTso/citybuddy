@@ -135,6 +135,18 @@ request. A later semantic diff change requires the checklist to be executed and 
   writes against both unrelated same-database truth and another owner's private tables. A grant-job
   success message, manifest text, or bootstrap-session metadata query is not terminal evidence.
 
+### Time-bounded integration fixture validity
+
+- Map every time-bounded sandbox, identity, token, lease, and retry window from creation through its
+  last asserted use. When a suite grows, prove the fixture is still valid at the boundary under test;
+  an expired credential that happens to return the expected status is a false green.
+- Give long-running happy-path fixtures a contract-valid lifetime that covers the measured suite
+  path, or refresh credentials at explicit phase boundaries. Keep separate short-lived fixtures for
+  expiry behavior instead of making one fixture prove both longevity and expiry.
+- When a 401/403/404/503 classification matters, record the response body and issuance/failure
+  timestamps and identify the component that produced it. Do not carry a parked-defect label from a
+  prior run across a different assertion without re-establishing that the same boundary failed.
+
 ## Closeout maintenance
 
 At each slice or authorized non-slice closeout, append every newly evidenced recurring defect

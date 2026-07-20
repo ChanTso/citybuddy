@@ -372,8 +372,9 @@ reset_body() {
   local sandbox="$1"
   local case_id="$2"
   local product_name="$3"
-  printf '{"sandboxId":"%s","caseCorrelation":"%s","ttlSeconds":60,"testUserLabel":"user-%s","products":[{"productId":"product-1","name":"%s","description":"sandbox fixture","priceMinor":900,"currency":"CNY","stockQuantity":3,"available":true}]}' \
-    "$sandbox" "$case_id" "$sandbox" "$product_name"
+  local ttl_seconds="${4:-60}"
+  printf '{"sandboxId":"%s","caseCorrelation":"%s","ttlSeconds":%s,"testUserLabel":"user-%s","products":[{"productId":"product-1","name":"%s","description":"sandbox fixture","priceMinor":900,"currency":"CNY","stockQuantity":3,"available":true}]}' \
+    "$sandbox" "$case_id" "$ttl_seconds" "$sandbox" "$product_name"
 }
 
 reset_sandbox() {
@@ -381,12 +382,13 @@ reset_sandbox() {
   local case_id="$2"
   local key="$3"
   local product_name="$4"
+  local ttl_seconds="${5:-60}"
   assert_status 200 "reset $sandbox" \
     --request POST "http://127.0.0.1:$commerce_port/api/eval/reset" \
     --user "evaluation-manager:$management_password" \
     --header "Idempotency-Key: $key" \
     --header 'Content-Type: application/json' \
-    --data "$(reset_body "$sandbox" "$case_id" "$product_name")"
+    --data "$(reset_body "$sandbox" "$case_id" "$product_name" "$ttl_seconds")"
 }
 
 payment_reset_body() {
@@ -1111,15 +1113,15 @@ assert_status 401 "reset rejects substituted management credential" \
   --user "evaluation-client:$invalid_management_password" \
   --header 'Idempotency-Key: reset-main' \
   --header 'Content-Type: application/json' \
-  --data "$(reset_body sandbox-main case-main sandbox-product)"
+  --data "$(reset_body sandbox-main case-main sandbox-product 3600)"
 assert_status 400 "reset rejects unbounded fixture set" \
   --request POST "http://127.0.0.1:$commerce_port/api/eval/reset" \
   --user "evaluation-manager:$management_password" \
   --header 'Idempotency-Key: reset-main' \
   --header 'Content-Type: application/json' \
-  --data '{"sandboxId":"sandbox-main","caseCorrelation":"case-main","ttlSeconds":60,"testUserLabel":"user-main","products":[]}'
+  --data '{"sandboxId":"sandbox-main","caseCorrelation":"case-main","ttlSeconds":3600,"testUserLabel":"user-main","products":[]}'
 
-reset_sandbox sandbox-main case-main reset-main sandbox-product
+reset_sandbox sandbox-main case-main reset-main sandbox-product 3600
 cp "$tmp_dir/http-response.json" "$tmp_dir/reset-main.json"
 main_handle="$(uv run python scripts/read_json_field.py "$tmp_dir/reset-main.json" testUserHandle)"
 test "${#main_handle}" = 43
@@ -1170,14 +1172,14 @@ assert_equal "$state_truth_before" "$(mysql_query commerce_app "$commerce_app_pa
   "SELECT CONCAT(version, ':', UNIX_TIMESTAMP(expires_at), ':', UNIX_TIMESTAMP(updated_at)) FROM eval_sandbox WHERE sandbox_id = 'sandbox-main'")" \
   "state read has no lifecycle side effect"
 
-reset_sandbox sandbox-main case-main reset-main sandbox-product
+reset_sandbox sandbox-main case-main reset-main sandbox-product 3600
 cmp "$tmp_dir/reset-main.json" "$tmp_dir/http-response.json"
 assert_status 409 "same reset key rejects fixture mutation" \
   --request POST "http://127.0.0.1:$commerce_port/api/eval/reset" \
   --user "evaluation-manager:$management_password" \
   --header 'Idempotency-Key: reset-main' \
   --header 'Content-Type: application/json' \
-  --data "$(reset_body sandbox-main case-main changed-product)"
+  --data "$(reset_body sandbox-main case-main changed-product 3600)"
 assert_status 409 "case cannot bind a second sandbox" \
   --request POST "http://127.0.0.1:$commerce_port/api/eval/reset" \
   --user "evaluation-manager:$management_password" \
@@ -1199,7 +1201,7 @@ uv run python scripts/check_evaluation_token.py \
   --token-file "$tmp_dir/direct.jwt" --jwks-file "$tmp_dir/jwks.json" \
   --issuer https://identity.citybuddy.test --audience citybuddy-web \
   --token-type eval_direct_user --sandbox sandbox-main \
-  --maximum-expiry "$(date -u -v+61S +%s 2>/dev/null || date -u -d '+61 seconds' +%s)" \
+  --maximum-expiry "$(date -u -v+901S +%s 2>/dev/null || date -u -d '+901 seconds' +%s)" \
   --output "$tmp_dir/direct.json"
 direct_subject="$(uv run python scripts/read_json_field.py "$tmp_dir/direct.json" subject)"
 
@@ -2608,7 +2610,7 @@ assert_status 409 "dead sandbox cannot be reset or reused" \
   --user "evaluation-manager:$management_password" \
   --header 'Idempotency-Key: reset-main' \
   --header 'Content-Type: application/json' \
-  --data "$(reset_body sandbox-main case-main sandbox-product)"
+  --data "$(reset_body sandbox-main case-main sandbox-product 3600)"
 assert_status 403 "completion immediately blocks commerce liveness" \
   --request POST "http://127.0.0.1:$commerce_port/internal/eval/sandboxes/sandbox-main/liveness" \
   --header "Authorization: Bearer $direct_token" \
