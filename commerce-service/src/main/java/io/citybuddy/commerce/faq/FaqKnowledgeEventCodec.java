@@ -6,6 +6,7 @@ import com.fasterxml.jackson.core.StreamReadFeature;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import java.io.IOException;
+import java.nio.charset.StandardCharsets;
 import java.time.Instant;
 import java.time.format.DateTimeParseException;
 import java.util.Set;
@@ -17,7 +18,7 @@ public final class FaqKnowledgeEventCodec {
   public static final String PUBLICATION_STATE = "PUBLISHED";
   public static final int MAX_QUESTION_LENGTH = 500;
   public static final int MAX_ANSWER_LENGTH = 4000;
-  private static final int MAX_PAYLOAD_LENGTH = 8192;
+  private static final int MAX_PAYLOAD_BYTES = 8192;
   private static final Pattern SOURCE_ID = Pattern.compile("[a-z0-9][a-z0-9-]{0,63}");
   private static final Set<String> EVENT_FIELDS =
       Set.of(
@@ -40,16 +41,16 @@ public final class FaqKnowledgeEventCodec {
   public String encode(FaqKnowledgeEvent event) {
     validate(event);
     try {
-      return objectMapper.writeValueAsString(event);
+      String payload = objectMapper.writeValueAsString(event);
+      validatePayloadBoundary(payload);
+      return payload;
     } catch (JsonProcessingException exception) {
       throw new IllegalStateException("FAQ knowledge event serialization failed", exception);
     }
   }
 
   public FaqKnowledgeEvent decode(String payload) {
-    if (payload == null || payload.isBlank() || payload.length() > MAX_PAYLOAD_LENGTH) {
-      throw invalid("FAQ knowledge event payload is invalid");
-    }
+    validatePayloadBoundary(payload);
     try (JsonParser parser = objectMapper.createParser(payload)) {
       parser.enable(StreamReadFeature.STRICT_DUPLICATE_DETECTION.mappedFeature());
       JsonNode root = objectMapper.readTree(parser);
@@ -85,6 +86,14 @@ public final class FaqKnowledgeEventCodec {
     node.fieldNames().forEachRemaining(actual::add);
     if (!actual.equals(expectedFields)) {
       throw invalid("FAQ knowledge event fields are not allowlisted");
+    }
+  }
+
+  private static void validatePayloadBoundary(String payload) {
+    if (payload == null
+        || payload.isBlank()
+        || payload.getBytes(StandardCharsets.UTF_8).length > MAX_PAYLOAD_BYTES) {
+      throw invalid("FAQ knowledge event payload is invalid");
     }
   }
 

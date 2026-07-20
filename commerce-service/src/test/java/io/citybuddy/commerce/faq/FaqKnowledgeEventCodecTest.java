@@ -133,6 +133,17 @@ class FaqKnowledgeEventCodecTest {
                 "q".repeat(FaqKnowledgeEventCodec.MAX_QUESTION_LENGTH + 1), "answer")));
   }
 
+  @Test
+  void appliesTheSameUtf8PayloadBoundaryBeforeEncodingAndDecoding() {
+    FaqKnowledgeEvent valid = validEvent();
+    FaqKnowledgeEvent escapedWithinBoundary = withAnswer(valid, "x" + "\0".repeat(1000));
+    String encoded = codec.encode(escapedWithinBoundary);
+    assertThat(codec.decode(encoded)).isEqualTo(escapedWithinBoundary);
+
+    assertEncodeValidation(withAnswer(valid, "x" + "\0".repeat(3999)));
+    assertEncodeValidation(withAnswer(valid, "界".repeat(2800)));
+  }
+
   private void assertValidation(String payload) {
     assertThatThrownBy(() -> codec.decode(payload))
         .isInstanceOf(FaqPublicationException.class)
@@ -157,5 +168,17 @@ class FaqKnowledgeEventCodecTest {
         false,
         Instant.parse("2026-07-20T08:00:00.123456Z").toString(),
         new FaqKnowledgeEvent.PublicContent("How do returns work?", "Returns take five days."));
+  }
+
+  private static FaqKnowledgeEvent withAnswer(FaqKnowledgeEvent event, String answer) {
+    return new FaqKnowledgeEvent(
+        event.eventId(),
+        event.sourceId(),
+        event.sourceType(),
+        event.sourceVersion(),
+        event.publicationState(),
+        event.tombstone(),
+        event.occurredTime(),
+        new FaqKnowledgeEvent.PublicContent(event.content().question(), answer));
   }
 }

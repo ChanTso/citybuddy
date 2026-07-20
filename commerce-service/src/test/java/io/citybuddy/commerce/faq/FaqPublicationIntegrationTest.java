@@ -102,6 +102,20 @@ class FaqPublicationIntegrationTest {
                 0),
         FaqPublicationException.Code.VALIDATION);
 
+    service.saveDraft("faq-escaped-bound", "Escaped answer?", "x" + "\0".repeat(1000), 0);
+    FaqPublicationService.PublicationCommand escaped =
+        command("faq-escaped-bound", "faq-escaped-bound", 1, 0);
+    FaqPublicationService.PublicationResult escapedPublished = service.publish(escaped);
+    assertThat(service.publish(escaped).event()).isEqualTo(escapedPublished.event());
+
+    service.saveDraft("faq-expanded-oversize", "Expanded answer?", "x" + "\0".repeat(3999), 0);
+    assertCode(
+        () -> service.publish(command("faq-expanded-oversize", "faq-expanded-oversize", 1, 0)),
+        FaqPublicationException.Code.VALIDATION);
+    assertSource("faq-expanded-oversize", 1, 0, "DRAFT", null);
+    assertThat(faqCommandCount("faq-expanded-oversize")).isZero();
+    assertThat(faqOutboxCount("faq-expanded-oversize")).isZero();
+
     FaqPublicationService.PublicationCommand first = command("faq-main", "faq-main-first", 1, 0);
     FaqPublicationService.PublicationResult published = service.publish(first);
     assertThat(published.replayed()).isFalse();
