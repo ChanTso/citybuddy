@@ -146,6 +146,9 @@ request. A later semantic diff change requires the checklist to be executed and 
 - When a 401/403/404/503 classification matters, record the response body and issuance/failure
   timestamps and identify the component that produced it. Do not carry a parked-defect label from a
   prior run across a different assertion without re-establishing that the same boundary failed.
+- When a known defect is parked, name the first dependent required check where it becomes due and
+  predefine the sequential disposition if it recurs. A later failure must be attributed from its own
+  assertion, response, timestamps, durable truth, and service logs before reusing the parked label.
 
 ## Closeout maintenance
 
