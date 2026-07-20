@@ -120,10 +120,11 @@ def test_evaluation_audit_is_append_only_scoped_and_not_agent_evidence() -> None
         "TO 'commerce_app'@'%';"
     ) in grants
     assert (
-        "GRANT SELECT ON commerce_db.eval_commerce_audit_legacy_watermark "
-        "TO 'commerce_app'@'%';"
+        "GRANT SELECT ON commerce_db.eval_commerce_audit_legacy_watermark TO 'commerce_app'@'%';"
     ) in grants
-    assert "INSERT ON commerce_db.eval_commerce_audit_legacy_watermark TO 'commerce_app'" not in grants
+    assert (
+        "INSERT ON commerce_db.eval_commerce_audit_legacy_watermark TO 'commerce_app'" not in grants
+    )
     assert "UPDATE ON commerce_db.eval_commerce_audit_legacy_watermark" not in grants
     assert "DELETE ON commerce_db.eval_commerce_audit_legacy_watermark" not in grants
     assert "UPDATE ON commerce_db.eval_commerce_audit_reference" not in grants
@@ -193,7 +194,7 @@ def test_evaluation_audit_is_append_only_scoped_and_not_agent_evidence() -> None
         assert filtered_validity_predicate not in callback_enumerator
     assert "callback.intentHash().equals(expectedIntentHash)" in repository
     assert "callback.callbackCorrelationId().equals(callback.attemptCorrelationId())" in repository
-    assert "ledger.businessEventKey().equals(\"mock-payment:\" + callback.attemptId())" in repository
+    assert 'ledger.businessEventKey().equals("mock-payment:" + callback.attemptId())' in repository
     assert "reference.createdAt().equals(truth.createdAt())" in repository
     assert '"LEGACY_CUTOFF".equals(reference.createdAtAnchor())' in repository
     assert "FROM eval_sandbox" in audit_service

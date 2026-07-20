@@ -128,13 +128,11 @@ def test_exact_runtime_grants_preserve_truth_ownership() -> None:
         "TO 'commerce_app'@'%';"
     ) in grants
     assert (
-        "GRANT CREATE, ALTER, REFERENCES ON commerce_db.* "
-        "TO 'commerce_migration'@'%';"
+        "GRANT CREATE, ALTER, REFERENCES ON commerce_db.* TO 'commerce_migration'@'%';"
     ) in grants
     assert "GRANT SELECT, INSERT, CREATE, ALTER, REFERENCES ON commerce_db.*" not in grants
     assert (
-        "GRANT SELECT ON commerce_db.eval_commerce_audit_reference "
-        "TO 'commerce_migration'@'%';"
+        "GRANT SELECT ON commerce_db.eval_commerce_audit_reference TO 'commerce_migration'@'%';"
     ) in grants
     assert (
         "GRANT INSERT ON commerce_db.eval_commerce_audit_legacy_watermark "
@@ -149,8 +147,7 @@ def test_exact_runtime_grants_preserve_truth_ownership() -> None:
         "FROM 'commerce_migration'@'%';"
     ) in grants
     assert (
-        "GRANT SELECT ON commerce_db.eval_commerce_audit_legacy_watermark "
-        "TO 'commerce_app'@'%';"
+        "GRANT SELECT ON commerce_db.eval_commerce_audit_legacy_watermark TO 'commerce_app'@'%';"
     ) in grants
     assert "UPDATE ON commerce_db.eval_commerce_product_observation" not in grants
     assert "DELETE ON commerce_db.eval_commerce_product_observation" not in grants
@@ -186,6 +183,18 @@ def test_v013_uses_an_exact_version_preserving_grant_barrier() -> None:
     assert "interrupted V013 commitment" in grant_job
     assert "commerce_complete_runtime_table_state" in grant_job
     assert "commerce-applied-awaiting-support-migration" in grant_job
+    assert "auth_runtime_table_state" in grant_job
+    assert "auth-applied-awaiting-commerce-and-support-migrations" in grant_job
+    assert (
+        "Grant job rejects commerce evaluation tables without the commerce runtime schema."
+        in grant_job
+    )
+    auth_only_branch = grant_job.split(
+        'elif [[ "$normalized_runtime_table_state" == "$auth_runtime_table_state" ]]',
+        maxsplit=1,
+    )[1].split('elif [[ "$normalized_runtime_table_state" == "0:none" ]]', maxsplit=1)[0]
+    assert "$evaluation_grant" in auth_only_branch
+    assert "$optional_evaluation_grants" not in auth_only_branch
     migrate_commerce = makefile.split("migrate-commerce:", maxsplit=1)[1].split(
         "migrate-agent:", maxsplit=1
     )[0]
