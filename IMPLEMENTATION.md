@@ -1,6 +1,6 @@
 # CityBuddy implementation index
 
-**Document version:** v0.28\
+**Document version:** v0.29\
 **Verification date:** 2026-07-20\
 **Repository phase:** FAQ publication truth and transactional Outbox ready
 
@@ -111,9 +111,11 @@ The linked slice name is the canonical detailed specification. Target outcomes a
 | [CB-111 — Incremental knowledge synchronization and version/tombstone convergence](docs/slices/CB-111.md) | P1 | `PLANNED` | `CB-110` |
 | [CB-112 — Versioned two-level FAQ cache](docs/slices/CB-112.md) | P1 | `PLANNED` | `CB-111` |
 | [CB-113 — Knowledge rebuild validation and atomic alias switch](docs/slices/CB-113.md) | P1 | `PLANNED` | `CB-112` |
+| [CB-114 — Knowledge rollback catch-up and atomic restoration](docs/slices/CB-114.md) | P1 | `PLANNED` | `CB-113` |
+| [CB-115 — Expired knowledge-index candidate and predecessor cleanup](docs/slices/CB-115.md) | P1 | `PLANNED` | `CB-114` |
 | `CB-120 — Commerce PendingAction and atomic ActionReceipt transaction` | P1 | `PLANNED` | `CB-071`, `CB-082` |
 | `CB-121 — Agent confirmation, receipt projection, and turn commit` | P1 | `PLANNED` | `CB-120`, `CB-082` |
-| `CB-130 — Memory watermarks, prompt/PII, and tiered output safety` | P1 | `PLANNED` | `CB-113`, `CB-121` |
+| `CB-130 — Memory watermarks, prompt/PII, and tiered output safety` | P1 | `PLANNED` | `CB-115`, `CB-121` |
 | `CB-131 — Authoritative handoff tickets and agent projection` | P1 | `PLANNED` | `CB-130` |
 | `CB-132 — Reviewed failure-candidate capture and authenticated export` | P1 | `PLANNED` | `CB-131` |
 | `CB-140 — Minimal web demonstration` | P1 | `PLANNED` | `CB-020`, `CB-030`, `CB-061`, `CB-082`, `CB-091`, `CB-121` |
