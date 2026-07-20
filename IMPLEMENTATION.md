@@ -109,7 +109,7 @@ The linked slice name is the canonical detailed specification. Target outcomes a
 | [CB-104 — Asynchronous evaluation-entry inventory and production-only closure](docs/slices/CB-104.md) | P0 | `VERIFIED` | `CB-103` |
 | [CB-105 — Sandbox-bound idempotent mock-payment callbacks](docs/slices/CB-105.md) | P0 | `VERIFIED` | `CB-104` |
 | [CB-110 — FAQ publication truth and transactional Outbox](docs/slices/CB-110.md) | P1 | `VERIFIED` | `CB-030`, `CB-085`, `CB-091` |
-| [CB-111 — Incremental knowledge synchronization and version/tombstone convergence](docs/slices/CB-111.md) | P1 | `READY` | `CB-110` |
+| [CB-111 — Incremental knowledge synchronization and version/tombstone convergence](docs/slices/CB-111.md) | P1 | `IN_PROGRESS` | `CB-110` |
 | [CB-112 — Versioned two-level FAQ cache](docs/slices/CB-112.md) | P1 | `PLANNED` | `CB-111` |
 | [CB-113 — Knowledge rebuild validation and atomic alias switch](docs/slices/CB-113.md) | P1 | `PLANNED` | `CB-112` |
 | [CB-114 — Knowledge rollback catch-up and atomic restoration](docs/slices/CB-114.md) | P1 | `PLANNED` | `CB-113` |

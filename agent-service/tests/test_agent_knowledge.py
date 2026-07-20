@@ -75,6 +75,13 @@ def mapping() -> dict[str, object]:
                             "language": {"type": "keyword"},
                         },
                     },
+                    "sync_record_type": {"type": "keyword"},
+                    "sync_event_id": {"type": "keyword"},
+                    "sync_event_commitment": {"type": "keyword"},
+                    "sync_occurred_at": {
+                        "type": "date",
+                        "format": "strict_date_optional_time_nanos",
+                    },
                 },
             }
         }

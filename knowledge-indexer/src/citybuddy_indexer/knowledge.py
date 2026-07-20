@@ -12,8 +12,16 @@ from urllib.request import Request, urlopen
 
 KNOWLEDGE_ALIAS = "knowledge_docs_read"
 KNOWLEDGE_SCHEMA_VERSION = "cb090-v1"
+KNOWLEDGE_SYNC_SCHEMA_VERSION = "cb111-v1"
 EMBEDDING_DIMS = 8
 _INDEX_NAME = re.compile(r"^knowledge_docs_v[1-9][0-9]*$")
+
+KNOWLEDGE_SYNC_MAPPING_PROPERTIES: dict[str, object] = {
+    "sync_record_type": {"type": "keyword"},
+    "sync_event_id": {"type": "keyword"},
+    "sync_event_commitment": {"type": "keyword"},
+    "sync_occurred_at": {"type": "date", "format": "strict_date_optional_time_nanos"},
+}
 
 KNOWLEDGE_INDEX_MAPPING: dict[str, object] = {
     "mappings": {
@@ -51,6 +59,7 @@ KNOWLEDGE_INDEX_MAPPING: dict[str, object] = {
                     "language": {"type": "keyword"},
                 },
             },
+            **KNOWLEDGE_SYNC_MAPPING_PROPERTIES,
         },
     }
 }
@@ -207,6 +216,10 @@ def validate_knowledge_mapping(payload: dict[str, Any], index: str) -> None:
         "content": "text",
         "embedding": "dense_vector",
         "public_metadata": "object",
+        "sync_record_type": "keyword",
+        "sync_event_id": "keyword",
+        "sync_event_commitment": "keyword",
+        "sync_occurred_at": "date",
     }
     if set(properties) != set(required_types):
         raise KnowledgeBootstrapError("incompatible_mapping")
@@ -253,6 +266,9 @@ def validate_knowledge_mapping(payload: dict[str, Any], index: str) -> None:
         for field in metadata_properties
     ):
         raise KnowledgeBootstrapError("incompatible_mapping")
+    occurred_at = cast(dict[str, Any], properties["sync_occurred_at"])
+    if occurred_at.get("format") != "strict_date_optional_time_nanos":
+        raise KnowledgeBootstrapError("incompatible_mapping")
 
 
 @dataclass(frozen=True)
@@ -288,6 +304,8 @@ class ElasticsearchBootstrapClient:
         if status == 404:
             self._request("PUT", f"/{quote(index)}", KNOWLEDGE_INDEX_MAPPING)
             _, mapping = self._request("GET", f"/{quote(index)}/_mapping")
+        else:
+            mapping = self._upgrade_incremental_mapping(index, mapping)
         validate_knowledge_mapping(mapping, index)
 
         for document in documents:
@@ -297,7 +315,11 @@ class ElasticsearchBootstrapClient:
                 document.as_source(),
             )
         self._request("POST", f"/{quote(index)}/_refresh")
-        _, count_payload = self._request("GET", f"/{quote(index)}/_count")
+        _, count_payload = self._request(
+            "POST",
+            f"/{quote(index)}/_count",
+            {"query": {"term": {"schema_version": KNOWLEDGE_SCHEMA_VERSION}}},
+        )
         if count_payload.get("count") != len(documents):
             raise KnowledgeBootstrapError("unexpected_document_count")
 
@@ -316,6 +338,25 @@ class ElasticsearchBootstrapClient:
         if not self._alias_points_exactly(final_alias, index, alias):
             raise KnowledgeBootstrapError("ambiguous_alias")
         return BootstrapResult(index=index, alias=alias, document_count=len(documents))
+
+    def _upgrade_incremental_mapping(self, index: str, payload: dict[str, Any]) -> dict[str, Any]:
+        index_payload = payload.get(index)
+        mappings = index_payload.get("mappings") if isinstance(index_payload, dict) else None
+        properties = mappings.get("properties") if isinstance(mappings, dict) else None
+        if not isinstance(properties, dict):
+            raise KnowledgeBootstrapError("incompatible_mapping")
+        missing = set(KNOWLEDGE_SYNC_MAPPING_PROPERTIES).difference(properties)
+        if not missing:
+            return payload
+        if missing != set(KNOWLEDGE_SYNC_MAPPING_PROPERTIES):
+            raise KnowledgeBootstrapError("incompatible_mapping")
+        self._request(
+            "PUT",
+            f"/{quote(index)}/_mapping",
+            {"properties": KNOWLEDGE_SYNC_MAPPING_PROPERTIES},
+        )
+        _, upgraded = self._request("GET", f"/{quote(index)}/_mapping")
+        return upgraded
 
     @staticmethod
     def _alias_points_exactly(payload: dict[str, Any], index: str, alias: str) -> bool:
