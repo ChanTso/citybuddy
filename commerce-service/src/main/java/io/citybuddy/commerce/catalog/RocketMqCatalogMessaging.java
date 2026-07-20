@@ -1,5 +1,7 @@
 package io.citybuddy.commerce.catalog;
 
+import io.citybuddy.commerce.faq.FaqOutboxPublisher;
+import io.citybuddy.commerce.faq.FaqRepository;
 import java.nio.ByteBuffer;
 import java.nio.charset.StandardCharsets;
 import java.time.Duration;
@@ -14,8 +16,11 @@ import org.apache.rocketmq.client.apis.message.MessageView;
 import org.apache.rocketmq.client.apis.producer.Producer;
 
 public final class RocketMqCatalogMessaging
-    implements CatalogOutboxPublisher.CatalogEventSender, AutoCloseable {
+    implements CatalogOutboxPublisher.CatalogEventSender,
+        FaqOutboxPublisher.FaqEventSender,
+        AutoCloseable {
   private static final String TAG = "product-publication";
+  public static final String FAQ_TAG = "knowledge-sync";
   static final String RESERVED_SANDBOX_PROPERTY = "citybuddy-eval-sandbox-id";
 
   private final ClientServiceProvider provider;
@@ -59,13 +64,22 @@ public final class RocketMqCatalogMessaging
 
   @Override
   public void send(ProductRepository.OutboxEvent event) throws Exception {
+    send(event.eventId(), event.payload(), TAG);
+  }
+
+  @Override
+  public void send(FaqRepository.OutboxEvent event) throws Exception {
+    send(event.eventId(), event.payload(), FAQ_TAG);
+  }
+
+  private void send(String eventId, String payload, String tag) throws Exception {
     Message message =
         provider
             .newMessageBuilder()
             .setTopic(properties.rocketmqTopic())
-            .setTag(TAG)
-            .setKeys(event.eventId())
-            .setBody(event.payload().getBytes(StandardCharsets.UTF_8))
+            .setTag(tag)
+            .setKeys(eventId)
+            .setBody(payload.getBytes(StandardCharsets.UTF_8))
             .build();
     producer.send(message);
   }

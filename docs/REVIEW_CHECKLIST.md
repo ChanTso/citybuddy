@@ -60,6 +60,27 @@ request. A later semantic diff change requires the checklist to be executed and 
   other validity predicates run only after enumeration; placing one in the enumerator turns an
   inconsistency into an apparent absence. Treat an unclassified predicate, or a predicate classified
   as an assertion but retained in `JOIN`/`WHERE`, as incomplete review evidence.
+- Treat prose rules, manually reviewed predicate tables, and source-text parsing as useful heuristics,
+  not totality evidence. SQL and Java text admit function wrapping, aliases, subqueries, and indirect
+  helper calls that a bounded textual checker cannot enumerate completely. Prove totality at the
+  observable behavior boundary with a real integration matrix generated from `information_schema`:
+  every physical column in each audited durable face must have an explicit anchored-content or
+  mechanism-backed-invariant disposition and a controlled data-consistency fault. A new schema
+  column without a disposition must make matrix construction fail closed. Exercise every applicable
+  corruption with each companion truth face present and absent; normal publication/state behavior
+  must reject rather than silently report zero work. Text-level predicate allowlists may remain as a
+  cheap review signal, but their success is never evidence that all predicates or reachable
+  enumerators were found.
+- Define behavioral completeness over the Cartesian product of two enumerable ground truths:
+  every lifecycle state reachable from the persisted state machine and every physical column from
+  `information_schema`. Construct a real fixture in each reachable state and execute every column
+  disposition there; a column matrix sampled in only one legal state is incomplete. Bind the state
+  inventory to the database state type and every production transition so an added state or schema
+  column fails closed. For the FAQ publication aggregate the closed state set is exactly `DRAFT`
+  and `PUBLISHED`; a mutable current draft is anchored to its latest immutable draft command, while
+  the latest applied publication command anchors only the published face. Any future completeness
+  objection must identify an omitted reachable state or physical column; a proposed third
+  orthogonal dimension triggers owner review rather than an unbounded implementation expansion.
 - Enumerate every overlapping authoritative truth face independently and require equality of their
   stable key sets before comparing row content. For a successful standard payment, independently
   enumerate `PAID` orders, `STANDARD_PAYMENT` ledger movements, terminal successful callbacks, and
