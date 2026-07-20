@@ -5,6 +5,7 @@ x-redis-image: &redis-image redis:7.2.14-bookworm@sha256:3d550f0b980dbf676953180
 x-elasticsearch-image: &elasticsearch-image ${ELASTICSEARCH_IMAGE:-citybuddy-elasticsearch-ik:8.19.8}
 x-rocketmq-image: &rocketmq-image apache/rocketmq:5.5.0@sha256:7e8f6c9dbd9df742ed26ba69c00d4ad69e2f86a56f3ca7782ff8144dd0798132
 x-rocketmq-probe-image: &rocketmq-probe-image ${ROCKETMQ_PROBE_IMAGE:-citybuddy-rocketmq-probe:5.2.1}
+x-knowledge-indexer-image: &knowledge-indexer-image ${KNOWLEDGE_INDEXER_IMAGE:-citybuddy-knowledge-indexer:local}
 x-migration-service: &migration-service
   image: *mysql-image
   restart: "no"
@@ -276,6 +277,31 @@ services:
       timeout: 15s
       retries: 6
       start_period: 5s
+
+  knowledge-indexer:
+    profiles: ["application"]
+    build:
+      context: .
+      dockerfile: infra/knowledge-indexer/Dockerfile
+    image: *knowledge-indexer-image
+    restart: unless-stopped
+    depends_on:
+      elasticsearch:
+        condition: service_healthy
+      rocketmq-broker-proxy:
+        condition: service_healthy
+    command:
+      - consume
+      - --rocketmq-endpoints
+      - rocketmq-broker-proxy:8081
+      - --topic
+      - ${KNOWLEDGE_SYNC_TOPIC:-citybuddy-catalog-events}
+      - --consumer-group
+      - ${KNOWLEDGE_SYNC_CONSUMER_GROUP:-citybuddy-knowledge-indexer}
+      - --elasticsearch-url
+      - http://elasticsearch:9200
+      - --alias
+      - knowledge_docs_read
 
 volumes:
   mysql-data:

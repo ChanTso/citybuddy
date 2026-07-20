@@ -140,6 +140,7 @@ def java_methods(java_source: str) -> dict[str, str]:
 def test_inventory_is_complete_and_has_no_evaluation_reachable_path() -> None:
     inventory = json.loads(INVENTORY.read_text(encoding="utf-8"))
     assert inventory["evaluationReachablePathCount"] == 0
+    assert inventory["version"] == "cb111-v1"
     assert inventory["reservedSandboxEnvelopeProperty"] == "citybuddy-eval-sandbox-id"
     paths = {path["id"]: path for path in inventory["paths"]}
     assert set(paths) == {
@@ -190,6 +191,12 @@ def test_production_consumers_reject_reserved_sandbox_envelope_property() -> Non
     assert "rejectEvaluationContext(message)" in catalog
     assert "rejectEvaluationContext(message)" in transaction
     assert "rejectEvaluationContext(message)" in timeout
+    indexer = source("knowledge-indexer/src/citybuddy_indexer/worker.py")
+    assert "RESERVED_SANDBOX_PROPERTY" in indexer
+    assert "_has_reserved_sandbox(properties)" in indexer
+    assert indexer.index("_has_reserved_sandbox(properties)") < indexer.index(
+        "FaqKnowledgeEvent.from_bytes(body)"
+    )
     assert ".addProperty(" not in catalog
     assert ".addProperty(" not in transaction
     assert ".addProperty(" not in timeout
@@ -209,7 +216,13 @@ def test_outbox_and_non_commerce_paths_are_not_hidden_async_carriers() -> None:
     assert "event_type = 'PRODUCT_PUBLICATION_CHANGED'" in products
     assert 'static final String EVENT_TYPE = "FAQ_KNOWLEDGE_SYNCHRONIZATION"' in faq
     assert "sandbox" not in spike_event.lower()
-    assert "without messaging" in indexer_worker
+    assert "RocketMqKnowledgeConsumer" in indexer_worker
+    assert "ElasticsearchKnowledgeProjection" in indexer_worker
+    assert "RESERVED_SANDBOX_PROPERTY" in indexer_worker
+    assert "SimpleConsumer" in indexer_worker
+    assert "RocketMqKnowledgeConsumer -> ElasticsearchKnowledgeProjection" in source(
+        "commerce-service/src/main/resources/async-entry-inventory.json"
+    )
     assert "rocketmq" not in agent_files.lower()
 
 
@@ -244,6 +257,13 @@ def test_inventory_closes_all_runtime_rocketmq_builders_and_outbox_readers() -> 
     assert consumers == runtime_messaging
     assert sum(source(path).count(".newProducerBuilder()") for path in producers) == 3
     assert sum(source(path).count(".newSimpleConsumerBuilder()") for path in consumers) == 3
+
+    python_consumers = relative_sources_with("knowledge-indexer/src", ".py", "SimpleConsumer(")
+    assert python_consumers == {
+        "knowledge-indexer/src/citybuddy_indexer/rocketmq_spike.py",
+        "knowledge-indexer/src/citybuddy_indexer/worker.py",
+    }
+    assert source("knowledge-indexer/src/citybuddy_indexer/worker.py").count("SimpleConsumer(") == 1
 
     outbox_readers = relative_sources_with(
         "commerce-service/src/main/java",

@@ -1,5 +1,13 @@
 """CityBuddy public-knowledge indexing boundary."""
 
+from .incremental import (
+    ElasticsearchKnowledgeProjection,
+    FaqKnowledgeEvent,
+    KnowledgeEventError,
+    KnowledgeSyncConflict,
+    KnowledgeSyncError,
+    ProjectionOutcome,
+)
 from .knowledge import (
     EMBEDDING_DIMS,
     INITIAL_PUBLIC_CORPUS,
@@ -9,7 +17,14 @@ from .knowledge import (
     KnowledgeBootstrapError,
     KnowledgeDocument,
 )
-from .worker import IndexerSettings, IndexerWorker, create_worker
+from .worker import (
+    DeliveryAction,
+    DeliveryResult,
+    IndexerSettings,
+    IndexerWorker,
+    RocketMqKnowledgeConsumer,
+    create_worker,
+)
 
 __all__ = [
     "EMBEDDING_DIMS",
@@ -17,9 +32,18 @@ __all__ = [
     "KNOWLEDGE_ALIAS",
     "KNOWLEDGE_INDEX_MAPPING",
     "ElasticsearchBootstrapClient",
+    "ElasticsearchKnowledgeProjection",
+    "FaqKnowledgeEvent",
+    "KnowledgeEventError",
     "IndexerSettings",
     "IndexerWorker",
     "KnowledgeBootstrapError",
     "KnowledgeDocument",
+    "KnowledgeSyncConflict",
+    "KnowledgeSyncError",
+    "ProjectionOutcome",
+    "DeliveryAction",
+    "DeliveryResult",
+    "RocketMqKnowledgeConsumer",
     "create_worker",
 ]

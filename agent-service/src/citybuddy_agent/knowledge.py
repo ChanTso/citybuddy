@@ -77,7 +77,7 @@ class KnowledgeSearchResult(BaseModel):
     chunk_id: str = Field(serialization_alias="chunkId", min_length=1, max_length=128)
     source_version: int = Field(serialization_alias="sourceVersion", ge=1)
     doc_type: Literal["faq", "product"] = Field(serialization_alias="docType")
-    title: str = Field(min_length=1, max_length=200)
+    title: str = Field(min_length=1, max_length=500)
     excerpt: str = Field(min_length=1, max_length=600)
     public_metadata: PublicKnowledgeMetadata = Field(serialization_alias="publicMetadata")
     rank: int = Field(ge=1, le=FINAL_RESULT_LIMIT)
@@ -96,15 +96,15 @@ class KnowledgeSearchOutput(BaseModel):
 class _IndexedKnowledgeSource(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
-    schema_version: Literal["cb090-v1"]
+    schema_version: Literal["cb090-v1", "cb111-v1"]
     source_id: str = Field(min_length=1, max_length=128)
     source_version: int = Field(ge=1)
     chunk_id: str = Field(min_length=1, max_length=128)
     doc_type: Literal["faq", "product"]
     published: Literal[True]
     deleted: Literal[False]
-    title: str = Field(min_length=1, max_length=200)
-    content: str = Field(min_length=1, max_length=2000)
+    title: str = Field(min_length=1, max_length=500)
+    content: str = Field(min_length=1, max_length=4000)
     public_metadata: PublicKnowledgeMetadata
 
 
@@ -240,6 +240,10 @@ class ElasticsearchKnowledgeSearch:
             "content": "text",
             "embedding": "dense_vector",
             "public_metadata": "object",
+            "sync_record_type": "keyword",
+            "sync_event_id": "keyword",
+            "sync_event_commitment": "keyword",
+            "sync_occurred_at": "date",
         }
         if set(properties) != set(expected):
             raise KnowledgeSearchFailure("mapping_incompatible")
@@ -285,6 +289,9 @@ class ElasticsearchKnowledgeSearch:
             or metadata_properties[field].get("type") != "keyword"
             for field in metadata_properties
         ):
+            raise KnowledgeSearchFailure("mapping_incompatible")
+        occurred_at = cast(dict[str, Any], properties["sync_occurred_at"])
+        if occurred_at.get("format") != "strict_date_optional_time_nanos":
             raise KnowledgeSearchFailure("mapping_incompatible")
 
     def _bm25(

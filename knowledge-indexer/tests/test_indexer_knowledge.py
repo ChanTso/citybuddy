@@ -109,6 +109,8 @@ def test_mapping_is_strict_versioned_ik_and_dense_vector() -> None:
         lambda properties: properties["public_metadata"]["properties"]["category"].update(
             {"type": "text"}
         ),
+        lambda properties: properties.pop("sync_event_commitment"),
+        lambda properties: properties["sync_occurred_at"].update({"format": "date_optional_time"}),
     ],
 )
 def test_mapping_validation_rejects_incompatible_boundary(

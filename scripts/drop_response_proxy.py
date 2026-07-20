@@ -10,19 +10,26 @@ from urllib.parse import urlsplit
 
 
 class DropState:
-    def __init__(self, upstream: str, path_prefix: str, drop_count: int) -> None:
+    def __init__(
+        self, upstream: str, path_prefix: str, drop_count: int, method: str | None = None
+    ) -> None:
         parsed = urlsplit(upstream)
         if parsed.scheme != "http" or not parsed.hostname or parsed.port is None:
             raise ValueError("upstream must be an explicit http host and port")
         self.host = parsed.hostname
         self.port = parsed.port
         self.path_prefix = path_prefix
+        self.method = method
         self.remaining = drop_count
         self.lock = Lock()
 
-    def should_drop(self, path: str) -> bool:
+    def should_drop(self, method: str, path: str) -> bool:
         with self.lock:
-            if not path.startswith(self.path_prefix) or self.remaining == 0:
+            if (
+                (self.method is not None and method != self.method)
+                or not path.startswith(self.path_prefix)
+                or self.remaining == 0
+            ):
                 return False
             self.remaining -= 1
             return True
@@ -36,6 +43,9 @@ class Handler(BaseHTTPRequestHandler):
         self._forward()
 
     def do_POST(self) -> None:  # noqa: N802
+        self._forward()
+
+    def do_PUT(self) -> None:  # noqa: N802
         self._forward()
 
     def _forward(self) -> None:
@@ -52,7 +62,7 @@ class Handler(BaseHTTPRequestHandler):
             connection.request(self.command, self.path, body=body, headers=headers)
             response = connection.getresponse()
             payload = response.read()
-            dropped = self.server.state.should_drop(self.path)
+            dropped = self.server.state.should_drop(self.command, self.path)
             print(
                 f"upstream_status={response.status} path={self.path} dropped={dropped}",
                 flush=True,
@@ -106,15 +116,17 @@ class DropServer(ThreadingHTTPServer):
 
 def main() -> None:
     parser = argparse.ArgumentParser()
+    parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, required=True)
     parser.add_argument("--upstream", required=True)
     parser.add_argument("--path-prefix", required=True)
+    parser.add_argument("--method", choices=("GET", "POST", "PUT"))
     parser.add_argument("--drop-count", type=int, default=1)
     args = parser.parse_args()
     if args.drop_count < 1 or args.drop_count > 20:
         raise ValueError("drop-count must be between 1 and 20")
-    state = DropState(args.upstream, args.path_prefix, args.drop_count)
-    DropServer(("127.0.0.1", args.port), state).serve_forever()
+    state = DropState(args.upstream, args.path_prefix, args.drop_count, args.method)
+    DropServer((args.host, args.port), state).serve_forever()
 
 
 if __name__ == "__main__":

@@ -159,6 +159,23 @@ def test_elasticsearch_image_and_health_pin_the_matching_ik_analyzer() -> None:
     assert "knowledge_docs_v" not in integration
 
 
+def test_knowledge_indexer_runtime_has_only_broker_and_elasticsearch_authority() -> None:
+    compose = (ROOT / "compose.yaml").read_text()
+    runtime = re.search(
+        r"(?ms)^  knowledge-indexer:\n(.*?)(?=^  [a-z][^:\n]*:\n|^volumes:)", compose
+    )
+    assert runtime is not None
+    configuration = runtime.group(1)
+    assert 'profiles: ["application"]' in configuration
+    assert "infra/knowledge-indexer/Dockerfile" in configuration
+    assert "rocketmq-broker-proxy:8081" in configuration
+    assert "http://elasticsearch:9200" in configuration
+    assert "knowledge_docs_read" in configuration
+    assert "mysql" not in configuration.casefold()
+    assert "redis" not in configuration.casefold()
+    assert "PASSWORD" not in configuration
+
+
 def test_rocketmq_runtime_uses_pinned_proxy_and_grpc_probe() -> None:
     compose = (ROOT / "compose.yaml").read_text()
     probe_pom = (ROOT / "infra" / "rocketmq" / "probe" / "pom.xml").read_text()
@@ -228,6 +245,7 @@ def test_local_ci_order_and_parallel_workflow_cover_every_required_target() -> N
         "test-retrieval-evidence-integration",
         "test-rocketmq-integration",
         "test-knowledge-indexer-rocketmq-spike",
+        "test-knowledge-sync-integration",
     )
     positions = [aggregate_commands.index(target) for target in expected_targets]
     assert positions == sorted(positions)
