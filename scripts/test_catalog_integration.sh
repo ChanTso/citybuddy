@@ -3,14 +3,13 @@ set -euo pipefail
 
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$repo_root"
+source "$repo_root/scripts/test_port_allocator.sh"
 
 tmp_dir="$(mktemp -d)"
 env_file="$tmp_dir/.env"
 project="citybuddy-cb030-test-$$"
-auth_port="$((44000 + ($$ % 500)))"
-export MYSQL_PORT="$((33060 + ($$ % 500)))"
-export REDIS_COMMERCE_PORT="$((35000 + ($$ % 500)))"
-export ROCKETMQ_PROXY_PORT="$((42000 + ($$ % 500)))"
+allocate_test_ports auth_port MYSQL_PORT REDIS_COMMERCE_PORT ROCKETMQ_PROXY_PORT
+export MYSQL_PORT REDIS_COMMERCE_PORT ROCKETMQ_PROXY_PORT
 topic="cb030-catalog-$$"
 consumer_group="cb030-catalog-consumer-$$"
 transaction_topic="cb060-seckill-transaction-$$"
@@ -55,6 +54,7 @@ cleanup() {
     fi
   fi
   "${compose[@]}" down --volumes --remove-orphans >/dev/null 2>&1 || true
+  release_test_ports
   rm -rf "$tmp_dir"
 }
 trap cleanup EXIT

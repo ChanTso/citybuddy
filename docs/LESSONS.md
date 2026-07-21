@@ -241,3 +241,10 @@ This file records only factual pitfalls supported by merged pull-request, commit
 - 根因：direct-user 与 OBO 鉴权器用覆盖整个授权流程的 `RuntimeException` 捕获边界，把 JWKS 缓存刷新时的连接失败、可信 JWKS 语法解析失败，以及语法可解析但无法转换为可用 RSA 公钥的语义失败折叠成普通凭证拒绝；控制器随后把这些拒绝统一渲染为 403。相同公开状态的各生产者又没有唯一内部原因码，使间歇失败在结构上不可归因。
 - 解决：先给 evaluation 的每个 403/拒绝生产者分配仅写服务日志的唯一原因码，公开 403 继续固定为 `Forbidden`；集成脚本在失败时只提取新增原因码。把 JWKS 获取、解析和公钥语义转换放进同一 dependency-refresh 边界并提升为独立的 identity-verification unavailable 异常，在 liveness、OBO tool、catalog 与 mock-payment 边界固定映射为 503；无效凭证、未知 signing key、确证 inactive/missing/mismatch 仍保持拒绝。真实集成把两类 JWKS cache TTL 降至一秒，取得 token 后等待过期并停止 auth 服务，fail-closed 地断言原因码集合精确为 `LIVENESS_DIRECT_USER_JWKS_UNAVAILABLE`、`TOOL_OBO_JWKS_UNAVAILABLE` 且都只返回固定 503；随后 16 路审计写撤权故障与 16 路并发 liveness 读取保持 `503/204`，原 token/header/registry liveness 回归继续通过。单元故障注入另覆盖 loader timeout、连接耗尽、可信 JWKS 语法损坏、可解析但不足 512 位的 RSA key，以及 audit、access、payment lock 三处数据库查询不可判定与确证 inactive/missing 的二分；mock-payment 的 direct-user 权限拒绝和缺少 evaluation 组件也各有独立内部原因码。
 - 结论：同一状态码的多个抛出点若无判别信息，间歇失败在结构上不可归因；修复前必须先插桩取得唯一归因。授权或存活校验只能把已证明的否定事实分类为拒绝，依赖不可用、超时、连接耗尽和查询失败都属于无法判定，必须固定返回 503；宽泛异常边界不得把不可用吞并为拒绝。
+
+## Maintenance — Probed integration-test port allocation
+
+- 现象：CB-111 final-head CI 的 evaluation sandbox 集成曾随机在服务启动时遇到 host port 已占用；原有 13 个集成脚本分别以 `PID % range` 直接生成端口且从不探测，其中多数区间落在 Linux 默认临时端口范围 32768–60999，runner 上无关进程的短连接也能与其竞争。
+- 根因：PID 取模只是在有限范围内猜测端口，不构成可用性检查或并发所有权；不同脚本重复实现不同区间，既无法统一避开系统临时端口，也无法阻止两个测试进程选择同一候选。受控预占夹具本身若未先证明 holder 已监听，还会制造“探测后才被抢占”的错误证据。
+- 解决：全部集成脚本统一使用共享端口租约器，只在 20000–31999 分配；每个候选先以真实 loopback bind 探测，再以原子目录租约协调并发套件，冲突时最多顺延 4096 个候选，进程退出后释放或由后续分配回收失效租约。行为回归真实预占首选端口，并让知识搜索与 evaluation identity 两个完整套件同时从同一候选开始；两者均成功且最终无残余租约或 Docker 资源。
+- 结论：测试端口不得落在系统临时端口范围内，且分配必须探测可用性；PID 取模是无保留的猜测，失败随机且易被误判为切片缺陷。并发正确性还需要共享租约而非彼此独立的“看起来空闲”；受控预占证据必须先证明占用方已就绪。

@@ -204,6 +204,20 @@ request. A later semantic diff change requires the checklist to be executed and 
   reason code, response, authoritative state, and reached fault boundary so a status coincidence
   cannot pass as attribution.
 
+### Probed and leased integration-test ports
+
+- Do not derive host ports from a PID or another unverified process-local value. Keep test-only
+  allocation below the platform ephemeral-port floor, probe the real loopback bind before use, and
+  retry the next candidate within an explicit bound when either the operating system or another
+  suite already owns the candidate.
+- Coordinate every repository integration suite through the same process-scoped lease registry so
+  concurrent suites cannot select the same probed port. Release leases only after local processes
+  and containers have stopped, reclaim leases whose owning process is gone, and fail closed when the
+  bounded candidate set is exhausted.
+- Prove both collision classes with behavior, not allocator arithmetic: hold the preferred port open
+  before allocation and show a real suite starts on a later candidate; start two real suites from the
+  same preferred candidate and show both complete with disjoint leases and no residual resources.
+
 ## Closeout maintenance
 
 At each slice or authorized non-slice closeout, append every newly evidenced recurring defect

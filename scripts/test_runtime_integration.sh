@@ -3,6 +3,7 @@ set -euo pipefail
 
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$repo_root"
+source "$repo_root/scripts/test_port_allocator.sh"
 
 tmp_dir="$(mktemp -d)"
 env_file="$tmp_dir/.env"
@@ -27,6 +28,7 @@ volumes=(
 
 cleanup() {
   "${compose[@]}" down --volumes --remove-orphans >/dev/null 2>&1 || true
+  release_test_ports
   rm -rf "$tmp_dir"
 }
 trap cleanup EXIT
@@ -104,11 +106,8 @@ assert_clean_project
 
 export MYSQL_PORT REDIS_COMMERCE_PORT REDIS_SUPPORT_PORT ELASTICSEARCH_PORT ELASTICSEARCH_IMAGE
 export ROCKETMQ_PROXY_PORT ROCKETMQ_PROBE_IMAGE
-MYSQL_PORT="$((33060 + ($$ % 700)))"
-REDIS_COMMERCE_PORT="$((35000 + ($$ % 700)))"
-REDIS_SUPPORT_PORT="$((36000 + ($$ % 700)))"
-ELASTICSEARCH_PORT="$((37000 + ($$ % 700)))"
-ROCKETMQ_PROXY_PORT="$((40000 + ($$ % 700)))"
+allocate_test_ports MYSQL_PORT REDIS_COMMERCE_PORT REDIS_SUPPORT_PORT ELASTICSEARCH_PORT \
+  ROCKETMQ_PROXY_PORT
 ELASTICSEARCH_IMAGE="citybuddy-elasticsearch-ik:${project}"
 ROCKETMQ_PROBE_IMAGE="citybuddy-rocketmq-probe:${project}"
 

@@ -3,16 +3,13 @@ set -euo pipefail
 
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$repo_root"
+source "$repo_root/scripts/test_port_allocator.sh"
 
 tmp_dir="$(mktemp -d)"
 env_file="$tmp_dir/.env"
 project="citybuddy-cb020-test-$$"
-auth_port="$((44000 + ($$ % 500)))"
-agent_port="$((45000 + ($$ % 500)))"
-commerce_port="$((46000 + ($$ % 500)))"
-proxy_port="$((47000 + ($$ % 500)))"
-timeout_agent_port="$((48000 + ($$ % 500)))"
-export MYSQL_PORT="$((33060 + ($$ % 500)))"
+allocate_test_ports auth_port agent_port commerce_port proxy_port timeout_agent_port MYSQL_PORT
+export MYSQL_PORT
 compose=(docker compose --project-name "$project" --env-file "$env_file" --file compose.yaml)
 auth_pid=""
 agent_pid=""
@@ -37,6 +34,7 @@ cleanup() {
     kill "$timeout_agent_pid" >/dev/null 2>&1 || true
   fi
   "${compose[@]}" down --volumes --remove-orphans >/dev/null 2>&1 || true
+  release_test_ports
   rm -rf "$tmp_dir"
 }
 

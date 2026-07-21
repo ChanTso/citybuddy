@@ -3,11 +3,13 @@ set -euo pipefail
 
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$repo_root"
+source "$repo_root/scripts/test_port_allocator.sh"
 
 tmp_dir="$(mktemp -d)"
 env_file="$tmp_dir/.env"
 project="citybuddy-cb090-test-$$"
-export ELASTICSEARCH_PORT="$((49000 + ($$ % 500)))"
+allocate_test_ports ELASTICSEARCH_PORT
+export ELASTICSEARCH_PORT
 export ELASTICSEARCH_IMAGE="citybuddy-elasticsearch-ik:${project}"
 compose=(docker compose --project-name "$project" --env-file "$env_file" --file compose.yaml)
 
@@ -19,6 +21,7 @@ cleanup() {
     "${compose[@]}" logs --no-color elasticsearch >&2 || true
   fi
   "${compose[@]}" down --volumes --remove-orphans >/dev/null 2>&1 || true
+  release_test_ports
   rm -rf "$tmp_dir"
   return "$status"
 }

@@ -279,8 +279,8 @@ def test_local_ci_order_and_parallel_workflow_cover_every_required_target() -> N
     assert "preserves existing credentials" in integration
     assert "down preserves all durable volumes" in integration
     assert "sleep " not in integration
-    assert 'REDIS_COMMERCE_PORT="$((35000 + ($$ % 700)))"' in mysql_integration
-    assert 'REDIS_SUPPORT_PORT="$((36000 + ($$ % 700)))"' in mysql_integration
+    assert "allocate_test_ports MYSQL_PORT REDIS_COMMERCE_PORT" in mysql_integration
+    assert 'source "$repo_root/scripts/test_port_allocator.sh"' in mysql_integration
 
 
 def test_grant_job_uses_only_fixed_manifest_and_isolated_bootstrap_config() -> None:

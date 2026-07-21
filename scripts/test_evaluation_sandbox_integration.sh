@@ -3,6 +3,7 @@ set -euo pipefail
 
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$repo_root"
+source "$repo_root/scripts/test_port_allocator.sh"
 
 v013_only="${CITYBUDDY_V013_ONLY:-false}"
 if [[ "$v013_only" != true && "$v013_only" != false ]]; then
@@ -13,18 +14,11 @@ fi
 tmp_dir="$(mktemp -d)"
 env_file="$tmp_dir/.env"
 project="citybuddy-cb101-test-$$"
-auth_port="$((44900 + ($$ % 200)))"
-commerce_port="$((45100 + ($$ % 200)))"
-agent_port="$((45300 + ($$ % 200)))"
-proxy_port="$((45500 + ($$ % 200)))"
-drop_proxy_port="$((45700 + ($$ % 200)))"
-export MYSQL_PORT="$((33900 + ($$ % 200)))"
-export REDIS_COMMERCE_PORT="$((6390 + ($$ % 200)))"
-export REDIS_SUPPORT_PORT="$((6590 + ($$ % 200)))"
-export ELASTICSEARCH_PORT="$((9290 + ($$ % 200)))"
-export ROCKETMQ_NAMESRV_PORT="$((9990 + ($$ % 200)))"
-export ROCKETMQ_BROKER_PORT="$((11190 + ($$ % 200)))"
-export ROCKETMQ_PROXY_PORT="$((8290 + ($$ % 200)))"
+allocate_test_ports auth_port commerce_port agent_port proxy_port drop_proxy_port MYSQL_PORT \
+  REDIS_COMMERCE_PORT REDIS_SUPPORT_PORT ELASTICSEARCH_PORT ROCKETMQ_NAMESRV_PORT \
+  ROCKETMQ_BROKER_PORT ROCKETMQ_PROXY_PORT
+export MYSQL_PORT REDIS_COMMERCE_PORT REDIS_SUPPORT_PORT ELASTICSEARCH_PORT
+export ROCKETMQ_NAMESRV_PORT ROCKETMQ_BROKER_PORT ROCKETMQ_PROXY_PORT
 compose=(docker compose --project-name "$project" --env-file "$env_file" --file compose.yaml)
 auth_pid=""
 commerce_pid=""
@@ -39,6 +33,7 @@ cleanup() {
     fi
   done
   "${compose[@]}" down --volumes --remove-orphans >/dev/null 2>&1 || true
+  release_test_ports
   rm -rf "$tmp_dir"
 }
 trap cleanup EXIT
