@@ -218,12 +218,11 @@ request. A later semantic diff change requires the checklist to be executed and 
   preserve at least one retry observation before ACK. Tests that expect a local contradiction to
   become a permanent conflict are defect-preserving tests and must be corrected, not retained as
   compatibility evidence.
-- For a stateful multi-phase consumer, close the disposition space as the Cartesian product of every
-  persisted state class and every mutation phase. At minimum distinguish missing, present-but-
-  malformed, valid-but-stale, and valid-current coordination state before the authoritative mutation
-  and after authoritative success but before projection finalization. Define and execute every cell;
-  field deletion, unknown fields, malformed lease/version, and loss of the whole state must preserve
-  retry/replay repair, while only a confirmed competing or superseding business fact may terminate.
+- For a stateful multi-phase consumer, close every mechanically enumerable disposition axis. At
+  minimum enumerate each persisted state class and mutation phase, including the indeterminate window
+  after authoritative success but before owner-local finalization. Field deletion, unknown fields,
+  malformed lease/version, and loss of the whole state must preserve retry/replay repair, while only a
+  confirmed competing or superseding business fact may terminate.
 - Do not claim totality by parsing production source text. A regex or bounded parser still chooses
   operands, syntax, helper reachability, and label granularity; its chosen scope becomes another
   place where persisted state can disappear from responsibility. For a Redis-backed state machine,
@@ -235,19 +234,36 @@ request. A later semantic diff change requires the checklist to be executed and 
   drifted. Expected absence is also an invariant: for example, a ready tombstone must exercise an
   unexpected versioned-answer key. Source-text analysis may remain diagnostic only; it is not
   completeness evidence.
-- Give each actual state-machine control path a distinct internal detail code. A label attached only
-  to a literal return statement is insufficient when several field, TTL, type, existence, or
-  tombstone predicates flow to that statement. Bind every live-data fault cell to the detail codes
-  it really observes so a path cannot borrow coverage from a sibling predicate. For every cell,
-  assert both Worker disposition and final convergence across the source state, the current
-  versioned answer (or its required absence), and the corresponding Elasticsearch document; an
-  Agent lookup miss alone is not convergence evidence.
+- Give each implemented state-machine control path a distinct internal detail code and declare the
+  complete production-return set in one phase-scoped registry. Collect the codes actually returned by
+  real execution and require exact equality with that registry separately before and after the
+  authoritative mutation; an unobserved registered code or an unregistered runtime code is a
+  construction failure. A label attached only to a literal return statement is insufficient when
+  several field, TTL, type, existence, or tombstone predicates flow to it. For every data-damage cell,
+  assert both Worker disposition and final convergence across the source state, current versioned
+  answer (or its required absence), and corresponding Elasticsearch document; an Agent lookup miss
+  alone is not convergence evidence.
 - Give every coordination marker both a bounded semantic lease and a bounded physical lifecycle.
   On a TTL-oriented cache, every marker must have positive TTL and its physical TTL must exceed the
   remaining semantic lease by a fixed safety margin; a lease checked only by a future request does
   not reclaim abandoned state. Prove owner crash or lost redelivery cannot accumulate immortal keys,
   early eviction remains fail-closed, expiry becomes retryable absence, exact retry renews safely,
   and stale finalize/abort calls cannot mutate a replacement owner.
+- When two operations consume the same persisted transition shape, define their guard set once and
+  reuse it. Review the shared guard against the semantic invariants, including TTL upper bound and the
+  strict physical-TTL versus remaining-lease-plus-safety-margin relation; runtime code coverage can
+  prove implemented guards execute, but cannot discover a semantic guard that was never implemented.
+- **CB-112 owner-approved closure boundary:** completeness evidence is limited to four mechanically
+  enumerable ground truths: (1) keys, fields and key-level properties discovered from live Redis,
+  (2) persisted classes `missing`, `ready0`, `ready1-live`, and `ready1-tombstone`, (3) phases
+  `before-es` and `after-es-before-finalize`, and (4) exact phase-scoped runtime coverage of the
+  production discriminator registry. Exhaustive partitioning of every attribute value domain is
+  explicitly excluded because it has no mechanical ground truth or constructive termination test.
+  Targeted value-boundary regressions remain required when design review identifies a semantic
+  condition, but they are not evidence of value-domain totality. For CB-112, a same-class review
+  blocker must identify an omission within one of the four included ground truths; another value
+  partition is a design-review recommendation under the recorded residual risk, not a closeout
+  blocker.
 
 ### Runtime-owned integration-test ports
 

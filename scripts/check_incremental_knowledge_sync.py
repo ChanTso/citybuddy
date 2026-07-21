@@ -29,6 +29,7 @@ from citybuddy_indexer import (
 from citybuddy_indexer.faq_cache import (
     _FINALIZE_SCRIPT,
     _PREPARE_SCRIPT,
+    FAQ_CACHE_LUA_DISCRIMINATORS,
     FAQ_ENTRY_TTL_MS,
     FAQ_PREPARATION_LEASE_MS,
     FAQ_PREPARATION_TTL_MS,
@@ -234,6 +235,7 @@ PIPELINE_PHASES = ("before-es", "after-es-before-finalize")
 class BranchRecordingRedis:
     delegate: Redis
     observed: list[str]
+    observed_by_phase: dict[str, list[str]]
 
     def eval(self, script: str, key_count: int, *values: str) -> object:
         raw = self.delegate.eval(script, key_count, *values)
@@ -250,7 +252,10 @@ class BranchRecordingRedis:
             and len(raw) == 2
             and all(isinstance(item, str) for item in raw)
         ):
-            self.observed.append(f"{script_name}:{raw[0]}:{raw[1]}")
+            label = f"{script_name}:{raw[0]}:{raw[1]}"
+            self.observed.append(label)
+            phase = "before-es" if script_name == "prepare" else "after-es-before-finalize"
+            self.observed_by_phase[phase].append(label)
         return raw
 
 
@@ -323,9 +328,27 @@ def _live_fault_inventory(
                 LiveRedisFault(key_role, "add-field"),
             )
         )
+        discovered.append(LiveRedisFault(key_role, "ttl-exceeds-bound"))
+        if key_role == "state" and persisted_class == "ready0":
+            discovered.extend(
+                (
+                    LiveRedisFault(key_role, "ttl-not-beyond-lease"),
+                    LiveRedisFault(key_role, "ttl-safety-margin-invalid"),
+                )
+            )
         for field in sorted(fields):
             discovered.append(LiveRedisFault(key_role, "delete-field", field))
             discovered.append(LiveRedisFault(key_role, "mutate-field", field))
+            if key_role == "state" and field == "source_version":
+                discovered.append(LiveRedisFault(key_role, "invalidate-field", field))
+            if persisted_class == "ready0" and key_role == "state" and field == "tombstone":
+                discovered.append(LiveRedisFault(key_role, "toggle-field", field))
+            if (
+                persisted_class == "ready1-live"
+                and key_role == "state"
+                and field in {"index_version", "cache_commitment"}
+            ):
+                discovered.append(LiveRedisFault(key_role, "clear-field", field))
     if persisted_class == "ready1-tombstone":
         discovered.append(LiveRedisFault("answer", "unexpected-key"))
     return tuple(sorted(discovered))
@@ -335,12 +358,12 @@ def _mutated_live_value(field: str, current: str, sync_event: FaqKnowledgeEvent)
     fixed = {
         "schema": "tampered-schema",
         "source_id": f"{sync_event.source_id}-tampered",
-        "tombstone": "0" if current == "1" else "1",
+        "tombstone": "invalid",
         "commitment": "0" * 64,
         "index_version": "knowledge_docs_v9" if current != "knowledge_docs_v9" else "v1",
         "event_id": str(uuid4()),
         "occurred_time": "2026-07-21T12:59:59Z",
-        "ready": "0" if current == "1" else "1",
+        "ready": "invalid",
         "cache_commitment": "f" * 64,
         "lease_deadline_ms": "invalid",
         "doc_type": "product",
@@ -372,6 +395,26 @@ def _inject_live_fault(admin: Redis, sync_event: FaqKnowledgeEvent, fault: LiveR
     if fault.operation == "remove-ttl":
         admin.persist(key)
         return
+    if fault.operation == "ttl-exceeds-bound":
+        ready = cast(str | None, admin.hget(key, "ready")) if fault.key_role == "state" else None
+        ttl_bound = FAQ_PREPARATION_TTL_MS if ready == "0" else FAQ_ENTRY_TTL_MS
+        admin.pexpire(key, ttl_bound + 60_000)
+        return
+    if fault.operation in {"ttl-not-beyond-lease", "ttl-safety-margin-invalid"}:
+        deadline = cast(str | None, admin.hget(key, "lease_deadline_ms"))
+        if deadline is None or not deadline.isdecimal():
+            raise AssertionError(f"TTL relation fault lacks a semantic lease: {fault.label}")
+        seconds, microseconds = cast(tuple[int, int], admin.time())
+        remaining = int(deadline) - (seconds * 1000 + microseconds // 1000)
+        if remaining <= 5_000:
+            raise AssertionError(f"TTL relation fault has no safe injection window: {fault.label}")
+        ttl = (
+            remaining
+            if fault.operation == "ttl-not-beyond-lease"
+            else (remaining + FAQ_PREPARATION_TTL_SAFETY_MS - 5_000)
+        )
+        admin.pexpire(key, ttl)
+        return
     if fault.operation == "add-field":
         admin.hset(key, "unexpected", "field")
         return
@@ -381,6 +424,18 @@ def _inject_live_fault(admin: Redis, sync_event: FaqKnowledgeEvent, fault: LiveR
         return
     if fault.operation == "delete-field":
         admin.hdel(key, fault.field)
+        return
+    if fault.operation == "invalidate-field":
+        admin.hset(key, fault.field, "0")
+        return
+    if fault.operation == "clear-field":
+        admin.hset(key, fault.field, "")
+        return
+    if fault.operation == "toggle-field":
+        current = cast(str | None, admin.hget(key, fault.field))
+        if current not in {"0", "1"}:
+            raise AssertionError(f"closed flag is not toggleable: {fault.label}")
+        admin.hset(key, fault.field, "0" if current == "1" else "1")
         return
     if fault.operation == "mutate-field":
         current = cast(str | None, admin.hget(key, fault.field))
@@ -541,14 +596,10 @@ def _recover_matrix_cell(
 
 
 def _exercise_invalid_input_discriminators(recorder: BranchRecordingRedis, source_id: str) -> None:
-    recorder.eval(
-        _PREPARE_SCRIPT,
-        2,
-        f"{FAQ_CACHE_PREFIX}state:{source_id}",
-        f"{FAQ_CACHE_PREFIX}answer:{source_id}:",
+    prepare_args = [
         FAQ_CACHE_SCHEMA,
         source_id,
-        "0",
+        "1",
         "0",
         "commitment",
         str(uuid4()),
@@ -559,15 +610,30 @@ def _exercise_invalid_input_discriminators(recorder: BranchRecordingRedis, sourc
         "0",
         "question",
         "answer",
-    )
-    recorder.eval(
-        _FINALIZE_SCRIPT,
-        2,
-        f"{FAQ_CACHE_PREFIX}state:{source_id}",
-        f"{FAQ_CACHE_PREFIX}answer:{source_id}:0",
+        str(FAQ_PREPARATION_TTL_SAFETY_MS),
+    ]
+    for argument, invalid in (
+        (2, "0"),
+        (3, "invalid"),
+        (7, "0"),
+        (8, str(FAQ_PREPARATION_LEASE_MS + FAQ_PREPARATION_TTL_SAFETY_MS)),
+        (9, "0"),
+        (13, "0"),
+    ):
+        candidate = prepare_args.copy()
+        candidate[argument] = invalid
+        recorder.eval(
+            _PREPARE_SCRIPT,
+            2,
+            f"{FAQ_CACHE_PREFIX}state:{source_id}",
+            f"{FAQ_CACHE_PREFIX}answer:{source_id}:",
+            *candidate,
+        )
+
+    finalize_args = [
         FAQ_CACHE_SCHEMA,
         source_id,
-        "0",
+        "1",
         "0",
         "commitment",
         "knowledge_docs_v1",
@@ -577,13 +643,36 @@ def _exercise_invalid_input_discriminators(recorder: BranchRecordingRedis, sourc
         str(FAQ_ENTRY_TTL_MS),
         "2026-07-21T12:00:00Z",
         "cache-commitment",
-    )
+        str(FAQ_PREPARATION_TTL_MS),
+        str(FAQ_PREPARATION_TTL_SAFETY_MS),
+        str(FAQ_PREPARATION_LEASE_MS),
+    ]
+    for argument, invalid in (
+        (2, "0"),
+        (3, "invalid"),
+        (9, "0"),
+        (12, str(FAQ_PREPARATION_LEASE_MS + FAQ_PREPARATION_TTL_SAFETY_MS)),
+        (13, "0"),
+        (14, "0"),
+    ):
+        candidate = finalize_args.copy()
+        candidate[argument] = invalid
+        recorder.eval(
+            _FINALIZE_SCRIPT,
+            2,
+            f"{FAQ_CACHE_PREFIX}state:{source_id}",
+            f"{FAQ_CACHE_PREFIX}answer:{source_id}:1",
+            *candidate,
+        )
 
 
 def disposition_matrix(args: argparse.Namespace, admin: Redis) -> dict[str, object]:
     observed_branches: list[str] = []
+    observed_by_phase: dict[str, list[str]] = {phase: [] for phase in PIPELINE_PHASES}
     recording_client = BranchRecordingRedis(
-        Redis.from_url(args.support_redis_url, decode_responses=True), observed_branches
+        Redis.from_url(args.support_redis_url, decode_responses=True),
+        observed_branches,
+        observed_by_phase,
     )
     cache_projection = RedisFaqCacheProjection(cast(Redis, recording_client))
     elasticsearch = ElasticsearchKnowledgeProjection(args.elasticsearch_url)
@@ -761,6 +850,18 @@ def disposition_matrix(args: argparse.Namespace, admin: Redis) -> dict[str, obje
     )
     _assert_matrix_converged(args, admin, v4_event)
 
+    contradiction_source = "faq-ready-tombstone-contradiction"
+    live_payload = event(2, source_id=contradiction_source)
+    contradiction_worker = IndexerWorker(
+        settings(args, args.elasticsearch_url),
+        VersionedKnowledgeProjection(elasticsearch, cache_projection),
+    )
+    assert contradiction_worker.handle(encode(live_payload)).action is DeliveryAction.ACK
+    tombstone_payload = event(2, source_id=contradiction_source, tombstone=True)
+    confirmed_contradiction = contradiction_worker.handle(encode(tombstone_payload))
+    assert confirmed_contradiction.action is DeliveryAction.ACK
+    assert confirmed_contradiction.code == "conflicting_source_version"
+
     live_field_targets = {
         (persisted_class, fault.key_role, fault.field)
         for persisted_class, inventory in inventories.items()
@@ -774,6 +875,17 @@ def disposition_matrix(args: argparse.Namespace, admin: Redis) -> dict[str, obje
         1 for inventory in inventories.values() for fault in inventory if fault.operation != "valid"
     ) * len(PIPELINE_PHASES)
     assert len(observed_fault_cells) == expected_fault_cells
+    for phase in PIPELINE_PHASES:
+        observed = set(observed_by_phase[phase])
+        registered = FAQ_CACHE_LUA_DISCRIMINATORS[phase]
+        if observed != registered:
+            raise AssertionError(
+                {
+                    "phase": phase,
+                    "unobservedRegisteredDiscriminators": sorted(registered - observed),
+                    "unregisteredRuntimeDiscriminators": sorted(observed - registered),
+                }
+            )
 
     return {
         "fenceDispositionCells": matrix_cells,
@@ -793,6 +905,9 @@ def disposition_matrix(args: argparse.Namespace, admin: Redis) -> dict[str, obje
         "persistedStateClasses": len(PERSISTED_STATE_CLASSES),
         "pipelinePhases": len(PIPELINE_PHASES),
         "retryObservations": retry_cells,
+        "registeredLuaDiscriminators": sum(
+            len(discriminators) for discriminators in FAQ_CACHE_LUA_DISCRIMINATORS.values()
+        ),
         "uniqueLuaDiscriminators": len(set(observed_branches)),
     }
 
@@ -1010,8 +1125,8 @@ def main() -> None:
     lease_remaining_ms = int(lease_deadline_ms) - now_ms
     preparation_ttl = cast(int, admin_cache.pttl(f"{FAQ_CACHE_PREFIX}state:faq-cb111-delivery"))
     assert 0 < lease_remaining_ms <= FAQ_PREPARATION_LEASE_MS
-    assert lease_remaining_ms < preparation_ttl <= FAQ_PREPARATION_TTL_MS
-    assert preparation_ttl - lease_remaining_ms >= FAQ_PREPARATION_TTL_SAFETY_MS - 1_000
+    assert lease_remaining_ms + FAQ_PREPARATION_TTL_SAFETY_MS < preparation_ttl
+    assert preparation_ttl <= FAQ_PREPARATION_TTL_MS
     time.sleep(11)
     cache_recovered = RocketMqKnowledgeConsumer(
         create_worker(settings(args, args.elasticsearch_url))

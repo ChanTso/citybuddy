@@ -3,7 +3,14 @@ from __future__ import annotations
 from typing import cast
 
 import pytest
-from citybuddy_indexer.faq_cache import CachePreparation, RedisFaqCacheProjection
+from citybuddy_indexer.faq_cache import (
+    _FINALIZE_SCRIPT,
+    _PREPARATION_STATE_GUARD_SCRIPT,
+    _PREPARE_SCRIPT,
+    FAQ_CACHE_LUA_DISCRIMINATORS,
+    CachePreparation,
+    RedisFaqCacheProjection,
+)
 from citybuddy_indexer.incremental import (
     FaqKnowledgeEvent,
     KnowledgeSyncError,
@@ -41,6 +48,23 @@ def event(*, tombstone: bool = False) -> FaqKnowledgeEvent:
     payload = event_payload()
     payload["tombstone"] = tombstone
     return FaqKnowledgeEvent.from_bytes(encoded(payload))
+
+
+def test_preparation_shape_guard_is_shared_and_discriminators_are_phase_scoped() -> None:
+    assert _PREPARE_SCRIPT.count(_PREPARATION_STATE_GUARD_SCRIPT) == 1
+    assert _FINALIZE_SCRIPT.count(_PREPARATION_STATE_GUARD_SCRIPT) == 1
+    assert set(FAQ_CACHE_LUA_DISCRIMINATORS) == {
+        "before-es",
+        "after-es-before-finalize",
+    }
+    assert all(
+        discriminator.startswith("prepare:")
+        for discriminator in FAQ_CACHE_LUA_DISCRIMINATORS["before-es"]
+    )
+    assert all(
+        discriminator.startswith("finalize:")
+        for discriminator in FAQ_CACHE_LUA_DISCRIMINATORS["after-es-before-finalize"]
+    )
 
 
 @pytest.mark.parametrize(
@@ -95,7 +119,7 @@ def test_authoritative_prepare_uses_the_explicit_authority_mode() -> None:
     cache, fake = projection(["prepared", "authoritative_repair_prepared"])
 
     assert cache.prepare_authoritatively(event()) is CachePreparation.PREPARED
-    assert fake.calls[0][-3] == "1"
+    assert fake.calls[0][-4] == "1"
 
 
 @pytest.mark.parametrize(

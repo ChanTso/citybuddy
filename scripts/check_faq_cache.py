@@ -157,8 +157,8 @@ def normal(port: int, values: dict[str, str]) -> dict[str, object]:
     lease_remaining_ms = int(lease_deadline_ms) - now_ms
     preparation_ttl = cast(int, admin.pttl(state_key))
     assert 0 < lease_remaining_ms <= FAQ_PREPARATION_LEASE_MS
-    assert lease_remaining_ms < preparation_ttl <= FAQ_PREPARATION_TTL_MS
-    assert preparation_ttl - lease_remaining_ms >= FAQ_PREPARATION_TTL_SAFETY_MS - 1_000
+    assert lease_remaining_ms + FAQ_PREPARATION_TTL_SAFETY_MS < preparation_ttl
+    assert preparation_ttl <= FAQ_PREPARATION_TTL_MS
     assert cache.lookup(raw_query) is None
     maxmemory_config = cast(dict[str, str], admin.config_get("maxmemory"))
     memory_info = cast(dict[str, int], admin.info("memory"))

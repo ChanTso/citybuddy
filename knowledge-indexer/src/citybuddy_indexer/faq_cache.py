@@ -21,7 +21,7 @@ FAQ_CACHE_PREFIX = "cb:faq:v1:"
 FAQ_ENTRY_TTL_MS = 900_000
 FAQ_PREPARATION_LEASE_MS = 60_000
 FAQ_PREPARATION_TTL_SAFETY_MS = 60_000
-FAQ_PREPARATION_TTL_MS = FAQ_PREPARATION_LEASE_MS + FAQ_PREPARATION_TTL_SAFETY_MS
+FAQ_PREPARATION_TTL_MS = FAQ_PREPARATION_LEASE_MS + FAQ_PREPARATION_TTL_SAFETY_MS + 1_000
 
 
 class CachePreparation(str, Enum):
@@ -31,7 +31,71 @@ class CachePreparation(str, Enum):
     AUTHORITY_REQUIRED = "authority_required"
 
 
-_PREPARE_SCRIPT = r"""
+_PREPARATION_STATE_GUARD_SCRIPT = r"""
+local function preparation_state_invalid(
+  state, schema, source_id, preparation_ttl, safety_margin, now_ms)
+  local current_version = redis.call('HGET', state, 'source_version')
+  if not current_version then
+    return 'preparation_source_version_missing'
+  elseif not valid_version(current_version) then
+    return 'preparation_source_version_invalid'
+  elseif redis.call('HGET', state, 'schema') ~= schema then
+    return 'preparation_schema_invalid'
+  elseif redis.call('HGET', state, 'source_id') ~= source_id then
+    return 'preparation_source_id_invalid'
+  end
+  local current_tombstone = redis.call('HGET', state, 'tombstone')
+  if current_tombstone == false then
+    return 'preparation_tombstone_missing'
+  elseif current_tombstone ~= '0' and current_tombstone ~= '1' then
+    return 'preparation_tombstone_invalid'
+  elseif redis.call('HGET', state, 'commitment') == false then
+    return 'preparation_commitment_missing'
+  elseif redis.call('HGET', state, 'index_version') == false then
+    return 'preparation_index_version_missing'
+  elseif redis.call('HGET', state, 'index_version') ~= '' then
+    return 'preparation_index_version_not_empty'
+  elseif redis.call('HGET', state, 'event_id') == false then
+    return 'preparation_event_id_missing'
+  elseif redis.call('HGET', state, 'occurred_time') == false then
+    return 'preparation_occurred_time_missing'
+  end
+  local current_ready = redis.call('HGET', state, 'ready')
+  if current_ready == false then
+    return 'preparation_ready_missing'
+  elseif current_ready ~= '0' then
+    return 'preparation_not_ready'
+  elseif redis.call('HGET', state, 'cache_commitment') == false then
+    return 'preparation_cache_commitment_missing'
+  elseif redis.call('HGET', state, 'cache_commitment') ~= '' then
+    return 'preparation_cache_commitment_not_empty'
+  end
+  local current_deadline = redis.call('HGET', state, 'lease_deadline_ms')
+  if current_deadline == false then
+    return 'preparation_lease_deadline_missing'
+  elseif not string.match(current_deadline, '^[1-9][0-9]*$') then
+    return 'preparation_lease_deadline_invalid'
+  elseif redis.call('HLEN', state) ~= 11 then
+    return 'preparation_field_set_invalid'
+  end
+  local state_ttl = redis.call('PTTL', state)
+  local lease_remaining = tonumber(current_deadline) - now_ms
+  if state_ttl <= 0 then
+    return 'preparation_ttl_invalid'
+  elseif state_ttl > preparation_ttl then
+    return 'preparation_ttl_exceeds_bound'
+  elseif state_ttl <= lease_remaining then
+    return 'preparation_ttl_not_beyond_lease'
+  elseif state_ttl <= lease_remaining + safety_margin then
+    return 'preparation_ttl_safety_margin_invalid'
+  end
+  return false
+end
+"""
+
+
+_PREPARE_SCRIPT = (
+    r"""
 local state = KEYS[1]
 local answer_prefix = KEYS[2]
 local schema = ARGV[1]
@@ -47,6 +111,7 @@ local ready_ttl = tonumber(ARGV[10])
 local authority_confirmed = ARGV[11] == '1'
 local incoming_title = ARGV[12]
 local incoming_answer = ARGV[13]
+local safety_margin = tonumber(ARGV[14])
 local redis_time = redis.call('TIME')
 local now_ms = tonumber(redis_time[1]) * 1000 + math.floor(tonumber(redis_time[2]) / 1000)
 local lease_deadline_ms = tostring(now_ms + lease_ms)
@@ -68,6 +133,9 @@ local function compare_version(left, right)
   if left > right then return 1 end
   return 0
 end
+"""
+    + _PREPARATION_STATE_GUARD_SCRIPT
+    + r"""
 
 if not valid_version(source_version) then
   return {'retry', 'input_source_version_invalid'}
@@ -78,7 +146,10 @@ end
 if not lease_ms or lease_ms <= 0 then
   return {'retry', 'input_lease_invalid'}
 end
-if not preparation_ttl or preparation_ttl <= lease_ms then
+if not safety_margin or safety_margin <= 0 then
+  return {'retry', 'input_safety_margin_invalid'}
+end
+if not preparation_ttl or preparation_ttl <= lease_ms + safety_margin then
   return {'retry', 'input_preparation_ttl_invalid'}
 end
 if not ready_ttl or ready_ttl <= 0 then
@@ -98,13 +169,21 @@ end
 local current_version = redis.call('HGET', state, 'source_version')
 local ready = redis.call('HGET', state, 'ready')
 local replay = false
-if state_exists and not current_version then
-  if ready == '1' and not authority_confirmed then
+if state_exists and ready == '0' then
+  local preparation_invalid = preparation_state_invalid(
+    state, schema, source_id, preparation_ttl, safety_margin, now_ms)
+  if preparation_invalid then
+    current_version = false
+    repair_detail = preparation_invalid .. '_repaired'
+  end
+end
+if state_exists and ready ~= '0' and not current_version then
+  if not authority_confirmed then
     return {'authority_required', 'ready_state_source_version_missing'}
   end
-  repair_detail = 'preparation_state_source_version_repaired'
+  repair_detail = 'ready_state_source_version_missing_repaired'
 end
-if current_version then
+if current_version and ready ~= '0' then
   local state_ttl = redis.call('PTTL', state)
   local invalid_detail = false
   if not valid_version(current_version) then
@@ -135,7 +214,7 @@ if current_version then
     invalid_detail = 'state_ttl_invalid'
   end
   if invalid_detail then
-    if ready == '1' and not authority_confirmed then
+    if not authority_confirmed then
       return {'authority_required', invalid_detail}
     end
     current_version = false
@@ -143,29 +222,6 @@ if current_version then
   end
 end
 if current_version then
-  if ready == '0' then
-    local current_deadline = redis.call('HGET', state, 'lease_deadline_ms')
-    local state_ttl = redis.call('PTTL', state)
-    local preparation_invalid = false
-    if not current_deadline or not string.match(current_deadline, '^[1-9][0-9]*$') then
-      preparation_invalid = 'preparation_lease_deadline_invalid'
-    elseif state_ttl > preparation_ttl then
-      preparation_invalid = 'preparation_ttl_exceeds_bound'
-    elseif state_ttl <= tonumber(current_deadline) - now_ms then
-      preparation_invalid = 'preparation_ttl_not_beyond_lease'
-    elseif redis.call('HGET', state, 'tombstone') ~= '0'
-      and redis.call('HGET', state, 'tombstone') ~= '1' then
-      preparation_invalid = 'preparation_tombstone_invalid'
-    elseif redis.call('HGET', state, 'index_version') ~= '' then
-      preparation_invalid = 'preparation_index_version_not_empty'
-    elseif redis.call('HGET', state, 'cache_commitment') ~= '' then
-      preparation_invalid = 'preparation_cache_commitment_not_empty'
-    end
-    if preparation_invalid then
-      current_version = false
-      repair_detail = preparation_invalid .. '_repaired'
-    end
-  end
   if current_version and ready == '0' then
     local current_deadline = redis.call('HGET', state, 'lease_deadline_ms')
     if current_version == source_version
@@ -277,13 +333,7 @@ if current_version then
       return {'stale', 'ready_state_newer'}
     end
     if comparison == 0 then
-      if redis.call('HGET', state, 'schema') ~= schema
-        or redis.call('HGET', state, 'source_id') ~= source_id then
-        if not authority_confirmed then
-          return {'authority_required', 'ready_state_identity_contradiction'}
-        end
-        repair_detail = 'ready_state_identity_contradiction_repaired'
-      elseif redis.call('HGET', state, 'tombstone') ~= tombstone then
+      if redis.call('HGET', state, 'tombstone') ~= tombstone then
         if not authority_confirmed then
           return {'authority_required', 'ready_state_tombstone_contradiction'}
         end
@@ -336,8 +386,10 @@ if replay then
 end
 return {'prepared', 'new_preparation'}
 """
+)
 
-_FINALIZE_SCRIPT = r"""
+_FINALIZE_SCRIPT = (
+    r"""
 local state = KEYS[1]
 local answer = KEYS[2]
 local schema = ARGV[1]
@@ -351,6 +403,11 @@ local title = ARGV[8]
 local content = ARGV[9]
 local ttl = tonumber(ARGV[10])
 local cache_commitment = ARGV[12]
+local preparation_ttl = tonumber(ARGV[13])
+local safety_margin = tonumber(ARGV[14])
+local lease_ms = tonumber(ARGV[15])
+local redis_time = redis.call('TIME')
+local now_ms = tonumber(redis_time[1]) * 1000 + math.floor(tonumber(redis_time[2]) / 1000)
 
 local function valid_version(value)
   if not value or not string.match(value, '^[1-9][0-9]*$') or string.len(value) > 19 then
@@ -369,6 +426,9 @@ local function compare_version(left, right)
   if left > right then return 1 end
   return 0
 end
+"""
+    + _PREPARATION_STATE_GUARD_SCRIPT
+    + r"""
 
 if not valid_version(source_version) then
   return {'retry', 'finalize_input_source_version_invalid'}
@@ -379,6 +439,15 @@ end
 if not ttl or ttl <= 0 then
   return {'retry', 'finalize_input_ttl_invalid'}
 end
+if not lease_ms or lease_ms <= 0 then
+  return {'retry', 'finalize_input_lease_invalid'}
+end
+if not safety_margin or safety_margin <= 0 then
+  return {'retry', 'finalize_input_safety_margin_invalid'}
+end
+if not preparation_ttl or preparation_ttl <= lease_ms + safety_margin then
+  return {'retry', 'finalize_input_preparation_ttl_invalid'}
+end
 
 if redis.call('EXISTS', state) == 0 then
   return {'retry', 'cache_preparation_missing'}
@@ -386,67 +455,13 @@ end
 if redis.call('TYPE', state).ok ~= 'hash' then
   return {'retry', 'preparation_state_type_invalid'}
 end
+local preparation_invalid = preparation_state_invalid(
+  state, schema, source_id, preparation_ttl, safety_margin, now_ms)
+if preparation_invalid then
+  return {'retry', preparation_invalid}
+end
 local current_version = redis.call('HGET', state, 'source_version')
-if not current_version then
-  return {'retry', 'preparation_source_version_missing'}
-end
-if not valid_version(current_version) then
-  return {'retry', 'preparation_source_version_invalid'}
-end
-if redis.call('HGET', state, 'schema') ~= schema then
-  return {'retry', 'preparation_schema_invalid'}
-end
-if redis.call('HGET', state, 'source_id') ~= source_id then
-  return {'retry', 'preparation_source_id_invalid'}
-end
 local current_tombstone = redis.call('HGET', state, 'tombstone')
-if current_tombstone == false then
-  return {'retry', 'preparation_tombstone_missing'}
-end
-if current_tombstone ~= '0' and current_tombstone ~= '1' then
-  return {'retry', 'preparation_tombstone_invalid'}
-end
-if redis.call('HGET', state, 'commitment') == false then
-  return {'retry', 'preparation_commitment_missing'}
-end
-if redis.call('HGET', state, 'index_version') == false then
-  return {'retry', 'preparation_index_version_missing'}
-end
-if redis.call('HGET', state, 'index_version') ~= '' then
-  return {'retry', 'preparation_index_version_not_empty'}
-end
-if redis.call('HGET', state, 'event_id') == false then
-  return {'retry', 'preparation_event_id_missing'}
-end
-if redis.call('HGET', state, 'occurred_time') == false then
-  return {'retry', 'preparation_occurred_time_missing'}
-end
-local current_ready = redis.call('HGET', state, 'ready')
-if current_ready == false then
-  return {'retry', 'preparation_ready_missing'}
-end
-if current_ready ~= '0' then
-  return {'retry', 'preparation_not_ready'}
-end
-if redis.call('HGET', state, 'cache_commitment') == false then
-  return {'retry', 'preparation_cache_commitment_missing'}
-end
-if redis.call('HGET', state, 'cache_commitment') ~= '' then
-  return {'retry', 'preparation_cache_commitment_not_empty'}
-end
-local current_deadline = redis.call('HGET', state, 'lease_deadline_ms')
-if current_deadline == false then
-  return {'retry', 'preparation_lease_deadline_missing'}
-end
-if not string.match(current_deadline, '^[1-9][0-9]*$') then
-  return {'retry', 'preparation_lease_deadline_invalid'}
-end
-if redis.call('HLEN', state) ~= 11 then
-  return {'retry', 'preparation_field_set_invalid'}
-end
-if redis.call('PTTL', state) <= 0 then
-  return {'retry', 'preparation_ttl_invalid'}
-end
 if current_version ~= source_version then
   return {'retry', 'preparation_owner_source_version_mismatch'}
 end
@@ -505,6 +520,7 @@ end
 redis.call('PEXPIRE', state, ttl)
 return {'applied', 'ready_state_applied'}
 """
+)
 
 _ABORT_SCRIPT = r"""
 local state = KEYS[1]
@@ -525,6 +541,133 @@ if redis.call('HLEN', state) == 11
 end
 return 0
 """
+
+
+FAQ_CACHE_LUA_DISCRIMINATORS = {
+    "before-es": frozenset(
+        {
+            "prepare:retry:input_source_version_invalid",
+            "prepare:retry:input_tombstone_invalid",
+            "prepare:retry:input_lease_invalid",
+            "prepare:retry:input_safety_margin_invalid",
+            "prepare:retry:input_preparation_ttl_invalid",
+            "prepare:retry:input_ready_ttl_invalid",
+            "prepare:authority_required:state_type_invalid",
+            "prepare:authority_required:ready_state_source_version_missing",
+            "prepare:authority_required:state_source_version_invalid",
+            "prepare:authority_required:state_schema_invalid",
+            "prepare:authority_required:state_source_id_invalid",
+            "prepare:authority_required:state_tombstone_missing",
+            "prepare:authority_required:state_commitment_missing",
+            "prepare:authority_required:state_index_version_missing",
+            "prepare:authority_required:state_event_id_missing",
+            "prepare:authority_required:state_occurred_time_missing",
+            "prepare:authority_required:state_ready_missing",
+            "prepare:authority_required:state_cache_commitment_missing",
+            "prepare:authority_required:state_lease_deadline_missing",
+            "prepare:authority_required:state_field_set_invalid",
+            "prepare:authority_required:state_ttl_invalid",
+            "prepare:authority_required:state_ready_invalid",
+            "prepare:retry:preparation_source_version_missing_repaired",
+            "prepare:retry:preparation_source_version_invalid_repaired",
+            "prepare:retry:preparation_schema_invalid_repaired",
+            "prepare:retry:preparation_source_id_invalid_repaired",
+            "prepare:retry:preparation_tombstone_missing_repaired",
+            "prepare:retry:preparation_tombstone_invalid_repaired",
+            "prepare:retry:preparation_commitment_missing_repaired",
+            "prepare:retry:preparation_index_version_missing_repaired",
+            "prepare:retry:preparation_index_version_not_empty_repaired",
+            "prepare:retry:preparation_event_id_missing_repaired",
+            "prepare:retry:preparation_occurred_time_missing_repaired",
+            "prepare:retry:preparation_cache_commitment_missing_repaired",
+            "prepare:retry:preparation_cache_commitment_not_empty_repaired",
+            "prepare:retry:preparation_lease_deadline_missing_repaired",
+            "prepare:retry:preparation_lease_deadline_invalid_repaired",
+            "prepare:retry:preparation_field_set_invalid_repaired",
+            "prepare:retry:preparation_ttl_invalid_repaired",
+            "prepare:retry:preparation_ttl_exceeds_bound_repaired",
+            "prepare:retry:preparation_ttl_not_beyond_lease_repaired",
+            "prepare:retry:preparation_ttl_safety_margin_invalid_repaired",
+            "prepare:prepared:current_preparation_renewed",
+            "prepare:busy:active_preparation_owner",
+            "prepare:authority_required:ready_state_lease_not_empty",
+            "prepare:authority_required:ready_state_ttl_exceeds_bound",
+            "prepare:authority_required:ready_state_tombstone_invalid",
+            "prepare:authority_required:ready_tombstone_index_version_not_empty",
+            "prepare:authority_required:ready_tombstone_cache_commitment_not_empty",
+            "prepare:authority_required:ready_tombstone_answer_present",
+            "prepare:authority_required:ready_state_index_version_empty",
+            "prepare:authority_required:ready_state_cache_commitment_empty",
+            "prepare:authority_required:ready_answer_missing",
+            "prepare:authority_required:ready_answer_type_invalid",
+            "prepare:authority_required:ready_answer_schema_invalid",
+            "prepare:authority_required:ready_answer_source_id_invalid",
+            "prepare:authority_required:ready_answer_source_version_invalid",
+            "prepare:authority_required:ready_answer_doc_type_invalid",
+            "prepare:authority_required:ready_answer_chunk_id_invalid",
+            "prepare:authority_required:ready_answer_title_missing",
+            "prepare:authority_required:ready_answer_title_invalid",
+            "prepare:authority_required:ready_answer_content_missing",
+            "prepare:authority_required:ready_answer_content_invalid",
+            "prepare:authority_required:ready_answer_index_version_invalid",
+            "prepare:authority_required:ready_answer_commitment_invalid",
+            "prepare:authority_required:ready_answer_cache_commitment_invalid",
+            "prepare:authority_required:ready_answer_public_category_invalid",
+            "prepare:authority_required:ready_answer_public_language_invalid",
+            "prepare:authority_required:ready_answer_field_set_invalid",
+            "prepare:authority_required:ready_answer_ttl_invalid",
+            "prepare:authority_required:ready_answer_ttl_exceeds_bound",
+            "prepare:stale:ready_state_newer",
+            "prepare:authority_required:ready_state_tombstone_contradiction",
+            "prepare:authority_required:ready_state_commitment_contradiction",
+            "prepare:authority_required:ready_state_event_id_contradiction",
+            "prepare:authority_required:ready_state_occurred_time_contradiction",
+            "prepare:prepared:authoritative_repair_prepared",
+            "prepare:replay_prepared:ready_replay_prepared",
+            "prepare:prepared:new_preparation",
+        }
+    ),
+    "after-es-before-finalize": frozenset(
+        {
+            "finalize:retry:finalize_input_source_version_invalid",
+            "finalize:retry:finalize_input_tombstone_invalid",
+            "finalize:retry:finalize_input_ttl_invalid",
+            "finalize:retry:finalize_input_lease_invalid",
+            "finalize:retry:finalize_input_safety_margin_invalid",
+            "finalize:retry:finalize_input_preparation_ttl_invalid",
+            "finalize:retry:cache_preparation_missing",
+            "finalize:retry:preparation_state_type_invalid",
+            "finalize:retry:preparation_source_version_missing",
+            "finalize:retry:preparation_source_version_invalid",
+            "finalize:retry:preparation_schema_invalid",
+            "finalize:retry:preparation_source_id_invalid",
+            "finalize:retry:preparation_tombstone_missing",
+            "finalize:retry:preparation_tombstone_invalid",
+            "finalize:retry:preparation_commitment_missing",
+            "finalize:retry:preparation_index_version_missing",
+            "finalize:retry:preparation_index_version_not_empty",
+            "finalize:retry:preparation_event_id_missing",
+            "finalize:retry:preparation_occurred_time_missing",
+            "finalize:retry:preparation_ready_missing",
+            "finalize:retry:preparation_not_ready",
+            "finalize:retry:preparation_cache_commitment_missing",
+            "finalize:retry:preparation_cache_commitment_not_empty",
+            "finalize:retry:preparation_lease_deadline_missing",
+            "finalize:retry:preparation_lease_deadline_invalid",
+            "finalize:retry:preparation_field_set_invalid",
+            "finalize:retry:preparation_ttl_invalid",
+            "finalize:retry:preparation_ttl_exceeds_bound",
+            "finalize:retry:preparation_ttl_not_beyond_lease",
+            "finalize:retry:preparation_ttl_safety_margin_invalid",
+            "finalize:retry:preparation_owner_source_version_mismatch",
+            "finalize:retry:preparation_owner_tombstone_mismatch",
+            "finalize:retry:preparation_owner_commitment_mismatch",
+            "finalize:retry:preparation_owner_event_id_mismatch",
+            "finalize:retry:preparation_owner_occurred_time_mismatch",
+            "finalize:applied:ready_state_applied",
+        }
+    ),
+}
 
 
 @dataclass(frozen=True)
@@ -572,6 +715,7 @@ class RedisFaqCacheProjection:
             "1" if authority_confirmed else "0",
             event.content.question,
             event.content.answer,
+            str(FAQ_PREPARATION_TTL_SAFETY_MS),
         )
         outcome, detail = self._closed_result(raw)
         if outcome in {"retry", "error"}:
@@ -604,6 +748,9 @@ class RedisFaqCacheProjection:
             str(FAQ_ENTRY_TTL_MS),
             event.occurred_time,
             _cache_commitment(event.commitment, index_version),
+            str(FAQ_PREPARATION_TTL_MS),
+            str(FAQ_PREPARATION_TTL_SAFETY_MS),
+            str(FAQ_PREPARATION_LEASE_MS),
         )
         outcome, detail = self._closed_result(raw)
         if outcome in {"retry", "error"}:
