@@ -247,5 +247,5 @@ This file records only factual pitfalls supported by merged pull-request, commit
 - 现象：CB-111 final-head CI 的 evaluation sandbox 集成曾随机在服务启动时遇到 host port 已占用；原有 13 个集成脚本分别以 `PID % range` 直接生成端口且从不探测，其中多数区间落在 Linux 默认临时端口范围 32768–60999，runner 上无关进程的短连接也能与其竞争。
 - 证据链接：[maintenance PR #46](https://github.com/ChanTso/citybuddy/pull/46)
 - 根因：PID 取模只是在有限范围内猜测端口，不构成可用性检查或并发所有权；不同脚本重复实现不同区间，既无法统一避开系统临时端口，也无法阻止两个测试进程选择同一候选。受控预占夹具本身若未先证明 holder 已监听，还会制造“探测后才被抢占”的错误证据。
-- 解决：全部集成脚本统一使用共享端口租约器，只在 20000–31999 分配；注册表目录的 advisory lock 串行化孤儿临时文件清扫、失效记录回收、完整记录原子发布与释放，关闭删旧换新 ABA 和活跃 publisher 被清扫的窗口。每个候选先做真实 loopback bind 预探测，再原子替换为已完整写入并 fsync 的租约文件，并在持有租约后复探一次。租约记录的 owner PID、独立 PID 字段和进程启动指纹必须一致；缺失、空白、损坏、真实旧格式非空目录、PID 复用或字段矛盾均可回收，冲突最多顺延 4096 个候选。本地服务清理必须 `kill` 后 `wait`；13 个套件都只有在全部 port-owning 容器成功停止后才释放，停止失败会保留租约并令清理非零退出。行为回归真实预占首选端口，并让知识搜索与 evaluation identity 两个完整套件同时从同一候选开始；两者均成功且最终无残余租约或 Docker 资源。
-- 结论：测试端口不得落在系统临时端口范围内，且分配必须探测可用性；PID 取模是无保留的猜测，失败随机且易被误判为切片缺陷。并发正确性还需要共享租约而非彼此独立的“看起来空闲”；受控预占证据必须先证明占用方已就绪。
+- 解决：删除自研端口注册表、flock、失效回收、PID/启动指纹及隔离态。MySQL、双 Redis、Elasticsearch 与 RocketMQ 的 Compose 映射只声明 loopback host 和容器目标端口，由 Docker 分配并持有宿主端口，脚本在启动后通过 `docker compose port` 读取；独立 auth 容器同样使用 Docker 随机发布。宿主 Java、Agent 与测试代理以端口 0 启动，由内核分配并由实际进程持续持有，脚本从当前启动代的日志读取端口。真实并发知识搜索与 evaluation identity、完整 identity 和 catalog 套件均通过且无资源残留；受控 `down` 失败时残留项目继续持有原端口，新项目取得不同端口。
+- 结论：自研跨进程资源租约几乎总会错配请求者与真实 owner；能让操作系统或运行时持有资源时，不要自己建注册表。删除机制比增加状态更能关闭生命周期缺陷类，端口分配证据应观察实际资源 owner，而不是推导候选值。

@@ -57,8 +57,8 @@ make init-local
 make up
 ```
 
-Commerce Redis and Support Redis have separate required URLs, credentials, host ports, containers,
-and named volumes. Commerce Redis uses AOF with `noeviction`; Support Redis uses a bounded
+Commerce Redis and Support Redis have separate required URLs, credentials, Docker-assigned host
+ports, containers, and named volumes. Commerce Redis uses AOF with `noeviction`; Support Redis uses a bounded
 `volatile-lfu` policy for TTL-bearing cache data. Neither Redis instance is authoritative business
 storage.
 
@@ -67,7 +67,7 @@ image. This runtime foundation does not create the later production knowledge in
 Elasticsearch authoritative storage.
 
 RocketMQ runs a pinned 5.x NameServer and combined Broker/Proxy process. Later 5.x clients use the
-Proxy endpoint at `127.0.0.1:${ROCKETMQ_PROXY_PORT}` (8081 after `make init-local`); a dedicated
+Proxy endpoint reported by `docker compose port rocketmq-broker-proxy 8081`; a dedicated
 gRPC Java probe gates `make up` on that exact route. The disposable readiness topic and integration
 probe do not define production topics, payloads, consumers, or delivery-semantics guarantees.
 

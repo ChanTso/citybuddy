@@ -204,27 +204,24 @@ request. A later semantic diff change requires the checklist to be executed and 
   reason code, response, authoritative state, and reached fault boundary so a status coincidence
   cannot pass as attribution.
 
-### Probed and leased integration-test ports
+### Runtime-owned integration-test ports
 
-- Do not derive host ports from a PID or another unverified process-local value. Keep test-only
-  allocation below the platform ephemeral-port floor, probe the real loopback bind before use, and
-  retry the next candidate within an explicit bound when either the operating system or another
-  suite already owns the candidate.
-- Coordinate every repository integration suite through the same process-scoped lease registry so
-  concurrent suites cannot select the same probed port. Serialize cleanup, stale-record recovery,
-  publication, and release under one registry lock so reclaim cannot delete a newly published lease
-  and orphan-temp cleanup cannot race an active publisher. Publish the complete owner record
-  atomically; a missing, blank, malformed, partial, or prior-format record must be reclaimable rather
-  than becoming a permanent lease. Bind ownership to both PID and process-start identity, and require
-  those two record fields to agree, so PID reuse or a semantically damaged record cannot preserve
-  another process's lease.
-- Release only after local processes have been killed and waited for and every port-owning container
-  has stopped successfully. If container cleanup fails, retain the lease and fail cleanup visibly;
-  `down || true` followed by unconditional release is a collision window. Fail closed when the bounded
-  candidate set is exhausted.
-- Prove both collision classes with behavior, not allocator arithmetic: hold the preferred port open
-  before allocation and show a real suite starts on a later candidate; start two real suites from the
-  same preferred candidate and show both complete with disjoint leases and no residual resources.
+- Do not derive, probe-and-release, or lease a host port in a requester process that is not the
+  resource which will bind it. For container ports, omit the published host port and let Docker
+  allocate and hold it; read the result only after startup with `docker compose port` or
+  `docker port`. For host applications, request port zero and read the bound port from that live
+  process. The socket owner and the lifecycle owner must be the same resource.
+- Keep the Docker publication configuration stable across restarts: declare the loopback host and
+  container target without a `published` value. A stopped, restarting, or cleanup-resistant
+  container retains Docker's publication identity; a new project receives another port without a
+  repository registry, PID fingerprint, stale-record recovery, or quarantine state.
+- Bind port discovery to the specific live owner and startup generation. Reject malformed,
+  multi-address, missing, stale-log, or out-of-range discovery output; an application restart must
+  ignore the prior generation's log line and read the newly bound port before any client request.
+- Prove the behavior with real concurrent suites and controlled cleanup failure: two projects must
+  start concurrently with disjoint runtime-owned ports; after a failed `down`, the residual project
+  must keep its port while a new project starts on another port. Repeated normal execution must leave
+  no containers, networks, or host-port registry artifacts.
 
 ## Closeout maintenance
 

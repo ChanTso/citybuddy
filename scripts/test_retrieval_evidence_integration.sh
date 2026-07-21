@@ -3,13 +3,14 @@ set -euo pipefail
 
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$repo_root"
-source "$repo_root/scripts/test_port_allocator.sh"
+source "$repo_root/scripts/test_dynamic_ports.sh"
 
 tmp_dir="$(mktemp -d)"
 env_file="$tmp_dir/.env"
 project="citybuddy-cb091-test-$$"
-allocate_test_ports model_port MYSQL_PORT ELASTICSEARCH_PORT
-export MYSQL_PORT ELASTICSEARCH_PORT
+model_port=""
+MYSQL_PORT=""
+ELASTICSEARCH_PORT=""
 export ELASTICSEARCH_IMAGE="citybuddy-elasticsearch-ik:${project}"
 compose=(docker compose --project-name "$project" --env-file "$env_file" --file compose.yaml)
 model_pid=""
@@ -29,7 +30,7 @@ cleanup() {
   fi
   "${compose[@]}" down --volumes --remove-orphans >/dev/null 2>&1 || resource_stop_status=$?
   rm -rf "$tmp_dir"
-  finalize_test_port_cleanup "$status" "$resource_stop_status"
+  finish_test_cleanup "$status" "$resource_stop_status"
 }
 trap cleanup EXIT
 
@@ -51,6 +52,8 @@ assert_exact() {
 
 ENV_FILE="$env_file" ./scripts/init_local.sh
 "${compose[@]}" up --build --detach --wait --wait-timeout 90 mysql elasticsearch
+compose_host_port MYSQL_PORT mysql 3306
+compose_host_port ELASTICSEARCH_PORT elasticsearch 9200
 make ENV_FILE="$env_file" COMPOSE_PROJECT_NAME="$project" grant-access
 make ENV_FILE="$env_file" COMPOSE_PROJECT_NAME="$project" migrate-auth
 make ENV_FILE="$env_file" COMPOSE_PROJECT_NAME="$project" migrate-commerce
@@ -68,9 +71,10 @@ assert_exact \
   '{"alias":"knowledge_docs_read","documentCount":4,"indexVersion":"knowledge_docs_v1"}' \
   "$("${bootstrap[@]}")"
 
-uv run python scripts/fake_litellm_server.py --port "$model_port" \
+uv run python scripts/fake_litellm_server.py --port 0 \
   >"$tmp_dir/model.log" 2>&1 &
 model_pid=$!
+process_bound_port model_port uvicorn "$model_pid" "$tmp_dir/model.log" 0
 for _ in {1..40}; do
   if curl --fail --silent "http://127.0.0.1:$model_port/fixture/counts" >/dev/null; then
     break

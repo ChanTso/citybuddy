@@ -44,17 +44,3 @@ if [[ "$commerce_redis_password" == "$support_redis_password" || "$commerce_redi
   echo "Commerce and Support Redis credentials and URLs must be distinct." >&2
   exit 1
 fi
-
-port="$(sed -n 's/^MYSQL_PORT=//p' "$env_file")"
-if [[ -n "$port" && ! "$port" =~ ^[0-9]{1,5}$ ]]; then
-  echo "Invalid MYSQL_PORT in $env_file." >&2
-  exit 1
-fi
-
-for name in REDIS_COMMERCE_PORT REDIS_SUPPORT_PORT ELASTICSEARCH_PORT; do
-  port="$(sed -n "s/^${name}=//p" "$env_file")"
-  if [[ -n "$port" && ! "$port" =~ ^[0-9]{1,5}$ ]]; then
-    echo "Invalid $name in $env_file." >&2
-    exit 1
-  fi
-done

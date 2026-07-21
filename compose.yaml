@@ -51,7 +51,8 @@ services:
       - --collation-server=utf8mb4_0900_ai_ci
       - --activate-all-roles-on-login=OFF
     ports:
-      - "127.0.0.1:${MYSQL_PORT:-3306}:3306"
+      - target: 3306
+        host_ip: 127.0.0.1
     volumes:
       - mysql-data:/var/lib/mysql
       - ./infra/mysql/init/010-accounts.sh:/docker-entrypoint-initdb.d/010-accounts.sh:ro
@@ -124,7 +125,8 @@ services:
     environment:
       REDIS_PASSWORD: ${REDIS_COMMERCE_PASSWORD:?Run make init-local first}
     ports:
-      - "127.0.0.1:${REDIS_COMMERCE_PORT:-6379}:6379"
+      - target: 6379
+        host_ip: 127.0.0.1
     volumes:
       - redis-commerce-data:/data
     healthcheck:
@@ -159,7 +161,8 @@ services:
     environment:
       REDIS_PASSWORD: ${REDIS_SUPPORT_PASSWORD:?Run make init-local first}
     ports:
-      - "127.0.0.1:${REDIS_SUPPORT_PORT:-6380}:6379"
+      - target: 6379
+        host_ip: 127.0.0.1
     volumes:
       - redis-support-data:/data
     healthcheck:
@@ -185,7 +188,8 @@ services:
       xpack.ml.enabled: "false"
       ES_JAVA_OPTS: -Xms512m -Xmx512m
     ports:
-      - "127.0.0.1:${ELASTICSEARCH_PORT:-9200}:9200"
+      - target: 9200
+        host_ip: 127.0.0.1
     volumes:
       - elasticsearch-data:/usr/share/elasticsearch/data
     healthcheck:
@@ -237,7 +241,8 @@ services:
     environment:
       HEAP_OPTS: -Xms512m -Xmx512m -Xmn256m -XX:MaxDirectMemorySize=256m
     ports:
-      - "127.0.0.1:${ROCKETMQ_PROXY_PORT:-8081}:8081"
+      - target: 8081
+        host_ip: 127.0.0.1
     volumes:
       - rocketmq-store:/home/rocketmq/store
       - ./infra/rocketmq/broker.conf:/home/rocketmq/rocketmq-5.5.0/conf/citybuddy-broker.conf:ro

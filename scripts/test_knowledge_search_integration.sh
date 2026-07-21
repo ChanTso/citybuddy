@@ -3,13 +3,12 @@ set -euo pipefail
 
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$repo_root"
-source "$repo_root/scripts/test_port_allocator.sh"
+source "$repo_root/scripts/test_dynamic_ports.sh"
 
 tmp_dir="$(mktemp -d)"
 env_file="$tmp_dir/.env"
 project="citybuddy-cb090-test-$$"
-allocate_test_ports ELASTICSEARCH_PORT
-export ELASTICSEARCH_PORT
+ELASTICSEARCH_PORT=""
 export ELASTICSEARCH_IMAGE="citybuddy-elasticsearch-ik:${project}"
 compose=(docker compose --project-name "$project" --env-file "$env_file" --file compose.yaml)
 
@@ -23,7 +22,7 @@ cleanup() {
   fi
   "${compose[@]}" down --volumes --remove-orphans >/dev/null 2>&1 || resource_stop_status=$?
   rm -rf "$tmp_dir"
-  finalize_test_port_cleanup "$status" "$resource_stop_status"
+  finish_test_cleanup "$status" "$resource_stop_status"
 }
 trap cleanup EXIT
 
@@ -40,6 +39,7 @@ assert_exact() {
 
 ENV_FILE="$env_file" ./scripts/init_local.sh
 "${compose[@]}" up --build --detach --wait --wait-timeout 90 elasticsearch
+compose_host_port ELASTICSEARCH_PORT elasticsearch 9200
 
 bootstrap_expected='{"alias":"knowledge_docs_read","documentCount":4,"indexVersion":"knowledge_docs_v1"}'
 bootstrap=(

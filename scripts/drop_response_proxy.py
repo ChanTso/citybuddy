@@ -126,7 +126,9 @@ def main() -> None:
     if args.drop_count < 1 or args.drop_count > 20:
         raise ValueError("drop-count must be between 1 and 20")
     state = DropState(args.upstream, args.path_prefix, args.drop_count, args.method)
-    DropServer((args.host, args.port), state).serve_forever()
+    server = DropServer((args.host, args.port), state)
+    print(f"drop_proxy_listening_port={server.server_port}", flush=True)
+    server.serve_forever()
 
 
 if __name__ == "__main__":
