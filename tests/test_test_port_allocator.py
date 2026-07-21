@@ -253,3 +253,14 @@ def test_local_service_processes_exit_before_port_release(name: str, minimum_wai
     cleanup = content.split("cleanup() {", 1)[1].split("\n}", 1)[0]
     assert cleanup.count('wait "') >= minimum_waits
     assert cleanup.rindex('wait "') < cleanup.index("finalize_test_port_cleanup")
+
+
+def test_standalone_port_owning_container_must_stop_before_release() -> None:
+    content = (ROOT / "scripts" / "test_catalog_integration.sh").read_text(encoding="utf-8")
+    cleanup = content.split("cleanup() {", 1)[1].split("\n}", 1)[0]
+    assert (
+        'docker rm --force "$auth_container" >/dev/null 2>&1 || resource_stop_status=$?' in cleanup
+    )
+    assert cleanup.index('docker rm --force "$auth_container"') < cleanup.index(
+        "finalize_test_port_cleanup"
+    )

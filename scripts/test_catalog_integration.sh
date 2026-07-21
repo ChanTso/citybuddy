@@ -29,7 +29,7 @@ cleanup() {
   local status=$?
   local resource_stop_status=0
   if [[ -n "$auth_container" ]]; then
-    docker rm --force "$auth_container" >/dev/null 2>&1 || true
+    docker rm --force "$auth_container" >/dev/null 2>&1 || resource_stop_status=$?
   fi
   if [[ -n "$("${compose[@]}" ps --status running -q rocketmq-broker-proxy 2>/dev/null)" ]]; then
     if [[ "$groups_created" = 1 ]]; then
