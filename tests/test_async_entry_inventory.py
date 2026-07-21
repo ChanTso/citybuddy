@@ -140,7 +140,7 @@ def java_methods(java_source: str) -> dict[str, str]:
 def test_inventory_is_complete_and_has_no_evaluation_reachable_path() -> None:
     inventory = json.loads(INVENTORY.read_text(encoding="utf-8"))
     assert inventory["evaluationReachablePathCount"] == 0
-    assert inventory["version"] == "cb111-v1"
+    assert inventory["version"] == "cb112-v1"
     assert inventory["reservedSandboxEnvelopeProperty"] == "citybuddy-eval-sandbox-id"
     paths = {path["id"]: path for path in inventory["paths"]}
     assert set(paths) == {
@@ -218,12 +218,38 @@ def test_outbox_and_non_commerce_paths_are_not_hidden_async_carriers() -> None:
     assert "sandbox" not in spike_event.lower()
     assert "RocketMqKnowledgeConsumer" in indexer_worker
     assert "ElasticsearchKnowledgeProjection" in indexer_worker
+    assert "RedisFaqCacheProjection" in indexer_worker
     assert "RESERVED_SANDBOX_PROPERTY" in indexer_worker
     assert "SimpleConsumer" in indexer_worker
-    assert "RocketMqKnowledgeConsumer -> ElasticsearchKnowledgeProjection" in source(
-        "commerce-service/src/main/resources/async-entry-inventory.json"
+    inventory = source("commerce-service/src/main/resources/async-entry-inventory.json")
+    assert (
+        "RocketMqKnowledgeConsumer -> ElasticsearchKnowledgeProjection + "
+        "RedisFaqCacheProjection" in inventory
     )
     assert "rocketmq" not in agent_files.lower()
+
+
+def test_faq_cache_writers_remain_on_their_exact_runtime_boundaries() -> None:
+    indexer_projection_references = relative_sources_with(
+        "knowledge-indexer/src", ".py", "RedisFaqCacheProjection"
+    )
+    assert indexer_projection_references == {
+        "knowledge-indexer/src/citybuddy_indexer/__init__.py",
+        "knowledge-indexer/src/citybuddy_indexer/faq_cache.py",
+        "knowledge-indexer/src/citybuddy_indexer/worker.py",
+    }
+    agent_cache_references = relative_sources_with("agent-service/src", ".py", "RedisFaqCache")
+    assert agent_cache_references == {
+        "agent-service/src/citybuddy_agent/application.py",
+        "agent-service/src/citybuddy_agent/faq_cache.py",
+    }
+    commerce_sources = "\n".join(
+        path.read_text(encoding="utf-8")
+        for path in sorted((ROOT / "commerce-service/src").rglob("*"))
+        if path.is_file()
+    )
+    assert "cb:faq:v1:" not in commerce_sources
+    assert "redis-support" not in commerce_sources.casefold()
 
 
 def test_faq_publication_has_no_early_api_projection_or_fixture_promotion() -> None:

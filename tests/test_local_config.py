@@ -17,6 +17,8 @@ CREDENTIAL_NAMES = (
     "MYSQL_AGENT_APP_PASSWORD",
     "REDIS_COMMERCE_PASSWORD",
     "REDIS_SUPPORT_PASSWORD",
+    "REDIS_AGENT_CACHE_PASSWORD",
+    "REDIS_INDEXER_CACHE_PASSWORD",
 )
 
 
@@ -61,6 +63,12 @@ def test_init_local_creates_private_distinct_credentials_and_preserves_them(
     assert values["SUPPORT_REDIS_URL"] == (
         f"redis://:{values['REDIS_SUPPORT_PASSWORD']}@redis-support:6379/0"
     )
+    assert values["AGENT_SUPPORT_REDIS_URL"] == (
+        f"redis://agent_cache:{values['REDIS_AGENT_CACHE_PASSWORD']}@redis-support:6379/0"
+    )
+    assert values["INDEXER_SUPPORT_REDIS_URL"] == (
+        f"redis://knowledge_indexer:{values['REDIS_INDEXER_CACHE_PASSWORD']}@redis-support:6379/0"
+    )
     assert values["COMMERCE_REDIS_URL"] != values["SUPPORT_REDIS_URL"]
     assert not any(name.endswith("_PORT") for name in values)
 
@@ -81,6 +89,30 @@ def test_require_local_env_rejects_missing_or_malformed_credentials(tmp_path: Pa
     malformed = run_script("require_local_env.sh", env_file)
     assert malformed.returncode != 0
     assert "Invalid or missing MYSQL_BOOTSTRAP_PASSWORD" in malformed.stderr
+
+
+def test_init_local_upgrades_legacy_env_without_rotating_existing_values(tmp_path: Path) -> None:
+    env_file = tmp_path / ".env"
+    first = run_script("init_local.sh", env_file)
+    assert first.returncode == 0, first.stderr
+    values = parse_env(env_file)
+    legacy_names = {
+        *CREDENTIAL_NAMES[:-2],
+        "COMMERCE_REDIS_URL",
+        "SUPPORT_REDIS_URL",
+    }
+    legacy = "\n".join(f"{name}={value}" for name, value in values.items() if name in legacy_names)
+    env_file.write_text(f"{legacy}\n")
+
+    upgraded = run_script("init_local.sh", env_file)
+
+    assert upgraded.returncode == 0, upgraded.stderr
+    assert "Added CB-112 Support Redis cache identities" in upgraded.stdout
+    updated = parse_env(env_file)
+    for name in legacy_names:
+        assert updated[name] == values[name]
+    assert re.fullmatch(r"[0-9a-f]{48}", updated["REDIS_AGENT_CACHE_PASSWORD"])
+    assert re.fullmatch(r"[0-9a-f]{48}", updated["REDIS_INDEXER_CACHE_PASSWORD"])
 
 
 def test_example_and_compose_contain_no_credential_defaults() -> None:
@@ -113,6 +145,9 @@ def test_compose_defines_distinct_authenticated_redis_policies_and_storage() -> 
     assert "CONFIG GET appendonly" in commerce_config
 
     assert "REDIS_SUPPORT_PASSWORD" in support_config
+    assert "REDIS_AGENT_CACHE_PASSWORD" in support_config
+    assert "REDIS_INDEXER_CACHE_PASSWORD" in support_config
+    assert "start_support_redis.sh" in support_config
     assert "--maxmemory-policy\n      - volatile-lfu" in support_config
     assert '--appendonly\n      - "no"' in support_config
     assert "--maxmemory\n      - 64mb" in support_config
@@ -159,7 +194,7 @@ def test_elasticsearch_image_and_health_pin_the_matching_ik_analyzer() -> None:
     assert "knowledge_docs_v" not in integration
 
 
-def test_knowledge_indexer_runtime_has_only_broker_and_elasticsearch_authority() -> None:
+def test_knowledge_indexer_runtime_has_only_broker_elasticsearch_and_cache_authority() -> None:
     compose = (ROOT / "compose.yaml").read_text()
     runtime = re.search(
         r"(?ms)^  knowledge-indexer:\n(.*?)(?=^  [a-z][^:\n]*:\n|^volumes:)", compose
@@ -172,7 +207,9 @@ def test_knowledge_indexer_runtime_has_only_broker_and_elasticsearch_authority()
     assert "http://elasticsearch:9200" in configuration
     assert "knowledge_docs_read" in configuration
     assert "mysql" not in configuration.casefold()
-    assert "redis" not in configuration.casefold()
+    assert "redis-support" in configuration
+    assert "INDEXER_SUPPORT_REDIS_URL" in configuration
+    assert "redis-commerce" not in configuration
     assert "PASSWORD" not in configuration
 
 

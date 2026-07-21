@@ -14,6 +14,7 @@ import httpx
 from fastapi import HTTPException
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
+from .faq_cache import FaqCache
 from .knowledge import (
     KnowledgeSearch,
     KnowledgeSearchFailure,
@@ -590,12 +591,14 @@ class ToolAdapter:
         knowledge: KnowledgeSearch | None = None,
         reranker: Reranker | None = None,
         calibration: SufficiencyCalibration | None = None,
+        faq_cache: FaqCache | None = None,
     ) -> None:
         self._base_url = base_url.rstrip("/")
         self._obo = obo
         self._knowledge = knowledge
         self._reranker = reranker
         self._calibration = calibration
+        self._faq_cache = faq_cache
         self._specs = {
             CATALOG_PRODUCT_SPEC.name: CATALOG_PRODUCT_SPEC,
             KNOWLEDGE_SEARCH_SPEC.name: KNOWLEDGE_SEARCH_SPEC,
@@ -619,6 +622,7 @@ class ToolAdapter:
         sandbox_id: str | None = None,
         trace_id: str | None = None,
         turn_id: str | None = None,
+        public_query: str | None = None,
     ) -> ToolResult:
         spec = self._specs.get(name)
         if spec is None:
@@ -633,17 +637,26 @@ class ToolAdapter:
             if not knowledge_allowed:
                 return self._deny(name, "retrieval_already_decided", events)
             if (
-                self._knowledge is None
+                (self._knowledge is None and self._faq_cache is None)
                 or self._reranker is None
                 or self._calibration is None
                 or plan is None
                 or not isinstance(arguments, KnowledgeSearchInput)
             ):
                 return self._deny(name, "knowledge_unavailable", events)
-            try:
-                bounded_knowledge = self._knowledge.search(arguments, budget.charge)
-            except KnowledgeSearchFailure as error:
-                return self._deny(name, error.code, events)
+            bounded_knowledge = (
+                self._faq_cache.lookup(public_query)
+                if self._faq_cache is not None and public_query is not None
+                else None
+            )
+            cache_hit = bounded_knowledge is not None
+            if bounded_knowledge is None:
+                if self._knowledge is None:
+                    return self._deny(name, "knowledge_unavailable", events)
+                try:
+                    bounded_knowledge = self._knowledge.search(arguments, budget.charge)
+                except KnowledgeSearchFailure as error:
+                    return self._deny(name, error.code, events)
             if not bounded_knowledge.results:
                 decision = insufficient_decision(
                     index_version=bounded_knowledge.index_version,
@@ -678,6 +691,17 @@ class ToolAdapter:
             self._record_retrieval_decision(decision, events)
             if decision.outcome != "SUFFICIENT":
                 return self._retrieval_denial(name, decision, events, record=False)
+            if (
+                not cache_hit
+                and self._faq_cache is not None
+                and public_query is not None
+                and len(decision.evidence) == 1
+                and decision.evidence[0].doc_type == "faq"
+            ):
+                evidence = decision.evidence[0]
+                self._faq_cache.populate_mapping(
+                    public_query, evidence.source_id, evidence.source_version
+                )
             events.append(AgentEvent("TOOL_LIFECYCLE", {"tool": name, "state": "succeeded"}))
             return ToolResult(
                 outcome="ok",
@@ -860,6 +884,7 @@ class BoundedAgent:
                     sandbox_id=sandbox_id,
                     trace_id=trace_id,
                     turn_id=turn_id,
+                    public_query=message,
                 )
                 if result.retrieval_decision is not None:
                     retrieval_decision = result.retrieval_decision

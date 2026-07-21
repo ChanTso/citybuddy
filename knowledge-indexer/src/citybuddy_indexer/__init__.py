@@ -1,5 +1,6 @@
 """CityBuddy public-knowledge indexing boundary."""
 
+from .faq_cache import RedisFaqCacheProjection
 from .incremental import (
     ElasticsearchKnowledgeProjection,
     FaqKnowledgeEvent,
@@ -45,5 +46,6 @@ __all__ = [
     "DeliveryAction",
     "DeliveryResult",
     "RocketMqKnowledgeConsumer",
+    "RedisFaqCacheProjection",
     "create_worker",
 ]

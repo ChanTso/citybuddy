@@ -22,8 +22,36 @@ from citybuddy_agent.agent_control import (
 )
 from citybuddy_agent.application import AgentSettings, MysqlSessionStore, OboClient
 from citybuddy_agent.conversation import CorrelationConflictError, MysqlConversationStore
+from citybuddy_agent.faq_cache import RedisFaqCache
 from citybuddy_agent.knowledge import ElasticsearchKnowledgeSearch
 from citybuddy_agent.retrieval import RetrievalDecision, load_calibration
+from citybuddy_indexer import (
+    ElasticsearchKnowledgeProjection,
+    FaqKnowledgeEvent,
+    KnowledgeSyncError,
+    ProjectionOutcome,
+    RedisFaqCacheProjection,
+)
+from citybuddy_indexer.faq_cache import CachePreparation
+from citybuddy_indexer.worker import VersionedKnowledgeProjection
+
+
+class FinalizeUnavailableCache:
+    def __init__(self, delegate: RedisFaqCacheProjection) -> None:
+        self._delegate = delegate
+
+    def prepare(self, event: FaqKnowledgeEvent) -> CachePreparation:
+        return self._delegate.prepare(event)
+
+    def prepare_authoritatively(self, event: FaqKnowledgeEvent) -> CachePreparation:
+        return self._delegate.prepare_authoritatively(event)
+
+    def finalize(self, event: FaqKnowledgeEvent, index_version: str) -> ProjectionOutcome:
+        del event, index_version
+        raise KnowledgeSyncError("support_cache_unavailable")
+
+    def abort(self, event: FaqKnowledgeEvent) -> None:
+        self._delegate.abort(event)
 
 
 def connection(
@@ -97,6 +125,7 @@ def make_agent(
             ElasticsearchKnowledgeSearch(settings.elasticsearch_url),
             model,
             load_calibration(),
+            RedisFaqCache(settings.support_redis_url) if settings.support_redis_url else None,
         ),
     )
 
@@ -150,6 +179,8 @@ def main() -> None:
     parser.add_argument("--commerce-password", required=True)
     parser.add_argument("--elasticsearch-url", required=True)
     parser.add_argument("--model-url", required=True)
+    parser.add_argument("--agent-cache-url", required=True)
+    parser.add_argument("--indexer-cache-url", required=True)
     args = parser.parse_args()
 
     settings = AgentSettings(
@@ -160,6 +191,7 @@ def main() -> None:
         elasticsearch_url=args.elasticsearch_url,
         model_proxy_url=args.model_url,
         commerce_tools_url="http://commerce-must-not-be-used",
+        support_redis_url=args.agent_cache_url,
         attempt_budget=12,
     )
     sessions = MysqlSessionStore(settings)
@@ -460,13 +492,134 @@ def main() -> None:
     expect_denied(mismatched_association, 1452)
     store.fail_turn(start=association_start, failure_code="association_rejected")
 
+    cache_message = "retrieval-sufficient exact refund cache"
+
+    def cache_event(version: int, *, tombstone: bool = False) -> FaqKnowledgeEvent:
+        return FaqKnowledgeEvent.from_bytes(
+            json.dumps(
+                {
+                    "eventId": f"22222222-2222-4222-8222-{version:012d}",
+                    "sourceId": "faq-cb112-exact",
+                    "sourceType": "faq",
+                    "sourceVersion": version,
+                    "publicationState": "PUBLISHED",
+                    "tombstone": tombstone,
+                    "occurredTime": f"2026-07-21T13:00:{version:02d}Z",
+                    "content": {
+                        "question": cache_message,
+                        "answer": "The exact public refund cache answer.",
+                    },
+                },
+                separators=(",", ":"),
+            ).encode()
+        )
+
+    delete_response = httpx.post(
+        f"{args.elasticsearch_url}/knowledge_docs_v1/_delete_by_query?refresh=true",
+        json={"query": {"match_all": {}}},
+        timeout=10,
+    )
+    delete_response.raise_for_status()
+    first_cache_event = cache_event(1)
+    es_projection = ElasticsearchKnowledgeProjection(args.elasticsearch_url)
+    cache_projection = RedisFaqCacheProjection.from_url(args.indexer_cache_url)
+    assert es_projection.apply(first_cache_event) is ProjectionOutcome.APPLIED
+    assert (
+        cache_projection.apply(first_cache_event, "knowledge_docs_v1") is ProjectionOutcome.APPLIED
+    )
+    refresh_response = httpx.post(
+        f"{args.elasticsearch_url}/knowledge_docs_v1/_refresh", timeout=10
+    )
+    refresh_response.raise_for_status()
+
+    cache_agent = make_agent(settings, sessions, model_url=args.model_url, attempt_limit=12)
+    first_cache_decision, _, _ = execute(
+        store=store,
+        agent=cache_agent,
+        session_id=session_id,
+        message=cache_message,
+        correlation_key="cb112-cache-population",
+    )
+    if (
+        first_cache_decision.outcome != "SUFFICIENT"
+        or len(first_cache_decision.evidence) != 1
+        or first_cache_decision.evidence[0].source_id != "faq-cb112-exact"
+        or first_cache_decision.evidence[0].source_version != 1
+    ):
+        raise AssertionError(
+            "Real Elasticsearch miss did not produce one guarded FAQ mapping: "
+            f"{first_cache_decision.model_dump(by_alias=True, mode='json')}"
+        )
+    cache_hit_settings = settings.model_copy(update={"elasticsearch_url": "http://127.0.0.1:9"})
+    cache_hit_agent = make_agent(
+        cache_hit_settings, sessions, model_url=args.model_url, attempt_limit=12
+    )
+    cache_hit_decision, _, _ = execute(
+        store=store,
+        agent=cache_hit_agent,
+        session_id=session_id,
+        message=cache_message,
+        correlation_key="cb112-cache-hit",
+    )
+    if cache_hit_decision.evidence != first_cache_decision.evidence:
+        raise AssertionError("Cache hit changed citation or retrieval evidence semantics")
+    outage_settings = settings.model_copy(update={"support_redis_url": "redis://127.0.0.1:9/0"})
+    outage_agent = make_agent(outage_settings, sessions, model_url=args.model_url, attempt_limit=12)
+    outage_decision, _, _ = execute(
+        store=store,
+        agent=outage_agent,
+        session_id=session_id,
+        message=cache_message,
+        correlation_key="cb112-cache-outage",
+    )
+    if outage_decision.evidence != first_cache_decision.evidence:
+        raise AssertionError("Support Redis outage changed Elasticsearch fallback evidence")
+
+    interrupted_publication = cache_event(2)
+    interrupted_projection = VersionedKnowledgeProjection(
+        es_projection,
+        FinalizeUnavailableCache(cache_projection),
+    )
+    try:
+        interrupted_projection.apply(interrupted_publication)
+    except KnowledgeSyncError as error:
+        if str(error) != "support_cache_unavailable":
+            raise
+    else:
+        raise AssertionError("Injected Redis finalization failure unexpectedly acknowledged")
+    agent_cache = RedisFaqCache(args.agent_cache_url)
+    if agent_cache.lookup(cache_message) is not None:
+        raise AssertionError("Old query mapping survived the Redis finalization failure window")
+    if (
+        VersionedKnowledgeProjection(es_projection, cache_projection).apply(interrupted_publication)
+        is not ProjectionOutcome.REPLAYED
+    ):
+        raise AssertionError("Elasticsearch replay did not repair the pending Redis projection")
+
+    tombstone = cache_event(3, tombstone=True)
+    assert es_projection.apply(tombstone) is ProjectionOutcome.APPLIED
+    assert cache_projection.apply(tombstone, "knowledge_docs_v1") is ProjectionOutcome.APPLIED
+    replay = store.begin_turn(
+        session_id=session_id,
+        subject="cb091-user",
+        sandbox_id=None,
+        correlation_key="cb112-cache-hit",
+        message=cache_message,
+    )
+    if replay.replay is None or replay.replay.retrieval_evidence != cache_hit_decision.evidence:
+        raise AssertionError("Historical cache-hit evidence was not replayed from MySQL")
+
     print(
         json.dumps(
             {
                 "atomicRollback": "passed",
+                "cacheDurableReplay": True,
+                "cacheFinalizeWindow": True,
+                "cacheHitEvidence": True,
+                "cacheOutageFallback": True,
                 "calibrationVersion": "cb091-calibration-v1",
                 "indexVersion": "knowledge_docs_v1",
-                "outcomes": len(expected) + 1,
+                "outcomes": len(expected) + 4,
                 "replayWithoutExecution": True,
                 "runtimeIsolation": "passed",
                 "storedEvidenceCount": len(sufficient.evidence),

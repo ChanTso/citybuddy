@@ -295,6 +295,247 @@ def test_tool_adapter_uses_elasticsearch_without_obo_or_caller_authority() -> No
     }
 
 
+def test_cache_hit_uses_server_message_and_still_runs_existing_sufficiency_path() -> None:
+    class ForbiddenObo:
+        def exchange(self, *args: object) -> str:
+            raise AssertionError(args)
+
+    class ForbiddenKnowledge:
+        def search(self, request: KnowledgeSearchInput, charge: Any) -> KnowledgeSearchOutput:
+            raise AssertionError((request, charge))
+
+    class StubCache:
+        def lookup(self, public_query: str) -> KnowledgeSearchOutput | None:
+            assert public_query == "SERVER original question"
+            return KnowledgeSearchOutput(
+                index_version="knowledge_docs_v2",
+                results=(
+                    KnowledgeSearchResult(
+                        source_id="faq-refund",
+                        chunk_id="answer",
+                        source_version=9,
+                        doc_type="faq",
+                        title="Refund policy",
+                        excerpt="Public refund guidance.",
+                        public_metadata=PublicKnowledgeMetadata(category="faq", language="und"),
+                        rank=1,
+                        rrf_score=1 / 61,
+                    ),
+                ),
+            )
+
+        def populate_mapping(self, public_query: str, source_id: str, source_version: int) -> bool:
+            raise AssertionError((public_query, source_id, source_version))
+
+    class StubReranker:
+        def rerank(
+            self,
+            plan: ModelPlan,
+            request: Any,
+            budget: AttemptBudget,
+            events: list[AgentEvent],
+        ) -> RerankOutput:
+            del plan, events
+            assert request.query == "model-selected rewrite target"
+            budget.charge("reranker_http", "reranker")
+            return RerankOutput(scores=(RerankScore(candidate_id="faq-refund:answer", score=0.9),))
+
+    events: list[AgentEvent] = []
+    result = ToolAdapter(
+        "https://commerce.test",
+        ForbiddenObo(),
+        ForbiddenKnowledge(),
+        StubReranker(),
+        load_calibration(),
+        StubCache(),
+    ).execute(
+        name="knowledge.search",
+        serialized_arguments='{"query":"model-selected rewrite target"}',
+        direct_token="direct",
+        subject="user",
+        session_id="session",
+        budget=AttemptBudget(2, events),
+        events=events,
+        plan=ModelPlan(
+            tier="standard",
+            routes=(ProviderRoute("support-standard-primary", "primary"),),
+            reranker_route=ProviderRoute("support-reranker-standard", "reranker"),
+            attempt_limit=2,
+        ),
+        public_query="SERVER original question",
+    )
+
+    assert result.outcome == "ok"
+    assert result.retrieval_decision is not None
+    assert result.retrieval_decision.evidence[0].source_version == 9
+    assert result.retrieval_decision.evidence[0].source_id == "faq-refund"
+
+
+def test_cache_miss_populates_only_one_sufficient_faq_from_server_message() -> None:
+    class ForbiddenObo:
+        def exchange(self, *args: object) -> str:
+            raise AssertionError(args)
+
+    class StubCache:
+        populated: tuple[str, str, int] | None = None
+
+        def lookup(self, public_query: str) -> KnowledgeSearchOutput | None:
+            assert public_query == "server message"
+            return None
+
+        def populate_mapping(self, public_query: str, source_id: str, source_version: int) -> bool:
+            self.populated = (public_query, source_id, source_version)
+            return True
+
+    class StubKnowledge:
+        def search(self, request: KnowledgeSearchInput, charge: Any) -> KnowledgeSearchOutput:
+            del request, charge
+            return KnowledgeSearchOutput(
+                index_version="knowledge_docs_v1",
+                results=(
+                    KnowledgeSearchResult(
+                        source_id="faq-refund",
+                        chunk_id="answer",
+                        source_version=4,
+                        doc_type="faq",
+                        title="Refund policy",
+                        excerpt="Public refund guidance.",
+                        public_metadata=PublicKnowledgeMetadata(category="faq", language="und"),
+                        rank=1,
+                        rrf_score=0.03,
+                    ),
+                ),
+            )
+
+    class StubReranker:
+        def rerank(self, *args: object) -> RerankOutput:
+            return RerankOutput(scores=(RerankScore(candidate_id="faq-refund:answer", score=0.9),))
+
+    cache = StubCache()
+    result = ToolAdapter(
+        "https://commerce.test",
+        ForbiddenObo(),
+        StubKnowledge(),
+        StubReranker(),
+        load_calibration(),
+        cache,
+    ).execute(
+        name="knowledge.search",
+        serialized_arguments='{"query":"model query"}',
+        direct_token="direct",
+        subject="user",
+        session_id="session",
+        budget=AttemptBudget(3, []),
+        events=[],
+        plan=ModelPlan(
+            tier="standard",
+            routes=(ProviderRoute("support-standard-primary", "primary"),),
+            reranker_route=ProviderRoute("support-reranker-standard", "reranker"),
+            attempt_limit=3,
+        ),
+        public_query="server message",
+    )
+
+    assert result.outcome == "ok"
+    assert cache.populated == ("server message", "faq-refund", 4)
+
+
+@pytest.mark.parametrize(
+    ("doc_types", "scores"),
+    [
+        (("faq",), (0.4,)),
+        (("product",), (0.9,)),
+        (("faq", "faq"), (0.9, 0.5)),
+    ],
+)
+def test_insufficient_product_or_multi_source_result_never_populates_mapping(
+    doc_types: tuple[str, ...], scores: tuple[float, ...]
+) -> None:
+    class ForbiddenObo:
+        def exchange(self, *args: object) -> str:
+            raise AssertionError(args)
+
+    class SpyCache:
+        populated: tuple[str, str, int] | None = None
+
+        def lookup(self, public_query: str) -> KnowledgeSearchOutput | None:
+            assert public_query == "server message"
+            return None
+
+        def populate_mapping(self, public_query: str, source_id: str, source_version: int) -> bool:
+            self.populated = (public_query, source_id, source_version)
+            return True
+
+    class StubKnowledge:
+        def search(self, request: KnowledgeSearchInput, charge: Any) -> KnowledgeSearchOutput:
+            del request, charge
+            return KnowledgeSearchOutput(
+                index_version="knowledge_docs_v1",
+                results=tuple(
+                    KnowledgeSearchResult(
+                        source_id=f"source-{index}",
+                        chunk_id="answer" if doc_type == "faq" else "description",
+                        source_version=1,
+                        doc_type=doc_type,  # type: ignore[arg-type]
+                        title=f"Public source {index}",
+                        excerpt=f"Public content {index}",
+                        public_metadata=PublicKnowledgeMetadata(
+                            category="faq" if doc_type == "faq" else "product",
+                            language="und",
+                            product_id=None if doc_type == "faq" else f"source-{index}",
+                        ),
+                        rank=index,
+                        rrf_score=1 / (60 + index),
+                    )
+                    for index, doc_type in enumerate(doc_types, start=1)
+                ),
+            )
+
+    class StubReranker:
+        def rerank(self, *args: object) -> RerankOutput:
+            del args
+            return RerankOutput(
+                scores=tuple(
+                    RerankScore(
+                        candidate_id=(
+                            f"source-{index}:{'answer' if doc_type == 'faq' else 'description'}"
+                        ),
+                        score=score,
+                    )
+                    for index, (doc_type, score) in enumerate(
+                        zip(doc_types, scores, strict=True), start=1
+                    )
+                )
+            )
+
+    cache = SpyCache()
+    ToolAdapter(
+        "https://commerce.test",
+        ForbiddenObo(),
+        StubKnowledge(),
+        StubReranker(),
+        load_calibration(),
+        cache,
+    ).execute(
+        name="knowledge.search",
+        serialized_arguments='{"query":"model query"}',
+        direct_token="direct",
+        subject="user",
+        session_id="session",
+        budget=AttemptBudget(3, []),
+        events=[],
+        plan=ModelPlan(
+            tier="standard",
+            routes=(ProviderRoute("support-standard-primary", "primary"),),
+            reranker_route=ProviderRoute("support-reranker-standard", "reranker"),
+            attempt_limit=3,
+        ),
+        public_query="server message",
+    )
+
+    assert cache.populated is None
+
+
 def test_unavailable_initial_retrieval_is_terminal_without_model_regeneration(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

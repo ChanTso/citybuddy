@@ -9,6 +9,7 @@ from dataclasses import dataclass
 from enum import Enum
 from typing import Any, Protocol, cast
 
+from .faq_cache import CachePreparation, RedisFaqCacheProjection
 from .incremental import (
     EVENT_TAG,
     RESERVED_SANDBOX_PROPERTY,
@@ -30,6 +31,7 @@ class IndexerSettings:
     rocketmq_topic: str = ""
     rocketmq_consumer_group: str = ""
     elasticsearch_url: str = ""
+    support_redis_url: str = ""
     knowledge_alias: str = KNOWLEDGE_ALIAS
     invisible_seconds: int = 30
 
@@ -39,6 +41,7 @@ class IndexerSettings:
             or not self.rocketmq_topic.strip()
             or not self.rocketmq_consumer_group.strip()
             or not self.elasticsearch_url.startswith(("http://", "https://"))
+            or not self.support_redis_url.startswith(("redis://", "rediss://"))
             or self.knowledge_alias != KNOWLEDGE_ALIAS
             or self.invisible_seconds < 10
             or self.invisible_seconds > 300
@@ -60,6 +63,53 @@ class DeliveryResult:
 
 class KnowledgeProjection(Protocol):
     def apply(self, event: FaqKnowledgeEvent) -> ProjectionOutcome: ...
+
+
+class FaqCacheProjection(Protocol):
+    def prepare(self, event: FaqKnowledgeEvent) -> CachePreparation: ...
+
+    def prepare_authoritatively(self, event: FaqKnowledgeEvent) -> CachePreparation: ...
+
+    def finalize(self, event: FaqKnowledgeEvent, index_version: str) -> ProjectionOutcome: ...
+
+    def abort(self, event: FaqKnowledgeEvent) -> None: ...
+
+
+@dataclass(frozen=True)
+class VersionedKnowledgeProjection:
+    elasticsearch: ElasticsearchKnowledgeProjection
+    faq_cache: FaqCacheProjection
+
+    def apply(self, event: FaqKnowledgeEvent) -> ProjectionOutcome:
+        preparation = self.faq_cache.prepare(event)
+        authority_repair = preparation is CachePreparation.AUTHORITY_REQUIRED
+        owner_local_ahead = preparation is CachePreparation.STALE
+        try:
+            outcome, index_version = self.elasticsearch.apply_with_index(event)
+        except KnowledgeSyncConflict:
+            if not authority_repair:
+                self.faq_cache.abort(event)
+            raise
+        if outcome is ProjectionOutcome.STALE:
+            if authority_repair:
+                repaired = self.faq_cache.prepare_authoritatively(event)
+                if repaired is not CachePreparation.STALE:
+                    self.faq_cache.abort(event)
+                raise KnowledgeSyncError("owner_local_state_repaired")
+            self.faq_cache.abort(event)
+            return outcome
+        if owner_local_ahead:
+            raise KnowledgeSyncError("owner_local_state_ahead")
+        if authority_repair:
+            repaired = self.faq_cache.prepare_authoritatively(event)
+            if repaired is CachePreparation.STALE:
+                raise KnowledgeSyncError("owner_local_state_repaired")
+            if repaired is CachePreparation.AUTHORITY_REQUIRED:
+                raise KnowledgeSyncError("owner_local_state_indeterminate")
+        self.faq_cache.finalize(event, index_version)
+        if authority_repair:
+            raise KnowledgeSyncError("owner_local_state_repaired")
+        return outcome
 
 
 @dataclass(frozen=True)
@@ -97,8 +147,11 @@ def create_worker(settings: IndexerSettings | None = None) -> IndexerWorker:
     projection: KnowledgeProjection | None = None
     if configured.elasticsearch_url:
         configured.validate_runtime()
-        projection = ElasticsearchKnowledgeProjection(
-            configured.elasticsearch_url, alias=configured.knowledge_alias
+        projection = VersionedKnowledgeProjection(
+            ElasticsearchKnowledgeProjection(
+                configured.elasticsearch_url, alias=configured.knowledge_alias
+            ),
+            RedisFaqCacheProjection.from_url(configured.support_redis_url),
         )
     return IndexerWorker(settings=configured, projection=projection)
 
