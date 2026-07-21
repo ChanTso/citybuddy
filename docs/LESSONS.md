@@ -249,3 +249,11 @@ This file records only factual pitfalls supported by merged pull-request, commit
 - 根因：PID 取模只是在有限范围内猜测端口，不构成可用性检查或并发所有权；不同脚本重复实现不同区间，既无法统一避开系统临时端口，也无法阻止两个测试进程选择同一候选。受控预占夹具本身若未先证明 holder 已监听，还会制造“探测后才被抢占”的错误证据。
 - 解决：删除自研端口注册表、flock、失效回收、PID/启动指纹及隔离态。MySQL、双 Redis、Elasticsearch 与 RocketMQ 的 Compose 映射只声明 loopback host 和容器目标端口，由 Docker 分配并持有宿主端口，脚本在启动后通过 `docker compose port` 读取；独立 auth 容器同样使用 Docker 随机发布。宿主 Java、Agent 与测试代理以端口 0 启动，由内核分配并由实际进程持续持有，脚本从当前启动代的日志读取端口。首次 final-head 与本地完整 evaluation 套件一致复现了一个编排缺口：JWKS 故障后 auth 已在新端口恢复，但存活的 commerce/agent 仍指向旧端口，因而把后续 liveness 压力正确分类为 503。测试编排现按依赖图依次刷新 auth、commerce、agent；commerce 自身换端口后也刷新 agent。恢复后的真实集成证明 16 个审计写故障继续返回 503、16 个并发 liveness 读取继续返回 204。最终复核又证明 cleanup 与原测试同时失败时，保留原退出码会把第二故障连同被重定向的 `down` 输出一起隐藏；finalizer 现始终输出 cleanup 状态诊断，同时保留原测试退出码。Docker 与 standalone 容器的端口读回也统一执行 `1..65535` 范围校验。真实并发知识搜索与 evaluation identity、完整 identity、catalog、RocketMQ 和 evaluation sandbox 套件均通过且无资源残留；受控 `down` 失败时残留项目继续持有原端口，新项目取得不同端口。
 - 结论：自研跨进程资源租约几乎总会错配请求者与真实 owner；能让操作系统或运行时持有资源时，不要自己建注册表。删除机制比增加状态更能关闭生命周期缺陷类，端口分配证据应观察实际资源 owner，而不是推导候选值。端口 0 关闭了分配竞态，却使重启后的 endpoint 成为新事实；所有存活依赖方必须随 owner 重启被重新绑定，否则旧地址会把已恢复依赖继续表现为不可用。保留主失败退出码不等于可以吞掉 cleanup 次生失败：退出码保持优先级，诊断必须保留全部资源生命周期事实。
+
+## Governance — One-time external-infrastructure CI rerun
+
+- 现象：维护 PR #46 的 final head 与本地完整收口均通过，但同一提交合并到 `main` 后，MySQL 集成在依赖容器启动阶段、进入依赖 MySQL 的主体集成断言前拉取 `rocketmq-store-init` 镜像时收到 Docker Registry `context deadline exceeded`；除该 lane 及其最终聚合器外，其余 required jobs 全部通过。所有者授权一次无代码重跑后，同一 workflow 的第二次 attempt 包括 MySQL lane 与最终聚合器在内全部通过。
+- 证据链接：[maintenance PR #46 post-merge record](https://github.com/ChanTso/citybuddy/pull/46#issuecomment-5034593198)、[main CI run 29832624866](https://github.com/ChanTso/citybuddy/actions/runs/29832624866)
+- 根因：既有连续执行规则把已经无歧义归因的外部基础设施失败也作为必须停止的基础设施阻塞，无法区分需要所有者决策的代码或编排失败与唯一合理动作始终相同的瞬时外部故障，因而重复产生没有决策含量的授权往返。
+- 解决：仅当 required-check 证据证明失败发生在仓库代码执行前或明显独立于仓库代码，且属于镜像仓库拉取失败/超时、runner 网络故障、runner 资源耗尽或 CI 平台错误时，允许 unchanged check/workflow 自动重跑一次；该次重跑不消耗恢复周期，但必须记录原始证据与结论。同类外部失败重跑后复现即停止，产品代码、测试、仓库编排或归因不唯一的失败不得使用该豁免。
+- 结论：无决策含量的停顿应转为窄边界规则；一次性外部基础设施重跑豁免必须以唯一归因、完整证据和复现即停为前提，不能成为掩盖真实失败的后门。
