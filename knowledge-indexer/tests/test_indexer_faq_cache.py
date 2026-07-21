@@ -66,7 +66,8 @@ def test_projection_returns_only_closed_monotonic_outcomes(
     call = repr(fake.calls)
     assert "faq-delivery-window" in call
     assert ("knowledge_docs_v1" in call) is (expected is not ProjectionOutcome.STALE)
-    assert ("When is delivery?" in call) is (expected is not ProjectionOutcome.STALE)
+    assert "When is delivery?" in call
+    assert "Delivery is tomorrow." in call
 
 
 def test_tombstone_is_sent_as_a_closed_flag_without_answer_availability() -> None:
@@ -94,7 +95,7 @@ def test_authoritative_prepare_uses_the_explicit_authority_mode() -> None:
     cache, fake = projection(["prepared", "authoritative_repair_prepared"])
 
     assert cache.prepare_authoritatively(event()) is CachePreparation.PREPARED
-    assert fake.calls[0][-1] == "1"
+    assert fake.calls[0][-3] == "1"
 
 
 @pytest.mark.parametrize(

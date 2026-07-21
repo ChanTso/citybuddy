@@ -224,12 +224,24 @@ request. A later semantic diff change requires the checklist to be executed and 
   and after authoritative success but before projection finalization. Define and execute every cell;
   field deletion, unknown fields, malformed lease/version, and loss of the whole state must preserve
   retry/replay repair, while only a confirmed competing or superseding business fact may terminate.
-- Derive the persisted-state and result axes mechanically from the production implementation rather
-  than from a handwritten matrix. Every production result branch must have one unique stable label;
-  executable inventory must fail on an unlabelled or duplicate branch and real fault evidence must
-  observe every label. Derive field-fault cells from every field the production state machine reads,
-  including every reachable persisted class such as both preparation and ready state. Adding a
-  production branch or state field without a real cell must fail matrix construction before review.
+- Do not claim totality by parsing production source text. A regex or bounded parser still chooses
+  operands, syntax, helper reachability, and label granularity; its chosen scope becomes another
+  place where persisted state can disappear from responsibility. For a Redis-backed state machine,
+  construct each legal persisted class through the real production transition, then enumerate the
+  resulting ground truth from live Redis: `SCAN` every owned key, inspect its type, existence and
+  TTL, and use `HGETALL` to enumerate every physical field. Generate field deletion/mutation and
+  key existence/type/TTL/extra-field faults directly from that snapshot in every mutation phase.
+  Re-enumerate before injection and fail matrix construction if the live key or field inventory has
+  drifted. Expected absence is also an invariant: for example, a ready tombstone must exercise an
+  unexpected versioned-answer key. Source-text analysis may remain diagnostic only; it is not
+  completeness evidence.
+- Give each actual state-machine control path a distinct internal detail code. A label attached only
+  to a literal return statement is insufficient when several field, TTL, type, existence, or
+  tombstone predicates flow to that statement. Bind every live-data fault cell to the detail codes
+  it really observes so a path cannot borrow coverage from a sibling predicate. For every cell,
+  assert both Worker disposition and final convergence across the source state, the current
+  versioned answer (or its required absence), and the corresponding Elasticsearch document; an
+  Agent lookup miss alone is not convergence evidence.
 - Give every coordination marker both a bounded semantic lease and a bounded physical lifecycle.
   On a TTL-oriented cache, every marker must have positive TTL and its physical TTL must exceed the
   remaining semantic lease by a fixed safety margin; a lease checked only by a future request does

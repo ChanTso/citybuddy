@@ -34,8 +34,7 @@ from citybuddy_indexer.faq_cache import (
     FAQ_PREPARATION_TTL_MS,
     FAQ_PREPARATION_TTL_SAFETY_MS,
     CachePreparation,
-    lua_result_branch_inventory,
-    lua_state_field_inventory,
+    _cache_commitment,
 )
 from citybuddy_indexer.incremental import EVENT_TAG, RESERVED_SANDBOX_PROPERTY
 from citybuddy_indexer.worker import VersionedKnowledgeProjection
@@ -227,14 +226,14 @@ class FinalizeUnavailableCache:
         self.delegate.abort(event)
 
 
-PERSISTED_STATE_CLASSES = ("missing", "ready0", "ready1")
+PERSISTED_STATE_CLASSES = ("missing", "ready0", "ready1-live", "ready1-tombstone")
 PIPELINE_PHASES = ("before-es", "after-es-before-finalize")
 
 
 @dataclass
 class BranchRecordingRedis:
     delegate: Redis
-    observed: set[str]
+    observed: list[str]
 
     def eval(self, script: str, key_count: int, *values: str) -> object:
         raw = self.delegate.eval(script, key_count, *values)
@@ -251,84 +250,145 @@ class BranchRecordingRedis:
             and len(raw) == 2
             and all(isinstance(item, str) for item in raw)
         ):
-            self.observed.add(f"{script_name}:{raw[0]}:{raw[1]}")
+            self.observed.append(f"{script_name}:{raw[0]}:{raw[1]}")
         return raw
-
-
-def _recording_projection(redis_url: str, observed: set[str]) -> RedisFaqCacheProjection:
-    client = Redis.from_url(redis_url, decode_responses=True)
-    return RedisFaqCacheProjection(cast(Redis, BranchRecordingRedis(client, observed)))
 
 
 def _state_key(sync_event: FaqKnowledgeEvent) -> str:
     return f"{FAQ_CACHE_PREFIX}state:{sync_event.source_id}"
 
 
+def _answer_key(sync_event: FaqKnowledgeEvent) -> str:
+    return f"{FAQ_CACHE_PREFIX}answer:{sync_event.source_id}:{sync_event.source_version}"
+
+
 def _parsed_event(payload: dict[str, object]) -> FaqKnowledgeEvent:
     return FaqKnowledgeEvent.from_bytes(encode(payload))
 
 
-def _state_faults() -> tuple[str, ...]:
-    fields = sorted(lua_state_field_inventory())
-    assert fields == [
-        "cache_commitment",
-        "commitment",
-        "event_id",
-        "index_version",
-        "lease_deadline_ms",
-        "occurred_time",
-        "ready",
-        "schema",
-        "source_id",
-        "source_version",
-        "tombstone",
-    ]
-    return (
-        "valid",
-        "unknown-field",
-        "invalid-source-version",
-        *(f"delete:{field}" for field in fields),
-        *(f"mutate:{field}" for field in fields),
+@dataclass(frozen=True, order=True)
+class LiveRedisFault:
+    key_role: str
+    operation: str
+    field: str = ""
+
+    @property
+    def label(self) -> str:
+        suffix = f":{self.field}" if self.field else ""
+        return f"{self.key_role}:{self.operation}{suffix}"
+
+
+def _key_for_role(sync_event: FaqKnowledgeEvent, key_role: str) -> str:
+    if key_role == "state":
+        return _state_key(sync_event)
+    if key_role == "answer":
+        return _answer_key(sync_event)
+    raise AssertionError(f"unclassified live Redis key role: {key_role}")
+
+
+def _role_for_key(sync_event: FaqKnowledgeEvent, key: str) -> str:
+    if key == _state_key(sync_event):
+        return "state"
+    if key == _answer_key(sync_event):
+        return "answer"
+    raise AssertionError(f"unexpected FAQ cache key discovered from live Redis: {key}")
+
+
+def _live_fault_inventory(
+    admin: Redis, sync_event: FaqKnowledgeEvent, persisted_class: str
+) -> tuple[LiveRedisFault, ...]:
+    discovered: list[LiveRedisFault] = [LiveRedisFault("none", "valid")]
+    keys = sorted(
+        cast(
+            list[str],
+            list(admin.scan_iter(match=f"{FAQ_CACHE_PREFIX}*{sync_event.source_id}*")),
+        )
     )
+    for key in keys:
+        key_role = _role_for_key(sync_event, key)
+        key_type = cast(str, admin.type(key))
+        if key_type != "hash":
+            raise AssertionError(f"legal FAQ cache key is not a hash: {key_role}={key_type}")
+        ttl = cast(int, admin.pttl(key))
+        if ttl <= 0:
+            raise AssertionError(f"legal FAQ cache key is not TTL-bounded: {key_role}={ttl}")
+        fields = cast(dict[str, str], admin.hgetall(key))
+        if not fields:
+            raise AssertionError(f"legal FAQ cache key has no enumerable fields: {key_role}")
+        discovered.extend(
+            (
+                LiveRedisFault(key_role, "delete-key"),
+                LiveRedisFault(key_role, "wrong-type"),
+                LiveRedisFault(key_role, "remove-ttl"),
+                LiveRedisFault(key_role, "add-field"),
+            )
+        )
+        for field in sorted(fields):
+            discovered.append(LiveRedisFault(key_role, "delete-field", field))
+            discovered.append(LiveRedisFault(key_role, "mutate-field", field))
+    if persisted_class == "ready1-tombstone":
+        discovered.append(LiveRedisFault("answer", "unexpected-key"))
+    return tuple(sorted(discovered))
 
 
-def _mutated_state_value(sync_event: FaqKnowledgeEvent, persisted_class: str, field: str) -> str:
-    current = {
-        "cache_commitment": "tampered-cache-commitment",
-        "commitment": "tampered-event-commitment",
-        "event_id": str(uuid4()),
-        "index_version": "tampered-index" if persisted_class == "ready1" else "unexpected",
-        "lease_deadline_ms": "1" if persisted_class == "ready1" else "invalid",
-        "occurred_time": "2026-07-21T12:59:59Z",
-        "ready": "0" if persisted_class == "ready1" else "1",
+def _mutated_live_value(field: str, current: str, sync_event: FaqKnowledgeEvent) -> str:
+    fixed = {
         "schema": "tampered-schema",
         "source_id": f"{sync_event.source_id}-tampered",
-        "source_version": str(sync_event.source_version + 1),
-        "tombstone": "1" if not sync_event.tombstone else "0",
+        "tombstone": "0" if current == "1" else "1",
+        "commitment": "0" * 64,
+        "index_version": "knowledge_docs_v9" if current != "knowledge_docs_v9" else "v1",
+        "event_id": str(uuid4()),
+        "occurred_time": "2026-07-21T12:59:59Z",
+        "ready": "0" if current == "1" else "1",
+        "cache_commitment": "f" * 64,
+        "lease_deadline_ms": "invalid",
+        "doc_type": "product",
+        "chunk_id": "other",
+        "title": "Data consistency fault title",
+        "answer": "Data consistency fault answer",
+        "public_category": "other",
+        "public_language": "en",
     }
-    return current[field]
+    if field == "source_version":
+        return str(sync_event.source_version + 1)
+    replacement = fixed.get(field, f"tampered-{field}")
+    if replacement == current:
+        replacement = f"{replacement}-other"
+    return replacement
 
 
-def _inject_state_fault(
-    admin: Redis, sync_event: FaqKnowledgeEvent, persisted_class: str, fault: str
-) -> None:
-    state_key = _state_key(sync_event)
-    if fault == "valid":
+def _inject_live_fault(admin: Redis, sync_event: FaqKnowledgeEvent, fault: LiveRedisFault) -> None:
+    if fault.operation == "valid":
         return
-    if fault == "unknown-field":
-        admin.hset(state_key, "unexpected", "field")
+    key = _key_for_role(sync_event, fault.key_role)
+    if fault.operation == "delete-key":
+        admin.delete(key)
         return
-    if fault == "invalid-source-version":
-        admin.hset(state_key, "source_version", "invalid")
+    if fault.operation == "wrong-type":
+        admin.delete(key)
+        admin.set(key, "data-consistency-fault", px=FAQ_ENTRY_TTL_MS)
         return
-    operation, field = fault.split(":", maxsplit=1)
-    if operation == "delete":
-        admin.hdel(state_key, field)
+    if fault.operation == "remove-ttl":
+        admin.persist(key)
         return
-    if operation == "mutate":
-        admin.hset(state_key, field, _mutated_state_value(sync_event, persisted_class, field))
+    if fault.operation == "add-field":
+        admin.hset(key, "unexpected", "field")
         return
-    raise AssertionError(f"unclassified persisted-state fault: {fault}")
+    if fault.operation == "unexpected-key":
+        admin.hset(key, mapping={"unexpected": "tombstone-answer"})
+        admin.pexpire(key, FAQ_ENTRY_TTL_MS)
+        return
+    if fault.operation == "delete-field":
+        admin.hdel(key, fault.field)
+        return
+    if fault.operation == "mutate-field":
+        current = cast(str | None, admin.hget(key, fault.field))
+        if current is None:
+            raise AssertionError(f"live Redis field disappeared before injection: {fault.label}")
+        admin.hset(key, fault.field, _mutated_live_value(fault.field, current, sync_event))
+        return
+    raise AssertionError(f"unclassified live Redis fault: {fault.label}")
 
 
 def _seed_persisted_state(
@@ -336,21 +396,30 @@ def _seed_persisted_state(
     projection: RedisFaqCacheProjection,
     sync_event: FaqKnowledgeEvent,
     persisted_class: str,
-    fault: str,
+    fault: LiveRedisFault,
+    expected_inventory: tuple[LiveRedisFault, ...] | None,
 ) -> None:
     state_key = _state_key(sync_event)
     admin.delete(state_key)
     for key in admin.scan_iter(match=f"{FAQ_CACHE_PREFIX}answer:{sync_event.source_id}:*"):
         admin.delete(key)
     if persisted_class == "missing":
-        return
-    if persisted_class == "ready0":
+        actual_inventory = _live_fault_inventory(admin, sync_event, persisted_class)
+    elif persisted_class == "ready0":
         assert projection.prepare(sync_event) is CachePreparation.PREPARED
-    elif persisted_class == "ready1":
+        actual_inventory = _live_fault_inventory(admin, sync_event, persisted_class)
+    elif persisted_class in {"ready1-live", "ready1-tombstone"}:
         assert projection.apply(sync_event, "knowledge_docs_v1") is ProjectionOutcome.APPLIED
+        actual_inventory = _live_fault_inventory(admin, sync_event, persisted_class)
     else:
         raise AssertionError(f"unclassified persisted state: {persisted_class}")
-    _inject_state_fault(admin, sync_event, persisted_class, fault)
+    if expected_inventory is not None and actual_inventory != expected_inventory:
+        raise AssertionError(
+            f"live Redis schema drifted for {persisted_class}: "
+            f"expected {[item.label for item in expected_inventory]}, "
+            f"got {[item.label for item in actual_inventory]}"
+        )
+    _inject_live_fault(admin, sync_event, fault)
 
 
 @dataclass(frozen=True)
@@ -358,7 +427,8 @@ class FinalizeFenceFault:
     delegate: RedisFaqCacheProjection
     admin: Redis
     persisted_class: str
-    fault: str
+    fault: LiveRedisFault
+    expected_inventory: tuple[LiveRedisFault, ...]
 
     def prepare(self, sync_event: FaqKnowledgeEvent) -> CachePreparation:
         return self.delegate.prepare(sync_event)
@@ -373,6 +443,7 @@ class FinalizeFenceFault:
             sync_event,
             self.persisted_class,
             self.fault,
+            self.expected_inventory,
         )
         return self.delegate.finalize(sync_event, index_version)
 
@@ -380,13 +451,69 @@ class FinalizeFenceFault:
         self.delegate.abort(sync_event)
 
 
-def _assert_matrix_converged(admin: Redis, sync_event: FaqKnowledgeEvent) -> None:
+def _assert_matrix_converged(
+    args: argparse.Namespace, admin: Redis, sync_event: FaqKnowledgeEvent
+) -> None:
     state_key = _state_key(sync_event)
     state = cast(dict[str, str], admin.hgetall(state_key))
-    assert state.get("source_version") == str(sync_event.source_version)
-    assert state.get("ready") == "1"
+    expected_cache_commitment = _cache_commitment(sync_event.commitment, args.index)
+    assert state == {
+        "schema": FAQ_CACHE_SCHEMA,
+        "source_id": sync_event.source_id,
+        "source_version": str(sync_event.source_version),
+        "tombstone": "1" if sync_event.tombstone else "0",
+        "commitment": sync_event.commitment,
+        "index_version": "" if sync_event.tombstone else args.index,
+        "event_id": sync_event.event_id,
+        "occurred_time": sync_event.occurred_time,
+        "ready": "1",
+        "cache_commitment": "" if sync_event.tombstone else expected_cache_commitment,
+        "lease_deadline_ms": "",
+    }
     state_ttl = cast(int, admin.pttl(state_key))
     assert 0 < state_ttl <= FAQ_ENTRY_TTL_MS
+    answer_key = _answer_key(sync_event)
+    if sync_event.tombstone:
+        assert not admin.exists(answer_key)
+    else:
+        answer = cast(dict[str, str], admin.hgetall(answer_key))
+        assert answer == {
+            "schema": FAQ_CACHE_SCHEMA,
+            "source_id": sync_event.source_id,
+            "source_version": str(sync_event.source_version),
+            "doc_type": "faq",
+            "chunk_id": "answer",
+            "title": sync_event.content.question,
+            "answer": sync_event.content.answer,
+            "index_version": args.index,
+            "commitment": sync_event.commitment,
+            "cache_commitment": expected_cache_commitment,
+            "public_category": "faq",
+            "public_language": "und",
+        }
+        answer_ttl = cast(int, admin.pttl(answer_key))
+        assert 0 < answer_ttl <= FAQ_ENTRY_TTL_MS
+    redis_keys = sorted(
+        cast(
+            list[str],
+            list(admin.scan_iter(match=f"{FAQ_CACHE_PREFIX}*{sync_event.source_id}*")),
+        )
+    )
+    expected_keys = [state_key] if sync_event.tombstone else sorted([state_key, answer_key])
+    assert set(expected_keys).issubset(redis_keys)
+    for residual_key in set(redis_keys) - set(expected_keys):
+        assert residual_key.startswith(f"{FAQ_CACHE_PREFIX}answer:{sync_event.source_id}:")
+        assert 0 < cast(int, admin.pttl(residual_key)) <= FAQ_ENTRY_TTL_MS
+    es_document = document(args.elasticsearch_url, args.index, source_id=sync_event.source_id)
+    assert es_document["source_id"] == sync_event.source_id
+    assert es_document["source_version"] == sync_event.source_version
+    assert es_document["title"] == sync_event.content.question
+    assert es_document["content"] == sync_event.content.answer
+    assert es_document["published"] is (not sync_event.tombstone)
+    assert es_document["deleted"] is sync_event.tombstone
+    assert es_document["sync_event_id"] == sync_event.event_id
+    assert es_document["sync_event_commitment"] == sync_event.commitment
+    assert es_document["sync_occurred_at"] == sync_event.occurred_time
 
 
 def _recover_matrix_cell(
@@ -402,20 +529,18 @@ def _recover_matrix_cell(
             assert result.code in {"applied", "replayed", "stale"}
             return retries
         retries += 1
-        assert result.code in {
-            "cache_source_busy",
-            "malformed_preparation_repaired",
-            "owner_local_state_ahead",
-            "owner_local_state_repaired",
-            "preparation_owner_mismatch",
-        }
+        assert result.code and result.code not in {"applied", "replayed", "stale"}
         state = cast(dict[str, str], admin.hgetall(_state_key(sync_event)))
+        if result.code == "owner_local_state_ahead":
+            admin.pexpire(_state_key(sync_event), 50)
+            time.sleep(0.1)
+            continue
         if state.get("ready") == "0" and state.get("lease_deadline_ms", "").isdecimal():
             admin.hset(_state_key(sync_event), "lease_deadline_ms", "1")
     raise AssertionError("persisted-state fault did not converge within the bounded replay window")
 
 
-def _exercise_invalid_input_branches(recorder: BranchRecordingRedis, source_id: str) -> None:
+def _exercise_invalid_input_discriminators(recorder: BranchRecordingRedis, source_id: str) -> None:
     recorder.eval(
         _PREPARE_SCRIPT,
         2,
@@ -432,6 +557,8 @@ def _exercise_invalid_input_branches(recorder: BranchRecordingRedis, source_id: 
         str(FAQ_PREPARATION_TTL_MS),
         str(FAQ_ENTRY_TTL_MS),
         "0",
+        "question",
+        "answer",
     )
     recorder.eval(
         _FINALIZE_SCRIPT,
@@ -454,30 +581,63 @@ def _exercise_invalid_input_branches(recorder: BranchRecordingRedis, source_id: 
 
 
 def disposition_matrix(args: argparse.Namespace, admin: Redis) -> dict[str, object]:
-    observed_branches: set[str] = set()
+    observed_branches: list[str] = []
     recording_client = BranchRecordingRedis(
         Redis.from_url(args.support_redis_url, decode_responses=True), observed_branches
     )
     cache_projection = RedisFaqCacheProjection(cast(Redis, recording_client))
     elasticsearch = ElasticsearchKnowledgeProjection(args.elasticsearch_url)
-    faults = _state_faults()
+    inventories: dict[str, tuple[LiveRedisFault, ...]] = {}
+    for persisted_class in PERSISTED_STATE_CLASSES:
+        source_id = f"faq-live-inventory-{persisted_class}"
+        payload = event(
+            2,
+            source_id=source_id,
+            tombstone=persisted_class == "ready1-tombstone",
+        )
+        sync_event = _parsed_event(payload)
+        discovery_seed = LiveRedisFault("none", "valid")
+        if persisted_class == "missing":
+            inventories[persisted_class] = _live_fault_inventory(admin, sync_event, persisted_class)
+        else:
+            _seed_persisted_state(
+                admin,
+                cache_projection,
+                sync_event,
+                persisted_class,
+                discovery_seed,
+                None,
+            )
+            inventories[persisted_class] = _live_fault_inventory(admin, sync_event, persisted_class)
+        admin.delete(_state_key(sync_event), _answer_key(sync_event))
     matrix_cells = 0
     corruption_cells = 0
     retry_cells = 0
+    discriminator_cells: dict[str, set[str]] = {}
     for phase in PIPELINE_PHASES:
         for persisted_class in PERSISTED_STATE_CLASSES:
-            applicable_faults = ("valid",) if persisted_class == "missing" else faults
-            for fault in applicable_faults:
+            inventory = inventories[persisted_class]
+            for fault in inventory:
                 source_id = f"faq-matrix-{phase[:3]}-{persisted_class}-{matrix_cells}"
-                payload = event(2, source_id=source_id)
+                payload = event(
+                    2,
+                    source_id=source_id,
+                    tombstone=persisted_class == "ready1-tombstone",
+                )
                 sync_event = _parsed_event(payload)
                 normal_worker = IndexerWorker(
                     settings(args, args.elasticsearch_url),
                     VersionedKnowledgeProjection(elasticsearch, cache_projection),
                 )
+                cell_branch_start = len(observed_branches)
                 if phase == "before-es":
                     _seed_persisted_state(
-                        admin, cache_projection, sync_event, persisted_class, fault
+                        admin,
+                        cache_projection,
+                        sync_event,
+                        persisted_class,
+                        fault,
+                        inventory,
                     )
                     first = normal_worker.handle(encode(payload))
                 else:
@@ -490,37 +650,58 @@ def disposition_matrix(args: argparse.Namespace, admin: Redis) -> dict[str, obje
                                 admin,
                                 persisted_class,
                                 fault,
+                                inventory,
                             ),
                         ),
                     )
                     first = fault_worker.handle(encode(payload))
 
-                requires_retry = fault != "valid" or (
+                requires_retry = fault.operation != "valid" or (
                     phase == "after-es-before-finalize" and persisted_class != "ready0"
                 )
+                if (
+                    phase == "before-es"
+                    and fault.key_role == "state"
+                    and fault.operation == "delete-key"
+                ):
+                    requires_retry = False
                 if requires_retry:
                     assert first.action is DeliveryAction.RETRY, {
-                        "fault": fault,
+                        "fault": fault.label,
                         "persistedClass": persisted_class,
                         "phase": phase,
                         "result": first,
                     }
                     retry_cells += 1
-                    if fault != "valid":
+                    if fault.operation != "valid":
                         corruption_cells += 1
-                    recovered_retries = _recover_matrix_cell(
-                        normal_worker, payload, admin, sync_event
-                    )
+                    try:
+                        recovered_retries = _recover_matrix_cell(
+                            normal_worker, payload, admin, sync_event
+                        )
+                    except AssertionError as error:
+                        raise AssertionError(
+                            {
+                                "fault": fault.label,
+                                "persistedClass": persisted_class,
+                                "phase": phase,
+                                "state": admin.hgetall(_state_key(sync_event)),
+                            }
+                        ) from error
                     retry_cells += recovered_retries
                 else:
                     assert first.action is DeliveryAction.ACK and first.code in {
                         "applied",
                         "replayed",
                     }
-                _assert_matrix_converged(admin, sync_event)
+                _assert_matrix_converged(args, admin, sync_event)
+                cell_branches = set(observed_branches[cell_branch_start:])
+                if not cell_branches:
+                    raise AssertionError(f"matrix cell emitted no Lua discriminator: {fault.label}")
+                discriminator_cells[f"{persisted_class}:{fault.label}:{phase}"] = cell_branches
                 matrix_cells += 1
 
-    _exercise_invalid_input_branches(recording_client, "faq-matrix-invalid-input")
+    _exercise_invalid_input_discriminators(recording_client, "faq-matrix-invalid-input")
     confirmed_stale_source = "faq-matrix-confirmed-stale"
     confirmed_v3_payload = event(3, source_id=confirmed_stale_source)
     confirmed_worker = IndexerWorker(
@@ -536,7 +717,14 @@ def disposition_matrix(args: argparse.Namespace, admin: Redis) -> dict[str, obje
     redis_v3 = _parsed_event(event(3, source_id=unconfirmed_source))
     es_v2_payload = event(2, source_id=unconfirmed_source)
     es_v2 = _parsed_event(es_v2_payload)
-    _seed_persisted_state(admin, cache_projection, redis_v3, "ready1", "valid")
+    _seed_persisted_state(
+        admin,
+        cache_projection,
+        redis_v3,
+        "ready1-live",
+        LiveRedisFault("none", "valid"),
+        inventories["ready1-live"],
+    )
     unconfirmed_worker = IndexerWorker(
         settings(args, args.elasticsearch_url),
         VersionedKnowledgeProjection(elasticsearch, cache_projection),
@@ -548,12 +736,7 @@ def disposition_matrix(args: argparse.Namespace, admin: Redis) -> dict[str, obje
     time.sleep(0.1)
     converged_v2 = unconfirmed_worker.handle(encode(es_v2_payload))
     assert converged_v2.action is DeliveryAction.ACK and converged_v2.code == "replayed"
-    _assert_matrix_converged(admin, es_v2)
-    required_branches = lua_result_branch_inventory()
-    assert observed_branches == required_branches, {
-        "missing": sorted(required_branches - observed_branches),
-        "unexpected": sorted(observed_branches - required_branches),
-    }
+    _assert_matrix_converged(args, admin, es_v2)
 
     # Exact regression from independent review: a format-valid version corruption must not
     # let Redis terminate a legitimate publication before Elasticsearch observes it.
@@ -576,16 +759,41 @@ def disposition_matrix(args: argparse.Namespace, admin: Redis) -> dict[str, obje
     assert (
         document(args.elasticsearch_url, args.index, source_id=review_source)["source_version"] == 4
     )
-    _assert_matrix_converged(admin, v4_event)
+    _assert_matrix_converged(args, admin, v4_event)
+
+    live_field_targets = {
+        (persisted_class, fault.key_role, fault.field)
+        for persisted_class, inventory in inventories.items()
+        for fault in inventory
+        if fault.operation in {"delete-field", "mutate-field"}
+    }
+    observed_fault_cells = {
+        key for key, details in discriminator_cells.items() if details and ":valid:" not in key
+    }
+    expected_fault_cells = sum(
+        1 for inventory in inventories.values() for fault in inventory if fault.operation != "valid"
+    ) * len(PIPELINE_PHASES)
+    assert len(observed_fault_cells) == expected_fault_cells
 
     return {
         "fenceDispositionCells": matrix_cells,
         "fieldCorruptionPhaseCells": corruption_cells,
-        "luaResultBranches": len(required_branches),
+        "liveRedisDiscriminatorCells": len(discriminator_cells),
+        "liveRedisFieldTargets": len(live_field_targets),
+        "liveRedisKeys": sum(
+            len(
+                {
+                    fault.key_role
+                    for fault in inventory
+                    if fault.key_role != "none" and fault.operation != "unexpected-key"
+                }
+            )
+            for inventory in inventories.values()
+        ),
         "persistedStateClasses": len(PERSISTED_STATE_CLASSES),
         "pipelinePhases": len(PIPELINE_PHASES),
         "retryObservations": retry_cells,
-        "stateFields": len(lua_state_field_inventory()),
+        "uniqueLuaDiscriminators": len(set(observed_branches)),
     }
 
 
