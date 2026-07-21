@@ -46,9 +46,11 @@ guard-layout:
 	test -x scripts/test_knowledge_sync_integration.sh
 	test -x scripts/test_runtime_integration.sh
 	test -f scripts/test_dynamic_ports.sh
+	test -x scripts/start_support_redis.sh
 	test -f scripts/fake_litellm_server.py
 	test -f scripts/check_knowledge_search.py
 	test -f scripts/check_retrieval_evidence.py
+	test -f scripts/check_faq_cache.py
 	test -f scripts/check_retrieval_calibration.py
 	test -f scripts/check_incremental_knowledge_sync.py
 	test -f scripts/seed_legacy_knowledge_mapping.py

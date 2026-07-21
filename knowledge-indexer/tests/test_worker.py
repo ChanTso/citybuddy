@@ -13,6 +13,7 @@ from citybuddy_indexer import (
     create_worker,
 )
 from citybuddy_indexer.incremental import RESERVED_SANDBOX_PROPERTY, FaqKnowledgeEvent
+from citybuddy_indexer.worker import VersionedKnowledgeProjection
 
 
 def valid_body() -> bytes:
@@ -60,6 +61,7 @@ def test_runtime_settings_are_bounded() -> None:
         rocketmq_topic="catalog",
         rocketmq_consumer_group="knowledge",
         elasticsearch_url="http://elasticsearch:9200",
+        support_redis_url="redis://knowledge_indexer:secret@redis-support:6379/0",
     )
 
     valid.validate_runtime()
@@ -67,6 +69,8 @@ def test_runtime_settings_are_bounded() -> None:
         IndexerSettings(**{**valid.__dict__, "invisible_seconds": 9}).validate_runtime()
     with pytest.raises(ValueError):
         IndexerSettings(**{**valid.__dict__, "knowledge_alias": "other"}).validate_runtime()
+    with pytest.raises(ValueError):
+        IndexerSettings(**{**valid.__dict__, "support_redis_url": ""}).validate_runtime()
 
 
 @pytest.mark.parametrize(
@@ -141,3 +145,60 @@ def test_missing_projection_does_not_ack_a_valid_event() -> None:
 
     assert result.action is DeliveryAction.RETRY
     assert result.code == "projection_not_configured"
+
+
+@dataclass
+class ElasticsearchProjection:
+    outcome: ProjectionOutcome
+    index_version: str = "knowledge_docs_v1"
+
+    def apply_with_index(self, event: FaqKnowledgeEvent) -> tuple[ProjectionOutcome, str]:
+        del event
+        return self.outcome, self.index_version
+
+
+@dataclass
+class CacheProjection:
+    outcome: ProjectionOutcome | Exception
+    observed: tuple[FaqKnowledgeEvent, str] | None = None
+
+    def apply(self, event: FaqKnowledgeEvent, index_version: str) -> ProjectionOutcome:
+        self.observed = (event, index_version)
+        if isinstance(self.outcome, Exception):
+            raise self.outcome
+        return self.outcome
+
+
+def test_stale_elasticsearch_delivery_cannot_mutate_support_cache() -> None:
+    cache = CacheProjection(ProjectionOutcome.APPLIED)
+    projection = VersionedKnowledgeProjection(
+        ElasticsearchProjection(ProjectionOutcome.STALE),  # type: ignore[arg-type]
+        cache,  # type: ignore[arg-type]
+    )
+
+    assert projection.apply(FaqKnowledgeEvent.from_bytes(valid_body())) is ProjectionOutcome.STALE
+    assert cache.observed is None
+
+
+def test_elasticsearch_replay_repairs_cache_before_acknowledgement() -> None:
+    cache = CacheProjection(ProjectionOutcome.APPLIED)
+    projection = VersionedKnowledgeProjection(
+        ElasticsearchProjection(ProjectionOutcome.REPLAYED),  # type: ignore[arg-type]
+        cache,  # type: ignore[arg-type]
+    )
+
+    assert (
+        projection.apply(FaqKnowledgeEvent.from_bytes(valid_body())) is ProjectionOutcome.REPLAYED
+    )
+    assert cache.observed is not None and cache.observed[1] == "knowledge_docs_v1"
+
+
+def test_cache_unavailability_after_elasticsearch_apply_remains_retryable() -> None:
+    cache = CacheProjection(KnowledgeSyncError("support_cache_unavailable"))
+    projection = VersionedKnowledgeProjection(
+        ElasticsearchProjection(ProjectionOutcome.APPLIED),  # type: ignore[arg-type]
+        cache,  # type: ignore[arg-type]
+    )
+
+    with pytest.raises(KnowledgeSyncError, match="support_cache_unavailable"):
+        projection.apply(FaqKnowledgeEvent.from_bytes(valid_body()))

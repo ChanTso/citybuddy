@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import time
+import unicodedata
 from copy import deepcopy
 from typing import Any, cast
 from urllib.error import HTTPError
@@ -18,9 +20,13 @@ from citybuddy_indexer import (
     create_worker,
 )
 from citybuddy_indexer.incremental import EVENT_TAG, RESERVED_SANDBOX_PROPERTY
+from redis import Redis
 from rocketmq.v5.client import ClientConfiguration, Credentials  # type: ignore[import-untyped]
 from rocketmq.v5.model import Message  # type: ignore[import-untyped]
 from rocketmq.v5.producer import Producer  # type: ignore[import-untyped]
+
+FAQ_CACHE_PREFIX = "cb:faq:v1:"
+FAQ_CACHE_SCHEMA = "cb112-v1"
 
 
 def request(
@@ -92,13 +98,18 @@ def send(
     producer.send(message)
 
 
-def settings(args: argparse.Namespace, elasticsearch_url: str) -> IndexerSettings:
+def settings(
+    args: argparse.Namespace,
+    elasticsearch_url: str,
+    support_redis_url: str | None = None,
+) -> IndexerSettings:
     return IndexerSettings(
         environment="integration",
         rocketmq_endpoints=args.endpoints,
         rocketmq_topic=args.topic,
         rocketmq_consumer_group=args.group,
         elasticsearch_url=elasticsearch_url,
+        support_redis_url=support_redis_url or args.support_redis_url,
         invisible_seconds=10,
     )
 
@@ -125,6 +136,52 @@ def document(es_url: str, index: str) -> dict[str, Any]:
     return cast(dict[str, Any], source)
 
 
+def query_hash(value: str) -> str:
+    normalized = " ".join(unicodedata.normalize("NFKC", value).casefold().split())
+    return hashlib.sha256(normalized.encode()).hexdigest()
+
+
+def seed_mapping(client: Redis, query: str, source_id: str, source_version: int) -> None:
+    digest = query_hash(query)
+    key = f"{FAQ_CACHE_PREFIX}query:{digest}"
+    client.hset(
+        key,
+        mapping={
+            "schema": FAQ_CACHE_SCHEMA,
+            "query_hash": digest,
+            "source_id": source_id,
+            "source_version": str(source_version),
+        },
+    )
+    client.pexpire(key, 300_000)
+
+
+def mapping_is_current(client: Redis, query: str, expected_version: int) -> bool:
+    digest = query_hash(query)
+    mapping = cast(dict[str, str], client.hgetall(f"{FAQ_CACHE_PREFIX}query:{digest}"))
+    source_id = mapping.get("source_id")
+    source_version = mapping.get("source_version")
+    if (
+        set(mapping) != {"schema", "query_hash", "source_id", "source_version"}
+        or mapping.get("schema") != FAQ_CACHE_SCHEMA
+        or mapping.get("query_hash") != digest
+        or not source_id
+        or source_version != str(expected_version)
+    ):
+        return False
+    state = cast(dict[str, str], client.hgetall(f"{FAQ_CACHE_PREFIX}state:{source_id}"))
+    answer = cast(
+        dict[str, str],
+        client.hgetall(f"{FAQ_CACHE_PREFIX}answer:{source_id}:{source_version}"),
+    )
+    return (
+        state.get("source_version") == source_version
+        and state.get("tombstone") == "0"
+        and answer.get("source_version") == source_version
+        and answer.get("commitment") == state.get("commitment")
+    )
+
+
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--endpoints", required=True)
@@ -133,6 +190,8 @@ def main() -> None:
     parser.add_argument("--elasticsearch-url", required=True)
     parser.add_argument("--drop-proxy-url", required=True)
     parser.add_argument("--index", required=True)
+    parser.add_argument("--support-redis-url", required=True)
+    parser.add_argument("--agent-cache-url", required=True)
     args = parser.parse_args()
 
     configuration = ClientConfiguration(args.endpoints, Credentials(), request_timeout=5)
@@ -142,6 +201,8 @@ def main() -> None:
         args.elasticsearch_url, "GET", f"/{args.index}/_doc/faq-store-hours%3Ageneral"
     )
     alias_before = request(args.elasticsearch_url, "GET", "/_alias/knowledge_docs_read")
+    cache = Redis.from_url(args.agent_cache_url, decode_responses=True)
+    cache_query = "When will my order arrive?"
     consumer = RocketMqKnowledgeConsumer(create_worker(settings(args, args.elasticsearch_url)))
     consumer.startup()
     try:
@@ -149,6 +210,8 @@ def main() -> None:
         send(producer, args.topic, encode(first), event_id=cast(str, first["eventId"]))
         consume_expected(consumer, DeliveryAction.ACK, "applied")
         assert document(args.elasticsearch_url, args.index)["source_version"] == 1
+        seed_mapping(cache, cache_query, "faq-cb111-delivery", 1)
+        assert mapping_is_current(cache, cache_query, 1)
 
         send(producer, args.topic, encode(first), event_id=cast(str, first["eventId"]))
         consume_expected(consumer, DeliveryAction.ACK, "replayed")
@@ -161,6 +224,9 @@ def main() -> None:
         send(producer, args.topic, encode(stale), event_id=cast(str, stale["eventId"]))
         consume_expected(consumer, DeliveryAction.ACK, "stale")
         assert document(args.elasticsearch_url, args.index)["source_version"] == 2
+        assert not mapping_is_current(cache, cache_query, 1)
+        seed_mapping(cache, cache_query, "faq-cb111-delivery", 2)
+        assert mapping_is_current(cache, cache_query, 2)
 
         conflict = event(2, answer="Conflicting content at the same version.")
         send(producer, args.topic, encode(conflict), event_id=cast(str, conflict["eventId"]))
@@ -168,6 +234,7 @@ def main() -> None:
         second_content = second["content"]
         assert isinstance(second_content, dict)
         assert document(args.elasticsearch_url, args.index)["content"] == second_content["answer"]
+        assert mapping_is_current(cache, cache_query, 2)
 
         equal_other_event = deepcopy(second)
         equal_other_event["eventId"] = str(uuid4())
@@ -207,6 +274,7 @@ def main() -> None:
         consume_expected(consumer, DeliveryAction.ACK, "applied")
         deleted_doc = document(args.elasticsearch_url, args.index)
         assert deleted_doc["deleted"] is True and deleted_doc["published"] is False
+        assert not mapping_is_current(cache, cache_query, 2)
         send(producer, args.topic, encode(deleted), event_id=cast(str, deleted["eventId"]))
         consume_expected(consumer, DeliveryAction.ACK, "replayed")
         older_tombstone = event(2, tombstone=True)
@@ -226,10 +294,13 @@ def main() -> None:
         )
         consume_expected(consumer, DeliveryAction.ACK, "stale")
         assert document(args.elasticsearch_url, args.index)["deleted"] is True
+        assert not mapping_is_current(cache, cache_query, 2)
 
         restored = event(4)
         send(producer, args.topic, encode(restored), event_id=cast(str, restored["eventId"]))
         consume_expected(consumer, DeliveryAction.ACK, "applied")
+        seed_mapping(cache, cache_query, "faq-cb111-delivery", 4)
+        assert mapping_is_current(cache, cache_query, 4)
 
         interrupted = event(5)
         send(
@@ -280,7 +351,32 @@ def main() -> None:
     finally:
         recovered.shutdown()
 
-    indeterminate = event(8)
+    cache_unavailable = event(8)
+    send(
+        producer,
+        args.topic,
+        encode(cache_unavailable),
+        event_id=cast(str, cache_unavailable["eventId"]),
+    )
+    cache_failing = RocketMqKnowledgeConsumer(
+        create_worker(settings(args, args.elasticsearch_url, "redis://127.0.0.1:9/0"))
+    )
+    cache_failing.startup()
+    try:
+        consume_expected(cache_failing, DeliveryAction.RETRY, "support_cache_unavailable")
+    finally:
+        cache_failing.shutdown()
+    time.sleep(11)
+    cache_recovered = RocketMqKnowledgeConsumer(
+        create_worker(settings(args, args.elasticsearch_url))
+    )
+    cache_recovered.startup()
+    try:
+        consume_expected(cache_recovered, DeliveryAction.ACK, "replayed")
+    finally:
+        cache_recovered.shutdown()
+
+    indeterminate = event(9)
     send(
         producer,
         args.topic,
@@ -306,14 +402,14 @@ def main() -> None:
             (b"{" + b" " * 8192 + b"}", {}, "invalid_payload"),
             (b"[" * 1000 + b"]" * 1000, {}, "invalid_payload"),
             (
-                encode(event(9)).replace(b'"sourceVersion":9', b'"sourceVersion":' + b"1" * 5000),
+                encode(event(10)).replace(b'"sourceVersion":10', b'"sourceVersion":' + b"1" * 5000),
                 {},
                 "invalid_payload",
             ),
             (
                 encode(
                     {
-                        **event(9),
+                        **event(10),
                         "content": {"question": "public", "answer": "\ud800"},
                     }
                 ),
@@ -321,12 +417,12 @@ def main() -> None:
                 "invalid_values",
             ),
             (
-                encode({**event(9), "privateCustomer": "must-not-pass"}),
+                encode({**event(10), "privateCustomer": "must-not-pass"}),
                 {},
                 "invalid_envelope",
             ),
             (
-                encode(event(9)),
+                encode(event(10)),
                 {RESERVED_SANDBOX_PROPERTY: "synthetic"},
                 "reserved_evaluation_context",
             ),
@@ -346,8 +442,11 @@ def main() -> None:
         == baseline
     )
     final_document = document(args.elasticsearch_url, args.index)
-    assert final_document["source_version"] == 8
+    assert final_document["source_version"] == 9
     assert final_document["published"] is True and final_document["deleted"] is False
+    assert not mapping_is_current(cache, cache_query, 4)
+    seed_mapping(cache, cache_query, "faq-cb111-delivery", 9)
+    assert mapping_is_current(cache, cache_query, 9)
     search = request(
         args.elasticsearch_url,
         "POST",
@@ -371,8 +470,9 @@ def main() -> None:
                 "aliasUnchanged": True,
                 "boundedPermanentRejections": len(malformed_cases),
                 "event": "cb111-incremental-knowledge-sync-evidence",
-                "finalSourceVersion": 8,
+                "finalSourceVersion": 9,
                 "restartRedelivery": True,
+                "supportCacheRecovery": True,
                 "tombstoneFence": True,
                 "transportIndeterminateRecovery": True,
             },

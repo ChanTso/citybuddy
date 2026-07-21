@@ -1,5 +1,5 @@
 {
-  "version": "cb111-v1",
+  "version": "cb112-v1",
   "reservedSandboxEnvelopeProperty": "citybuddy-eval-sandbox-id",
   "evaluationReachablePathCount": 0,
   "paths": [
@@ -44,12 +44,12 @@
       "owner": "commerce-service",
       "classification": "production-only",
       "producer": "FaqPublicationService -> FaqOutboxPublisher -> RocketMqCatalogMessaging",
-      "consumer": "RocketMqKnowledgeConsumer -> ElasticsearchKnowledgeProjection",
+      "consumer": "RocketMqKnowledgeConsumer -> ElasticsearchKnowledgeProjection + RedisFaqCacheProjection",
       "evidence": [
         "the bounded publication command has no HTTP or evaluation entry point",
         "FaqKnowledgeEvent has no sandbox field and contains only allowlisted public content",
         "the publisher selects only FAQ_KNOWLEDGE_SYNCHRONIZATION truth",
-        "the production consumer rejects the reserved sandbox property before parsing or mutation"
+        "the production consumer rejects the reserved sandbox property before parsing or Elasticsearch/Support Redis mutation"
       ]
     },
     {

@@ -20,6 +20,11 @@ admin() {
   "${compose[@]}" run --rm --no-deps rocketmq-admin "$@"
 }
 
+read_value() {
+  local name="$1"
+  sed -n "s/^${name}=//p" "$env_file"
+}
+
 cleanup() {
   local status=$?
   local resource_stop_status=0
@@ -79,15 +84,19 @@ docker run --rm --network "${project}_default" \
   --group "$group" \
   --elasticsearch-url http://elasticsearch:9200 \
   --drop-proxy-url http://"$proxy_name":8765 \
-  --index "$index"
+  --index "$index" \
+  --support-redis-url \
+  "redis://knowledge_indexer:$(read_value REDIS_INDEXER_CACHE_PASSWORD)@redis-support:6379/0" \
+  --agent-cache-url \
+  "redis://agent_cache:$(read_value REDIS_AGENT_CACHE_PASSWORD)@redis-support:6379/0"
 
 # Re-running the baseline bootstrap must preserve and tolerate incremental projection records.
 docker run --rm --network "${project}_default" "$indexer_image" \
   bootstrap --elasticsearch-url http://elasticsearch:9200 --index "$index"
 
-if rg -n 'mysql|commerce_db|cs_db|redis' \
+if rg -n 'mysql|commerce_db|cs_db' \
   knowledge-indexer/src knowledge-indexer/pyproject.toml infra/knowledge-indexer/Dockerfile; then
-  echo "Knowledge indexer production boundary contains a forbidden database/cache dependency." >&2
+  echo "Knowledge indexer production boundary contains a forbidden database dependency." >&2
   exit 1
 fi
 
@@ -106,7 +115,16 @@ if ! grep -Fq 'NOAUTH Authentication required' <<<"$redis_denial"; then
   echo "Support Redis did not deny the credential-free knowledge-indexer boundary." >&2
   exit 1
 fi
-echo "Verified knowledge-indexer has no MySQL/Support Redis client dependency or credentialed access."
+indexer_mapping_denial="$(
+  "${compose[@]}" exec -T redis-support redis-cli --no-auth-warning \
+    --user knowledge_indexer --pass "$(read_value REDIS_INDEXER_CACHE_PASSWORD)" \
+    HGETALL cb:faq:v1:query:unrelated 2>&1
+)"
+if ! grep -Fq 'NOPERM' <<<"$indexer_mapping_denial"; then
+  echo "Knowledge indexer unexpectedly read the agent query-mapping prefix." >&2
+  exit 1
+fi
+echo "Verified knowledge-indexer has no MySQL access and only its Support Redis projection authority."
 
 admin deleteSubGroup --namesrvAddr rocketmq-namesrv:9876 --clusterName DefaultCluster \
   --groupName "$group" --removeOffset true

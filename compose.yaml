@@ -144,6 +144,7 @@ services:
   redis-support:
     image: *redis-image
     restart: unless-stopped
+    entrypoint: ["/bin/sh", "/opt/citybuddy/start-support-redis.sh"]
     command:
       - redis-server
       - --requirepass
@@ -160,11 +161,15 @@ services:
       - /data
     environment:
       REDIS_PASSWORD: ${REDIS_SUPPORT_PASSWORD:?Run make init-local first}
+      REDIS_SUPPORT_PASSWORD: ${REDIS_SUPPORT_PASSWORD:?Run make init-local first}
+      REDIS_AGENT_CACHE_PASSWORD: ${REDIS_AGENT_CACHE_PASSWORD:?Run make init-local first}
+      REDIS_INDEXER_CACHE_PASSWORD: ${REDIS_INDEXER_CACHE_PASSWORD:?Run make init-local first}
     ports:
       - target: 6379
         host_ip: 127.0.0.1
     volumes:
       - redis-support-data:/data
+      - ./scripts/start_support_redis.sh:/opt/citybuddy/start-support-redis.sh:ro
     healthcheck:
       test:
         - CMD-SHELL
@@ -293,6 +298,8 @@ services:
     depends_on:
       elasticsearch:
         condition: service_healthy
+      redis-support:
+        condition: service_healthy
       rocketmq-broker-proxy:
         condition: service_healthy
     command:
@@ -305,6 +312,8 @@ services:
       - ${KNOWLEDGE_SYNC_CONSUMER_GROUP:-citybuddy-knowledge-indexer}
       - --elasticsearch-url
       - http://elasticsearch:9200
+      - --support-redis-url
+      - ${INDEXER_SUPPORT_REDIS_URL:?Run make init-local first}
       - --alias
       - knowledge_docs_read
 

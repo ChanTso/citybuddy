@@ -19,6 +19,7 @@ def main() -> None:
     consume.add_argument("--topic", required=True)
     consume.add_argument("--consumer-group", required=True)
     consume.add_argument("--elasticsearch-url", required=True)
+    consume.add_argument("--support-redis-url", required=True)
     consume.add_argument("--alias", default="knowledge_docs_read")
     consume.add_argument("--invisible-seconds", type=int, default=30)
     args = parser.parse_args()
@@ -48,6 +49,7 @@ def main() -> None:
             rocketmq_topic=args.topic,
             rocketmq_consumer_group=args.consumer_group,
             elasticsearch_url=args.elasticsearch_url,
+            support_redis_url=args.support_redis_url,
             knowledge_alias=args.alias,
             invisible_seconds=args.invisible_seconds,
         )

@@ -262,6 +262,10 @@ class ElasticsearchKnowledgeProjection:
         self._timeout_seconds = timeout_seconds
 
     def apply(self, event: FaqKnowledgeEvent) -> ProjectionOutcome:
+        outcome, _ = self.apply_with_index(event)
+        return outcome
+
+    def apply_with_index(self, event: FaqKnowledgeEvent) -> tuple[ProjectionOutcome, str]:
         index = self._resolve_current_index()
         self._bind_event_identity(index, event)
         for _ in range(MAX_CAS_ATTEMPTS):
@@ -275,16 +279,16 @@ class ElasticsearchKnowledgeProjection:
                 )
                 if status == 409:
                     continue
-                return ProjectionOutcome.APPLIED
+                return ProjectionOutcome.APPLIED, index
             current_version = current.source.get("source_version")
             if type(current_version) is not int or current_version < 1:
                 raise KnowledgeSyncError("inconsistent_projection")
             if current_version > event.source_version:
-                return ProjectionOutcome.STALE
+                return ProjectionOutcome.STALE, index
             if current_version == event.source_version:
                 if not self._matches_projection(current.source, event):
                     raise KnowledgeSyncConflict("conflicting_source_version")
-                return ProjectionOutcome.REPLAYED
+                return ProjectionOutcome.REPLAYED, index
             status, _ = self._request(
                 "PUT",
                 self._document_path(
@@ -297,7 +301,7 @@ class ElasticsearchKnowledgeProjection:
             )
             if status == 409:
                 continue
-            return ProjectionOutcome.APPLIED
+            return ProjectionOutcome.APPLIED, index
         raise KnowledgeSyncError("concurrent_projection_contention")
 
     def _resolve_current_index(self) -> str:

@@ -30,6 +30,7 @@ def _settings() -> AgentSettings:
         commerce_liveness_url=os.environ.get("AGENT_COMMERCE_LIVENESS_URL", ""),
         elasticsearch_url=os.environ.get("AGENT_ELASTICSEARCH_URL", ""),
         knowledge_alias=os.environ.get("AGENT_KNOWLEDGE_ALIAS", "knowledge_docs_read"),
+        support_redis_url=os.environ.get("AGENT_SUPPORT_REDIS_URL", ""),
         primary_role_alias=os.environ.get("AGENT_PRIMARY_ROLE_ALIAS", "support-standard-primary"),
         fallback_role_alias=os.environ.get(
             "AGENT_FALLBACK_ROLE_ALIAS", "support-standard-fallback"

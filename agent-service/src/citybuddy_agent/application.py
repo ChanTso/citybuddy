@@ -43,6 +43,7 @@ from .evaluation import (
     EvaluationEvidenceStore,
     MysqlEvaluationEvidenceStore,
 )
+from .faq_cache import RedisFaqCache
 from .feedback import (
     FeedbackConflictError,
     FeedbackOwnershipError,
@@ -92,6 +93,7 @@ class AgentSettings(BaseModel):
     reranker_provider_key: str = "reranker"
     elasticsearch_url: str = ""
     knowledge_alias: str = "knowledge_docs_read"
+    support_redis_url: str = ""
     attempt_budget: int = 8
     circuit_minimum_requests: int = 2
     circuit_open_seconds: float = 1.0
@@ -476,6 +478,7 @@ def create_app(
                 else None,
                 model_client,
                 load_calibration(),
+                RedisFaqCache(resolved.support_redis_url) if resolved.support_redis_url else None,
             ),
         )
     else:

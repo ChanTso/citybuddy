@@ -13,6 +13,7 @@ dependencies = [
   "PyJWT[crypto]==2.10.1",
   "pydantic==2.11.7",
   "PyMySQL==1.1.1",
+  "redis==5.2.1",
   "uvicorn==0.35.0",
 ]
 
