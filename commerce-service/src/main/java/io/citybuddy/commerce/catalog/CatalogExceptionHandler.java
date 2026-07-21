@@ -1,5 +1,6 @@
 package io.citybuddy.commerce.catalog;
 
+import io.citybuddy.commerce.identity.IdentityVerificationUnavailableException;
 import java.util.Map;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.http.ResponseEntity;
@@ -9,6 +10,12 @@ import org.springframework.web.bind.annotation.RestControllerAdvice;
 @RestControllerAdvice
 @ConditionalOnProperty(name = "citybuddy.catalog.enabled", havingValue = "true")
 public final class CatalogExceptionHandler {
+
+  @ExceptionHandler(IdentityVerificationUnavailableException.class)
+  ResponseEntity<Map<String, String>> unavailable(
+      IdentityVerificationUnavailableException exception) {
+    return ResponseEntity.status(503).body(Map.of("error", "Service unavailable"));
+  }
 
   @ExceptionHandler(CatalogException.class)
   ResponseEntity<Map<String, String>> handle(CatalogException exception) {

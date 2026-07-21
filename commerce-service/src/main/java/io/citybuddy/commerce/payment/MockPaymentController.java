@@ -3,6 +3,7 @@ package io.citybuddy.commerce.payment;
 import io.citybuddy.commerce.catalog.CatalogException;
 import io.citybuddy.commerce.catalog.DirectUserAuthorizer;
 import io.citybuddy.commerce.evaluation.EvaluationSandboxException;
+import io.citybuddy.commerce.identity.IdentityVerificationUnavailableException;
 import jakarta.servlet.http.HttpServletRequest;
 import java.util.Map;
 import org.slf4j.Logger;
@@ -115,6 +116,12 @@ final class MockPaymentExceptionHandler {
 
   @ExceptionHandler(DataAccessException.class)
   ResponseEntity<Map<String, String>> handleUnavailable() {
+    return ResponseEntity.status(503)
+        .body(Map.of("category", "UNAVAILABLE", "message", "Payment service is unavailable"));
+  }
+
+  @ExceptionHandler(IdentityVerificationUnavailableException.class)
+  ResponseEntity<Map<String, String>> handleIdentityUnavailable() {
     return ResponseEntity.status(503)
         .body(Map.of("category", "UNAVAILABLE", "message", "Payment service is unavailable"));
   }

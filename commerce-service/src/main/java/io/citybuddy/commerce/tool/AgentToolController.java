@@ -5,6 +5,7 @@ import io.citybuddy.commerce.evaluation.EvaluationCommerceAuditService;
 import io.citybuddy.commerce.evaluation.EvaluationRejectionReason;
 import io.citybuddy.commerce.evaluation.EvaluationSandboxAccess;
 import io.citybuddy.commerce.evaluation.EvaluationSandboxException;
+import io.citybuddy.commerce.identity.IdentityVerificationUnavailableException;
 import io.citybuddy.commerce.identity.OboAuthorizationException;
 import io.citybuddy.commerce.identity.OboAuthorizer;
 import java.util.Map;
@@ -110,7 +111,7 @@ public final class AgentToolController {
           evaluationAudit == null ? null : evaluationAudit.getIfAvailable();
       if (access == null || audit == null) {
         throw new EvaluationSandboxException(
-            403,
+            503,
             EvaluationRejectionReason.TOOL_EVALUATION_COMPONENT_UNAVAILABLE,
             "Evaluation sandbox is unavailable");
       }
@@ -163,9 +164,19 @@ public final class AgentToolController {
     return ResponseEntity.status(403).body(Map.of("error", "Forbidden"));
   }
 
+  @ExceptionHandler(IdentityVerificationUnavailableException.class)
+  ResponseEntity<Map<String, String>> identityUnavailable(
+      IdentityVerificationUnavailableException exception) {
+    LOG.warn("evaluation_request_rejected reason_code=TOOL_OBO_JWKS_UNAVAILABLE");
+    return ResponseEntity.status(503).body(Map.of("error", "Service unavailable"));
+  }
+
   @ExceptionHandler(EvaluationSandboxException.class)
   ResponseEntity<Map<String, String>> inactive(EvaluationSandboxException exception) {
     LOG.warn("evaluation_request_rejected reason_code={}", exception.reason());
+    if (exception.status() == 503) {
+      return ResponseEntity.status(503).body(Map.of("error", "Service unavailable"));
+    }
     return ResponseEntity.status(403).body(Map.of("error", "Forbidden"));
   }
 

@@ -348,6 +348,7 @@ start_commerce() {
     --citybuddy.obo.enabled=true \
     --citybuddy.obo.issuer=https://identity.citybuddy.test \
     --citybuddy.obo.jwks-url="http://127.0.0.1:$auth_port/auth/jwks" \
+    --citybuddy.obo.jwks-cache-ttl=1s \
     --citybuddy.agent-tools.enabled=true \
     --citybuddy.evaluation.management-client-id=evaluation-manager \
     --citybuddy.evaluation.management-client-secret="$management_password" \
@@ -357,6 +358,7 @@ start_commerce() {
     --citybuddy.evaluation.identity-issuer=https://identity.citybuddy.test \
     --citybuddy.evaluation.user-audience=citybuddy-web \
     --citybuddy.evaluation.jwks-url="http://127.0.0.1:$auth_port/auth/jwks" \
+    --citybuddy.evaluation.jwks-cache-ttl=1s \
     --citybuddy.evaluation.provisioning-timeout=10s \
     --citybuddy.evaluation.auth-expiry-safety=2s \
     --citybuddy.evaluation.cleanup-retry=1s \
@@ -2108,6 +2110,35 @@ assert_status 200 "JIT exchange preserves the exact sandbox" \
   --header 'Content-Type: application/json' \
   --data "{\"sessionId\":\"$session_id\",\"userSubject\":\"$direct_subject\",\"scope\":\"catalog:read\"}"
 obo_token="$(uv run python scripts/read_json_field.py "$tmp_dir/http-response.json" accessToken)"
+sleep 1.1
+jwks_fault_log_start="$(wc -l <"$tmp_dir/commerce.log")"
+stop_process auth_pid "$auth_pid"
+jwks_liveness_status="$(request_status "$tmp_dir/jwks-liveness-unavailable.json" \
+  --request POST "http://127.0.0.1:$commerce_port/internal/eval/sandboxes/sandbox-main/liveness" \
+  --header "Authorization: Bearer $direct_token" \
+  --header 'X-Eval-Sandbox-Id: sandbox-main')"
+jwks_tool_operation="$(openssl rand -hex 32)"
+jwks_tool_status="$(request_status "$tmp_dir/jwks-tool-unavailable.json" \
+  --request POST "http://127.0.0.1:$commerce_port/internal/tools/catalog.product.get" \
+  --header "Authorization: Bearer $obo_token" \
+  --header "X-Support-Session-Id: $session_id" \
+  --header 'X-Eval-Sandbox-Id: sandbox-main' \
+  --header 'X-Agent-Trace-Id: jwks-unavailable-trace' \
+  --header "X-Agent-Operation-Id: $jwks_tool_operation" \
+  --header 'Content-Type: application/json' \
+  --data '{"productId":"product-1"}')"
+echo 'jwks-unavailability-rejection-reasons'
+tail -n "+$((jwks_fault_log_start + 1))" "$tmp_dir/commerce.log" \
+  | grep 'evaluation_request_rejected reason_code=' || true
+start_auth evaluation
+assert_equal '503:503' "$jwks_liveness_status:$jwks_tool_status" \
+  "JWKS unavailability is never classified as authorization or inactive"
+assert_equal 'Service unavailable' \
+  "$(uv run python scripts/read_json_field.py "$tmp_dir/jwks-liveness-unavailable.json" error)" \
+  "liveness JWKS outage exposes only the fixed unavailable response"
+assert_equal 'Service unavailable' \
+  "$(uv run python scripts/read_json_field.py "$tmp_dir/jwks-tool-unavailable.json" error)" \
+  "tool JWKS outage exposes only the fixed unavailable response"
 direct_trace="direct-trace-$(openssl rand -hex 8)"
 direct_operation="$(openssl rand -hex 32)"
 failed_operation="$(openssl rand -hex 32)"

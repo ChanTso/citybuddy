@@ -64,6 +64,9 @@ public final class OboAuthorizer {
           claims.getClaimAsString("scope"),
           claims.getClaimAsString("sandbox"));
     } catch (ParseException | JOSEException | RuntimeException exception) {
+      if (exception instanceof IdentityVerificationUnavailableException unavailableException) {
+        throw unavailableException;
+      }
       if (exception instanceof OboAuthorizationException authorizationException) {
         throw authorizationException;
       }
@@ -124,19 +127,23 @@ public final class OboAuthorizer {
     require(issuedAt != null && !issuedAt.toInstant().isAfter(upper), "Future issued-at");
   }
 
-  private synchronized void refresh() throws ParseException {
-    JWKSet set = JWKSet.parse(loader.load());
-    Map<String, RSAKey> loaded = new HashMap<>();
-    for (JWK key : set.getKeys()) {
-      if (key instanceof RSAKey rsaKey
-          && !key.isPrivate()
-          && JWSAlgorithm.RS256.equals(key.getAlgorithm())
-          && hasText(key.getKeyID())) {
-        loaded.put(key.getKeyID(), rsaKey.toPublicJWK());
+  private synchronized void refresh() {
+    try {
+      JWKSet set = JWKSet.parse(loader.load());
+      Map<String, RSAKey> loaded = new HashMap<>();
+      for (JWK key : set.getKeys()) {
+        if (key instanceof RSAKey rsaKey
+            && !key.isPrivate()
+            && JWSAlgorithm.RS256.equals(key.getAlgorithm())
+            && hasText(key.getKeyID())) {
+          loaded.put(key.getKeyID(), rsaKey.toPublicJWK());
+        }
       }
+      keys = Map.copyOf(loaded);
+      loadedAt = clock.instant();
+    } catch (ParseException | RuntimeException exception) {
+      throw new IdentityVerificationUnavailableException(exception);
     }
-    keys = Map.copyOf(loaded);
-    loadedAt = clock.instant();
   }
 
   private static void require(boolean condition, String message) {

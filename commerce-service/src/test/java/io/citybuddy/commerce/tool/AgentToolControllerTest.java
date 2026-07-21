@@ -14,6 +14,7 @@ import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.
 
 import io.citybuddy.commerce.evaluation.EvaluationRejectionReason;
 import io.citybuddy.commerce.evaluation.EvaluationSandboxException;
+import io.citybuddy.commerce.identity.IdentityVerificationUnavailableException;
 import io.citybuddy.commerce.identity.OboAuthorizationException;
 import io.citybuddy.commerce.identity.OboAuthorizer;
 import java.util.List;
@@ -133,5 +134,46 @@ class AgentToolControllerTest {
     org.assertj.core.api.Assertions.assertThat(output)
         .contains("reason_code=AUDIT_SANDBOX_NOT_ACTIVE")
         .doesNotContain("private sandbox detail");
+  }
+
+  @Test
+  void reportsOboVerificationDependencyFailureAsUnavailable(CapturedOutput output)
+      throws Exception {
+    doThrow(new IdentityVerificationUnavailableException(new IllegalStateException("private")))
+        .when(authorizer)
+        .authorize(anyString(), any(OboAuthorizer.AuthorizationRequest.class));
+
+    mvc.perform(
+            post("/internal/tools/catalog.product.get")
+                .header("Authorization", "Bearer signed-obo")
+                .header("X-Support-Session-Id", "session-1")
+                .contentType(MediaType.APPLICATION_JSON)
+                .content("{\"productId\":\"product-1\"}"))
+        .andExpect(status().isServiceUnavailable())
+        .andExpect(jsonPath("$.error").value("Service unavailable"));
+
+    verifyNoInteractions(jdbc);
+    org.assertj.core.api.Assertions.assertThat(output)
+        .contains("reason_code=TOOL_OBO_JWKS_UNAVAILABLE")
+        .doesNotContain("private");
+  }
+
+  @Test
+  void reportsMissingEvaluationComponentsAsUnavailable(CapturedOutput output) {
+    AgentToolController controller = new AgentToolController(authorizer, jdbc);
+
+    var response =
+        controller.inactive(
+            new EvaluationSandboxException(
+                503,
+                EvaluationRejectionReason.TOOL_EVALUATION_COMPONENT_UNAVAILABLE,
+                "private component detail"));
+
+    org.assertj.core.api.Assertions.assertThat(response.getStatusCode().value()).isEqualTo(503);
+    org.assertj.core.api.Assertions.assertThat(response.getBody())
+        .containsExactlyEntriesOf(Map.of("error", "Service unavailable"));
+    org.assertj.core.api.Assertions.assertThat(output)
+        .contains("reason_code=TOOL_EVALUATION_COMPONENT_UNAVAILABLE")
+        .doesNotContain("private component detail");
   }
 }

@@ -8,6 +8,7 @@ import com.nimbusds.jose.jwk.JWKSet;
 import com.nimbusds.jose.jwk.RSAKey;
 import com.nimbusds.jwt.JWTClaimsSet;
 import com.nimbusds.jwt.SignedJWT;
+import io.citybuddy.commerce.identity.IdentityVerificationUnavailableException;
 import io.citybuddy.commerce.identity.JwksLoader;
 import java.text.ParseException;
 import java.time.Clock;
@@ -103,6 +104,9 @@ public final class DirectUserAuthorizer {
           validateClaims(claims, requiredPermission, evalSandboxHeader, evaluationAllowed);
       return new DirectPrincipal(claims.getSubject(), sandboxId);
     } catch (ParseException | JOSEException | RuntimeException exception) {
+      if (exception instanceof IdentityVerificationUnavailableException unavailableException) {
+        throw unavailableException;
+      }
       if (exception instanceof CatalogException catalogException) {
         throw catalogException;
       }
@@ -159,19 +163,23 @@ public final class DirectUserAuthorizer {
     require(issuedAt != null && !issuedAt.toInstant().isAfter(upper), "Future issued-at");
   }
 
-  private synchronized void refresh() throws ParseException {
-    JWKSet set = JWKSet.parse(loader.load());
-    Map<String, RSAKey> loaded = new HashMap<>();
-    for (JWK key : set.getKeys()) {
-      if (key instanceof RSAKey rsaKey
-          && !key.isPrivate()
-          && JWSAlgorithm.RS256.equals(key.getAlgorithm())
-          && hasText(key.getKeyID())) {
-        loaded.put(key.getKeyID(), rsaKey.toPublicJWK());
+  private synchronized void refresh() {
+    try {
+      JWKSet set = JWKSet.parse(loader.load());
+      Map<String, RSAKey> loaded = new HashMap<>();
+      for (JWK key : set.getKeys()) {
+        if (key instanceof RSAKey rsaKey
+            && !key.isPrivate()
+            && JWSAlgorithm.RS256.equals(key.getAlgorithm())
+            && hasText(key.getKeyID())) {
+          loaded.put(key.getKeyID(), rsaKey.toPublicJWK());
+        }
       }
+      keys = Map.copyOf(loaded);
+      loadedAt = clock.instant();
+    } catch (ParseException | RuntimeException exception) {
+      throw new IdentityVerificationUnavailableException(exception);
     }
-    keys = Map.copyOf(loaded);
-    loadedAt = clock.instant();
   }
 
   private static void require(boolean condition, String message) {
