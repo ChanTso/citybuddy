@@ -20,6 +20,8 @@ FAQ_CACHE_SCHEMA = "cb112-v1"
 FAQ_CACHE_PREFIX = "cb:faq:v1:"
 FAQ_ENTRY_TTL_MS = 900_000
 FAQ_PREPARATION_LEASE_MS = 60_000
+FAQ_PREPARATION_TTL_SAFETY_MS = 60_000
+FAQ_PREPARATION_TTL_MS = FAQ_PREPARATION_LEASE_MS + FAQ_PREPARATION_TTL_SAFETY_MS
 
 _PREPARE_SCRIPT = r"""
 local state = KEYS[1]
@@ -32,6 +34,8 @@ local commitment = ARGV[5]
 local event_id = ARGV[6]
 local occurred_time = ARGV[7]
 local lease_ms = tonumber(ARGV[8])
+local preparation_ttl = tonumber(ARGV[9])
+local ready_ttl = tonumber(ARGV[10])
 local redis_time = redis.call('TIME')
 local now_ms = tonumber(redis_time[1]) * 1000 + math.floor(tonumber(redis_time[2]) / 1000)
 local lease_deadline_ms = tostring(now_ms + lease_ms)
@@ -54,24 +58,44 @@ local function compare_version(left, right)
   return 0
 end
 
-if not valid_version(source_version) or (tombstone ~= '0' and tombstone ~= '1') then
-  return {'error', 'invalid_input'}
+if not valid_version(source_version) or (tombstone ~= '0' and tombstone ~= '1')
+  or not lease_ms or not preparation_ttl or not ready_ttl
+  or lease_ms <= 0 or preparation_ttl <= lease_ms or ready_ttl <= 0 then
+  return {'retry', 'invalid_input'}
 end
 
+local state_exists = redis.call('EXISTS', state) == 1
 local current_version = redis.call('HGET', state, 'source_version')
 local replay = false
+local repaired = state_exists and not current_version
 if current_version then
+  local state_ttl = redis.call('PTTL', state)
   if redis.call('HLEN', state) ~= 11 or not valid_version(current_version)
     or redis.call('HGET', state, 'schema') ~= schema
-    or redis.call('HGET', state, 'source_id') ~= source_id then
-    return {'error', 'malformed_state'}
+    or redis.call('HGET', state, 'source_id') ~= source_id
+    or state_ttl <= 0 then
+    current_version = false
+    repaired = true
   end
+end
+if current_version then
   local ready = redis.call('HGET', state, 'ready')
   if ready == '0' then
     local current_deadline = redis.call('HGET', state, 'lease_deadline_ms')
-    if not current_deadline or not string.match(current_deadline, '^[1-9][0-9]*$') then
-      return {'error', 'malformed_state'}
+    local state_ttl = redis.call('PTTL', state)
+    if not current_deadline or not string.match(current_deadline, '^[1-9][0-9]*$')
+      or state_ttl > preparation_ttl
+      or state_ttl <= tonumber(current_deadline) - now_ms
+      or (redis.call('HGET', state, 'tombstone') ~= '0'
+        and redis.call('HGET', state, 'tombstone') ~= '1')
+      or redis.call('HGET', state, 'index_version') ~= ''
+      or redis.call('HGET', state, 'cache_commitment') ~= '' then
+      current_version = false
+      repaired = true
     end
+  end
+  if current_version and ready == '0' then
+    local current_deadline = redis.call('HGET', state, 'lease_deadline_ms')
     if current_version == source_version
       and redis.call('HGET', state, 'tombstone') == tombstone
       and redis.call('HGET', state, 'commitment') == commitment
@@ -80,20 +104,30 @@ if current_version then
       and redis.call('HGET', state, 'index_version') == ''
       and redis.call('HGET', state, 'cache_commitment') == '' then
       redis.call('HSET', state, 'lease_deadline_ms', lease_deadline_ms)
-      redis.call('PERSIST', state)
+      redis.call('PEXPIRE', state, preparation_ttl)
       return {'prepared', source_version}
     end
     if tonumber(current_deadline) > now_ms then
       return {'busy', current_version}
     end
   end
-  if ready ~= '1' and ready ~= '0' then
-    return {'error', 'malformed_state'}
+  if current_version and ready ~= '1' and ready ~= '0' then
+    current_version = false
+    repaired = true
   end
-  if ready == '1' then
-    if redis.call('HGET', state, 'lease_deadline_ms') ~= '' then
-      return {'error', 'malformed_state'}
+  if current_version and ready == '1' then
+    local state_ttl = redis.call('PTTL', state)
+    if redis.call('HGET', state, 'lease_deadline_ms') ~= ''
+      or state_ttl > ready_ttl
+      or (redis.call('HGET', state, 'tombstone') ~= '0'
+        and redis.call('HGET', state, 'tombstone') ~= '1')
+      or redis.call('HGET', state, 'index_version') == ''
+      or redis.call('HGET', state, 'cache_commitment') == '' then
+      current_version = false
+      repaired = true
     end
+  end
+  if current_version and ready == '1' then
     local comparison = compare_version(current_version, source_version)
     if comparison > 0 then
       return {'stale', current_version}
@@ -105,7 +139,7 @@ if current_version then
         or redis.call('HGET', state, 'commitment') ~= commitment
         or redis.call('HGET', state, 'event_id') ~= event_id
         or redis.call('HGET', state, 'occurred_time') ~= occurred_time then
-        return {'error', 'conflicting_source_version'}
+        return {'conflict', 'conflicting_source_version'}
       end
       replay = true
     end
@@ -126,7 +160,10 @@ redis.call('HSET', state,
   'ready', '0',
   'cache_commitment', '',
   'lease_deadline_ms', lease_deadline_ms)
-redis.call('PERSIST', state)
+redis.call('PEXPIRE', state, preparation_ttl)
+if repaired then
+  return {'retry', 'malformed_state_repaired'}
+end
 if replay then
   return {'replay_prepared', source_version}
 end
@@ -166,30 +203,35 @@ local function compare_version(left, right)
   return 0
 end
 
-if not valid_version(source_version) or (tombstone ~= '0' and tombstone ~= '1') then
-  return {'error', 'invalid_input'}
+if not valid_version(source_version) or (tombstone ~= '0' and tombstone ~= '1')
+  or not ttl or ttl <= 0 then
+  return {'retry', 'invalid_input'}
 end
 
 local current_version = redis.call('HGET', state, 'source_version')
 if not current_version then
   return {'retry', 'cache_preparation_missing'}
 end
-if redis.call('HLEN', state) ~= 11 or not valid_version(current_version) then
-  return {'error', 'malformed_state'}
+if redis.call('HLEN', state) ~= 11 or not valid_version(current_version)
+  or redis.call('PTTL', state) <= 0
+  or redis.call('HGET', state, 'schema') ~= schema
+  or redis.call('HGET', state, 'source_id') ~= source_id
+  or (redis.call('HGET', state, 'tombstone') ~= '0'
+    and redis.call('HGET', state, 'tombstone') ~= '1')
+  or redis.call('HGET', state, 'index_version') ~= ''
+  or redis.call('HGET', state, 'cache_commitment') ~= ''
+  or not string.match(redis.call('HGET', state, 'lease_deadline_ms') or '', '^[1-9][0-9]*$') then
+  return {'retry', 'malformed_state'}
 end
 if redis.call('HGET', state, 'ready') ~= '0' then
   return {'retry', 'cache_preparation_missing'}
 end
 if current_version ~= source_version
-  or redis.call('HGET', state, 'schema') ~= schema
-  or redis.call('HGET', state, 'source_id') ~= source_id
   or redis.call('HGET', state, 'tombstone') ~= tombstone
   or redis.call('HGET', state, 'commitment') ~= commitment
-  or redis.call('HGET', state, 'index_version') ~= ''
   or redis.call('HGET', state, 'event_id') ~= event_id
   or redis.call('HGET', state, 'occurred_time') ~= ARGV[11]
-  or redis.call('HGET', state, 'cache_commitment') ~= ''
-  or not string.match(redis.call('HGET', state, 'lease_deadline_ms') or '', '^[1-9][0-9]*$') then
+  then
   return {'retry', 'cache_source_busy'}
 end
 
@@ -285,10 +327,14 @@ class RedisFaqCacheProjection:
             event.event_id,
             event.occurred_time,
             str(FAQ_PREPARATION_LEASE_MS),
+            str(FAQ_PREPARATION_TTL_MS),
+            str(FAQ_ENTRY_TTL_MS),
         )
         outcome, detail = self._closed_result(raw)
-        if outcome == "error":
+        if outcome == "conflict":
             raise KnowledgeSyncConflict(detail)
+        if outcome in {"retry", "error"}:
+            raise KnowledgeSyncError(detail)
         if outcome == "busy":
             raise KnowledgeSyncError("cache_source_busy")
         if outcome == "prepared":
@@ -323,9 +369,9 @@ class RedisFaqCacheProjection:
             _cache_commitment(event.commitment, index_version),
         )
         outcome, detail = self._closed_result(raw)
-        if outcome == "error":
+        if outcome == "conflict":
             raise KnowledgeSyncConflict(detail)
-        if outcome == "retry":
+        if outcome in {"retry", "error"}:
             raise KnowledgeSyncError(detail)
         try:
             return ProjectionOutcome(outcome)

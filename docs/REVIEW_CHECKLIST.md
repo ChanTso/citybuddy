@@ -204,6 +204,27 @@ request. A later semantic diff change requires the checklist to be executed and 
   reason code, response, authoritative state, and reached fault boundary so a status coincidence
   cannot pass as attribution.
 
+### Faults never become terminal business decisions
+
+- Enumerate every consumer outcome and classify its evidence source. ACK, reject, drop, not-found,
+  stale, or another terminal disposition requires a positively established business conclusion;
+  malformed or contradictory owner-local state, integrity failure, dependency unavailability,
+  timeout, and indeterminate results remain retryable or explicitly unavailable. Audit broad result
+  and exception mappings so those fault classes cannot be folded into a business conflict merely
+  because they share one internal return shape.
+- For a stateful multi-phase consumer, close the disposition space as the Cartesian product of every
+  persisted state class and every mutation phase. At minimum distinguish missing, present-but-
+  malformed, valid-but-stale, and valid-current coordination state before the authoritative mutation
+  and after authoritative success but before projection finalization. Define and execute every cell;
+  field deletion, unknown fields, malformed lease/version, and loss of the whole state must preserve
+  retry/replay repair, while only a confirmed competing or superseding business fact may terminate.
+- Give every coordination marker both a bounded semantic lease and a bounded physical lifecycle.
+  On a TTL-oriented cache, every marker must have positive TTL and its physical TTL must exceed the
+  remaining semantic lease by a fixed safety margin; a lease checked only by a future request does
+  not reclaim abandoned state. Prove owner crash or lost redelivery cannot accumulate immortal keys,
+  early eviction remains fail-closed, expiry becomes retryable absence, exact retry renews safely,
+  and stale finalize/abort calls cannot mutate a replacement owner.
+
 ### Runtime-owned integration-test ports
 
 - Do not derive, probe-and-release, or lease a host port in a requester process that is not the

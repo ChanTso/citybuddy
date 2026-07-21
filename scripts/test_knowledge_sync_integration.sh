@@ -88,7 +88,9 @@ docker run --rm --network "${project}_default" \
   --support-redis-url \
   "redis://knowledge_indexer:$(read_value REDIS_INDEXER_CACHE_PASSWORD)@redis-support:6379/0" \
   --agent-cache-url \
-  "redis://agent_cache:$(read_value REDIS_AGENT_CACHE_PASSWORD)@redis-support:6379/0"
+  "redis://agent_cache:$(read_value REDIS_AGENT_CACHE_PASSWORD)@redis-support:6379/0" \
+  --admin-redis-url \
+  "redis://default:$(read_value REDIS_SUPPORT_PASSWORD)@redis-support:6379/0"
 
 # Re-running the baseline bootstrap must preserve and tolerate incremental projection records.
 docker run --rm --network "${project}_default" "$indexer_image" \

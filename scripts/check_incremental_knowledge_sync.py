@@ -26,6 +26,12 @@ from citybuddy_indexer import (
     RocketMqKnowledgeConsumer,
     create_worker,
 )
+from citybuddy_indexer.faq_cache import (
+    FAQ_ENTRY_TTL_MS,
+    FAQ_PREPARATION_LEASE_MS,
+    FAQ_PREPARATION_TTL_MS,
+    FAQ_PREPARATION_TTL_SAFETY_MS,
+)
 from citybuddy_indexer.incremental import EVENT_TAG, RESERVED_SANDBOX_PROPERTY
 from citybuddy_indexer.worker import VersionedKnowledgeProjection
 from redis import Redis
@@ -68,10 +74,16 @@ def request(
     return cast(dict[str, Any], decoded)
 
 
-def event(version: int, *, tombstone: bool = False, answer: str | None = None) -> dict[str, object]:
+def event(
+    version: int,
+    *,
+    tombstone: bool = False,
+    answer: str | None = None,
+    source_id: str = "faq-cb111-delivery",
+) -> dict[str, object]:
     return {
         "eventId": str(uuid4()),
-        "sourceId": "faq-cb111-delivery",
+        "sourceId": source_id,
         "sourceType": "faq",
         "sourceVersion": version,
         "publicationState": "PUBLISHED",
@@ -207,6 +219,160 @@ class FinalizeUnavailableCache:
         self.delegate.abort(event)
 
 
+MALFORMED_FENCE_FAULTS = {
+    "deleted-field",
+    "unknown-field",
+    "invalid-lease",
+    "invalid-version",
+}
+FENCE_MATRIX_STATES = ("missing", *sorted(MALFORMED_FENCE_FAULTS), "stale", "current")
+
+
+def _state_key(sync_event: FaqKnowledgeEvent) -> str:
+    return f"{FAQ_CACHE_PREFIX}state:{sync_event.source_id}"
+
+
+def _parsed_event(payload: dict[str, object]) -> FaqKnowledgeEvent:
+    return FaqKnowledgeEvent.from_bytes(encode(payload))
+
+
+def _inject_fence_state(
+    admin: Redis,
+    projection: RedisFaqCacheProjection,
+    sync_event: FaqKnowledgeEvent,
+    state: str,
+) -> None:
+    state_key = _state_key(sync_event)
+    if state == "current":
+        return
+    if state == "missing":
+        admin.delete(state_key)
+        return
+    if state == "stale":
+        admin.delete(state_key)
+        stale = _parsed_event(event(1, source_id=sync_event.source_id))
+        assert projection.prepare(stale) is None
+        admin.hset(state_key, "lease_deadline_ms", "1")
+        return
+    if state == "deleted-field":
+        admin.hdel(state_key, "commitment")
+        return
+    if state == "unknown-field":
+        admin.hset(state_key, "unexpected", "field")
+        return
+    if state == "invalid-lease":
+        admin.hset(state_key, "lease_deadline_ms", "invalid")
+        return
+    if state == "invalid-version":
+        admin.hset(state_key, "source_version", "invalid")
+        return
+    raise AssertionError(f"unclassified fence state: {state}")
+
+
+def _seed_pre_es_fence(
+    admin: Redis,
+    projection: RedisFaqCacheProjection,
+    sync_event: FaqKnowledgeEvent,
+    state: str,
+) -> None:
+    admin.delete(_state_key(sync_event))
+    if state in {"missing", "stale"}:
+        _inject_fence_state(admin, projection, sync_event, state)
+        return
+    assert projection.prepare(sync_event) is None
+    _inject_fence_state(admin, projection, sync_event, state)
+
+
+@dataclass(frozen=True)
+class FinalizeFenceFault:
+    delegate: RedisFaqCacheProjection
+    admin: Redis
+    state: str
+
+    def prepare(self, sync_event: FaqKnowledgeEvent) -> ProjectionOutcome | None:
+        return self.delegate.prepare(sync_event)
+
+    def finalize(self, sync_event: FaqKnowledgeEvent, index_version: str) -> ProjectionOutcome:
+        _inject_fence_state(self.admin, self.delegate, sync_event, self.state)
+        return self.delegate.finalize(sync_event, index_version)
+
+    def abort(self, sync_event: FaqKnowledgeEvent) -> None:
+        self.delegate.abort(sync_event)
+
+
+def _assert_matrix_converged(admin: Redis, sync_event: FaqKnowledgeEvent) -> None:
+    state_key = _state_key(sync_event)
+    state = cast(dict[str, str], admin.hgetall(state_key))
+    assert state.get("source_version") == str(sync_event.source_version)
+    assert state.get("ready") == "1"
+    state_ttl = cast(int, admin.pttl(state_key))
+    assert 0 < state_ttl <= FAQ_ENTRY_TTL_MS
+
+
+def disposition_matrix(args: argparse.Namespace, admin: Redis) -> dict[str, object]:
+    retry_codes = {
+        "missing": "cache_preparation_missing",
+        "deleted-field": "malformed_state",
+        "unknown-field": "malformed_state",
+        "invalid-lease": "malformed_state",
+        "invalid-version": "malformed_state",
+        "stale": "cache_source_busy",
+    }
+    matrix_cells = 0
+    corruption_cells = 0
+    for phase in ("before-es", "after-es-before-finalize"):
+        for fence_state in FENCE_MATRIX_STATES:
+            source_id = f"faq-matrix-{phase}-{fence_state}"
+            payload = event(2, source_id=source_id)
+            sync_event = _parsed_event(payload)
+            cache_projection = RedisFaqCacheProjection.from_url(args.support_redis_url)
+            elasticsearch = ElasticsearchKnowledgeProjection(args.elasticsearch_url)
+            normal_worker = IndexerWorker(
+                settings(args, args.elasticsearch_url),
+                VersionedKnowledgeProjection(elasticsearch, cache_projection),
+            )
+            if phase == "before-es":
+                _seed_pre_es_fence(admin, cache_projection, sync_event, fence_state)
+                first = normal_worker.handle(encode(payload))
+                if fence_state in MALFORMED_FENCE_FAULTS:
+                    assert first.action is DeliveryAction.RETRY
+                    assert first.code == "malformed_state_repaired"
+                    second = normal_worker.handle(encode(payload))
+                    assert second.action is DeliveryAction.ACK and second.code == "applied"
+                    corruption_cells += 1
+                else:
+                    assert first.action is DeliveryAction.ACK and first.code == "applied"
+            else:
+                fault_worker = IndexerWorker(
+                    settings(args, args.elasticsearch_url),
+                    VersionedKnowledgeProjection(
+                        elasticsearch,
+                        FinalizeFenceFault(cache_projection, admin, fence_state),
+                    ),
+                )
+                first = fault_worker.handle(encode(payload))
+                if fence_state == "current":
+                    assert first.action is DeliveryAction.ACK and first.code == "applied"
+                else:
+                    assert first.action is DeliveryAction.RETRY
+                    assert first.code == retry_codes[fence_state]
+                    if fence_state in MALFORMED_FENCE_FAULTS:
+                        repaired = normal_worker.handle(encode(payload))
+                        assert repaired.action is DeliveryAction.RETRY
+                        assert repaired.code == "malformed_state_repaired"
+                        corruption_cells += 1
+                    recovered = normal_worker.handle(encode(payload))
+                    assert recovered.action is DeliveryAction.ACK and recovered.code == "replayed"
+            _assert_matrix_converged(admin, sync_event)
+            matrix_cells += 1
+    return {
+        "fenceDispositionCells": matrix_cells,
+        "fieldCorruptionPhaseCells": corruption_cells,
+        "fenceStates": len(FENCE_MATRIX_STATES),
+        "pipelinePhases": 2,
+    }
+
+
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--endpoints", required=True)
@@ -217,6 +383,7 @@ def main() -> None:
     parser.add_argument("--index", required=True)
     parser.add_argument("--support-redis-url", required=True)
     parser.add_argument("--agent-cache-url", required=True)
+    parser.add_argument("--admin-redis-url", required=True)
     args = parser.parse_args()
 
     configuration = ClientConfiguration(args.endpoints, Credentials(), request_timeout=5)
@@ -227,6 +394,7 @@ def main() -> None:
     )
     alias_before = request(args.elasticsearch_url, "GET", "/_alias/knowledge_docs_read")
     cache = Redis.from_url(args.agent_cache_url, decode_responses=True)
+    admin_cache = Redis.from_url(args.admin_redis_url, decode_responses=True)
     cache_query = "When will my order arrive?"
     consumer = RocketMqKnowledgeConsumer(create_worker(settings(args, args.elasticsearch_url)))
     consumer.startup()
@@ -411,8 +579,15 @@ def main() -> None:
     )
     assert current_state.get("source_version") == "8"
     assert current_state.get("ready") == "0"
-    assert current_state.get("lease_deadline_ms", "").isdecimal()
-    assert cache.pttl(f"{FAQ_CACHE_PREFIX}state:faq-cb111-delivery") == -1
+    lease_deadline_ms = current_state.get("lease_deadline_ms", "")
+    assert lease_deadline_ms.isdecimal()
+    redis_time = cast(tuple[int, int], admin_cache.time())
+    now_ms = redis_time[0] * 1000 + redis_time[1] // 1000
+    lease_remaining_ms = int(lease_deadline_ms) - now_ms
+    preparation_ttl = cast(int, admin_cache.pttl(f"{FAQ_CACHE_PREFIX}state:faq-cb111-delivery"))
+    assert 0 < lease_remaining_ms <= FAQ_PREPARATION_LEASE_MS
+    assert lease_remaining_ms < preparation_ttl <= FAQ_PREPARATION_TTL_MS
+    assert preparation_ttl - lease_remaining_ms >= FAQ_PREPARATION_TTL_SAFETY_MS - 1_000
     time.sleep(11)
     cache_recovered = RocketMqKnowledgeConsumer(
         create_worker(settings(args, args.elasticsearch_url))
@@ -483,6 +658,7 @@ def main() -> None:
         final_consumer.shutdown()
         producer.shutdown()
 
+    matrix_evidence = disposition_matrix(args, admin_cache)
     assert request(args.elasticsearch_url, "GET", "/_alias/knowledge_docs_read") == alias_before
     assert (
         request(args.elasticsearch_url, "GET", f"/{args.index}/_doc/faq-store-hours%3Ageneral")
@@ -517,6 +693,7 @@ def main() -> None:
                 "aliasUnchanged": True,
                 "boundedPermanentRejections": len(malformed_cases),
                 "event": "cb111-incremental-knowledge-sync-evidence",
+                **matrix_evidence,
                 "finalSourceVersion": 9,
                 "restartRedelivery": True,
                 "supportCacheRecovery": True,

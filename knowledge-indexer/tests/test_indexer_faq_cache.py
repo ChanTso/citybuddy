@@ -72,9 +72,26 @@ def test_tombstone_is_sent_as_a_closed_flag_without_answer_availability() -> Non
 
 
 def test_equal_version_conflict_never_becomes_a_retrying_overwrite() -> None:
-    cache, _ = projection(["error", "conflicting_source_version"])
+    cache, _ = projection(["conflict", "conflicting_source_version"])
 
     with pytest.raises(KnowledgeSyncConflict, match="conflicting_source_version"):
+        cache.apply(event(), "knowledge_docs_v1")
+
+
+@pytest.mark.parametrize(
+    "result",
+    [
+        ["retry", "malformed_state"],
+        ["retry", "cache_preparation_missing"],
+        ["error", "unexpected_cache_failure"],
+    ],
+)
+def test_integrity_and_unknown_cache_failures_never_become_permanent_conflicts(
+    result: list[str],
+) -> None:
+    cache, _ = projection(result)
+
+    with pytest.raises(KnowledgeSyncError, match=result[1]):
         cache.apply(event(), "knowledge_docs_v1")
 
 

@@ -5,12 +5,16 @@ from __future__ import annotations
 
 import argparse
 import json
+import time
 from pathlib import Path
 from typing import Any, cast
 
 from citybuddy_agent.faq_cache import RedisFaqCache, normalized_query_hash
 from citybuddy_indexer.faq_cache import (
     FAQ_CACHE_PREFIX,
+    FAQ_PREPARATION_LEASE_MS,
+    FAQ_PREPARATION_TTL_MS,
+    FAQ_PREPARATION_TTL_SAFETY_MS,
     RedisFaqCacheProjection,
 )
 from citybuddy_indexer.incremental import (
@@ -146,8 +150,15 @@ def normal(port: int, values: dict[str, str]) -> dict[str, object]:
     assert projection.prepare(event(5)) is None
     assert admin.hget(state_key, "source_version") == "5"
     assert admin.hget(state_key, "ready") == "0"
-    assert cast(str, admin.hget(state_key, "lease_deadline_ms")).isdecimal()
-    assert admin.pttl(state_key) == -1
+    lease_deadline_ms = cast(str, admin.hget(state_key, "lease_deadline_ms"))
+    assert lease_deadline_ms.isdecimal()
+    redis_time = cast(tuple[int, int], admin.time())
+    now_ms = redis_time[0] * 1000 + redis_time[1] // 1000
+    lease_remaining_ms = int(lease_deadline_ms) - now_ms
+    preparation_ttl = cast(int, admin.pttl(state_key))
+    assert 0 < lease_remaining_ms <= FAQ_PREPARATION_LEASE_MS
+    assert lease_remaining_ms < preparation_ttl <= FAQ_PREPARATION_TTL_MS
+    assert preparation_ttl - lease_remaining_ms >= FAQ_PREPARATION_TTL_SAFETY_MS - 1_000
     assert cache.lookup(raw_query) is None
     maxmemory_config = cast(dict[str, str], admin.config_get("maxmemory"))
     memory_info = cast(dict[str, int], admin.info("memory"))
@@ -164,13 +175,13 @@ def normal(port: int, values: dict[str, str]) -> dict[str, object]:
                 break
         else:
             raise AssertionError("controlled volatile-lfu pressure did not evict an eligible key")
-        assert admin.hget(state_key, "source_version") == "5"
-        assert admin.hget(state_key, "ready") == "0"
         assert cache.lookup(raw_query) is None
     finally:
         admin.config_set("maxmemory", original_maxmemory)
         for key in admin.scan_iter(match="cb112:eviction:*"):
             admin.delete(key)
+    if not admin.exists(state_key):
+        assert projection.prepare(event(5)) is None
     try:
         projection.prepare(event(6))
     except KnowledgeSyncError as error:
@@ -194,7 +205,9 @@ def normal(port: int, values: dict[str, str]) -> dict[str, object]:
     assert cache.populate_mapping(raw_query, "faq-refund", 4)
     assert cache.lookup(raw_query) is not None
     assert projection.prepare(event(5)) is None
-    admin.delete(state_key)
+    admin.pexpire(state_key, 50)
+    time.sleep(0.1)
+    assert not admin.exists(state_key)
     assert cache.lookup(raw_query) is None
     try:
         projection.finalize(event(5), "knowledge_docs_v1")
@@ -291,7 +304,8 @@ def normal(port: int, values: dict[str, str]) -> dict[str, object]:
         "concurrentSourceSerialization": True,
         "currentVersion": int(state["source_version"]),
         "expiredPreparationTakeover": True,
-        "inFlightStateSurvivesVolatileEviction": True,
+        "inFlightStateEvictionSafe": True,
+        "preparationPhysicalExpiry": True,
         "normalizationStable": True,
         "rawQueryStored": False,
         "tombstoneFenced": True,
