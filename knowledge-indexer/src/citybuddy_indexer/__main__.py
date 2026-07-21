@@ -4,6 +4,8 @@ import argparse
 import json
 
 from .knowledge import ElasticsearchBootstrapClient, KnowledgeBootstrapError
+from .rebuild import ElasticsearchRebuildClient, KnowledgeRebuildCoordinator, KnowledgeRebuildError
+from .rebuild_runtime import HttpOwnerSnapshotSource, RocketMqAcceptedEventJournal
 from .worker import IndexerSettings, RocketMqKnowledgeConsumer, create_worker
 
 
@@ -22,10 +24,19 @@ def main() -> None:
     consume.add_argument("--support-redis-url", required=True)
     consume.add_argument("--alias", default="knowledge_docs_read")
     consume.add_argument("--invisible-seconds", type=int, default=30)
+    rebuild = subcommands.add_parser("rebuild")
+    rebuild.add_argument("--elasticsearch-url", required=True)
+    rebuild.add_argument("--owner-snapshot-url", required=True)
+    rebuild.add_argument("--owner-client-id", required=True)
+    rebuild.add_argument("--owner-client-secret", required=True)
+    rebuild.add_argument("--rocketmq-endpoints", required=True)
+    rebuild.add_argument("--topic", required=True)
+    rebuild.add_argument("--consumer-group", required=True)
+    rebuild.add_argument("--invisible-seconds", type=int, default=30)
     args = parser.parse_args()
     if args.command == "bootstrap":
         try:
-            result = ElasticsearchBootstrapClient(args.elasticsearch_url).bootstrap(
+            bootstrap_result = ElasticsearchBootstrapClient(args.elasticsearch_url).bootstrap(
                 index=args.index,
                 alias=args.alias,
             )
@@ -34,9 +45,9 @@ def main() -> None:
         print(
             json.dumps(
                 {
-                    "alias": result.alias,
-                    "documentCount": result.document_count,
-                    "indexVersion": result.index,
+                    "alias": bootstrap_result.alias,
+                    "documentCount": bootstrap_result.document_count,
+                    "indexVersion": bootstrap_result.index,
                 },
                 separators=(",", ":"),
                 sort_keys=True,
@@ -54,6 +65,39 @@ def main() -> None:
             invisible_seconds=args.invisible_seconds,
         )
         RocketMqKnowledgeConsumer(create_worker(settings)).run_forever()
+        return
+    if args.command == "rebuild":
+        source = HttpOwnerSnapshotSource(
+            args.owner_snapshot_url,
+            args.owner_client_id,
+            args.owner_client_secret,
+        )
+        try:
+            with RocketMqAcceptedEventJournal(
+                args.rocketmq_endpoints,
+                args.topic,
+                args.consumer_group,
+                invisible_seconds=args.invisible_seconds,
+            ) as journal:
+                rebuild_result = KnowledgeRebuildCoordinator(
+                    ElasticsearchRebuildClient(args.elasticsearch_url)
+                ).rebuild(source, journal)
+        except KnowledgeRebuildError as error:
+            raise SystemExit(f"knowledge rebuild failed: {error.code}") from error
+        print(
+            json.dumps(
+                {
+                    "candidate": rebuild_result.candidate,
+                    "documentCount": rebuild_result.document_count,
+                    "handoffWatermark": rebuild_result.handoff_watermark,
+                    "predecessor": rebuild_result.predecessor,
+                    "replayed": rebuild_result.replayed,
+                    "rollbackLeaseExpiresAt": rebuild_result.rollback_lease_expires_at,
+                },
+                separators=(",", ":"),
+                sort_keys=True,
+            )
+        )
         return
     worker = create_worker()
     print(f"{worker.settings.service_name} skeleton constructed")

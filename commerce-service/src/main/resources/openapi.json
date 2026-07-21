@@ -45,6 +45,21 @@
         }
       }
     },
+    "/internal/knowledge/snapshot": {
+      "get": {
+        "operationId": "capturePublishedKnowledgeSnapshot",
+        "security": [{"knowledgeSnapshotBasic": []}],
+        "responses": {
+          "200": {
+            "description": "One complete committed owner snapshot of published public knowledge",
+            "content": {"application/json": {"schema": {"$ref": "#/components/schemas/KnowledgeSnapshot"}}}
+          },
+          "401": {"description": "Invalid dedicated knowledge-indexer credential"},
+          "409": {"description": "Published owner truth cannot form a complete consistent snapshot"},
+          "503": {"description": "Authoritative owner persistence unavailable"}
+        }
+      }
+    },
     "/internal/tools/catalog.product.get": {
       "post": {
         "operationId": "getPublishedProductForAgent",
@@ -325,11 +340,54 @@
     "securitySchemes": {
       "directUserBearer": {"type": "http", "scheme": "bearer", "bearerFormat": "JWT"},
       "agentOboBearer": {"type": "http", "scheme": "bearer", "bearerFormat": "Agent OBO JWT"},
+      "knowledgeSnapshotBasic": {"type": "http", "scheme": "basic"},
       "evaluationManagementBasic": {"type": "http", "scheme": "basic"},
       "mockPaymentKeyId": {"type": "apiKey", "in": "header", "name": "X-Mock-Payment-Key-Id"},
       "mockPaymentSignature": {"type": "apiKey", "in": "header", "name": "X-Mock-Payment-Signature", "description": "HMAC-SHA256 over the timestamp, idempotency key, complete callback intent, and exact evaluation context when present."}
     },
     "schemas": {
+      "KnowledgeSnapshot": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["schemaVersion", "snapshotId", "capturedAt", "recordCount", "sourceCount", "contentCommitment", "watermark", "records"],
+        "properties": {
+          "schemaVersion": {"type": "string", "const": "cb113-v1"},
+          "snapshotId": {"type": "string", "format": "uuid", "description": "Deterministic UUID.nameUUIDFromBytes identity derived from contentCommitment and watermark."},
+          "capturedAt": {"type": "string", "format": "date-time"},
+          "recordCount": {"type": "integer", "minimum": 1, "maximum": 1000},
+          "sourceCount": {"type": "integer", "minimum": 1, "maximum": 1000},
+          "contentCommitment": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+          "watermark": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+          "records": {"type": "array", "minItems": 1, "maxItems": 1000, "description": "Complete records ordered by sourceId ascending and then chunkId ascending.", "items": {"$ref": "#/components/schemas/KnowledgeSnapshotRecord"}}
+        }
+      },
+      "KnowledgeSnapshotRecord": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["eventId", "sourceId", "sourceVersion", "chunkId", "docType", "publicationState", "tombstone", "occurredTime", "title", "content", "publicMetadata"],
+        "properties": {
+          "eventId": {"type": "string", "format": "uuid"},
+          "sourceId": {"type": "string", "pattern": "^[a-z0-9][a-z0-9-]{0,63}$"},
+          "sourceVersion": {"type": "integer", "minimum": 1, "maximum": 9223372036854775807},
+          "chunkId": {"type": "string", "enum": ["answer", "description"]},
+          "docType": {"type": "string", "enum": ["faq", "product"]},
+          "publicationState": {"type": "string", "const": "PUBLISHED"},
+          "tombstone": {"type": "boolean"},
+          "occurredTime": {"type": "string", "format": "date-time"},
+          "title": {"type": "string", "minLength": 1, "maxLength": 500},
+          "content": {"type": "string", "minLength": 1, "maxLength": 4000},
+          "publicMetadata": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["category", "language"],
+            "properties": {
+              "category": {"type": "string", "minLength": 1},
+              "language": {"type": "string", "minLength": 1},
+              "productId": {"type": "string", "pattern": "^[a-z0-9][a-z0-9-]{0,63}$"}
+            }
+          }
+        }
+      },
       "EvaluationProductFixture": {
         "type": "object",
         "additionalProperties": false,

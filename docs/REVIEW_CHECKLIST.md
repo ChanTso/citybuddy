@@ -60,6 +60,16 @@ request. A later semantic diff change requires the checklist to be executed and 
   encoding, missing structure, wrong primitive types, bounds, control bytes, and nulls where the
   protocol permits them to reach the parser.
 
+### Bounds apply before materialization
+
+- Enforce every count and byte bound at the acquisition boundary, before an untrusted query,
+  response, message batch, or collection is fully materialized. A size check after an unbounded
+  fetch is not a bounded boundary; use an exact limit or at most `maximum + 1` rows/items so the
+  extra item proves overflow and fails closed without loading the full source.
+- Exercise the production acquisition path with more underlying rows/items than the configured
+  maximum. Confirm the fetch itself remains bounded, the response or state transition is rejected,
+  and no prefix is misreported as a complete snapshot.
+
 ### One total-order contract in all three places
 
 - Compare the production query/order implementation, the public OpenAPI or frozen contract, and
@@ -328,6 +338,10 @@ request. A later semantic diff change requires the checklist to be executed and 
   not reclaim abandoned state. Prove owner crash or lost redelivery cannot accumulate immortal keys,
   early eviction remains fail-closed, expiry becomes retryable absence, exact retry renews safely,
   and stale finalize/abort calls cannot mutate a replacement owner.
+- Persist a terminal completion marker only after every required authoritative mutation and
+  receipt/journal disposition has succeeded. If the final receipt commit fails or discovers a
+  contradictory event, the durable state must remain resumable and must not claim completion;
+  prove the crash/failure window and the subsequent redelivery or owner-truth recovery path.
 - When two operations consume the same persisted transition shape, define their guard set once and
   reuse it. Review the shared guard against the semantic invariants, including TTL upper bound and the
   strict physical-TTL versus remaining-lease-plus-safety-margin relation; runtime code coverage can

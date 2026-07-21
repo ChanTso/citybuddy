@@ -33,6 +33,7 @@ EVENT_TAG = "knowledge-sync"
 RESERVED_SANDBOX_PROPERTY = "citybuddy-eval-sandbox-id"
 
 _SOURCE_ID = re.compile(r"^[a-z0-9][a-z0-9-]{0,63}$")
+_INDEX_NAME = re.compile(r"^knowledge_docs_v[1-9][0-9]*$")
 _INSTANT = re.compile(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.(\d{3}|\d{6}|\d{9}))?Z$")
 _EVENT_FIELDS = {
     "eventId",
@@ -267,6 +268,16 @@ class ElasticsearchKnowledgeProjection:
 
     def apply_with_index(self, event: FaqKnowledgeEvent) -> tuple[ProjectionOutcome, str]:
         index = self._resolve_current_index()
+        return self.apply_to_index(event, index), index
+
+    def apply_to_index(self, event: FaqKnowledgeEvent, index: str) -> ProjectionOutcome:
+        if _INDEX_NAME.fullmatch(index) is None:
+            raise KnowledgeSyncError("invalid_index")
+        _, mapping = self._request("GET", f"/{quote(index)}/_mapping")
+        try:
+            validate_knowledge_mapping(mapping, index)
+        except KnowledgeBootstrapError as error:
+            raise KnowledgeSyncError("incompatible_mapping") from error
         self._bind_event_identity(index, event)
         for _ in range(MAX_CAS_ATTEMPTS):
             current = self._get(index, event.document_id)
@@ -279,16 +290,16 @@ class ElasticsearchKnowledgeProjection:
                 )
                 if status == 409:
                     continue
-                return ProjectionOutcome.APPLIED, index
+                return ProjectionOutcome.APPLIED
             current_version = current.source.get("source_version")
             if type(current_version) is not int or current_version < 1:
                 raise KnowledgeSyncError("inconsistent_projection")
             if current_version > event.source_version:
-                return ProjectionOutcome.STALE, index
+                return ProjectionOutcome.STALE
             if current_version == event.source_version:
                 if not self._matches_projection(current.source, event):
                     raise KnowledgeSyncConflict("conflicting_source_version")
-                return ProjectionOutcome.REPLAYED, index
+                return ProjectionOutcome.REPLAYED
             status, _ = self._request(
                 "PUT",
                 self._document_path(
@@ -301,7 +312,7 @@ class ElasticsearchKnowledgeProjection:
             )
             if status == 409:
                 continue
-            return ProjectionOutcome.APPLIED, index
+            return ProjectionOutcome.APPLIED
         raise KnowledgeSyncError("concurrent_projection_contention")
 
     def _resolve_current_index(self) -> str:

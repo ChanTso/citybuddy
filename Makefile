@@ -10,7 +10,7 @@ COMPOSE_BUILD ?= --build
 COMPOSE := docker compose --project-name "$(COMPOSE_PROJECT_NAME)" --env-file "$(ENV_FILE)" --file compose.yaml
 
 .DEFAULT_GOAL := ci
-.PHONY: setup setup-java setup-python setup-web setup-repo format lint typecheck test build docs-check secret-scan java-ci python-ci web-ci repo-ci ci guard-layout init-local up down reset-local grant-access revoke-v013-migration-access migrate-auth migrate-commerce migrate-agent rocketmq-store-init rocketmq-init test-integration test-runtime-integration test-mysql-integration test-identity-integration test-evaluation-identity-integration test-evaluation-sandbox-integration test-catalog-integration test-redis-integration test-elasticsearch-integration test-knowledge-search-integration test-retrieval-evidence-integration test-rocketmq-integration test-knowledge-indexer-rocketmq-spike test-knowledge-sync-integration
+.PHONY: setup setup-java setup-python setup-web setup-repo format lint typecheck test build docs-check secret-scan java-ci python-ci web-ci repo-ci ci guard-layout init-local up down reset-local grant-access revoke-v013-migration-access migrate-auth migrate-commerce migrate-agent rocketmq-store-init rocketmq-init test-integration test-runtime-integration test-mysql-integration test-identity-integration test-evaluation-identity-integration test-evaluation-sandbox-integration test-catalog-integration test-redis-integration test-elasticsearch-integration test-knowledge-search-integration test-retrieval-evidence-integration test-rocketmq-integration test-knowledge-indexer-rocketmq-spike test-knowledge-sync-integration test-knowledge-rebuild-integration
 
 guard-layout:
 	test -x ./mvnw
@@ -53,6 +53,8 @@ guard-layout:
 	test -f scripts/check_faq_cache.py
 	test -f scripts/check_retrieval_calibration.py
 	test -f scripts/check_incremental_knowledge_sync.py
+	test -f scripts/check_knowledge_rebuild.py
+	test -f scripts/check_knowledge_rebuild_concurrency.py
 	test -f scripts/seed_legacy_knowledge_mapping.py
 	test -f infra/mysql/grants/V001__migration_access.sql
 	test -f infra/elasticsearch/Dockerfile
@@ -185,6 +187,9 @@ test-knowledge-indexer-rocketmq-spike:
 test-knowledge-sync-integration:
 	./scripts/test_knowledge_sync_integration.sh
 
+test-knowledge-rebuild-integration:
+	./scripts/test_knowledge_rebuild_integration.sh
+
 test-runtime-integration:
 	./scripts/test_runtime_integration.sh
 
@@ -202,6 +207,7 @@ test-integration:
 	$(MAKE) test-rocketmq-integration
 	$(MAKE) test-knowledge-indexer-rocketmq-spike
 	$(MAKE) test-knowledge-sync-integration
+	$(MAKE) test-knowledge-rebuild-integration
 
 setup: setup-java setup-python setup-web setup-repo
 

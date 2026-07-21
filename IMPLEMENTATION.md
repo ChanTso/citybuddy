@@ -112,7 +112,7 @@ The linked slice name is the canonical detailed specification. Target outcomes a
 | [CB-110 — FAQ publication truth and transactional Outbox](docs/slices/CB-110.md) | P1 | `VERIFIED` | `CB-030`, `CB-085`, `CB-091` |
 | [CB-111 — Incremental knowledge synchronization and version/tombstone convergence](docs/slices/CB-111.md) | P1 | `VERIFIED` | `CB-110` |
 | [CB-112 — Versioned two-level FAQ cache](docs/slices/CB-112.md) | P1 | `VERIFIED` | `CB-111` |
-| [CB-113 — Knowledge rebuild validation and atomic alias switch](docs/slices/CB-113.md) | P1 | `READY` | `CB-112` |
+| [CB-113 — Knowledge rebuild validation and atomic alias switch](docs/slices/CB-113.md) | P1 | `IN_PROGRESS` | `CB-112` |
 | [CB-114 — Knowledge rollback catch-up and atomic restoration](docs/slices/CB-114.md) | P1 | `PLANNED` | `CB-113` |
 | [CB-115 — Expired knowledge-index candidate and predecessor cleanup](docs/slices/CB-115.md) | P1 | `PLANNED` | `CB-114` |
 | `CB-120 — Commerce PendingAction and atomic ActionReceipt transaction` | P1 | `PLANNED` | `CB-071`, `CB-082` |

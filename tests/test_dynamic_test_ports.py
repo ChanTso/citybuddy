@@ -17,6 +17,7 @@ INTEGRATION_SCRIPTS = {
     "test_knowledge_search_integration.sh",
     "test_retrieval_evidence_integration.sh",
     "test_knowledge_sync_integration.sh",
+    "test_knowledge_rebuild_integration.sh",
     "test_identity_integration.sh",
     "test_evaluation_identity_integration.sh",
     "test_evaluation_sandbox_integration.sh",

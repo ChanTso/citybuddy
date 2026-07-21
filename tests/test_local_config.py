@@ -284,6 +284,7 @@ def test_local_ci_order_and_parallel_workflow_cover_every_required_target() -> N
         "test-rocketmq-integration",
         "test-knowledge-indexer-rocketmq-spike",
         "test-knowledge-sync-integration",
+        "test-knowledge-rebuild-integration",
     )
     positions = [aggregate_commands.index(target) for target in expected_targets]
     assert positions == sorted(positions)

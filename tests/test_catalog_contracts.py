@@ -31,6 +31,7 @@ def test_catalog_contract_exposes_only_authenticated_published_reads() -> None:
         "/api/seckill/activities/{activityId}/reservations",
         "/api/reservations/{reservationId}",
         "/internal/tools/catalog.product.get",
+        "/internal/knowledge/snapshot",
         "/internal/eval/sandboxes/{sandboxId}/liveness",
         "/internal/mock-payments/callback",
     }
@@ -49,6 +50,75 @@ def test_catalog_contract_exposes_only_authenticated_published_reads() -> None:
         "productId",
         "X-Eval-Sandbox-Id",
     }
+
+
+def test_knowledge_snapshot_contract_is_dedicated_closed_and_bounded() -> None:
+    contract = load_contract()
+    operation = contract["paths"]["/internal/knowledge/snapshot"]["get"]
+
+    assert operation["security"] == [{"knowledgeSnapshotBasic": []}]
+    assert set(operation["responses"]) == {"200", "401", "409", "503"}
+    snapshot = contract["components"]["schemas"]["KnowledgeSnapshot"]
+    record = contract["components"]["schemas"]["KnowledgeSnapshotRecord"]
+    assert snapshot["additionalProperties"] is False
+    assert snapshot["properties"]["records"]["maxItems"] == 1000
+    assert (
+        "sourceId ascending and then chunkId ascending"
+        in snapshot["properties"]["records"]["description"]
+    )
+    assert "contentCommitment and watermark" in snapshot["properties"]["snapshotId"]["description"]
+    assert record["additionalProperties"] is False
+    assert set(record["properties"]) == {
+        "eventId",
+        "sourceId",
+        "sourceVersion",
+        "chunkId",
+        "docType",
+        "publicationState",
+        "tombstone",
+        "occurredTime",
+        "title",
+        "content",
+        "publicMetadata",
+    }
+    assert record["properties"]["publicMetadata"]["additionalProperties"] is False
+
+
+def test_knowledge_snapshot_enumerates_published_rows_before_content_validation() -> None:
+    repository = (
+        ROOT
+        / "commerce-service/src/main/java/io/citybuddy/commerce/knowledge"
+        / "KnowledgeSnapshotRepository.java"
+    ).read_text(encoding="utf-8")
+    faq_query = repository.split("public List<PublishedSource> publishedFaqs(int limit)", 1)[
+        1
+    ].split("public List<PublishedSource> publishedProducts(int limit)", 1)[0]
+
+    assert "WHERE s.published_version > 0" in faq_query
+    assert "published_question IS NOT NULL" not in faq_query
+    assert "published_answer IS NOT NULL" not in faq_query
+    assert "LIMIT ?" in faq_query
+
+
+def test_knowledge_rebuild_has_no_support_redis_or_direct_database_boundary() -> None:
+    rebuild_sources = "\n".join(
+        path.read_text(encoding="utf-8")
+        for path in (
+            ROOT / "knowledge-indexer/src/citybuddy_indexer/rebuild.py",
+            ROOT / "knowledge-indexer/src/citybuddy_indexer/rebuild_runtime.py",
+        )
+    ).lower()
+    command = (ROOT / "knowledge-indexer/src/citybuddy_indexer/__main__.py").read_text(
+        encoding="utf-8"
+    )
+    rebuild_arguments = command.split('subcommands.add_parser("rebuild")', 1)[1].split(
+        "args = parser.parse_args()", 1
+    )[0]
+
+    assert "redis" not in rebuild_sources
+    assert "mysql" not in rebuild_sources
+    assert "pymysql" not in rebuild_sources
+    assert "support-redis" not in rebuild_arguments
 
 
 def test_catalog_product_shape_keeps_live_commerce_fields_explicit() -> None:

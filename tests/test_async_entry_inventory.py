@@ -285,10 +285,14 @@ def test_inventory_closes_all_runtime_rocketmq_builders_and_outbox_readers() -> 
 
     python_consumers = relative_sources_with("knowledge-indexer/src", ".py", "SimpleConsumer(")
     assert python_consumers == {
+        "knowledge-indexer/src/citybuddy_indexer/rebuild_runtime.py",
         "knowledge-indexer/src/citybuddy_indexer/rocketmq_spike.py",
         "knowledge-indexer/src/citybuddy_indexer/worker.py",
     }
     assert source("knowledge-indexer/src/citybuddy_indexer/worker.py").count("SimpleConsumer(") == 1
+    rebuild_runtime = source("knowledge-indexer/src/citybuddy_indexer/rebuild_runtime.py")
+    assert rebuild_runtime.count("SimpleConsumer(") == 1
+    assert "RESERVED_SANDBOX_PROPERTY in properties" in rebuild_runtime
 
     outbox_readers = relative_sources_with(
         "commerce-service/src/main/java",
