@@ -16,6 +16,7 @@ auth_pid=""
 cleanup() {
   if [[ -n "$auth_pid" ]]; then
     kill "$auth_pid" >/dev/null 2>&1 || true
+    wait "$auth_pid" >/dev/null 2>&1 || true
   fi
   "${compose[@]}" down --volumes --remove-orphans >/dev/null 2>&1 || true
   release_test_ports

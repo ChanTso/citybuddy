@@ -20,18 +20,23 @@ timeout_agent_pid=""
 cleanup() {
   if [[ -n "$agent_pid" ]]; then
     kill "$agent_pid" >/dev/null 2>&1 || true
+    wait "$agent_pid" >/dev/null 2>&1 || true
   fi
   if [[ -n "$auth_pid" ]]; then
     kill "$auth_pid" >/dev/null 2>&1 || true
+    wait "$auth_pid" >/dev/null 2>&1 || true
   fi
   if [[ -n "$commerce_pid" ]]; then
     kill "$commerce_pid" >/dev/null 2>&1 || true
+    wait "$commerce_pid" >/dev/null 2>&1 || true
   fi
   if [[ -n "$proxy_pid" ]]; then
     kill "$proxy_pid" >/dev/null 2>&1 || true
+    wait "$proxy_pid" >/dev/null 2>&1 || true
   fi
   if [[ -n "$timeout_agent_pid" ]]; then
     kill "$timeout_agent_pid" >/dev/null 2>&1 || true
+    wait "$timeout_agent_pid" >/dev/null 2>&1 || true
   fi
   "${compose[@]}" down --volumes --remove-orphans >/dev/null 2>&1 || true
   release_test_ports

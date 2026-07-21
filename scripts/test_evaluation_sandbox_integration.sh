@@ -32,6 +32,11 @@ cleanup() {
       kill "$pid" >/dev/null 2>&1 || true
     fi
   done
+  for pid in "$agent_pid" "$commerce_pid" "$auth_pid" "$model_pid" "$drop_proxy_pid"; do
+    if [[ -n "$pid" ]]; then
+      wait "$pid" >/dev/null 2>&1 || true
+    fi
+  done
   "${compose[@]}" down --volumes --remove-orphans >/dev/null 2>&1 || true
   release_test_ports
   rm -rf "$tmp_dir"
