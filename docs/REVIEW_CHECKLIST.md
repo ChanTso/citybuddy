@@ -218,6 +218,9 @@ request. A later semantic diff change requires the checklist to be executed and 
 - Bind port discovery to the specific live owner and startup generation. Reject malformed,
   multi-address, missing, stale-log, or out-of-range discovery output; an application restart must
   ignore the prior generation's log line and read the newly bound port before any client request.
+  Because port zero may change the endpoint on every restart, enumerate the live dependency graph:
+  reconfigure or restart every surviving client before it can issue another request, then prove the
+  first post-recovery request reaches the new owner rather than the prior port.
 - Prove the behavior with real concurrent suites and controlled cleanup failure: two projects must
   start concurrently with disjoint runtime-owned ports; after a failed `down`, the residual project
   must keep its port while a new project starts on another port. Repeated normal execution must leave

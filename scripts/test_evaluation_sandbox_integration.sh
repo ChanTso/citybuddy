@@ -2147,6 +2147,10 @@ jwks_rejection_reasons="$(tail -n "+$((jwks_fault_log_start + 1))" "$tmp_dir/com
   | sort)"
 echo "$jwks_rejection_reasons"
 start_auth evaluation
+stop_process agent_pid "$agent_pid"
+stop_process commerce_pid "$commerce_pid"
+start_commerce evaluation "http://127.0.0.1:$auth_port"
+start_agent true
 assert_equal $'LIVENESS_DIRECT_USER_JWKS_UNAVAILABLE\nTOOL_OBO_JWKS_UNAVAILABLE' \
   "$jwks_rejection_reasons" \
   "JWKS outage reaches exactly the two attributed unavailable producers"
@@ -2561,6 +2565,8 @@ assert_status 200 "agent evidence survives restart without model or commerce ava
   --header 'X-Eval-Sandbox-Id: sandbox-main'
 cmp "$tmp_dir/agent-evidence.json" "$tmp_dir/http-response.json"
 start_commerce evaluation "http://127.0.0.1:$auth_port"
+stop_process agent_pid "$agent_pid"
+start_agent true
 assert_status 200 "state persists across commerce restart" \
   --request GET "http://127.0.0.1:$commerce_port/api/eval/state" \
   --user "evaluation-manager:$management_password" \
@@ -2864,6 +2870,8 @@ assert_status 503 "completion revocation outage cannot report success" \
 test "$(mysql_query commerce_app "$commerce_app_password" commerce_db \
   "SELECT CONCAT(lifecycle_state, ':', closed_at IS NULL) FROM eval_sandbox WHERE sandbox_id = 'sandbox-revoke-retry'")" = 'DEAD:1'
 start_auth evaluation
+stop_process commerce_pid "$commerce_pid"
+start_commerce evaluation "http://127.0.0.1:$auth_port"
 sleep 2
 assert_status 200 "completion retry converges after auth recovery" \
   --request POST "http://127.0.0.1:$commerce_port/api/eval/sandboxes/sandbox-revoke-retry/complete" \

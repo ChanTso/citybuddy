@@ -169,3 +169,32 @@ def test_host_clients_read_docker_assigned_container_ports() -> None:
         content = (ROOT / "scripts" / name).read_text(encoding="utf-8")
         for statement in required:
             assert statement in content
+
+
+def test_port_zero_restarts_refresh_every_live_dependent() -> None:
+    content = (ROOT / "scripts/test_evaluation_sandbox_integration.sh").read_text(encoding="utf-8")
+    jwks_recovery = content.split("jwks-unavailability-rejection-reasons", 1)[1].split(
+        "audit_denials_before=", 1
+    )[0]
+    assert "start_auth evaluation" in jwks_recovery
+    assert 'stop_process agent_pid "$agent_pid"' in jwks_recovery
+    assert 'stop_process commerce_pid "$commerce_pid"' in jwks_recovery
+    assert 'start_commerce evaluation "http://127.0.0.1:$auth_port"' in jwks_recovery
+    assert "start_agent true" in jwks_recovery
+
+    evidence_restart = (
+        'assert_status 200 "agent evidence survives restart without model or commerce availability"'
+    )
+    commerce_recovery = content.split(evidence_restart, 1)[1].split(
+        'assert_status 200 "state persists across commerce restart"', 1
+    )[0]
+    assert 'start_commerce evaluation "http://127.0.0.1:$auth_port"' in commerce_recovery
+    assert 'stop_process agent_pid "$agent_pid"' in commerce_recovery
+    assert "start_agent true" in commerce_recovery
+
+    auth_recovery = content.split(
+        'assert_status 503 "completion revocation outage cannot report success"', 1
+    )[1].split('assert_status 200 "completion retry converges after auth recovery"', 1)[0]
+    assert "start_auth evaluation" in auth_recovery
+    assert 'stop_process commerce_pid "$commerce_pid"' in auth_recovery
+    assert 'start_commerce evaluation "http://127.0.0.1:$auth_port"' in auth_recovery
