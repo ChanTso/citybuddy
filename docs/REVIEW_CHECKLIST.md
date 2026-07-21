@@ -204,6 +204,30 @@ request. A later semantic diff change requires the checklist to be executed and 
   reason code, response, authoritative state, and reached fault boundary so a status coincidence
   cannot pass as attribution.
 
+### Runtime-owned integration-test ports
+
+- Do not derive, probe-and-release, or lease a host port in a requester process that is not the
+  resource which will bind it. For container ports, omit the published host port and let Docker
+  allocate and hold it; read the result only after startup with `docker compose port` or
+  `docker port`. For host applications, request port zero and read the bound port from that live
+  process. The socket owner and the lifecycle owner must be the same resource.
+- Keep the Docker publication configuration stable across restarts: declare the loopback host and
+  container target without a `published` value. A stopped, restarting, or cleanup-resistant
+  container retains Docker's publication identity; a new project receives another port without a
+  repository registry, PID fingerprint, stale-record recovery, or quarantine state.
+- Bind port discovery to the specific live owner and startup generation. Reject malformed,
+  multi-address, missing, stale-log, or out-of-range discovery output; an application restart must
+  ignore the prior generation's log line and read the newly bound port before any client request.
+  Because port zero may change the endpoint on every restart, enumerate the live dependency graph:
+  reconfigure or restart every surviving client before it can issue another request, then prove the
+  first post-recovery request reaches the new owner rather than the prior port.
+- Prove the behavior with real concurrent suites and controlled cleanup failure: two projects must
+  start concurrently with disjoint runtime-owned ports; after a failed `down`, the residual project
+  must keep its port while a new project starts on another port. Repeated normal execution must leave
+  no containers, networks, or host-port registry artifacts. A resource-stop failure must always emit
+  an unambiguous diagnostic even when the primary test already failed; preserve the primary exit code
+  without making the secondary cleanup failure invisible.
+
 ## Closeout maintenance
 
 At each slice or authorized non-slice closeout, append every newly evidenced recurring defect

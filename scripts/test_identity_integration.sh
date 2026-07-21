@@ -3,16 +3,17 @@ set -euo pipefail
 
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$repo_root"
+source "$repo_root/scripts/test_dynamic_ports.sh"
 
 tmp_dir="$(mktemp -d)"
 env_file="$tmp_dir/.env"
 project="citybuddy-cb020-test-$$"
-auth_port="$((44000 + ($$ % 500)))"
-agent_port="$((45000 + ($$ % 500)))"
-commerce_port="$((46000 + ($$ % 500)))"
-proxy_port="$((47000 + ($$ % 500)))"
-timeout_agent_port="$((48000 + ($$ % 500)))"
-export MYSQL_PORT="$((33060 + ($$ % 500)))"
+auth_port=""
+agent_port=""
+commerce_port=""
+proxy_port=""
+timeout_agent_port=""
+MYSQL_PORT=""
 compose=(docker compose --project-name "$project" --env-file "$env_file" --file compose.yaml)
 auth_pid=""
 agent_pid=""
@@ -21,23 +22,31 @@ proxy_pid=""
 timeout_agent_pid=""
 
 cleanup() {
+  local status=$?
+  local resource_stop_status=0
   if [[ -n "$agent_pid" ]]; then
     kill "$agent_pid" >/dev/null 2>&1 || true
+    wait "$agent_pid" >/dev/null 2>&1 || true
   fi
   if [[ -n "$auth_pid" ]]; then
     kill "$auth_pid" >/dev/null 2>&1 || true
+    wait "$auth_pid" >/dev/null 2>&1 || true
   fi
   if [[ -n "$commerce_pid" ]]; then
     kill "$commerce_pid" >/dev/null 2>&1 || true
+    wait "$commerce_pid" >/dev/null 2>&1 || true
   fi
   if [[ -n "$proxy_pid" ]]; then
     kill "$proxy_pid" >/dev/null 2>&1 || true
+    wait "$proxy_pid" >/dev/null 2>&1 || true
   fi
   if [[ -n "$timeout_agent_pid" ]]; then
     kill "$timeout_agent_pid" >/dev/null 2>&1 || true
+    wait "$timeout_agent_pid" >/dev/null 2>&1 || true
   fi
-  "${compose[@]}" down --volumes --remove-orphans >/dev/null 2>&1 || true
+  "${compose[@]}" down --volumes --remove-orphans >/dev/null 2>&1 || resource_stop_status=$?
   rm -rf "$tmp_dir"
+  finish_test_cleanup "$status" "$resource_stop_status"
 }
 
 wait_port() {
@@ -155,6 +164,7 @@ disabled_hash="$(uv run python scripts/hash_test_credential.py "$disabled_passwo
 service_hash="$(uv run python scripts/hash_test_credential.py "$service_password")"
 
 "${compose[@]}" up --detach --wait --wait-timeout 60 mysql
+compose_host_port MYSQL_PORT mysql 3306
 make ENV_FILE="$env_file" COMPOSE_PROJECT_NAME="$project" grant-access
 make ENV_FILE="$env_file" COMPOSE_PROJECT_NAME="$project" migrate-auth
 
@@ -256,7 +266,7 @@ openssl pkey -in "$tmp_dir/overlap-private.pem" -pubout -out "$tmp_dir/overlap-p
 
 ./mvnw -q -pl auth-service,commerce-service -am -DskipTests package
 SPRING_DATASOURCE_PASSWORD="$auth_app_password" java -jar auth-service/target/auth-service-0.0.1-SNAPSHOT.jar \
-  --server.port="$auth_port" \
+  --server.port=0 \
   --spring.datasource.url="jdbc:mysql://127.0.0.1:$MYSQL_PORT/commerce_db?useSSL=false&allowPublicKeyRetrieval=true" \
   --spring.datasource.username=auth_app \
   --citybuddy.identity.enabled=true \
@@ -270,11 +280,12 @@ SPRING_DATASOURCE_PASSWORD="$auth_app_password" java -jar auth-service/target/au
   '--citybuddy.identity.exchange-scopes[0]=catalog:read' \
   >"$tmp_dir/auth.log" 2>&1 &
 auth_pid=$!
+process_bound_port auth_port spring "$auth_pid" "$tmp_dir/auth.log" 0
 wait_http "http://127.0.0.1:$auth_port/auth/jwks" "$auth_pid" "$tmp_dir/auth.log"
 
 SPRING_DATASOURCE_PASSWORD="$commerce_app_password" \
 java -jar commerce-service/target/commerce-service-0.0.1-SNAPSHOT.jar \
-  --server.port="$commerce_port" \
+  --server.port=0 \
   --spring.datasource.url="jdbc:mysql://127.0.0.1:$MYSQL_PORT/commerce_db?useSSL=false&allowPublicKeyRetrieval=true" \
   --spring.datasource.username=commerce_app \
   --citybuddy.obo.enabled=true \
@@ -283,14 +294,16 @@ java -jar commerce-service/target/commerce-service-0.0.1-SNAPSHOT.jar \
   --citybuddy.agent-tools.enabled=true \
   >"$tmp_dir/commerce.log" 2>&1 &
 commerce_pid=$!
+process_bound_port commerce_port spring "$commerce_pid" "$tmp_dir/commerce.log" 0
 wait_port \
   "http://127.0.0.1:$commerce_port/internal/tools/catalog.product.get" \
   "$commerce_pid" \
   "$tmp_dir/commerce.log"
 
-uv run python scripts/fake_litellm_server.py --port "$proxy_port" \
+uv run python scripts/fake_litellm_server.py --port 0 \
   >"$tmp_dir/proxy.log" 2>&1 &
 proxy_pid=$!
+process_bound_port proxy_port uvicorn "$proxy_pid" "$tmp_dir/proxy.log" 0
 wait_http "http://127.0.0.1:$proxy_port/fixture/counts" "$proxy_pid" "$tmp_dir/proxy.log"
 
 curl --silent --show-error "http://127.0.0.1:$auth_port/auth/jwks" >"$tmp_dir/jwks.json"
@@ -327,7 +340,7 @@ assert_status 200 "second active principal login" \
   --data "{\"loginIdentifier\":\"other-user\",\"password\":\"$other_password\"}"
 other_token="$(uv run python scripts/read_json_field.py "$tmp_dir/http-response.json" accessToken)"
 
-AGENT_PORT="$agent_port" \
+AGENT_PORT=0 \
 AGENT_IDENTITY_ENABLED=true \
 CITYBUDDY_ENVIRONMENT=integration \
 IDENTITY_ISSUER=https://identity.citybuddy.test \
@@ -345,6 +358,7 @@ AGENT_COMMERCE_TOOLS_URL="http://127.0.0.1:$commerce_port" \
 AGENT_CIRCUIT_OPEN_SECONDS=3 \
 uv run citybuddy-agent >"$tmp_dir/agent.log" 2>&1 &
 agent_pid=$!
+process_bound_port agent_port uvicorn "$agent_pid" "$tmp_dir/agent.log" 0
 for _ in {1..60}; do
   if kill -0 "$agent_pid" >/dev/null 2>&1 && \
       [[ "$(curl --silent --output /dev/null --write-out '%{http_code}' "http://127.0.0.1:$agent_port/api/sessions")" != 000 ]]; then
@@ -775,7 +789,7 @@ test "$(uv run python scripts/read_json_field.py "$tmp_dir/http-response.json" o
 budget_trace="$(uv run python scripts/read_json_field.py "$tmp_dir/http-response.json" traceId)"
 test "$(mysql_query agent_app "$agent_app_password" cs_db "SELECT COUNT(*) FROM support_event WHERE trace_id = '$budget_trace' AND event_type = 'BUDGET_CHARGED'")" = 8
 
-AGENT_PORT="$timeout_agent_port" \
+AGENT_PORT=0 \
 AGENT_IDENTITY_ENABLED=true \
 CITYBUDDY_ENVIRONMENT=integration \
 IDENTITY_ISSUER=https://identity.citybuddy.test \
@@ -792,6 +806,7 @@ AGENT_MODEL_PROXY_URL="http://127.0.0.1:$proxy_port" \
 AGENT_COMMERCE_TOOLS_URL="http://127.0.0.1:$proxy_port" \
 uv run citybuddy-agent >"$tmp_dir/timeout-agent.log" 2>&1 &
 timeout_agent_pid=$!
+process_bound_port timeout_agent_port uvicorn "$timeout_agent_pid" "$tmp_dir/timeout-agent.log" 0
 wait_port "http://127.0.0.1:$timeout_agent_port/api/sessions" \
   "$timeout_agent_pid" "$tmp_dir/timeout-agent.log"
 assert_status 200 "bounded commerce tool timeout becomes feedback" \

@@ -62,7 +62,7 @@ def test_init_local_creates_private_distinct_credentials_and_preserves_them(
         f"redis://:{values['REDIS_SUPPORT_PASSWORD']}@redis-support:6379/0"
     )
     assert values["COMMERCE_REDIS_URL"] != values["SUPPORT_REDIS_URL"]
-    assert values["ROCKETMQ_PROXY_PORT"] == "8081"
+    assert not any(name.endswith("_PORT") for name in values)
 
     second = run_script("init_local.sh", env_file)
 
@@ -201,7 +201,8 @@ def test_rocketmq_runtime_uses_pinned_proxy_and_grpc_probe() -> None:
     assert "--enable-proxy" in compose
     assert 'user: "0:0"' in compose
     assert "chown -R 3000:3000 /home/rocketmq/store" in compose
-    assert '"127.0.0.1:${ROCKETMQ_PROXY_PORT:-8081}:8081"' in compose
+    assert "- target: 8081" in compose
+    assert "published:" not in compose
     assert "clusterList --namesrvAddr rocketmq-namesrv:9876" in compose
     assert "rocketmq-probe.jar\n        - route" in compose
     assert "<artifactId>rocketmq-client-java</artifactId>" in probe_pom
@@ -279,8 +280,8 @@ def test_local_ci_order_and_parallel_workflow_cover_every_required_target() -> N
     assert "preserves existing credentials" in integration
     assert "down preserves all durable volumes" in integration
     assert "sleep " not in integration
-    assert 'REDIS_COMMERCE_PORT="$((35000 + ($$ % 700)))"' in mysql_integration
-    assert 'REDIS_SUPPORT_PORT="$((36000 + ($$ % 700)))"' in mysql_integration
+    assert "allocate_test_ports" not in mysql_integration
+    assert 'source "$repo_root/scripts/test_dynamic_ports.sh"' in mysql_integration
 
 
 def test_grant_job_uses_only_fixed_manifest_and_isolated_bootstrap_config() -> None:

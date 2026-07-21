@@ -3,6 +3,7 @@ set -euo pipefail
 
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$repo_root"
+source "$repo_root/scripts/test_dynamic_ports.sh"
 
 tmp_dir="$(mktemp -d)"
 env_file="$tmp_dir/.env"
@@ -22,6 +23,8 @@ admin() {
 }
 
 cleanup() {
+  local status=$?
+  local resource_stop_status=0
   if [[ "$topic_created" = 1 ]] && [[ -n "$("${compose[@]}" ps --status running -q rocketmq-broker-proxy 2>/dev/null)" ]]; then
     admin deleteSubGroup --namesrvAddr rocketmq-namesrv:9876 --clusterName DefaultCluster \
       --groupName "$simple_group" --removeOffset true >/dev/null 2>&1 || true
@@ -30,9 +33,10 @@ cleanup() {
     admin deleteTopic --namesrvAddr rocketmq-namesrv:9876 --clusterName DefaultCluster \
       --topic "$topic" >/dev/null 2>&1 || true
   fi
-  "${compose[@]}" down --volumes --remove-orphans >/dev/null 2>&1 || true
+  "${compose[@]}" down --volumes --remove-orphans >/dev/null 2>&1 || resource_stop_status=$?
   docker image rm --force "$spike_image" >/dev/null 2>&1 || true
   rm -rf "$tmp_dir"
+  finish_test_cleanup "$status" "$resource_stop_status"
 }
 trap cleanup EXIT
 
@@ -49,11 +53,8 @@ assert_contains() {
 
 ENV_FILE="$env_file" ./scripts/init_local.sh
 
-export ELASTICSEARCH_PORT ELASTICSEARCH_IMAGE ROCKETMQ_PROXY_PORT ROCKETMQ_PROBE_IMAGE
-ELASTICSEARCH_PORT="$((37000 + ($$ % 700)))"
-ROCKETMQ_PROXY_PORT="$((40000 + ($$ % 700)))"
-ELASTICSEARCH_IMAGE="citybuddy-elasticsearch-ik:${project}"
-ROCKETMQ_PROBE_IMAGE="citybuddy-rocketmq-probe:${project}"
+export ELASTICSEARCH_IMAGE="citybuddy-elasticsearch-ik:${project}"
+export ROCKETMQ_PROBE_IMAGE="citybuddy-rocketmq-probe:${project}"
 
 docker build --file infra/rocketmq/python-spike/Dockerfile --tag "$spike_image" .
 make ENV_FILE="$env_file" COMPOSE_PROJECT_NAME="$project" rocketmq-store-init

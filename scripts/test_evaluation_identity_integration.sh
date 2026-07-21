@@ -3,21 +3,26 @@ set -euo pipefail
 
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$repo_root"
+source "$repo_root/scripts/test_dynamic_ports.sh"
 
 tmp_dir="$(mktemp -d)"
 env_file="$tmp_dir/.env"
 project="citybuddy-cb100-test-$$"
-auth_port="$((44500 + ($$ % 400)))"
-export MYSQL_PORT="$((33500 + ($$ % 400)))"
+auth_port=""
+MYSQL_PORT=""
 compose=(docker compose --project-name "$project" --env-file "$env_file" --file compose.yaml)
 auth_pid=""
 
 cleanup() {
+  local status=$?
+  local resource_stop_status=0
   if [[ -n "$auth_pid" ]]; then
     kill "$auth_pid" >/dev/null 2>&1 || true
+    wait "$auth_pid" >/dev/null 2>&1 || true
   fi
-  "${compose[@]}" down --volumes --remove-orphans >/dev/null 2>&1 || true
+  "${compose[@]}" down --volumes --remove-orphans >/dev/null 2>&1 || resource_stop_status=$?
   rm -rf "$tmp_dir"
+  finish_test_cleanup "$status" "$resource_stop_status"
 }
 trap cleanup EXIT
 
@@ -115,12 +120,14 @@ stop_auth() {
 start_auth() {
   local profile="$1"
   local -a profile_argument=()
+  local log_offset
   if [[ "$profile" == evaluation ]]; then
     profile_argument=(--spring.profiles.active=evaluation)
   fi
+  port_log_offset log_offset "$tmp_dir/auth.log"
   SPRING_DATASOURCE_PASSWORD="$auth_app_password" \
     java -jar auth-service/target/auth-service-0.0.1-SNAPSHOT.jar \
-    --server.port="$auth_port" \
+    --server.port=0 \
     --spring.datasource.url="jdbc:mysql://127.0.0.1:$MYSQL_PORT/commerce_db?useSSL=false&allowPublicKeyRetrieval=true" \
     --spring.datasource.username=auth_app \
     --citybuddy.identity.enabled=true \
@@ -135,6 +142,7 @@ start_auth() {
     ${profile_argument[@]+"${profile_argument[@]}"} \
     >>"$tmp_dir/auth.log" 2>&1 &
   auth_pid=$!
+  process_bound_port auth_port spring "$auth_pid" "$tmp_dir/auth.log" "$log_offset"
   wait_http
 }
 
@@ -152,6 +160,7 @@ agent_service_hash="$(uv run python scripts/hash_test_credential.py "$agent_serv
 production_user_hash="$(uv run python scripts/hash_test_credential.py "$production_user_password")"
 
 "${compose[@]}" up --detach --wait --wait-timeout 60 mysql
+compose_host_port MYSQL_PORT mysql 3306
 make ENV_FILE="$env_file" COMPOSE_PROJECT_NAME="$project" grant-access
 make ENV_FILE="$env_file" COMPOSE_PROJECT_NAME="$project" migrate-auth migrate-commerce migrate-agent
 make ENV_FILE="$env_file" COMPOSE_PROJECT_NAME="$project" grant-access

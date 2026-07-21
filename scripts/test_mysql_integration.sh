@@ -3,6 +3,7 @@ set -euo pipefail
 
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$repo_root"
+source "$repo_root/scripts/test_dynamic_ports.sh"
 
 tmp_dir="$(mktemp -d)"
 env_file="$tmp_dir/.env"
@@ -12,8 +13,11 @@ project="citybuddy-cb010-test-$$"
 compose=(docker compose --project-name "$project" --env-file "$env_file" --file compose.yaml)
 
 cleanup() {
-  "${compose[@]}" down --volumes --remove-orphans >/dev/null 2>&1 || true
+  local status=$?
+  local resource_stop_status=0
+  "${compose[@]}" down --volumes --remove-orphans >/dev/null 2>&1 || resource_stop_status=$?
   rm -rf "$tmp_dir"
+  finish_test_cleanup "$status" "$resource_stop_status"
 }
 trap cleanup EXIT
 
@@ -98,17 +102,8 @@ echo "Verified init-local preserves existing credentials."
 assert_fails "missing configuration blocks make up" 'Missing local configuration' \
   make ENV_FILE="$missing_env" COMPOSE_PROJECT_NAME="$project-missing" up
 
-# Isolate every published integration port from any developer runtime. The
-# tests connect through the Docker network, not these per-process host ports.
-export MYSQL_PORT REDIS_COMMERCE_PORT REDIS_SUPPORT_PORT ELASTICSEARCH_PORT \
-  ELASTICSEARCH_IMAGE ROCKETMQ_PROXY_PORT ROCKETMQ_PROBE_IMAGE
-MYSQL_PORT="$((33060 + ($$ % 1000)))"
-REDIS_COMMERCE_PORT="$((35000 + ($$ % 700)))"
-REDIS_SUPPORT_PORT="$((36000 + ($$ % 700)))"
-ELASTICSEARCH_PORT="$((38000 + ($$ % 1000)))"
-ROCKETMQ_PROXY_PORT="$((42000 + ($$ % 1000)))"
-ELASTICSEARCH_IMAGE="citybuddy-elasticsearch-ik:${project}"
-ROCKETMQ_PROBE_IMAGE="citybuddy-rocketmq-probe:${project}"
+export ELASTICSEARCH_IMAGE="citybuddy-elasticsearch-ik:${project}"
+export ROCKETMQ_PROBE_IMAGE="citybuddy-rocketmq-probe:${project}"
 
 make ENV_FILE="$env_file" COMPOSE_PROJECT_NAME="$project" up
 

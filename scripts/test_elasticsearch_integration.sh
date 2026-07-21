@@ -3,6 +3,7 @@ set -euo pipefail
 
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$repo_root"
+source "$repo_root/scripts/test_dynamic_ports.sh"
 
 tmp_dir="$(mktemp -d)"
 env_file="$tmp_dir/.env"
@@ -26,10 +27,13 @@ es_api() {
 }
 
 cleanup() {
+  local status=$?
+  local resource_stop_status=0
   es_api DELETE "/$old_index,$new_index" >/dev/null 2>&1 || true
-  "${compose[@]}" down --volumes --remove-orphans >/dev/null 2>&1 || true
-  "${fault_compose[@]}" down --volumes --remove-orphans >/dev/null 2>&1 || true
+  "${compose[@]}" down --volumes --remove-orphans >/dev/null 2>&1 || resource_stop_status=$?
+  "${fault_compose[@]}" down --volumes --remove-orphans >/dev/null 2>&1 || resource_stop_status=$?
   rm -rf "$tmp_dir"
+  finish_test_cleanup "$status" "$resource_stop_status"
 }
 trap cleanup EXIT
 
@@ -68,16 +72,8 @@ assert_fails() {
 
 ENV_FILE="$env_file" ./scripts/init_local.sh
 
-# Isolate the integration project from any developer runtime using per-process host ports.
-export MYSQL_PORT REDIS_COMMERCE_PORT REDIS_SUPPORT_PORT ELASTICSEARCH_PORT ELASTICSEARCH_IMAGE
-export ROCKETMQ_PROXY_PORT ROCKETMQ_PROBE_IMAGE
-MYSQL_PORT="$((33060 + ($$ % 700)))"
-REDIS_COMMERCE_PORT="$((35000 + ($$ % 700)))"
-REDIS_SUPPORT_PORT="$((36000 + ($$ % 700)))"
-ELASTICSEARCH_PORT="$((37000 + ($$ % 700)))"
-ROCKETMQ_PROXY_PORT="$((40000 + ($$ % 700)))"
-ELASTICSEARCH_IMAGE="citybuddy-elasticsearch-ik:${project}"
-ROCKETMQ_PROBE_IMAGE="citybuddy-rocketmq-probe:${project}"
+export ELASTICSEARCH_IMAGE="citybuddy-elasticsearch-ik:${project}"
+export ROCKETMQ_PROBE_IMAGE="citybuddy-rocketmq-probe:${project}"
 
 make ENV_FILE="$env_file" COMPOSE_PROJECT_NAME="$project" up
 

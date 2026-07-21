@@ -45,6 +45,7 @@ guard-layout:
 	test -x scripts/test_knowledge_indexer_rocketmq_spike.sh
 	test -x scripts/test_knowledge_sync_integration.sh
 	test -x scripts/test_runtime_integration.sh
+	test -f scripts/test_dynamic_ports.sh
 	test -f scripts/fake_litellm_server.py
 	test -f scripts/check_knowledge_search.py
 	test -f scripts/check_retrieval_evidence.py

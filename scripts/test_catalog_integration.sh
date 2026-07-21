@@ -3,14 +3,12 @@ set -euo pipefail
 
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$repo_root"
+source "$repo_root/scripts/test_dynamic_ports.sh"
 
 tmp_dir="$(mktemp -d)"
 env_file="$tmp_dir/.env"
 project="citybuddy-cb030-test-$$"
-auth_port="$((44000 + ($$ % 500)))"
-export MYSQL_PORT="$((33060 + ($$ % 500)))"
-export REDIS_COMMERCE_PORT="$((35000 + ($$ % 500)))"
-export ROCKETMQ_PROXY_PORT="$((42000 + ($$ % 500)))"
+auth_port=""
 topic="cb030-catalog-$$"
 consumer_group="cb030-catalog-consumer-$$"
 transaction_topic="cb060-seckill-transaction-$$"
@@ -27,8 +25,10 @@ admin() {
 }
 
 cleanup() {
+  local status=$?
+  local resource_stop_status=0
   if [[ -n "$auth_container" ]]; then
-    docker rm --force "$auth_container" >/dev/null 2>&1 || true
+    docker rm --force "$auth_container" >/dev/null 2>&1 || resource_stop_status=$?
   fi
   if [[ -n "$("${compose[@]}" ps --status running -q rocketmq-broker-proxy 2>/dev/null)" ]]; then
     if [[ "$groups_created" = 1 ]]; then
@@ -54,8 +54,9 @@ cleanup() {
         --topic "$timeout_topic" >/dev/null 2>&1 || true
     fi
   fi
-  "${compose[@]}" down --volumes --remove-orphans >/dev/null 2>&1 || true
+  "${compose[@]}" down --volumes --remove-orphans >/dev/null 2>&1 || resource_stop_status=$?
   rm -rf "$tmp_dir"
+  finish_test_cleanup "$status" "$resource_stop_status"
 }
 trap cleanup EXIT
 
@@ -386,7 +387,7 @@ openssl pkey -in "$tmp_dir/current-private.pem" -pubout \
 auth_container="$(docker run --detach --rm \
   --name "$project-auth" \
   --network "${project}_default" \
-  --publish "127.0.0.1:$auth_port:8080" \
+  --publish "127.0.0.1::8080" \
   --volume "$repo_root/auth-service/target/auth-service-0.0.1-SNAPSHOT.jar:/opt/citybuddy/auth.jar:ro" \
   --volume "$tmp_dir/current-private.pem:/opt/citybuddy/current-private.pem:ro" \
   --volume "$tmp_dir/current-public.pem:/opt/citybuddy/current-public.pem:ro" \
@@ -402,6 +403,7 @@ auth_container="$(docker run --detach --rm \
   --citybuddy.identity.current-kid=catalog-current \
   --citybuddy.identity.current-private-key-path=/opt/citybuddy/current-private.pem \
   --citybuddy.identity.current-public-key-path=/opt/citybuddy/current-public.pem)"
+container_host_port auth_port "$auth_container" 8080
 wait_http "http://127.0.0.1:$auth_port/auth/jwks" "$auth_container"
 
 login_status="$(curl --silent --show-error --output "$tmp_dir/login.json" --write-out '%{http_code}' \

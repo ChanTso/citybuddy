@@ -3,6 +3,7 @@ set -euo pipefail
 
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$repo_root"
+source "$repo_root/scripts/test_dynamic_ports.sh"
 
 v013_only="${CITYBUDDY_V013_ONLY:-false}"
 if [[ "$v013_only" != true && "$v013_only" != false ]]; then
@@ -13,18 +14,12 @@ fi
 tmp_dir="$(mktemp -d)"
 env_file="$tmp_dir/.env"
 project="citybuddy-cb101-test-$$"
-auth_port="$((44900 + ($$ % 200)))"
-commerce_port="$((45100 + ($$ % 200)))"
-agent_port="$((45300 + ($$ % 200)))"
-proxy_port="$((45500 + ($$ % 200)))"
-drop_proxy_port="$((45700 + ($$ % 200)))"
-export MYSQL_PORT="$((33900 + ($$ % 200)))"
-export REDIS_COMMERCE_PORT="$((6390 + ($$ % 200)))"
-export REDIS_SUPPORT_PORT="$((6590 + ($$ % 200)))"
-export ELASTICSEARCH_PORT="$((9290 + ($$ % 200)))"
-export ROCKETMQ_NAMESRV_PORT="$((9990 + ($$ % 200)))"
-export ROCKETMQ_BROKER_PORT="$((11190 + ($$ % 200)))"
-export ROCKETMQ_PROXY_PORT="$((8290 + ($$ % 200)))"
+auth_port=""
+commerce_port=""
+agent_port=""
+proxy_port=""
+drop_proxy_port=""
+MYSQL_PORT=""
 compose=(docker compose --project-name "$project" --env-file "$env_file" --file compose.yaml)
 auth_pid=""
 commerce_pid=""
@@ -33,13 +28,21 @@ model_pid=""
 drop_proxy_pid=""
 
 cleanup() {
+  local status=$?
+  local resource_stop_status=0
   for pid in "$agent_pid" "$commerce_pid" "$auth_pid" "$model_pid" "$drop_proxy_pid"; do
     if [[ -n "$pid" ]]; then
       kill "$pid" >/dev/null 2>&1 || true
     fi
   done
-  "${compose[@]}" down --volumes --remove-orphans >/dev/null 2>&1 || true
+  for pid in "$agent_pid" "$commerce_pid" "$auth_pid" "$model_pid" "$drop_proxy_pid"; do
+    if [[ -n "$pid" ]]; then
+      wait "$pid" >/dev/null 2>&1 || true
+    fi
+  done
+  "${compose[@]}" down --volumes --remove-orphans >/dev/null 2>&1 || resource_stop_status=$?
   rm -rf "$tmp_dir"
+  finish_test_cleanup "$status" "$resource_stop_status"
 }
 trap cleanup EXIT
 
@@ -301,12 +304,14 @@ stop_process() {
 start_auth() {
   local profile="$1"
   local -a profile_argument=()
+  local log_offset
   if [[ "$profile" == evaluation ]]; then
     profile_argument=(--spring.profiles.active=evaluation)
   fi
+  port_log_offset log_offset "$tmp_dir/auth.log"
   SPRING_DATASOURCE_PASSWORD="$auth_app_password" \
     java -jar auth-service/target/auth-service-0.0.1-SNAPSHOT.jar \
-    --server.port="$auth_port" \
+    --server.port=0 \
     --spring.datasource.url="jdbc:mysql://127.0.0.1:$MYSQL_PORT/commerce_db?useSSL=false&allowPublicKeyRetrieval=true" \
     --spring.datasource.username=auth_app \
     --citybuddy.identity.enabled=true \
@@ -321,6 +326,7 @@ start_auth() {
     ${profile_argument[@]+"${profile_argument[@]}"} \
     >>"$tmp_dir/auth.log" 2>&1 &
   auth_pid=$!
+  process_bound_port auth_port spring "$auth_pid" "$tmp_dir/auth.log" "$log_offset"
   wait_http "http://127.0.0.1:$auth_port/auth/jwks" "$auth_pid" "$tmp_dir/auth.log"
 }
 
@@ -329,6 +335,7 @@ start_commerce() {
   local auth_base="$2"
   local -a profile_argument=()
   local -a payment_arguments=()
+  local log_offset
   if [[ "$profile" == evaluation ]]; then
     profile_argument=(--spring.profiles.active=evaluation)
     payment_arguments=(
@@ -340,9 +347,10 @@ start_commerce() {
       --citybuddy.mock-payment.callback-clock-skew=30s
     )
   fi
+  port_log_offset log_offset "$tmp_dir/commerce.log"
   SPRING_DATASOURCE_PASSWORD="$commerce_app_password" \
     java -jar commerce-service/target/commerce-service-0.0.1-SNAPSHOT.jar \
-    --server.port="$commerce_port" \
+    --server.port=0 \
     --spring.datasource.url="jdbc:mysql://127.0.0.1:$MYSQL_PORT/commerce_db?useSSL=false&allowPublicKeyRetrieval=true" \
     --spring.datasource.username=commerce_app \
     --citybuddy.obo.enabled=true \
@@ -371,12 +379,15 @@ start_commerce() {
     ${payment_arguments[@]+"${payment_arguments[@]}"} \
     >>"$tmp_dir/commerce.log" 2>&1 &
   commerce_pid=$!
+  process_bound_port commerce_port spring "$commerce_pid" "$tmp_dir/commerce.log" "$log_offset"
   wait_http "http://127.0.0.1:$commerce_port/api/products" "$commerce_pid" "$tmp_dir/commerce.log"
 }
 
 start_agent() {
   local evaluation_enabled="$1"
-  AGENT_PORT="$agent_port" \
+  local log_offset
+  port_log_offset log_offset "$tmp_dir/agent.log"
+  AGENT_PORT=0 \
   AGENT_IDENTITY_ENABLED=true \
   AGENT_EVALUATION_ENABLED="$evaluation_enabled" \
   AGENT_EVALUATION_CLIENT_ID=evaluation-manager \
@@ -397,6 +408,7 @@ start_agent() {
   AGENT_COMMERCE_LIVENESS_URL="http://127.0.0.1:$commerce_port" \
   uv run citybuddy-agent >>"$tmp_dir/agent.log" 2>&1 &
   agent_pid=$!
+  process_bound_port agent_port uvicorn "$agent_pid" "$tmp_dir/agent.log" "$log_offset"
   wait_http "http://127.0.0.1:$agent_port/api/sessions" "$agent_pid" "$tmp_dir/agent.log"
 }
 
@@ -515,6 +527,7 @@ evaluator_hash="$(uv run python scripts/hash_test_credential.py "$evaluator_pass
 agent_service_hash="$(uv run python scripts/hash_test_credential.py "$agent_service_password")"
 
 "${compose[@]}" up --detach --wait --wait-timeout 60 mysql
+compose_host_port MYSQL_PORT mysql 3306
 make ENV_FILE="$env_file" COMPOSE_PROJECT_NAME="$project" grant-access
 make ENV_FILE="$env_file" COMPOSE_PROJECT_NAME="$project" migrate-auth migrate-agent
 pre_totality_migrations="$tmp_dir/pre-totality-commerce-migrations"
@@ -2089,8 +2102,9 @@ assert_status 204 "token header path and registry liveness agree" \
   --header "Authorization: Bearer $direct_token" \
   --header 'X-Eval-Sandbox-Id: sandbox-main'
 
-uv run python scripts/fake_litellm_server.py --port "$proxy_port" >>"$tmp_dir/model.log" 2>&1 &
+uv run python scripts/fake_litellm_server.py --port 0 >>"$tmp_dir/model.log" 2>&1 &
 model_pid=$!
+process_bound_port proxy_port uvicorn "$model_pid" "$tmp_dir/model.log" 0
 wait_http "http://127.0.0.1:$proxy_port/fixture/counts" "$model_pid" "$tmp_dir/model.log"
 start_agent true
 assert_status 201 "evaluation support session binds subject and sandbox" \
@@ -2133,6 +2147,10 @@ jwks_rejection_reasons="$(tail -n "+$((jwks_fault_log_start + 1))" "$tmp_dir/com
   | sort)"
 echo "$jwks_rejection_reasons"
 start_auth evaluation
+stop_process agent_pid "$agent_pid"
+stop_process commerce_pid "$commerce_pid"
+start_commerce evaluation "http://127.0.0.1:$auth_port"
+start_agent true
 assert_equal $'LIVENESS_DIRECT_USER_JWKS_UNAVAILABLE\nTOOL_OBO_JWKS_UNAVAILABLE' \
   "$jwks_rejection_reasons" \
   "JWKS outage reaches exactly the two attributed unavailable producers"
@@ -2547,6 +2565,8 @@ assert_status 200 "agent evidence survives restart without model or commerce ava
   --header 'X-Eval-Sandbox-Id: sandbox-main'
 cmp "$tmp_dir/agent-evidence.json" "$tmp_dir/http-response.json"
 start_commerce evaluation "http://127.0.0.1:$auth_port"
+stop_process agent_pid "$agent_pid"
+start_agent true
 assert_status 200 "state persists across commerce restart" \
   --request GET "http://127.0.0.1:$commerce_port/api/eval/state" \
   --user "evaluation-manager:$management_password" \
@@ -2804,10 +2824,11 @@ assert_equal 0 "$(mysql_query commerce_app "$commerce_app_password" commerce_db 
 
 # Auth commits provisioning but every response is lost. A commerce restart must recover by key.
 uv run python scripts/drop_response_proxy.py \
-  --port "$drop_proxy_port" --upstream "http://127.0.0.1:$auth_port" \
+  --port 0 --upstream "http://127.0.0.1:$auth_port" \
   --path-prefix /internal/eval/test-principals/provision --drop-count 20 \
   >>"$tmp_dir/drop-proxy.log" 2>&1 &
 drop_proxy_pid=$!
+process_bound_port drop_proxy_port proxy "$drop_proxy_pid" "$tmp_dir/drop-proxy.log" 0
 wait_http "http://127.0.0.1:$drop_proxy_port/auth/jwks" "$drop_proxy_pid" "$tmp_dir/drop-proxy.log"
 stop_process commerce_pid "$commerce_pid"
 start_commerce evaluation "http://127.0.0.1:$drop_proxy_port"
@@ -2849,6 +2870,8 @@ assert_status 503 "completion revocation outage cannot report success" \
 test "$(mysql_query commerce_app "$commerce_app_password" commerce_db \
   "SELECT CONCAT(lifecycle_state, ':', closed_at IS NULL) FROM eval_sandbox WHERE sandbox_id = 'sandbox-revoke-retry'")" = 'DEAD:1'
 start_auth evaluation
+stop_process commerce_pid "$commerce_pid"
+start_commerce evaluation "http://127.0.0.1:$auth_port"
 sleep 2
 assert_status 200 "completion retry converges after auth recovery" \
   --request POST "http://127.0.0.1:$commerce_port/api/eval/sandboxes/sandbox-revoke-retry/complete" \

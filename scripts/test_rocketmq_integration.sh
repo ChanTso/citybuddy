@@ -3,6 +3,7 @@ set -euo pipefail
 
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$repo_root"
+source "$repo_root/scripts/test_dynamic_ports.sh"
 
 tmp_dir="$(mktemp -d)"
 env_file="$tmp_dir/.env"
@@ -20,15 +21,18 @@ admin() {
 }
 
 cleanup() {
+  local status=$?
+  local resource_stop_status=0
   if [[ "$topic_created" = 1 ]] && [[ -n "$("${compose[@]}" ps --status running -q rocketmq-broker-proxy 2>/dev/null)" ]]; then
     admin deleteSubGroup --namesrvAddr rocketmq-namesrv:9876 --clusterName DefaultCluster \
       --groupName "$consumer_group" --removeOffset true >/dev/null 2>&1 || true
     admin deleteTopic --namesrvAddr rocketmq-namesrv:9876 --clusterName DefaultCluster \
       --topic "$topic" >/dev/null 2>&1 || true
   fi
-  "${compose[@]}" down --volumes --remove-orphans >/dev/null 2>&1 || true
-  "${fault_compose[@]}" down --volumes --remove-orphans >/dev/null 2>&1 || true
+  "${compose[@]}" down --volumes --remove-orphans >/dev/null 2>&1 || resource_stop_status=$?
+  "${fault_compose[@]}" down --volumes --remove-orphans >/dev/null 2>&1 || resource_stop_status=$?
   rm -rf "$tmp_dir"
+  finish_test_cleanup "$status" "$resource_stop_status"
 }
 trap cleanup EXIT
 
@@ -67,15 +71,8 @@ assert_fails() {
 
 ENV_FILE="$env_file" ./scripts/init_local.sh
 
-export MYSQL_PORT REDIS_COMMERCE_PORT REDIS_SUPPORT_PORT ELASTICSEARCH_PORT ELASTICSEARCH_IMAGE
-export ROCKETMQ_PROXY_PORT ROCKETMQ_PROBE_IMAGE
-MYSQL_PORT="$((33060 + ($$ % 700)))"
-REDIS_COMMERCE_PORT="$((35000 + ($$ % 700)))"
-REDIS_SUPPORT_PORT="$((36000 + ($$ % 700)))"
-ELASTICSEARCH_PORT="$((37000 + ($$ % 700)))"
-ROCKETMQ_PROXY_PORT="$((40000 + ($$ % 700)))"
-ELASTICSEARCH_IMAGE="citybuddy-elasticsearch-ik:${project}"
-ROCKETMQ_PROBE_IMAGE="citybuddy-rocketmq-probe:${project}"
+export ELASTICSEARCH_IMAGE="citybuddy-elasticsearch-ik:${project}"
+export ROCKETMQ_PROBE_IMAGE="citybuddy-rocketmq-probe:${project}"
 
 make ENV_FILE="$env_file" COMPOSE_PROJECT_NAME="$project" up
 
@@ -95,6 +92,7 @@ test "$(docker inspect --format '{{.State.Health.Status}}' "$probe_id")" = healt
 probe_health="$(docker inspect --format '{{range .State.Health.Log}}{{.Output}}{{end}}' "$probe_id")"
 assert_contains "Proxy client readiness" \
   'PROXY_ROUTE_OK endpoint=rocketmq-broker-proxy:8081 topic=cb013-readiness' "$probe_health"
+compose_host_port ROCKETMQ_PROXY_PORT rocketmq-broker-proxy 8081
 proxy_binding="$("${compose[@]}" port rocketmq-broker-proxy 8081)"
 assert_contains "Proxy host binding" "127.0.0.1:$ROCKETMQ_PROXY_PORT" "$proxy_binding"
 echo "Verified pinned NameServer and Broker/Proxy images plus gRPC client-level readiness."
