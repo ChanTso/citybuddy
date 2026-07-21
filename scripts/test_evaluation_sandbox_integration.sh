@@ -2128,9 +2128,14 @@ jwks_tool_status="$(request_status "$tmp_dir/jwks-tool-unavailable.json" \
   --header 'Content-Type: application/json' \
   --data '{"productId":"product-1"}')"
 echo 'jwks-unavailability-rejection-reasons'
-tail -n "+$((jwks_fault_log_start + 1))" "$tmp_dir/commerce.log" \
-  | grep 'evaluation_request_rejected reason_code=' || true
+jwks_rejection_reasons="$(tail -n "+$((jwks_fault_log_start + 1))" "$tmp_dir/commerce.log" \
+  | sed -n 's/.*evaluation_request_rejected reason_code=\([^ ]*\).*/\1/p' \
+  | sort)"
+echo "$jwks_rejection_reasons"
 start_auth evaluation
+assert_equal $'LIVENESS_DIRECT_USER_JWKS_UNAVAILABLE\nTOOL_OBO_JWKS_UNAVAILABLE' \
+  "$jwks_rejection_reasons" \
+  "JWKS outage reaches exactly the two attributed unavailable producers"
 assert_equal '503:503' "$jwks_liveness_status:$jwks_tool_status" \
   "JWKS unavailability is never classified as authorization or inactive"
 assert_equal 'Service unavailable' \

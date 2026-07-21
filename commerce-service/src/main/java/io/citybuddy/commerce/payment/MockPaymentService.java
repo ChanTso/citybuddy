@@ -423,7 +423,11 @@ public final class MockPaymentService {
       return;
     }
     if (sandboxes == null) {
-      throw new MockPaymentException(403, "AUTHORIZATION", "Evaluation payment is unavailable");
+      throw new MockPaymentException(
+          403,
+          "AUTHORIZATION",
+          MockPaymentRejectionReason.EVALUATION_COMPONENT_UNAVAILABLE,
+          "Evaluation payment is unavailable");
     }
     EvaluationSandboxRepository.Sandbox sandbox = sandboxes.lockForPayment(sandboxId);
     if (!"ACTIVE".equals(sandbox.lifecycleState())

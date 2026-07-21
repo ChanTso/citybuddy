@@ -196,6 +196,25 @@ class OboAuthorizerTest {
         .hasCauseInstanceOf(ParseException.class);
   }
 
+  @Test
+  void treatsSemanticallyUnusableTrustedKeyAsDependencyUnavailability() throws Exception {
+    OboAuthorizer unusableKey =
+        new OboAuthorizer(
+            new OboProperties(
+                "https://identity.citybuddy.test",
+                "https://auth.test/auth/jwks",
+                Duration.ofSeconds(30),
+                Duration.ZERO),
+            () ->
+                "{\"keys\":[{\"kty\":\"RSA\",\"kid\":\"current-key\",\"alg\":\"RS256\",\"n\":\"AQ\",\"e\":\"AQAB\"}]}",
+            Clock.fixed(NOW, ZoneOffset.UTC));
+
+    assertThatThrownBy(
+            () -> unusableKey.authorize(token(current, TokenValues.valid()), request(null, null)))
+        .isInstanceOf(IdentityVerificationUnavailableException.class)
+        .hasCauseInstanceOf(JOSEException.class);
+  }
+
   private void assertRejected(
       TokenValues values, OboAuthorizer.AuthorizationRequest authorizationRequest)
       throws JOSEException {

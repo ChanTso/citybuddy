@@ -175,6 +175,20 @@ class DirectUserAuthorizerTest {
                 "Bearer " + token("direct_user", "citybuddy-web", List.of("catalog:read")), null));
   }
 
+  @Test
+  void treatsSemanticallyUnusableTrustedKeyAsDependencyUnavailability() throws Exception {
+    DirectUserAuthorizer unusableKey =
+        authorizer(
+            () ->
+                "{\"keys\":[{\"kty\":\"RSA\",\"kid\":\"current\",\"alg\":\"RS256\",\"n\":\"AQ\",\"e\":\"AQAB\"}]}");
+
+    assertThrows(
+        IdentityVerificationUnavailableException.class,
+        () ->
+            unusableKey.authorize(
+                "Bearer " + token("direct_user", "citybuddy-web", List.of("catalog:read")), null));
+  }
+
   private DirectUserAuthorizer authorizer(io.citybuddy.commerce.identity.JwksLoader loader) {
     return new DirectUserAuthorizer(properties, loader, Clock.fixed(NOW, ZoneOffset.UTC));
   }

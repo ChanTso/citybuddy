@@ -19,5 +19,13 @@ class EvaluationSandboxExceptionTest {
 
     assertThat(attributed.status()).isEqualTo(403);
     assertThat(attributed.reason()).isEqualTo(EvaluationRejectionReason.ACCESS_SANDBOX_NOT_ACTIVE);
+
+    assertThatIllegalArgumentException()
+        .isThrownBy(
+            () ->
+                new EvaluationSandboxException(
+                    403, EvaluationRejectionReason.NOT_APPLICABLE, "unattributed"));
+    assertThatIllegalArgumentException()
+        .isThrownBy(() -> new EvaluationSandboxException(403, null, "unattributed"));
   }
 }

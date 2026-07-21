@@ -50,10 +50,15 @@ public final class MockPaymentController {
           authorizer.authorizeEvaluation(
               authorization, evalSandbox, properties.requiredPermission());
     } catch (CatalogException exception) {
+      if (exception.status() == 403) {
+        throw new MockPaymentException(
+            403,
+            "AUTHORIZATION",
+            MockPaymentRejectionReason.DIRECT_USER_AUTHORIZATION_REJECTED,
+            "Direct-user payment authorization failed");
+      }
       throw new MockPaymentException(
-          exception.status(),
-          exception.status() == 403 ? "AUTHORIZATION" : "AUTHENTICATION",
-          "Direct-user payment authorization failed");
+          exception.status(), "AUTHENTICATION", "Direct-user payment authorization failed");
     }
     MockPaymentResult result =
         service.start(subject.subject(), subject.sandboxId(), orderId, idempotencyKey, request);
@@ -93,6 +98,9 @@ final class MockPaymentExceptionHandler {
 
   @ExceptionHandler(MockPaymentException.class)
   ResponseEntity<Map<String, String>> handle(MockPaymentException exception) {
+    if (exception.status() == 403) {
+      LOG.warn("evaluation_request_rejected reason_code={}", exception.reason());
+    }
     return ResponseEntity.status(exception.status())
         .body(Map.of("category", exception.category(), "message", exception.getMessage()));
   }

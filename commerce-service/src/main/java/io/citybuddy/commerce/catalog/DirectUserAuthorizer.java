@@ -10,6 +10,7 @@ import com.nimbusds.jwt.JWTClaimsSet;
 import com.nimbusds.jwt.SignedJWT;
 import io.citybuddy.commerce.identity.IdentityVerificationUnavailableException;
 import io.citybuddy.commerce.identity.JwksLoader;
+import java.security.interfaces.RSAPublicKey;
 import java.text.ParseException;
 import java.time.Clock;
 import java.time.Duration;
@@ -28,7 +29,7 @@ public final class DirectUserAuthorizer {
   private final JwksLoader loader;
   private final Clock clock;
   private final boolean evaluationProfile;
-  private volatile Map<String, RSAKey> keys = Map.of();
+  private volatile Map<String, RSAPublicKey> keys = Map.of();
   private volatile Instant loadedAt;
 
   public DirectUserAuthorizer(CatalogProperties properties, JwksLoader loader, Clock clock) {
@@ -92,18 +93,18 @@ public final class DirectUserAuthorizer {
         refresh();
         refreshed = true;
       }
-      RSAKey key = keys.get(kid);
+      RSAPublicKey key = keys.get(kid);
       if (key == null && !refreshed) {
         refresh();
         key = keys.get(kid);
       }
       require(key != null, "Unknown signing key");
-      require(jwt.verify(new RSASSAVerifier(key.toRSAPublicKey())), "Invalid signature");
+      require(verify(jwt, key), "Invalid signature");
       JWTClaimsSet claims = jwt.getJWTClaimsSet();
       String sandboxId =
           validateClaims(claims, requiredPermission, evalSandboxHeader, evaluationAllowed);
       return new DirectPrincipal(claims.getSubject(), sandboxId);
-    } catch (ParseException | JOSEException | RuntimeException exception) {
+    } catch (ParseException | RuntimeException exception) {
       if (exception instanceof IdentityVerificationUnavailableException unavailableException) {
         throw unavailableException;
       }
@@ -166,18 +167,26 @@ public final class DirectUserAuthorizer {
   private synchronized void refresh() {
     try {
       JWKSet set = JWKSet.parse(loader.load());
-      Map<String, RSAKey> loaded = new HashMap<>();
+      Map<String, RSAPublicKey> loaded = new HashMap<>();
       for (JWK key : set.getKeys()) {
         if (key instanceof RSAKey rsaKey
             && !key.isPrivate()
             && JWSAlgorithm.RS256.equals(key.getAlgorithm())
             && hasText(key.getKeyID())) {
-          loaded.put(key.getKeyID(), rsaKey.toPublicJWK());
+          loaded.put(key.getKeyID(), rsaKey.toRSAPublicKey());
         }
       }
       keys = Map.copyOf(loaded);
       loadedAt = clock.instant();
-    } catch (ParseException | RuntimeException exception) {
+    } catch (JOSEException | ParseException | RuntimeException exception) {
+      throw new IdentityVerificationUnavailableException(exception);
+    }
+  }
+
+  private static boolean verify(SignedJWT jwt, RSAPublicKey key) {
+    try {
+      return jwt.verify(new RSASSAVerifier(key));
+    } catch (JOSEException exception) {
       throw new IdentityVerificationUnavailableException(exception);
     }
   }

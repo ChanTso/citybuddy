@@ -15,6 +15,9 @@ public final class EvaluationSandboxException extends RuntimeException {
 
   public EvaluationSandboxException(int status, EvaluationRejectionReason reason, String message) {
     super(message);
+    if (status == 403 && (reason == null || reason == EvaluationRejectionReason.NOT_APPLICABLE)) {
+      throw new IllegalArgumentException("HTTP 403 requires an attribution reason");
+    }
     this.status = status;
     this.reason = reason;
   }
