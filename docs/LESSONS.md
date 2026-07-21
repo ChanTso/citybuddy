@@ -233,3 +233,11 @@ This file records only factual pitfalls supported by merged pull-request, commit
 - 根因：实现按已知异常名称列举解析失败，而没有把整个不可信解析操作视为总失败边界；故障注入只绑定 path，未绑定方法、目标和尝试阶段，因此无法区分写前不可用与写后响应丢失；运行时 SDK 的导入副作用没有延迟到真实消费者启动边界。
 - 解决：JSON/文本边界统一吸收解码、数值转换和递归资源限制错误，并对全部字符串执行可编码性验证；真实 Broker 回归证明七类永久无效消息均一次 ACK 且不重投，独立复核另以 314 个不超过 8192 字节的对抗输入验证全部收敛到固定 `KnowledgeEventError`。响应丢失代理精确绑定方法、目标和指定尝试，先证明 Elasticsearch 变更持久化再抑制响应，随后由重投从持久版本承诺重建结果；SDK 改为消费者运行时惰性导入。
 - 结论：总解析边界必须覆盖运行时和库施加的资源限制异常，不能只覆盖语法异常；一致性故障注入必须绑定精确阶段并证明权威持久后置条件。`docs/REVIEW_CHECKLIST.md` 已覆盖总解析与阶段绑定两类规则，本次 closeout 没有新的未登记复发缺陷类。
+
+## Maintenance — Evaluation rejection attribution and availability classification
+
+- 现象：CB-111 合并后的 main required CI 再次在“审计持久化故意不可用”窗口期望 503、实际得到固定 `403 {"error":"Forbidden"}`。Evaluation audit、sandbox repository、sandbox access、liveness mismatch 与 OBO 授权等多个入口会渲染相同公开 403，其中三处还使用相同的 inactive 文本，因此仅凭响应无法确定实际生产者；PR #42 在没有生产者证据时只强化了一条数据库时序回归，未关闭其他分类入口。
+- 证据链接：[maintenance PR #45](https://github.com/ChanTso/citybuddy/pull/45)
+- 根因：direct-user 与 OBO 鉴权器用覆盖整个授权流程的 `RuntimeException` 捕获边界，把 JWKS 缓存刷新时的连接失败、可信 JWKS 语法解析失败，以及语法可解析但无法转换为可用 RSA 公钥的语义失败折叠成普通凭证拒绝；控制器随后把这些拒绝统一渲染为 403。相同公开状态的各生产者又没有唯一内部原因码，使间歇失败在结构上不可归因。
+- 解决：先给 evaluation 的每个 403/拒绝生产者分配仅写服务日志的唯一原因码，公开 403 继续固定为 `Forbidden`；集成脚本在失败时只提取新增原因码。把 JWKS 获取、解析和公钥语义转换放进同一 dependency-refresh 边界并提升为独立的 identity-verification unavailable 异常，在 liveness、OBO tool、catalog 与 mock-payment 边界固定映射为 503；无效凭证、未知 signing key、确证 inactive/missing/mismatch 仍保持拒绝。真实集成把两类 JWKS cache TTL 降至一秒，取得 token 后等待过期并停止 auth 服务，fail-closed 地断言原因码集合精确为 `LIVENESS_DIRECT_USER_JWKS_UNAVAILABLE`、`TOOL_OBO_JWKS_UNAVAILABLE` 且都只返回固定 503；随后 16 路审计写撤权故障与 16 路并发 liveness 读取保持 `503/204`，原 token/header/registry liveness 回归继续通过。单元故障注入另覆盖 loader timeout、连接耗尽、可信 JWKS 语法损坏、可解析但不足 512 位的 RSA key，以及 audit、access、payment lock 三处数据库查询不可判定与确证 inactive/missing 的二分；mock-payment 的 direct-user 权限拒绝和缺少 evaluation 组件也各有独立内部原因码。
+- 结论：同一状态码的多个抛出点若无判别信息，间歇失败在结构上不可归因；修复前必须先插桩取得唯一归因。授权或存活校验只能把已证明的否定事实分类为拒绝，依赖不可用、超时、连接耗尽和查询失败都属于无法判定，必须固定返回 503；宽泛异常边界不得把不可用吞并为拒绝。

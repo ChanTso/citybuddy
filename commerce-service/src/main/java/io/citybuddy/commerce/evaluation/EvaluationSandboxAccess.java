@@ -14,7 +14,10 @@ public final class EvaluationSandboxAccess {
   public void requireActive(String sandboxId) {
     EvaluationRequestParser.boundedHeader(sandboxId, 64, "Invalid sandbox");
     if (!repository.isActive(sandboxId, clock.instant())) {
-      throw new EvaluationSandboxException(403, "Evaluation sandbox is inactive");
+      throw new EvaluationSandboxException(
+          403,
+          EvaluationRejectionReason.ACCESS_SANDBOX_NOT_ACTIVE,
+          "Evaluation sandbox is inactive");
     }
   }
 }

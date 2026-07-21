@@ -423,14 +423,20 @@ public final class MockPaymentService {
       return;
     }
     if (sandboxes == null) {
-      throw new MockPaymentException(403, "AUTHORIZATION", "Evaluation payment is unavailable");
+      throw new MockPaymentException(
+          403,
+          "AUTHORIZATION",
+          MockPaymentRejectionReason.EVALUATION_COMPONENT_UNAVAILABLE,
+          "Evaluation payment is unavailable");
     }
     EvaluationSandboxRepository.Sandbox sandbox = sandboxes.lockForPayment(sandboxId);
     if (!"ACTIVE".equals(sandbox.lifecycleState())
         || sandbox.expiresAt() == null
         || !sandbox.expiresAt().isAfter(clock.instant())) {
       throw new io.citybuddy.commerce.evaluation.EvaluationSandboxException(
-          403, "Evaluation sandbox is inactive");
+          403,
+          io.citybuddy.commerce.evaluation.EvaluationRejectionReason.PAYMENT_SANDBOX_NOT_ACTIVE,
+          "Evaluation sandbox is inactive");
     }
   }
 

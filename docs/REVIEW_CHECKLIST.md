@@ -185,6 +185,25 @@ request. A later semantic diff change requires the checklist to be executed and 
   rather than consume its failure budget on another operation or pass only because a later retry
   happens to converge.
 
+### Attributable rejection and unavailability classification
+
+- Inventory every internal producer that can render the same bounded public rejection. Give each
+  producer a unique server-side reason code and make integration diagnostics capture only that code;
+  keep private claims, resource state, dependency details, and the reason code out of the public
+  response. A shared status and response body without a producer-level attribution channel is not
+  sufficient evidence for an intermittent classification failure.
+- Separate credential or authoritative-state validation from dependency acquisition. Invalid
+  credentials and positively confirmed inactive, missing, or mismatched state may produce the
+  contract rejection; JWKS refresh failure, timeout, connection exhaustion, database read failure,
+  or any other inability to determine the truth must produce bounded unavailability and must not
+  persist a terminal denial decision. Broad authorization exception handlers must explicitly
+  preserve the unavailable class instead of folding it into 401/403/404.
+- Exercise every changed decision point in both directions: a confirmed negative returns the fixed
+  rejection, while a controlled dependency failure returns the fixed unavailable response. For
+  cached dependencies, force cache expiry before the failure; include timing pressure and retain the
+  reason code, response, authoritative state, and reached fault boundary so a status coincidence
+  cannot pass as attribution.
+
 ## Closeout maintenance
 
 At each slice or authorized non-slice closeout, append every newly evidenced recurring defect

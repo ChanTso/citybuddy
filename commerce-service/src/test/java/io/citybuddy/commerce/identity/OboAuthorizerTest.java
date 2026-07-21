@@ -16,6 +16,7 @@ import java.security.KeyPair;
 import java.security.KeyPairGenerator;
 import java.security.interfaces.RSAPrivateKey;
 import java.security.interfaces.RSAPublicKey;
+import java.text.ParseException;
 import java.time.Clock;
 import java.time.Duration;
 import java.time.Instant;
@@ -152,6 +153,66 @@ class OboAuthorizerTest {
     assertThatThrownBy(() -> immediateRefresh.authorize(signed, request(null, null)))
         .isInstanceOf(OboAuthorizationException.class)
         .hasMessage("Unknown signing key");
+  }
+
+  @Test
+  void distinguishesJwksDependencyFailureFromAuthorizationRejection() throws Exception {
+    OboAuthorizer unavailable =
+        new OboAuthorizer(
+            new OboProperties(
+                "https://identity.citybuddy.test",
+                "https://auth.test/auth/jwks",
+                Duration.ofSeconds(30),
+                Duration.ZERO),
+            () -> {
+              throw new IllegalStateException("controlled connection timeout");
+            },
+            Clock.fixed(NOW, ZoneOffset.UTC));
+
+    assertThatThrownBy(
+            () -> unavailable.authorize(token(current, TokenValues.valid()), request(null, null)))
+        .isInstanceOf(IdentityVerificationUnavailableException.class)
+        .hasCauseInstanceOf(IllegalStateException.class);
+    assertThatThrownBy(() -> authorizer.authorize("not-a-jwt", request(null, null)))
+        .isInstanceOf(OboAuthorizationException.class)
+        .isNotInstanceOf(IdentityVerificationUnavailableException.class);
+  }
+
+  @Test
+  void treatsMalformedTrustedJwksAsDependencyUnavailability() throws Exception {
+    OboAuthorizer malformed =
+        new OboAuthorizer(
+            new OboProperties(
+                "https://identity.citybuddy.test",
+                "https://auth.test/auth/jwks",
+                Duration.ofSeconds(30),
+                Duration.ZERO),
+            () -> "not-jwks",
+            Clock.fixed(NOW, ZoneOffset.UTC));
+
+    assertThatThrownBy(
+            () -> malformed.authorize(token(current, TokenValues.valid()), request(null, null)))
+        .isInstanceOf(IdentityVerificationUnavailableException.class)
+        .hasCauseInstanceOf(ParseException.class);
+  }
+
+  @Test
+  void treatsSemanticallyUnusableTrustedKeyAsDependencyUnavailability() throws Exception {
+    OboAuthorizer unusableKey =
+        new OboAuthorizer(
+            new OboProperties(
+                "https://identity.citybuddy.test",
+                "https://auth.test/auth/jwks",
+                Duration.ofSeconds(30),
+                Duration.ZERO),
+            () ->
+                "{\"keys\":[{\"kty\":\"RSA\",\"kid\":\"current-key\",\"alg\":\"RS256\",\"n\":\"AQ\",\"e\":\"AQAB\"}]}",
+            Clock.fixed(NOW, ZoneOffset.UTC));
+
+    assertThatThrownBy(
+            () -> unusableKey.authorize(token(current, TokenValues.valid()), request(null, null)))
+        .isInstanceOf(IdentityVerificationUnavailableException.class)
+        .hasCauseInstanceOf(JOSEException.class);
   }
 
   private void assertRejected(

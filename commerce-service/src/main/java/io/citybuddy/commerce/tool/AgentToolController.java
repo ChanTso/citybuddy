@@ -2,12 +2,16 @@ package io.citybuddy.commerce.tool;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import io.citybuddy.commerce.evaluation.EvaluationCommerceAuditService;
+import io.citybuddy.commerce.evaluation.EvaluationRejectionReason;
 import io.citybuddy.commerce.evaluation.EvaluationSandboxAccess;
 import io.citybuddy.commerce.evaluation.EvaluationSandboxException;
+import io.citybuddy.commerce.identity.IdentityVerificationUnavailableException;
 import io.citybuddy.commerce.identity.OboAuthorizationException;
 import io.citybuddy.commerce.identity.OboAuthorizer;
 import java.util.Map;
 import java.util.Set;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.ObjectProvider;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
@@ -24,6 +28,7 @@ import org.springframework.web.bind.annotation.RestController;
 @RestController
 @ConditionalOnProperty(name = "citybuddy.agent-tools.enabled", havingValue = "true")
 public final class AgentToolController {
+  private static final Logger LOG = LoggerFactory.getLogger(AgentToolController.class);
   private static final String CATALOG_TOOL = "catalog.product.get";
   private static final String CATALOG_SCOPE = "catalog:read";
   private static final Set<String> CATALOG_FIELDS = Set.of("productId");
@@ -105,7 +110,10 @@ public final class AgentToolController {
       EvaluationCommerceAuditService audit =
           evaluationAudit == null ? null : evaluationAudit.getIfAvailable();
       if (access == null || audit == null) {
-        throw new EvaluationSandboxException(403, "Evaluation sandbox is unavailable");
+        throw new EvaluationSandboxException(
+            503,
+            EvaluationRejectionReason.TOOL_EVALUATION_COMPONENT_UNAVAILABLE,
+            "Evaluation sandbox is unavailable");
       }
       access.requireActive(sandboxId);
       EvaluationCommerceAuditService.ProductObservation product =
@@ -151,12 +159,24 @@ public final class AgentToolController {
   }
 
   @ExceptionHandler(OboAuthorizationException.class)
-  ResponseEntity<Map<String, String>> denied() {
+  ResponseEntity<Map<String, String>> denied(OboAuthorizationException exception) {
+    LOG.warn("evaluation_request_rejected reason_code=TOOL_OBO_AUTHORIZATION_REJECTED");
     return ResponseEntity.status(403).body(Map.of("error", "Forbidden"));
   }
 
+  @ExceptionHandler(IdentityVerificationUnavailableException.class)
+  ResponseEntity<Map<String, String>> identityUnavailable(
+      IdentityVerificationUnavailableException exception) {
+    LOG.warn("evaluation_request_rejected reason_code=TOOL_OBO_JWKS_UNAVAILABLE");
+    return ResponseEntity.status(503).body(Map.of("error", "Service unavailable"));
+  }
+
   @ExceptionHandler(EvaluationSandboxException.class)
-  ResponseEntity<Map<String, String>> inactive() {
+  ResponseEntity<Map<String, String>> inactive(EvaluationSandboxException exception) {
+    LOG.warn("evaluation_request_rejected reason_code={}", exception.reason());
+    if (exception.status() == 503) {
+      return ResponseEntity.status(503).body(Map.of("error", "Service unavailable"));
+    }
     return ResponseEntity.status(403).body(Map.of("error", "Forbidden"));
   }
 

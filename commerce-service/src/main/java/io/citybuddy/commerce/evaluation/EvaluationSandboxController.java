@@ -3,7 +3,10 @@ package io.citybuddy.commerce.evaluation;
 import com.fasterxml.jackson.databind.JsonNode;
 import io.citybuddy.commerce.catalog.CatalogException;
 import io.citybuddy.commerce.catalog.DirectUserAuthorizer;
+import io.citybuddy.commerce.identity.IdentityVerificationUnavailableException;
 import java.util.Map;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.springframework.context.annotation.Profile;
 import org.springframework.dao.DataAccessException;
 import org.springframework.http.ResponseEntity;
@@ -20,6 +23,7 @@ import org.springframework.web.bind.annotation.RestController;
 @RestController
 @Profile("evaluation")
 public final class EvaluationSandboxController {
+  private static final Logger LOG = LoggerFactory.getLogger(EvaluationSandboxController.class);
   private final EvaluationManagementAuthenticator authenticator;
   private final EvaluationSandboxService service;
   private final EvaluationSandboxAccess access;
@@ -101,7 +105,8 @@ public final class EvaluationSandboxController {
     if (principal.sandboxId() == null
         || !sandboxId.equals(principal.sandboxId())
         || !sandboxId.equals(sandboxHeader)) {
-      throw new EvaluationSandboxException(403, "Evaluation sandbox mismatch");
+      throw new EvaluationSandboxException(
+          403, EvaluationRejectionReason.LIVENESS_SANDBOX_MISMATCH, "Evaluation sandbox mismatch");
     }
     access.requireActive(sandboxId);
     return ResponseEntity.noContent().build();
@@ -109,13 +114,29 @@ public final class EvaluationSandboxController {
 
   @ExceptionHandler(EvaluationSandboxException.class)
   ResponseEntity<Map<String, String>> rejected(EvaluationSandboxException exception) {
+    if (exception.status() == 403) {
+      LOG.warn("evaluation_request_rejected reason_code={}", exception.reason());
+      return ResponseEntity.status(403).body(Map.of("error", "Forbidden"));
+    }
     return ResponseEntity.status(exception.status()).body(Map.of("error", exception.getMessage()));
   }
 
   @ExceptionHandler(CatalogException.class)
   ResponseEntity<Map<String, String>> unauthorized(CatalogException exception) {
     int status = exception.status() == 404 ? 404 : 403;
+    LOG.warn(
+        "evaluation_request_rejected reason_code={}",
+        status == 404
+            ? "LIVENESS_DIRECT_USER_NOT_FOUND"
+            : "LIVENESS_DIRECT_USER_AUTHORIZATION_REJECTED");
     return ResponseEntity.status(status).body(Map.of("error", "Forbidden"));
+  }
+
+  @ExceptionHandler(IdentityVerificationUnavailableException.class)
+  ResponseEntity<Map<String, String>> identityUnavailable(
+      IdentityVerificationUnavailableException exception) {
+    LOG.warn("evaluation_request_rejected reason_code=LIVENESS_DIRECT_USER_JWKS_UNAVAILABLE");
+    return ResponseEntity.status(503).body(Map.of("error", "Service unavailable"));
   }
 
   @ExceptionHandler(DataAccessException.class)

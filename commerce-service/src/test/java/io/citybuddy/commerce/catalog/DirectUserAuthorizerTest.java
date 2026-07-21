@@ -9,6 +9,7 @@ import com.nimbusds.jose.crypto.RSASSASigner;
 import com.nimbusds.jose.jwk.RSAKey;
 import com.nimbusds.jwt.JWTClaimsSet;
 import com.nimbusds.jwt.SignedJWT;
+import io.citybuddy.commerce.identity.IdentityVerificationUnavailableException;
 import java.security.KeyPair;
 import java.security.KeyPairGenerator;
 import java.security.interfaces.RSAPrivateKey;
@@ -144,6 +145,48 @@ class DirectUserAuthorizerTest {
     assertThrows(
         CatalogException.class,
         () -> authorizer(() -> jwks(signingKey)).authorize("Bearer " + token, "sandbox-1"));
+  }
+
+  @Test
+  void distinguishesJwksDependencyFailureFromAuthorizationRejection() throws Exception {
+    DirectUserAuthorizer unavailable =
+        authorizer(
+            () -> {
+              throw new IllegalStateException("controlled connection exhaustion");
+            });
+
+    assertThrows(
+        IdentityVerificationUnavailableException.class,
+        () ->
+            unavailable.authorize(
+                "Bearer " + token("direct_user", "citybuddy-web", List.of("catalog:read")), null));
+    assertThrows(
+        CatalogException.class, () -> authorizer(() -> jwks(signingKey)).authorize("bad", null));
+  }
+
+  @Test
+  void treatsMalformedTrustedJwksAsDependencyUnavailability() throws Exception {
+    DirectUserAuthorizer malformed = authorizer(() -> "not-jwks");
+
+    assertThrows(
+        IdentityVerificationUnavailableException.class,
+        () ->
+            malformed.authorize(
+                "Bearer " + token("direct_user", "citybuddy-web", List.of("catalog:read")), null));
+  }
+
+  @Test
+  void treatsSemanticallyUnusableTrustedKeyAsDependencyUnavailability() throws Exception {
+    DirectUserAuthorizer unusableKey =
+        authorizer(
+            () ->
+                "{\"keys\":[{\"kty\":\"RSA\",\"kid\":\"current\",\"alg\":\"RS256\",\"n\":\"AQ\",\"e\":\"AQAB\"}]}");
+
+    assertThrows(
+        IdentityVerificationUnavailableException.class,
+        () ->
+            unusableKey.authorize(
+                "Bearer " + token("direct_user", "citybuddy-web", List.of("catalog:read")), null));
   }
 
   private DirectUserAuthorizer authorizer(io.citybuddy.commerce.identity.JwksLoader loader) {

@@ -357,7 +357,10 @@ public class EvaluationSandboxRepository {
             EvaluationSandboxRepository::mapSandbox,
             sandboxId);
     if (matches.size() != 1) {
-      throw new EvaluationSandboxException(403, "Evaluation sandbox is inactive");
+      throw new EvaluationSandboxException(
+          403,
+          EvaluationRejectionReason.PAYMENT_SANDBOX_NOT_FOUND,
+          "Evaluation sandbox is inactive");
     }
     return matches.getFirst();
   }
