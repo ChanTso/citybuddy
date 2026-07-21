@@ -430,7 +430,9 @@ public final class MockPaymentService {
         || sandbox.expiresAt() == null
         || !sandbox.expiresAt().isAfter(clock.instant())) {
       throw new io.citybuddy.commerce.evaluation.EvaluationSandboxException(
-          403, "Evaluation sandbox is inactive");
+          403,
+          io.citybuddy.commerce.evaluation.EvaluationRejectionReason.PAYMENT_SANDBOX_NOT_ACTIVE,
+          "Evaluation sandbox is inactive");
     }
   }
 

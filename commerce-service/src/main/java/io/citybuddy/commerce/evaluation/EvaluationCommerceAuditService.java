@@ -43,7 +43,10 @@ public class EvaluationCommerceAuditService {
             sandboxId,
             java.sql.Timestamp.from(clock.instant()));
     if (active.size() != 1) {
-      throw new EvaluationSandboxException(403, "Evaluation sandbox is inactive");
+      throw new EvaluationSandboxException(
+          403,
+          EvaluationRejectionReason.AUDIT_SANDBOX_NOT_ACTIVE,
+          "Evaluation sandbox is inactive");
     }
 
     List<ProductObservation> products =

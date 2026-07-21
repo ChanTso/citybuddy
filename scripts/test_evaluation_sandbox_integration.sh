@@ -190,10 +190,19 @@ assert_status() {
   local label="$2"
   shift 2
   local status
+  local commerce_log_start=0
+  if [[ -f "$tmp_dir/commerce.log" ]]; then
+    commerce_log_start="$(wc -l <"$tmp_dir/commerce.log")"
+  fi
   status="$(request_status "$tmp_dir/http-response.json" "$@")"
   if [[ "$status" != "$expected" ]]; then
     echo "Unexpected HTTP status for $label: $status" >&2
     cat "$tmp_dir/http-response.json" >&2
+    if [[ -f "$tmp_dir/commerce.log" ]]; then
+      echo "request-rejection-reasons" >&2
+      tail -n "+$((commerce_log_start + 1))" "$tmp_dir/commerce.log" \
+        | grep 'evaluation_request_rejected reason_code=' >&2 || true
+    fi
     for log in auth commerce agent model drop-proxy; do
       if [[ -f "$tmp_dir/$log.log" ]]; then
         echo "${log}-log-tail" >&2

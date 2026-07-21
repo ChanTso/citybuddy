@@ -5,6 +5,8 @@ import io.citybuddy.commerce.catalog.DirectUserAuthorizer;
 import io.citybuddy.commerce.evaluation.EvaluationSandboxException;
 import jakarta.servlet.http.HttpServletRequest;
 import java.util.Map;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.dao.DataAccessException;
 import org.springframework.http.HttpStatus;
@@ -86,6 +88,8 @@ final class MockPaymentCallbackController {
 @RestControllerAdvice(
     assignableTypes = {MockPaymentController.class, MockPaymentCallbackController.class})
 final class MockPaymentExceptionHandler {
+  private static final Logger LOG = LoggerFactory.getLogger(MockPaymentExceptionHandler.class);
+
   @ExceptionHandler(MockPaymentException.class)
   ResponseEntity<Map<String, String>> handle(MockPaymentException exception) {
     return ResponseEntity.status(exception.status())
@@ -103,7 +107,8 @@ final class MockPaymentExceptionHandler {
   }
 
   @ExceptionHandler(EvaluationSandboxException.class)
-  ResponseEntity<Map<String, String>> handleSandbox() {
+  ResponseEntity<Map<String, String>> handleSandbox(EvaluationSandboxException exception) {
+    LOG.warn("evaluation_request_rejected reason_code={}", exception.reason());
     return ResponseEntity.status(403)
         .body(Map.of("category", "AUTHORIZATION", "message", "Evaluation payment is unavailable"));
   }

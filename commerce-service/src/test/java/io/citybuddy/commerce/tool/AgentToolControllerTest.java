@@ -12,18 +12,24 @@ import static org.springframework.test.web.servlet.request.MockMvcRequestBuilder
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
 
+import io.citybuddy.commerce.evaluation.EvaluationRejectionReason;
+import io.citybuddy.commerce.evaluation.EvaluationSandboxException;
 import io.citybuddy.commerce.identity.OboAuthorizationException;
 import io.citybuddy.commerce.identity.OboAuthorizer;
 import java.util.List;
 import java.util.Map;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.extension.ExtendWith;
+import org.springframework.boot.test.system.CapturedOutput;
+import org.springframework.boot.test.system.OutputCaptureExtension;
 import org.springframework.http.MediaType;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.jdbc.core.RowMapper;
 import org.springframework.test.web.servlet.MockMvc;
 import org.springframework.test.web.servlet.setup.MockMvcBuilders;
 
+@ExtendWith(OutputCaptureExtension.class)
 class AgentToolControllerTest {
   private OboAuthorizer authorizer;
   private JdbcTemplate jdbc;
@@ -91,7 +97,8 @@ class AgentToolControllerTest {
   }
 
   @Test
-  void boundsOboRejectionWithoutLeakingClaimDetails() throws Exception {
+  void boundsAndAttributesOboRejectionWithoutLeakingClaimDetails(CapturedOutput output)
+      throws Exception {
     doThrow(new OboAuthorizationException("private token claim detail"))
         .when(authorizer)
         .authorize(anyString(), any(OboAuthorizer.AuthorizationRequest.class));
@@ -106,5 +113,25 @@ class AgentToolControllerTest {
         .andExpect(jsonPath("$.error").value("Forbidden"));
 
     verifyNoInteractions(jdbc);
+    org.assertj.core.api.Assertions.assertThat(output)
+        .contains("reason_code=TOOL_OBO_AUTHORIZATION_REJECTED")
+        .doesNotContain("private token claim detail");
+  }
+
+  @Test
+  void boundsAndAttributesSandboxRejectionWithoutLeakingInternalDetail(CapturedOutput output) {
+    AgentToolController controller = new AgentToolController(authorizer, jdbc);
+
+    var response =
+        controller.inactive(
+            new EvaluationSandboxException(
+                403, EvaluationRejectionReason.AUDIT_SANDBOX_NOT_ACTIVE, "private sandbox detail"));
+
+    org.assertj.core.api.Assertions.assertThat(response.getStatusCode().value()).isEqualTo(403);
+    org.assertj.core.api.Assertions.assertThat(response.getBody())
+        .containsExactlyEntriesOf(Map.of("error", "Forbidden"));
+    org.assertj.core.api.Assertions.assertThat(output)
+        .contains("reason_code=AUDIT_SANDBOX_NOT_ACTIVE")
+        .doesNotContain("private sandbox detail");
   }
 }
