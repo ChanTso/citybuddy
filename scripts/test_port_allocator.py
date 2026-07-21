@@ -4,10 +4,13 @@
 from __future__ import annotations
 
 import argparse
+import fcntl
 import os
 import socket
 import subprocess
 import tempfile
+from collections.abc import Iterator
+from contextlib import contextmanager
 from pathlib import Path
 
 PORT_MIN = 20_000
@@ -61,11 +64,41 @@ def _read_lease(lease: Path) -> tuple[str, int, str] | None:
         return None
     if len(lines) != 3 or not lines[1].isdecimal() or not lines[0] or not lines[2]:
         return None
-    return lines[0], int(lines[1]), lines[2]
+    pid = int(lines[1])
+    if _owner_pid(lines[0]) != pid:
+        return None
+    return lines[0], pid, lines[2]
+
+
+@contextmanager
+def _locked_registry(lease_root: Path) -> Iterator[None]:
+    directory_fd = os.open(lease_root, os.O_RDONLY)
+    try:
+        fcntl.flock(directory_fd, fcntl.LOCK_EX)
+        yield
+    finally:
+        fcntl.flock(directory_fd, fcntl.LOCK_UN)
+        os.close(directory_fd)
 
 
 def _reclaim_stale_lease(lease: Path) -> bool:
     if lease.is_dir():
+        owner_file = lease / "owner"
+        entries = list(lease.iterdir())
+        if entries:
+            if entries != [owner_file]:
+                return False
+            try:
+                legacy_owner = owner_file.read_text(encoding="utf-8").strip()
+            except (OSError, UnicodeError):
+                legacy_owner = ""
+            legacy_pid = _owner_pid(legacy_owner)
+            if legacy_pid is not None and _process_start_token(legacy_pid) is not None:
+                return False
+            try:
+                owner_file.unlink()
+            except OSError:
+                return False
         try:
             lease.rmdir()
         except OSError:
@@ -92,15 +125,11 @@ def _publish_claim(lease: Path, record: str) -> bool:
         os.fsync(temporary.fileno())
         temporary_path = Path(temporary.name)
     try:
-        try:
-            os.link(temporary_path, lease)
-        except FileExistsError:
-            if not _reclaim_stale_lease(lease):
-                return False
-            try:
-                os.link(temporary_path, lease)
-            except FileExistsError:
-                return False
+        if lease.exists() and not _reclaim_stale_lease(lease):
+            return False
+        if lease.exists():
+            return False
+        os.replace(temporary_path, lease)
         return True
     finally:
         temporary_path.unlink(missing_ok=True)
@@ -129,19 +158,15 @@ def _release_lease(lease: Path, owner: str) -> None:
 def release_ports(owner: str, lease_root: Path = DEFAULT_LEASE_ROOT) -> None:
     if not lease_root.exists():
         return
-    for lease in lease_root.iterdir():
-        if not lease.name.isdecimal():
-            continue
-        _release_lease(lease, owner)
+    with _locked_registry(lease_root):
+        for lease in lease_root.iterdir():
+            if not lease.name.isdecimal():
+                continue
+            _release_lease(lease, owner)
 
 
 def _reclaim_orphaned_temporary_claims(lease_root: Path) -> None:
     for temporary in lease_root.glob(".lease-*"):
-        record = _read_lease(temporary)
-        if record is not None:
-            _, pid, recorded_start = record
-            if _process_start_token(pid) == recorded_start:
-                continue
         try:
             temporary.unlink()
         except OSError:
@@ -165,28 +190,31 @@ def allocate_ports(
         raise ValueError(f"preferred start must be within {PORT_MIN}-{PORT_MAX}")
 
     lease_root.mkdir(mode=0o700, parents=True, exist_ok=True)
-    _reclaim_orphaned_temporary_claims(lease_root)
-    record = _lease_record(owner)
-    allocated: list[int] = []
-    try:
-        for offset in range(min(span, MAX_CANDIDATE_ATTEMPTS)):
-            candidate = PORT_MIN + ((preferred_start - PORT_MIN + offset) % span)
-            lease = lease_root / str(candidate)
-            if not _port_is_available(candidate):
-                continue
-            if not _publish_claim(lease, record):
-                continue
-            if not _port_is_available(candidate):
-                _release_lease(lease, owner)
-                continue
-            allocated.append(candidate)
-            if len(allocated) == count:
-                return allocated
-    except BaseException:
-        release_ports(owner, lease_root)
-        raise
+    with _locked_registry(lease_root):
+        _reclaim_orphaned_temporary_claims(lease_root)
+        record = _lease_record(owner)
+        allocated: list[int] = []
+        try:
+            for offset in range(min(span, MAX_CANDIDATE_ATTEMPTS)):
+                candidate = PORT_MIN + ((preferred_start - PORT_MIN + offset) % span)
+                lease = lease_root / str(candidate)
+                if not _port_is_available(candidate):
+                    continue
+                if not _publish_claim(lease, record):
+                    continue
+                if not _port_is_available(candidate):
+                    _release_lease(lease, owner)
+                    continue
+                allocated.append(candidate)
+                if len(allocated) == count:
+                    return allocated
+        except BaseException:
+            for port in allocated:
+                _release_lease(lease_root / str(port), owner)
+            raise
 
-    release_ports(owner, lease_root)
+        for port in allocated:
+            _release_lease(lease_root / str(port), owner)
     raise RuntimeError(
         f"unable to allocate {count} test ports after {MAX_CANDIDATE_ATTEMPTS} candidates"
     )

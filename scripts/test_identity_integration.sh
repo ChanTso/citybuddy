@@ -18,6 +18,8 @@ proxy_pid=""
 timeout_agent_pid=""
 
 cleanup() {
+  local status=$?
+  local resource_stop_status=0
   if [[ -n "$agent_pid" ]]; then
     kill "$agent_pid" >/dev/null 2>&1 || true
     wait "$agent_pid" >/dev/null 2>&1 || true
@@ -38,9 +40,9 @@ cleanup() {
     kill "$timeout_agent_pid" >/dev/null 2>&1 || true
     wait "$timeout_agent_pid" >/dev/null 2>&1 || true
   fi
-  "${compose[@]}" down --volumes --remove-orphans >/dev/null 2>&1 || true
-  release_test_ports
+  "${compose[@]}" down --volumes --remove-orphans >/dev/null 2>&1 || resource_stop_status=$?
   rm -rf "$tmp_dir"
+  finalize_test_port_cleanup "$status" "$resource_stop_status"
 }
 
 wait_port() {

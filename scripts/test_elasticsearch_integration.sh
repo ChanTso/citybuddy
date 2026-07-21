@@ -27,11 +27,13 @@ es_api() {
 }
 
 cleanup() {
+  local status=$?
+  local resource_stop_status=0
   es_api DELETE "/$old_index,$new_index" >/dev/null 2>&1 || true
-  "${compose[@]}" down --volumes --remove-orphans >/dev/null 2>&1 || true
-  "${fault_compose[@]}" down --volumes --remove-orphans >/dev/null 2>&1 || true
-  release_test_ports
+  "${compose[@]}" down --volumes --remove-orphans >/dev/null 2>&1 || resource_stop_status=$?
+  "${fault_compose[@]}" down --volumes --remove-orphans >/dev/null 2>&1 || resource_stop_status=$?
   rm -rf "$tmp_dir"
+  finalize_test_port_cleanup "$status" "$resource_stop_status"
 }
 trap cleanup EXIT
 

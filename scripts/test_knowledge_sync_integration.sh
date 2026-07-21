@@ -21,6 +21,8 @@ admin() {
 }
 
 cleanup() {
+  local status=$?
+  local resource_stop_status=0
   docker stop "$proxy_name" >/dev/null 2>&1 || true
   docker rm "$proxy_name" >/dev/null 2>&1 || true
   if [[ "$topic_created" = 1 ]] && [[ -n "$("${compose[@]}" ps --status running -q rocketmq-broker-proxy 2>/dev/null)" ]]; then
@@ -29,10 +31,10 @@ cleanup() {
     admin deleteTopic --namesrvAddr rocketmq-namesrv:9876 --clusterName DefaultCluster \
       --topic "$topic" >/dev/null 2>&1 || true
   fi
-  "${compose[@]}" down --volumes --remove-orphans >/dev/null 2>&1 || true
+  "${compose[@]}" down --volumes --remove-orphans >/dev/null 2>&1 || resource_stop_status=$?
   docker image rm --force "$indexer_image" >/dev/null 2>&1 || true
-  release_test_ports
   rm -rf "$tmp_dir"
+  finalize_test_port_cleanup "$status" "$resource_stop_status"
 }
 trap cleanup EXIT
 

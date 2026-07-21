@@ -16,6 +16,7 @@ model_pid=""
 
 cleanup() {
   local status=$?
+  local resource_stop_status=0
   if [[ -n "$model_pid" ]]; then
     kill "$model_pid" >/dev/null 2>&1 || true
     wait "$model_pid" >/dev/null 2>&1 || true
@@ -26,10 +27,9 @@ cleanup() {
     "${compose[@]}" logs --no-color mysql elasticsearch >&2 || true
     sed -E 's/[0-9a-f]{48}/<redacted>/g' "$tmp_dir/model.log" >&2 || true
   fi
-  "${compose[@]}" down --volumes --remove-orphans >/dev/null 2>&1 || true
-  release_test_ports
+  "${compose[@]}" down --volumes --remove-orphans >/dev/null 2>&1 || resource_stop_status=$?
   rm -rf "$tmp_dir"
-  return "$status"
+  finalize_test_port_cleanup "$status" "$resource_stop_status"
 }
 trap cleanup EXIT
 

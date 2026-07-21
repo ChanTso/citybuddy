@@ -21,16 +21,18 @@ admin() {
 }
 
 cleanup() {
+  local status=$?
+  local resource_stop_status=0
   if [[ "$topic_created" = 1 ]] && [[ -n "$("${compose[@]}" ps --status running -q rocketmq-broker-proxy 2>/dev/null)" ]]; then
     admin deleteSubGroup --namesrvAddr rocketmq-namesrv:9876 --clusterName DefaultCluster \
       --groupName "$consumer_group" --removeOffset true >/dev/null 2>&1 || true
     admin deleteTopic --namesrvAddr rocketmq-namesrv:9876 --clusterName DefaultCluster \
       --topic "$topic" >/dev/null 2>&1 || true
   fi
-  "${compose[@]}" down --volumes --remove-orphans >/dev/null 2>&1 || true
-  "${fault_compose[@]}" down --volumes --remove-orphans >/dev/null 2>&1 || true
-  release_test_ports
+  "${compose[@]}" down --volumes --remove-orphans >/dev/null 2>&1 || resource_stop_status=$?
+  "${fault_compose[@]}" down --volumes --remove-orphans >/dev/null 2>&1 || resource_stop_status=$?
   rm -rf "$tmp_dir"
+  finalize_test_port_cleanup "$status" "$resource_stop_status"
 }
 trap cleanup EXIT
 

@@ -38,4 +38,21 @@ if [[ -z "${CITYBUDDY_TEST_PORT_ALLOCATOR_LOADED:-}" ]]; then
     python3 "$citybuddy_test_port_allocator_dir/test_port_allocator.py" \
       release --owner "$citybuddy_test_port_owner" >/dev/null 2>&1 || true
   }
+
+  finalize_test_port_cleanup() {
+    local original_status="$1"
+    local resource_stop_status="$2"
+    if ((resource_stop_status == 0)); then
+      release_test_ports
+    else
+      echo "Retaining test-port leases because suite resources did not stop cleanly." >&2
+    fi
+    if ((original_status != 0)); then
+      return "$original_status"
+    fi
+    if ((resource_stop_status != 0)); then
+      trap - EXIT
+      exit "$resource_stop_status"
+    fi
+  }
 fi

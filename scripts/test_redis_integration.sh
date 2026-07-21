@@ -11,9 +11,11 @@ project="citybuddy-cb011-test-$$"
 compose=(docker compose --project-name "$project" --env-file "$env_file" --file compose.yaml)
 
 cleanup() {
-  "${compose[@]}" down --volumes --remove-orphans >/dev/null 2>&1 || true
-  release_test_ports
+  local status=$?
+  local resource_stop_status=0
+  "${compose[@]}" down --volumes --remove-orphans >/dev/null 2>&1 || resource_stop_status=$?
   rm -rf "$tmp_dir"
+  finalize_test_port_cleanup "$status" "$resource_stop_status"
 }
 trap cleanup EXIT
 

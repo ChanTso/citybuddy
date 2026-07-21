@@ -211,11 +211,17 @@ request. A later semantic diff change requires the checklist to be executed and 
   retry the next candidate within an explicit bound when either the operating system or another
   suite already owns the candidate.
 - Coordinate every repository integration suite through the same process-scoped lease registry so
-  concurrent suites cannot select the same probed port. Publish the complete owner record atomically;
-  a missing, blank, malformed, or partial record must be reclaimable rather than becoming a permanent
-  lease. Bind ownership to both PID and process-start identity so PID reuse cannot preserve another
-  process's lease. Release only after local processes have been killed and waited for and containers
-  have stopped; fail closed when the bounded candidate set is exhausted.
+  concurrent suites cannot select the same probed port. Serialize cleanup, stale-record recovery,
+  publication, and release under one registry lock so reclaim cannot delete a newly published lease
+  and orphan-temp cleanup cannot race an active publisher. Publish the complete owner record
+  atomically; a missing, blank, malformed, partial, or prior-format record must be reclaimable rather
+  than becoming a permanent lease. Bind ownership to both PID and process-start identity, and require
+  those two record fields to agree, so PID reuse or a semantically damaged record cannot preserve
+  another process's lease.
+- Release only after local processes have been killed and waited for and every port-owning container
+  has stopped successfully. If container cleanup fails, retain the lease and fail cleanup visibly;
+  `down || true` followed by unconditional release is a collision window. Fail closed when the bounded
+  candidate set is exhausted.
 - Prove both collision classes with behavior, not allocator arithmetic: hold the preferred port open
   before allocation and show a real suite starts on a later candidate; start two real suites from the
   same preferred candidate and show both complete with disjoint leases and no residual resources.

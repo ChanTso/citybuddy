@@ -1,9 +1,11 @@
 from __future__ import annotations
 
+import fcntl
 import os
 import socket
 import subprocess
 import sys
+import time
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
@@ -77,9 +79,13 @@ def test_allocator_skips_a_preoccupied_candidate(tmp_path: Path) -> None:
 
 def test_concurrent_allocators_receive_disjoint_ports(tmp_path: Path) -> None:
     owners = [f"{os.getpid()}:parallel-a", f"{os.getpid()}:parallel-b"]
+    candidate = PORT_MIN + 100
+    (tmp_path / str(candidate)).write_text(
+        "2000000000:stale\n2000000000\nold-process-start\n", encoding="utf-8"
+    )
 
     def allocate_concurrently(owner: str) -> list[int]:
-        return allocate(owner, 8, tmp_path, PORT_MIN + 100)
+        return allocate(owner, 8, tmp_path, candidate)
 
     with ThreadPoolExecutor(max_workers=2) as executor:
         allocations = list(executor.map(allocate_concurrently, owners))
@@ -92,7 +98,15 @@ def test_concurrent_allocators_receive_disjoint_ports(tmp_path: Path) -> None:
 
 
 @pytest.mark.parametrize(
-    "corrupt_state", ["empty-file", "invalid-utf8", "empty-directory", "reused-pid"]
+    "corrupt_state",
+    [
+        "empty-file",
+        "invalid-utf8",
+        "empty-directory",
+        "legacy-directory",
+        "reused-pid",
+        "mismatched-owner-pid",
+    ],
 )
 def test_allocator_reclaims_incomplete_or_stale_claims(tmp_path: Path, corrupt_state: str) -> None:
     candidate = PORT_MIN + 200
@@ -103,9 +117,17 @@ def test_allocator_reclaims_incomplete_or_stale_claims(tmp_path: Path, corrupt_s
         stale_lease.write_bytes(b"\xff")
     elif corrupt_state == "empty-directory":
         stale_lease.mkdir()
-    else:
+    elif corrupt_state == "legacy-directory":
+        stale_lease.mkdir()
+        (stale_lease / "owner").write_text("2000000000:legacy\n", encoding="utf-8")
+    elif corrupt_state == "reused-pid":
         stale_lease.write_text(
             f"{os.getpid()}:old-owner\n{os.getpid()}\nwrong-process-start\n",
+            encoding="utf-8",
+        )
+    else:
+        stale_lease.write_text(
+            f"2000000000:wrong-owner\n{os.getpid()}\nactive-but-mismatched\n",
             encoding="utf-8",
         )
     owner = f"{os.getpid()}:replacement"
@@ -128,6 +150,79 @@ def test_allocator_reclaims_an_orphaned_atomic_publish_temporary(tmp_path: Path)
         release(owner, tmp_path)
 
 
+def test_registry_lock_serializes_cleanup_and_publication(tmp_path: Path) -> None:
+    owner = f"{os.getpid()}:locked-publication"
+    directory_fd = os.open(tmp_path, os.O_RDONLY)
+    fcntl.flock(directory_fd, fcntl.LOCK_EX)
+    process = subprocess.Popen(
+        [
+            sys.executable,
+            str(ALLOCATOR),
+            "allocate",
+            "--owner",
+            owner,
+            "--count",
+            "1",
+            "--start",
+            str(PORT_MIN + 400),
+        ],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        env=allocator_environment(tmp_path),
+    )
+    try:
+        time.sleep(0.1)
+        assert process.poll() is None
+    finally:
+        fcntl.flock(directory_fd, fcntl.LOCK_UN)
+        os.close(directory_fd)
+    stdout, stderr = process.communicate(timeout=5)
+    try:
+        assert process.returncode == 0, stderr
+        assert stdout.strip() == str(PORT_MIN + 400)
+    finally:
+        release(owner, tmp_path)
+
+
+def test_failed_resource_stop_retains_the_lease_and_fails_cleanup(tmp_path: Path) -> None:
+    result = subprocess.run(
+        [
+            "/bin/bash",
+            "-c",
+            "set -euo pipefail; "
+            "source scripts/test_port_allocator.sh; allocate_test_ports held_port; "
+            "finalize_test_port_cleanup 0 9",
+        ],
+        cwd=ROOT,
+        capture_output=True,
+        text=True,
+        env=allocator_environment(tmp_path),
+    )
+    assert result.returncode == 9
+    assert "Retaining test-port leases" in result.stderr
+    leases = [path for path in tmp_path.iterdir() if path.name.isdecimal()]
+    assert len(leases) == 1
+
+
+def test_successful_resource_stop_releases_the_lease(tmp_path: Path) -> None:
+    result = subprocess.run(
+        [
+            "/bin/bash",
+            "-c",
+            "set -euo pipefail; "
+            "source scripts/test_port_allocator.sh; allocate_test_ports held_port; "
+            "finalize_test_port_cleanup 0 0",
+        ],
+        cwd=ROOT,
+        capture_output=True,
+        text=True,
+        env=allocator_environment(tmp_path),
+    )
+    assert result.returncode == 0, result.stderr
+    assert not [path for path in tmp_path.iterdir() if path.name.isdecimal()]
+
+
 def test_every_integration_suite_uses_the_shared_allocator() -> None:
     scripts = ROOT / "scripts"
     discovered = {path.name for path in scripts.glob("test_*integration.sh")}
@@ -137,10 +232,12 @@ def test_every_integration_suite_uses_the_shared_allocator() -> None:
         content = (scripts / name).read_text(encoding="utf-8")
         assert 'source "$repo_root/scripts/test_port_allocator.sh"' in content
         assert "allocate_test_ports " in content
-        assert "release_test_ports" in content
+        assert "finalize_test_port_cleanup" in content
         assert "$$ %" not in content
         cleanup = content.split("cleanup() {", 1)[1].split("\n}", 1)[0]
-        assert cleanup.index("down --volumes") < cleanup.index("release_test_ports")
+        assert "down --volumes --remove-orphans >/dev/null 2>&1 || true" not in cleanup
+        assert "resource_stop_status=$?" in cleanup
+        assert cleanup.index("down --volumes") < cleanup.index("finalize_test_port_cleanup")
 
 
 @pytest.mark.parametrize(
@@ -155,4 +252,4 @@ def test_local_service_processes_exit_before_port_release(name: str, minimum_wai
     content = (ROOT / "scripts" / name).read_text(encoding="utf-8")
     cleanup = content.split("cleanup() {", 1)[1].split("\n}", 1)[0]
     assert cleanup.count('wait "') >= minimum_waits
-    assert cleanup.rindex('wait "') < cleanup.index("release_test_ports")
+    assert cleanup.rindex('wait "') < cleanup.index("finalize_test_port_cleanup")

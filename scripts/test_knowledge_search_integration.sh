@@ -15,15 +15,15 @@ compose=(docker compose --project-name "$project" --env-file "$env_file" --file 
 
 cleanup() {
   local status=$?
+  local resource_stop_status=0
   if ((status != 0)); then
     echo "CB-090 integration failed; collecting Elasticsearch diagnostics." >&2
     "${compose[@]}" ps --all >&2 || true
     "${compose[@]}" logs --no-color elasticsearch >&2 || true
   fi
-  "${compose[@]}" down --volumes --remove-orphans >/dev/null 2>&1 || true
-  release_test_ports
+  "${compose[@]}" down --volumes --remove-orphans >/dev/null 2>&1 || resource_stop_status=$?
   rm -rf "$tmp_dir"
-  return "$status"
+  finalize_test_port_cleanup "$status" "$resource_stop_status"
 }
 trap cleanup EXIT
 

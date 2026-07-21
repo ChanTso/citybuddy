@@ -27,6 +27,8 @@ model_pid=""
 drop_proxy_pid=""
 
 cleanup() {
+  local status=$?
+  local resource_stop_status=0
   for pid in "$agent_pid" "$commerce_pid" "$auth_pid" "$model_pid" "$drop_proxy_pid"; do
     if [[ -n "$pid" ]]; then
       kill "$pid" >/dev/null 2>&1 || true
@@ -37,9 +39,9 @@ cleanup() {
       wait "$pid" >/dev/null 2>&1 || true
     fi
   done
-  "${compose[@]}" down --volumes --remove-orphans >/dev/null 2>&1 || true
-  release_test_ports
+  "${compose[@]}" down --volumes --remove-orphans >/dev/null 2>&1 || resource_stop_status=$?
   rm -rf "$tmp_dir"
+  finalize_test_port_cleanup "$status" "$resource_stop_status"
 }
 trap cleanup EXIT
 
