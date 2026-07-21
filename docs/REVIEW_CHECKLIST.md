@@ -184,6 +184,10 @@ request. A later semantic diff change requires the checklist to be executed and 
 - Keep the injector fail-closed: if the intended method/phase is never reached, the test must fail
   rather than consume its failure budget on another operation or pass only because a later retry
   happens to converge.
+- For a time-varying boundary, inject strictly inside the intended semantic partition with a stated
+  margin and require the corresponding discriminator. Do not inject at a moving equality boundary:
+  clock progress and TTL rounding can move the sample into an adjacent valid partition while the
+  assertion still appears to exercise the original condition.
 
 ### Attributable rejection and unavailability classification
 

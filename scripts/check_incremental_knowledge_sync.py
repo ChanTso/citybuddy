@@ -409,7 +409,7 @@ def _inject_live_fault(admin: Redis, sync_event: FaqKnowledgeEvent, fault: LiveR
         if remaining <= 5_000:
             raise AssertionError(f"TTL relation fault has no safe injection window: {fault.label}")
         ttl = (
-            remaining
+            remaining - 5_000
             if fault.operation == "ttl-not-beyond-lease"
             else (remaining + FAQ_PREPARATION_TTL_SAFETY_MS - 5_000)
         )
