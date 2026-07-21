@@ -110,6 +110,7 @@ def state_hash(**overrides: str) -> list[str]:
         "occurred_time": "2026-07-21T12:34:56Z",
         "ready": "1",
         "cache_commitment": cache_commitment(),
+        "lease_deadline_ms": "",
         **overrides,
     }
     return [item for pair in values.items() for item in pair]

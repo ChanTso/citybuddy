@@ -183,8 +183,7 @@ def mapping_is_current(client: Redis, query: str, expected_version: int) -> bool
         client.hgetall(f"{FAQ_CACHE_PREFIX}answer:{source_id}:{source_version}"),
     )
     return (
-        not client.exists(f"{FAQ_CACHE_PREFIX}pending:{source_id}")
-        and state.get("source_version") == source_version
+        state.get("source_version") == source_version
         and state.get("tombstone") == "0"
         and state.get("ready") == "1"
         and answer.get("source_version") == source_version
@@ -407,15 +406,13 @@ def main() -> None:
     finally:
         cache_failing.shutdown()
     assert not mapping_is_current(cache, cache_query, 7)
-    pending_state = cast(
-        dict[str, str], cache.hgetall(f"{FAQ_CACHE_PREFIX}pending:faq-cb111-delivery")
-    )
-    assert pending_state.get("source_version") == "8"
     current_state = cast(
         dict[str, str], cache.hgetall(f"{FAQ_CACHE_PREFIX}state:faq-cb111-delivery")
     )
-    assert current_state.get("source_version") == "7"
-    assert current_state.get("ready") == "1"
+    assert current_state.get("source_version") == "8"
+    assert current_state.get("ready") == "0"
+    assert current_state.get("lease_deadline_ms", "").isdecimal()
+    assert cache.pttl(f"{FAQ_CACHE_PREFIX}state:faq-cb111-delivery") == -1
     time.sleep(11)
     cache_recovered = RocketMqKnowledgeConsumer(
         create_worker(settings(args, args.elasticsearch_url))

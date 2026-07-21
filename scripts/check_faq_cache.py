@@ -144,10 +144,66 @@ def normal(port: int, values: dict[str, str]) -> dict[str, object]:
     assert cache.populate_mapping(raw_query, "faq-refund", 4)
     answer_v4 = f"{FAQ_CACHE_PREFIX}answer:faq-refund:4"
     assert projection.prepare(event(5)) is None
+    assert admin.hget(state_key, "source_version") == "5"
+    assert admin.hget(state_key, "ready") == "0"
+    assert cast(str, admin.hget(state_key, "lease_deadline_ms")).isdecimal()
+    assert admin.pttl(state_key) == -1
     assert cache.lookup(raw_query) is None
+    maxmemory_config = cast(dict[str, str], admin.config_get("maxmemory"))
+    memory_info = cast(dict[str, int], admin.info("memory"))
+    stats_info = cast(dict[str, int], admin.info("stats"))
+    original_maxmemory = int(maxmemory_config["maxmemory"])
+    used_memory = memory_info["used_memory"]
+    evicted_before = stats_info["evicted_keys"]
+    admin.config_set("maxmemory", used_memory + 262_144)
+    try:
+        for index in range(512):
+            admin.set(f"cb112:eviction:{index}", "x" * 4096, px=60_000)
+            current_stats = cast(dict[str, int], admin.info("stats"))
+            if current_stats["evicted_keys"] > evicted_before:
+                break
+        else:
+            raise AssertionError("controlled volatile-lfu pressure did not evict an eligible key")
+        assert admin.hget(state_key, "source_version") == "5"
+        assert admin.hget(state_key, "ready") == "0"
+        assert cache.lookup(raw_query) is None
+    finally:
+        admin.config_set("maxmemory", original_maxmemory)
+        for key in admin.scan_iter(match="cb112:eviction:*"):
+            admin.delete(key)
+    try:
+        projection.prepare(event(6))
+    except KnowledgeSyncError as error:
+        assert str(error) == "cache_source_busy"
+    else:
+        raise AssertionError("a concurrent source transition overwrote the in-flight state")
+    projection.abort(event(6))
+    assert admin.hget(state_key, "source_version") == "5"
+    admin.hset(state_key, "lease_deadline_ms", "1")
+    assert projection.prepare(event(6)) is None
+    assert admin.hget(state_key, "source_version") == "6"
     projection.abort(event(5))
+    assert admin.hget(state_key, "source_version") == "6"
+    projection.abort(event(6))
+    assert not admin.exists(state_key)
+    assert projection.prepare(event(5)) is None
+    projection.abort(event(5))
+    assert not admin.exists(state_key)
+    assert not cache.populate_mapping(raw_query, "faq-refund", 4)
+    assert projection.apply(event(4), "knowledge_docs_v1") is ProjectionOutcome.APPLIED
     assert cache.populate_mapping(raw_query, "faq-refund", 4)
     assert cache.lookup(raw_query) is not None
+    assert projection.prepare(event(5)) is None
+    admin.delete(state_key)
+    assert cache.lookup(raw_query) is None
+    try:
+        projection.finalize(event(5), "knowledge_docs_v1")
+    except KnowledgeSyncError as error:
+        assert str(error) == "cache_preparation_missing"
+    else:
+        raise AssertionError("a lost preparation state permanently acknowledged finalization")
+    assert projection.apply(event(4), "knowledge_docs_v1") is ProjectionOutcome.APPLIED
+    assert cache.populate_mapping(raw_query, "faq-refund", 4)
     admin.delete(answer_v4)
     assert cache.lookup(raw_query) is None
     assert not admin.exists(mapping_key)
@@ -228,10 +284,14 @@ def normal(port: int, values: dict[str, str]) -> dict[str, object]:
         "occurred_time",
         "ready",
         "cache_commitment",
+        "lease_deadline_ms",
     }
     return {
         "aclDenials": 4,
+        "concurrentSourceSerialization": True,
         "currentVersion": int(state["source_version"]),
+        "expiredPreparationTakeover": True,
+        "inFlightStateSurvivesVolatileEviction": True,
         "normalizationStable": True,
         "rawQueryStored": False,
         "tombstoneFenced": True,

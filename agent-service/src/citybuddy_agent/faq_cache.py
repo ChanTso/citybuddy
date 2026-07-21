@@ -41,6 +41,7 @@ _STATE_FIELDS = {
     "occurred_time",
     "ready",
     "cache_commitment",
+    "lease_deadline_ms",
 }
 _ANSWER_FIELDS = {
     "schema",
@@ -80,12 +81,7 @@ end
 
 local state = prefix .. 'state:' .. source_id
 local answer = prefix .. 'answer:' .. source_id .. ':' .. source_version
-local pending = prefix .. 'pending:' .. source_id
-if redis.call('EXISTS', pending) ~= 0 then
-  redis.call('DEL', mapping)
-  return {}
-end
-if redis.call('HLEN', state) ~= 10 or redis.call('HLEN', answer) ~= 12 then
+if redis.call('HLEN', state) ~= 11 or redis.call('HLEN', answer) ~= 12 then
   redis.call('DEL', mapping)
   return {}
 end
@@ -94,6 +90,7 @@ if redis.call('HGET', state, 'schema') ~= ARGV[3]
   or redis.call('HGET', state, 'source_version') ~= source_version
   or redis.call('HGET', state, 'tombstone') ~= '0'
   or redis.call('HGET', state, 'ready') ~= '1'
+  or redis.call('HGET', state, 'lease_deadline_ms') ~= ''
   or redis.call('HGET', answer, 'schema') ~= ARGV[3]
   or redis.call('HGET', answer, 'source_id') ~= source_id
   or redis.call('HGET', answer, 'source_version') ~= source_version
@@ -126,10 +123,8 @@ local max_ttl = tonumber(ARGV[5])
 local prefix = ARGV[6]
 local state = prefix .. 'state:' .. source_id
 local answer = prefix .. 'answer:' .. source_id .. ':' .. source_version
-local pending = prefix .. 'pending:' .. source_id
 
-if redis.call('EXISTS', pending) ~= 0
-  or redis.call('HLEN', state) ~= 10 or redis.call('HLEN', answer) ~= 12 then
+if redis.call('HLEN', state) ~= 11 or redis.call('HLEN', answer) ~= 12 then
   return 0
 end
 if redis.call('HGET', state, 'schema') ~= schema
@@ -137,6 +132,7 @@ if redis.call('HGET', state, 'schema') ~= schema
   or redis.call('HGET', state, 'source_version') ~= source_version
   or redis.call('HGET', state, 'tombstone') ~= '0'
   or redis.call('HGET', state, 'ready') ~= '1'
+  or redis.call('HGET', state, 'lease_deadline_ms') ~= ''
   or redis.call('HGET', answer, 'schema') ~= schema
   or redis.call('HGET', answer, 'source_id') ~= source_id
   or redis.call('HGET', answer, 'source_version') ~= source_version
@@ -300,6 +296,7 @@ def _knowledge_output(state: dict[str, str], answer: dict[str, str]) -> Knowledg
         or state["source_version"] != source_version_text
         or state["tombstone"] != "0"
         or state["ready"] != "1"
+        or state["lease_deadline_ms"] != ""
         or state["index_version"] != index_version
         or state["commitment"] != answer["commitment"]
         or state["cache_commitment"] != answer["cache_commitment"]
