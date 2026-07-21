@@ -234,6 +234,14 @@ This file records only factual pitfalls supported by merged pull-request, commit
 - 解决：JSON/文本边界统一吸收解码、数值转换和递归资源限制错误，并对全部字符串执行可编码性验证；真实 Broker 回归证明七类永久无效消息均一次 ACK 且不重投，独立复核另以 314 个不超过 8192 字节的对抗输入验证全部收敛到固定 `KnowledgeEventError`。响应丢失代理精确绑定方法、目标和指定尝试，先证明 Elasticsearch 变更持久化再抑制响应，随后由重投从持久版本承诺重建结果；SDK 改为消费者运行时惰性导入。
 - 结论：总解析边界必须覆盖运行时和库施加的资源限制异常，不能只覆盖语法异常；一致性故障注入必须绑定精确阶段并证明权威持久后置条件。`docs/REVIEW_CHECKLIST.md` 已覆盖总解析与阶段绑定两类规则，本次 closeout 没有新的未登记复发缺陷类。
 
+## CB-112 — Versioned two-level FAQ cache
+
+- 现象：最初把 Elasticsearch 已成功但 Redis finalize 失败的窗口直接留在旧 ready 状态，使 Agent 仍可能命中旧答案；改用独立 pending fence 后，`volatile-lfu` 又可单独淘汰 fence 并重新暴露旧 ready。把状态合并为 source-scoped preparation 后，首轮只修复 fence 缺失、仍把存在但损坏的 preparation 映射为 `KnowledgeSyncConflict` 并永久 ACK，且语义租约使用 `PERSIST`，没有物理回收机制。随后手写的 14 格状态 × 阶段矩阵全部只构造 `ready=0` preparation，遗漏同一生产 Lua 会读取的 `ready=1` 持久态；把合法 ready v3 的 `source_version` 单独损坏为格式仍合法的 v4 后，合法 v4 publication 会被 Redis 误判为业务冲突并在到达 Elasticsearch 前永久 ACK。
+- 证据链接：[slice PR #48](https://github.com/ChanTso/citybuddy/pull/48)
+- 根因：跨存储投影先后把可淘汰协调键当作唯一 fence、把语义租约当作物理生命周期，并让低层 Redis 对自身矛盾作终态业务裁决。人工矩阵的状态轴又来自作者已想到的实例，而不是生产脚本自身的分支与字段空间，因此“缺失态已修、损坏态遗漏”和“preparation 已覆盖、ready state 缺席”都是同一不完备枚举模式。
+- 解决：source 状态在权威写前原子切换为 fail-closed preparation，租约由 Redis `TIME` 取得并配套 120 秒物理 TTL（60 秒语义租约加 60 秒安全余量）。owner-local 矛盾只返回 authority-required；Worker 先让 Elasticsearch 判定，同版本真实冲突只有 Elasticsearch 可以终态 ACK，合法事件则以已确认权威结果重建 Redis、先 RETRY 再重放收敛。生产 Lua 的每个二元返回分支改为唯一稳定标签，测试从 Lua 机械导出 18 个分支和实际读取的 11 个状态字段，并以 `missing/ready=0/ready=1 × 字段删除或变异 × ES 前或成功后` 生成 102 个真实格、96 个逐字段一致性故障格；新增分支、重复/无标签分支或新增读取字段缺少故障格都会构造性失败。原始合法格式版本矛盾回归证明首投 RETRY、ES 推进至 v4、Redis 修复，重投才 ACK。
+- 结论：修复缺失态而遗漏损坏态，是同一状态空间里的同胞实例；语义租约必须有配套物理生命周期。人工列举的处置矩阵必然遗漏作者未想到的状态类，枚举轴必须从生产代码的分支、返回标签和读取字段空间机械导出并以真实行为覆盖。低层真值不得独立确证业务冲突：owner-local 自相矛盾是完整性故障，终态只能由更高真值给出；把相反行为写进测试只是在固化缺陷。
+
 ## Maintenance — Evaluation rejection attribution and availability classification
 
 - 现象：CB-111 合并后的 main required CI 再次在“审计持久化故意不可用”窗口期望 503、实际得到固定 `403 {"error":"Forbidden"}`。Evaluation audit、sandbox repository、sandbox access、liveness mismatch 与 OBO 授权等多个入口会渲染相同公开 403，其中三处还使用相同的 inactive 文本，因此仅凭响应无法确定实际生产者；PR #42 在没有生产者证据时只强化了一条数据库时序回归，未关闭其他分类入口。

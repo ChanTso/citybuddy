@@ -12,6 +12,7 @@ from citybuddy_indexer import (
     ProjectionOutcome,
     create_worker,
 )
+from citybuddy_indexer.faq_cache import CachePreparation
 from citybuddy_indexer.incremental import RESERVED_SANDBOX_PROPERTY, FaqKnowledgeEvent
 from citybuddy_indexer.worker import VersionedKnowledgeProjection
 
@@ -162,15 +163,21 @@ class ElasticsearchProjection:
 class CacheProjection:
     outcome: ProjectionOutcome | Exception
     prepare_error: Exception | None = None
+    preparation: CachePreparation = CachePreparation.PREPARED
     prepared: FaqKnowledgeEvent | None = None
+    authoritative_prepared: FaqKnowledgeEvent | None = None
     finalized: tuple[FaqKnowledgeEvent, str] | None = None
     aborted: FaqKnowledgeEvent | None = None
 
-    def prepare(self, event: FaqKnowledgeEvent) -> ProjectionOutcome | None:
+    def prepare(self, event: FaqKnowledgeEvent) -> CachePreparation:
         self.prepared = event
         if self.prepare_error is not None:
             raise self.prepare_error
-        return None
+        return self.preparation
+
+    def prepare_authoritatively(self, event: FaqKnowledgeEvent) -> CachePreparation:
+        self.authoritative_prepared = event
+        return CachePreparation.PREPARED
 
     def finalize(self, event: FaqKnowledgeEvent, index_version: str) -> ProjectionOutcome:
         self.finalized = (event, index_version)
@@ -235,3 +242,56 @@ def test_cache_prepare_unavailability_prevents_elasticsearch_mutation() -> None:
         projection.apply(FaqKnowledgeEvent.from_bytes(valid_body()))
     assert elasticsearch.observed is None
     assert cache.finalized is None
+
+
+def test_owner_local_contradiction_is_repaired_after_elasticsearch_then_retried() -> None:
+    cache = CacheProjection(
+        ProjectionOutcome.APPLIED,
+        preparation=CachePreparation.AUTHORITY_REQUIRED,
+    )
+    projection = VersionedKnowledgeProjection(
+        ElasticsearchProjection(ProjectionOutcome.APPLIED),  # type: ignore[arg-type]
+        cache,
+    )
+
+    with pytest.raises(KnowledgeSyncError, match="owner_local_state_repaired"):
+        projection.apply(FaqKnowledgeEvent.from_bytes(valid_body()))
+    assert cache.authoritative_prepared is not None
+    assert cache.finalized is not None
+
+
+def test_elasticsearch_conflict_is_the_only_terminal_equal_version_authority() -> None:
+    cache = CacheProjection(
+        ProjectionOutcome.APPLIED,
+        preparation=CachePreparation.AUTHORITY_REQUIRED,
+    )
+
+    @dataclass
+    class ConflictingElasticsearch:
+        def apply_with_index(self, event: FaqKnowledgeEvent) -> tuple[ProjectionOutcome, str]:
+            del event
+            raise KnowledgeSyncConflict("conflicting_source_version")
+
+    projection = VersionedKnowledgeProjection(ConflictingElasticsearch(), cache)  # type: ignore[arg-type]
+
+    with pytest.raises(KnowledgeSyncConflict, match="conflicting_source_version"):
+        projection.apply(FaqKnowledgeEvent.from_bytes(valid_body()))
+    assert cache.authoritative_prepared is None
+    assert cache.finalized is None
+    assert cache.aborted is None
+
+
+def test_owner_local_ahead_state_retries_without_elasticsearch_confirmation() -> None:
+    cache = CacheProjection(
+        ProjectionOutcome.APPLIED,
+        preparation=CachePreparation.STALE,
+    )
+    projection = VersionedKnowledgeProjection(
+        ElasticsearchProjection(ProjectionOutcome.REPLAYED),  # type: ignore[arg-type]
+        cache,
+    )
+
+    with pytest.raises(KnowledgeSyncError, match="owner_local_state_ahead"):
+        projection.apply(FaqKnowledgeEvent.from_bytes(valid_body()))
+    assert cache.finalized is None
+    assert cache.aborted is None

@@ -32,6 +32,7 @@ from citybuddy_indexer import (
     ProjectionOutcome,
     RedisFaqCacheProjection,
 )
+from citybuddy_indexer.faq_cache import CachePreparation
 from citybuddy_indexer.worker import VersionedKnowledgeProjection
 
 
@@ -39,8 +40,11 @@ class FinalizeUnavailableCache:
     def __init__(self, delegate: RedisFaqCacheProjection) -> None:
         self._delegate = delegate
 
-    def prepare(self, event: FaqKnowledgeEvent) -> ProjectionOutcome | None:
+    def prepare(self, event: FaqKnowledgeEvent) -> CachePreparation:
         return self._delegate.prepare(event)
+
+    def prepare_authoritatively(self, event: FaqKnowledgeEvent) -> CachePreparation:
+        return self._delegate.prepare_authoritatively(event)
 
     def finalize(self, event: FaqKnowledgeEvent, index_version: str) -> ProjectionOutcome:
         del event, index_version

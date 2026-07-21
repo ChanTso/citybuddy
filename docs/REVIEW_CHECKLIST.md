@@ -212,12 +212,24 @@ request. A later semantic diff change requires the checklist to be executed and 
   timeout, and indeterminate results remain retryable or explicitly unavailable. Audit broad result
   and exception mappings so those fault classes cannot be folded into a business conflict merely
   because they share one internal return shape.
+- A lower, owner-local projection may report a contradiction but cannot independently establish a
+  business conflict. Route that contradiction through the authoritative truth before any terminal
+  disposition; if authoritative truth confirms the operation, repair the local projection and
+  preserve at least one retry observation before ACK. Tests that expect a local contradiction to
+  become a permanent conflict are defect-preserving tests and must be corrected, not retained as
+  compatibility evidence.
 - For a stateful multi-phase consumer, close the disposition space as the Cartesian product of every
   persisted state class and every mutation phase. At minimum distinguish missing, present-but-
   malformed, valid-but-stale, and valid-current coordination state before the authoritative mutation
   and after authoritative success but before projection finalization. Define and execute every cell;
   field deletion, unknown fields, malformed lease/version, and loss of the whole state must preserve
   retry/replay repair, while only a confirmed competing or superseding business fact may terminate.
+- Derive the persisted-state and result axes mechanically from the production implementation rather
+  than from a handwritten matrix. Every production result branch must have one unique stable label;
+  executable inventory must fail on an unlabelled or duplicate branch and real fault evidence must
+  observe every label. Derive field-fault cells from every field the production state machine reads,
+  including every reachable persisted class such as both preparation and ready state. Adding a
+  production branch or state field without a real cell must fail matrix construction before review.
 - Give every coordination marker both a bounded semantic lease and a bounded physical lifecycle.
   On a TTL-oriented cache, every marker must have positive TTL and its physical TTL must exceed the
   remaining semantic lease by a fixed safety margin; a lease checked only by a future request does

@@ -3,10 +3,9 @@ from __future__ import annotations
 from typing import cast
 
 import pytest
-from citybuddy_indexer.faq_cache import RedisFaqCacheProjection
+from citybuddy_indexer.faq_cache import CachePreparation, RedisFaqCacheProjection
 from citybuddy_indexer.incremental import (
     FaqKnowledgeEvent,
-    KnowledgeSyncConflict,
     KnowledgeSyncError,
     ProjectionOutcome,
 )
@@ -47,9 +46,15 @@ def event(*, tombstone: bool = False) -> FaqKnowledgeEvent:
 @pytest.mark.parametrize(
     ("results", "expected"),
     [
-        ([["prepared", "3"], ["applied", "3"]], ProjectionOutcome.APPLIED),
-        ([["replayed", "3"], ["replayed", "3"]], ProjectionOutcome.REPLAYED),
-        ([["stale", "4"]], ProjectionOutcome.STALE),
+        (
+            [["prepared", "new_preparation"], ["applied", "ready_state_applied"]],
+            ProjectionOutcome.APPLIED,
+        ),
+        (
+            [["replay_prepared", "ready_replay_prepared"], ["applied", "ready_state_applied"]],
+            ProjectionOutcome.REPLAYED,
+        ),
+        ([["stale", "ready_state_newer"]], ProjectionOutcome.STALE),
     ],
 )
 def test_projection_returns_only_closed_monotonic_outcomes(
@@ -71,11 +76,25 @@ def test_tombstone_is_sent_as_a_closed_flag_without_answer_availability() -> Non
     assert "'1'" in repr(fake.calls)
 
 
-def test_equal_version_conflict_never_becomes_a_retrying_overwrite() -> None:
+def test_owner_local_equal_version_contradiction_requires_authoritative_projection() -> None:
+    cache, _ = projection(["authority_required", "ready_state_contradiction"])
+
+    with pytest.raises(KnowledgeSyncError, match="authoritative_projection_required"):
+        cache.apply(event(), "knowledge_docs_v1")
+
+
+def test_unknown_conflict_result_is_not_a_permanent_cache_decision() -> None:
     cache, _ = projection(["conflict", "conflicting_source_version"])
 
-    with pytest.raises(KnowledgeSyncConflict, match="conflicting_source_version"):
+    with pytest.raises(KnowledgeSyncError, match="malformed_support_cache_response"):
         cache.apply(event(), "knowledge_docs_v1")
+
+
+def test_authoritative_prepare_uses_the_explicit_authority_mode() -> None:
+    cache, fake = projection(["prepared", "authoritative_repair_prepared"])
+
+    assert cache.prepare_authoritatively(event()) is CachePreparation.PREPARED
+    assert fake.calls[0][-1] == "1"
 
 
 @pytest.mark.parametrize(

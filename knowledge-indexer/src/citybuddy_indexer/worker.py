@@ -9,7 +9,7 @@ from dataclasses import dataclass
 from enum import Enum
 from typing import Any, Protocol, cast
 
-from .faq_cache import RedisFaqCacheProjection
+from .faq_cache import CachePreparation, RedisFaqCacheProjection
 from .incremental import (
     EVENT_TAG,
     RESERVED_SANDBOX_PROPERTY,
@@ -66,7 +66,9 @@ class KnowledgeProjection(Protocol):
 
 
 class FaqCacheProjection(Protocol):
-    def prepare(self, event: FaqKnowledgeEvent) -> ProjectionOutcome | None: ...
+    def prepare(self, event: FaqKnowledgeEvent) -> CachePreparation: ...
+
+    def prepare_authoritatively(self, event: FaqKnowledgeEvent) -> CachePreparation: ...
 
     def finalize(self, event: FaqKnowledgeEvent, index_version: str) -> ProjectionOutcome: ...
 
@@ -79,16 +81,34 @@ class VersionedKnowledgeProjection:
     faq_cache: FaqCacheProjection
 
     def apply(self, event: FaqKnowledgeEvent) -> ProjectionOutcome:
-        self.faq_cache.prepare(event)
+        preparation = self.faq_cache.prepare(event)
+        authority_repair = preparation is CachePreparation.AUTHORITY_REQUIRED
+        owner_local_ahead = preparation is CachePreparation.STALE
         try:
             outcome, index_version = self.elasticsearch.apply_with_index(event)
         except KnowledgeSyncConflict:
-            self.faq_cache.abort(event)
+            if not authority_repair:
+                self.faq_cache.abort(event)
             raise
         if outcome is ProjectionOutcome.STALE:
+            if authority_repair:
+                repaired = self.faq_cache.prepare_authoritatively(event)
+                if repaired is not CachePreparation.STALE:
+                    self.faq_cache.abort(event)
+                raise KnowledgeSyncError("owner_local_state_repaired")
             self.faq_cache.abort(event)
             return outcome
+        if owner_local_ahead:
+            raise KnowledgeSyncError("owner_local_state_ahead")
+        if authority_repair:
+            repaired = self.faq_cache.prepare_authoritatively(event)
+            if repaired is CachePreparation.STALE:
+                raise KnowledgeSyncError("owner_local_state_repaired")
+            if repaired is CachePreparation.AUTHORITY_REQUIRED:
+                raise KnowledgeSyncError("owner_local_state_indeterminate")
         self.faq_cache.finalize(event, index_version)
+        if authority_repair:
+            raise KnowledgeSyncError("owner_local_state_repaired")
         return outcome
 
 

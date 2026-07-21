@@ -4,14 +4,15 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 from dataclasses import dataclass
+from enum import Enum
 
 from redis import Redis
 from redis.exceptions import RedisError
 
 from .incremental import (
     FaqKnowledgeEvent,
-    KnowledgeSyncConflict,
     KnowledgeSyncError,
     ProjectionOutcome,
 )
@@ -22,6 +23,14 @@ FAQ_ENTRY_TTL_MS = 900_000
 FAQ_PREPARATION_LEASE_MS = 60_000
 FAQ_PREPARATION_TTL_SAFETY_MS = 60_000
 FAQ_PREPARATION_TTL_MS = FAQ_PREPARATION_LEASE_MS + FAQ_PREPARATION_TTL_SAFETY_MS
+
+
+class CachePreparation(str, Enum):
+    PREPARED = "prepared"
+    REPLAY_PREPARED = "replay_prepared"
+    STALE = "stale"
+    AUTHORITY_REQUIRED = "authority_required"
+
 
 _PREPARE_SCRIPT = r"""
 local state = KEYS[1]
@@ -36,6 +45,7 @@ local occurred_time = ARGV[7]
 local lease_ms = tonumber(ARGV[8])
 local preparation_ttl = tonumber(ARGV[9])
 local ready_ttl = tonumber(ARGV[10])
+local authority_confirmed = ARGV[11] == '1'
 local redis_time = redis.call('TIME')
 local now_ms = tonumber(redis_time[1]) * 1000 + math.floor(tonumber(redis_time[2]) / 1000)
 local lease_deadline_ms = tostring(now_ms + lease_ms)
@@ -66,20 +76,26 @@ end
 
 local state_exists = redis.call('EXISTS', state) == 1
 local current_version = redis.call('HGET', state, 'source_version')
+local ready = redis.call('HGET', state, 'ready')
 local replay = false
 local repaired = state_exists and not current_version
+if repaired and ready == '1' and not authority_confirmed then
+  return {'authority_required', 'ready_state_missing_version'}
+end
 if current_version then
   local state_ttl = redis.call('PTTL', state)
   if redis.call('HLEN', state) ~= 11 or not valid_version(current_version)
     or redis.call('HGET', state, 'schema') ~= schema
     or redis.call('HGET', state, 'source_id') ~= source_id
     or state_ttl <= 0 then
+    if ready == '1' and not authority_confirmed then
+      return {'authority_required', 'ready_state_invalid_identity'}
+    end
     current_version = false
     repaired = true
   end
 end
 if current_version then
-  local ready = redis.call('HGET', state, 'ready')
   if ready == '0' then
     local current_deadline = redis.call('HGET', state, 'lease_deadline_ms')
     local state_ttl = redis.call('PTTL', state)
@@ -105,10 +121,10 @@ if current_version then
       and redis.call('HGET', state, 'cache_commitment') == '' then
       redis.call('HSET', state, 'lease_deadline_ms', lease_deadline_ms)
       redis.call('PEXPIRE', state, preparation_ttl)
-      return {'prepared', source_version}
+      return {'prepared', 'current_preparation_renewed'}
     end
     if tonumber(current_deadline) > now_ms then
-      return {'busy', current_version}
+      return {'busy', 'active_preparation_owner'}
     end
   end
   if current_version and ready ~= '1' and ready ~= '0' then
@@ -117,12 +133,40 @@ if current_version then
   end
   if current_version and ready == '1' then
     local state_ttl = redis.call('PTTL', state)
+    local current_tombstone = redis.call('HGET', state, 'tombstone')
+    local current_answer = answer_prefix .. current_version
+    local answer_valid = false
+    if current_tombstone == '1' then
+      answer_valid = redis.call('EXISTS', current_answer) == 0
+    elseif current_tombstone == '0' then
+      local answer_ttl = redis.call('PTTL', current_answer)
+      answer_valid = redis.call('HLEN', current_answer) == 12
+        and answer_ttl > 0 and answer_ttl <= ready_ttl
+        and redis.call('HGET', current_answer, 'schema') == schema
+        and redis.call('HGET', current_answer, 'source_id') == source_id
+        and redis.call('HGET', current_answer, 'source_version') == current_version
+        and redis.call('HGET', current_answer, 'doc_type') == 'faq'
+        and redis.call('HGET', current_answer, 'chunk_id') == 'answer'
+        and redis.call('HGET', current_answer, 'title') ~= false
+        and redis.call('HGET', current_answer, 'answer') ~= false
+        and redis.call('HGET', current_answer, 'index_version')
+          == redis.call('HGET', state, 'index_version')
+        and redis.call('HGET', current_answer, 'commitment')
+          == redis.call('HGET', state, 'commitment')
+        and redis.call('HGET', current_answer, 'cache_commitment')
+          == redis.call('HGET', state, 'cache_commitment')
+        and redis.call('HGET', current_answer, 'public_category') == 'faq'
+        and redis.call('HGET', current_answer, 'public_language') == 'und'
+    end
     if redis.call('HGET', state, 'lease_deadline_ms') ~= ''
       or state_ttl > ready_ttl
-      or (redis.call('HGET', state, 'tombstone') ~= '0'
-        and redis.call('HGET', state, 'tombstone') ~= '1')
+      or (current_tombstone ~= '0' and current_tombstone ~= '1')
       or redis.call('HGET', state, 'index_version') == ''
-      or redis.call('HGET', state, 'cache_commitment') == '' then
+      or redis.call('HGET', state, 'cache_commitment') == ''
+      or not answer_valid then
+      if not authority_confirmed then
+        return {'authority_required', 'ready_state_invalid_projection'}
+      end
       current_version = false
       repaired = true
     end
@@ -130,7 +174,7 @@ if current_version then
   if current_version and ready == '1' then
     local comparison = compare_version(current_version, source_version)
     if comparison > 0 then
-      return {'stale', current_version}
+      return {'stale', 'ready_state_newer'}
     end
     if comparison == 0 then
       if redis.call('HGET', state, 'schema') ~= schema
@@ -139,9 +183,13 @@ if current_version then
         or redis.call('HGET', state, 'commitment') ~= commitment
         or redis.call('HGET', state, 'event_id') ~= event_id
         or redis.call('HGET', state, 'occurred_time') ~= occurred_time then
-        return {'conflict', 'conflicting_source_version'}
+        if not authority_confirmed then
+          return {'authority_required', 'ready_state_contradiction'}
+        end
+        repaired = true
+      else
+        replay = true
       end
-      replay = true
     end
     redis.call('DEL', answer_prefix .. current_version)
   end
@@ -161,13 +209,16 @@ redis.call('HSET', state,
   'cache_commitment', '',
   'lease_deadline_ms', lease_deadline_ms)
 redis.call('PEXPIRE', state, preparation_ttl)
+if repaired and not authority_confirmed then
+  return {'retry', 'malformed_preparation_repaired'}
+end
 if repaired then
-  return {'retry', 'malformed_state_repaired'}
+  return {'prepared', 'authoritative_repair_prepared'}
 end
 if replay then
-  return {'replay_prepared', source_version}
+  return {'replay_prepared', 'ready_replay_prepared'}
 end
-return {'prepared', source_version}
+return {'prepared', 'new_preparation'}
 """
 
 _FINALIZE_SCRIPT = r"""
@@ -224,7 +275,7 @@ if redis.call('HLEN', state) ~= 11 or not valid_version(current_version)
   return {'retry', 'malformed_state'}
 end
 if redis.call('HGET', state, 'ready') ~= '0' then
-  return {'retry', 'cache_preparation_missing'}
+  return {'retry', 'preparation_not_ready'}
 end
 if current_version ~= source_version
   or redis.call('HGET', state, 'tombstone') ~= tombstone
@@ -232,7 +283,7 @@ if current_version ~= source_version
   or redis.call('HGET', state, 'event_id') ~= event_id
   or redis.call('HGET', state, 'occurred_time') ~= ARGV[11]
   then
-  return {'retry', 'cache_source_busy'}
+  return {'retry', 'preparation_owner_mismatch'}
 end
 
 redis.call('DEL', state)
@@ -269,7 +320,7 @@ else
   redis.call('PEXPIRE', answer, ttl)
 end
 redis.call('PEXPIRE', state, ttl)
-return {'applied', source_version}
+return {'applied', 'ready_state_applied'}
 """
 
 _ABORT_SCRIPT = r"""
@@ -311,7 +362,13 @@ class RedisFaqCacheProjection:
             )
         )
 
-    def prepare(self, event: FaqKnowledgeEvent) -> ProjectionOutcome | None:
+    def prepare(self, event: FaqKnowledgeEvent) -> CachePreparation:
+        return self._prepare(event, authority_confirmed=False)
+
+    def prepare_authoritatively(self, event: FaqKnowledgeEvent) -> CachePreparation:
+        return self._prepare(event, authority_confirmed=True)
+
+    def _prepare(self, event: FaqKnowledgeEvent, *, authority_confirmed: bool) -> CachePreparation:
         state_key = f"{FAQ_CACHE_PREFIX}state:{event.source_id}"
         answer_prefix = f"{FAQ_CACHE_PREFIX}answer:{event.source_id}:"
         raw = self._eval(
@@ -329,20 +386,15 @@ class RedisFaqCacheProjection:
             str(FAQ_PREPARATION_LEASE_MS),
             str(FAQ_PREPARATION_TTL_MS),
             str(FAQ_ENTRY_TTL_MS),
+            "1" if authority_confirmed else "0",
         )
         outcome, detail = self._closed_result(raw)
-        if outcome == "conflict":
-            raise KnowledgeSyncConflict(detail)
         if outcome in {"retry", "error"}:
             raise KnowledgeSyncError(detail)
         if outcome == "busy":
             raise KnowledgeSyncError("cache_source_busy")
-        if outcome == "prepared":
-            return None
-        if outcome == "replay_prepared":
-            return ProjectionOutcome.REPLAYED
         try:
-            return ProjectionOutcome(outcome)
+            return CachePreparation(outcome)
         except ValueError as error:
             raise KnowledgeSyncError("malformed_support_cache_response") from error
 
@@ -369,8 +421,6 @@ class RedisFaqCacheProjection:
             _cache_commitment(event.commitment, index_version),
         )
         outcome, detail = self._closed_result(raw)
-        if outcome == "conflict":
-            raise KnowledgeSyncConflict(detail)
         if outcome in {"retry", "error"}:
             raise KnowledgeSyncError(detail)
         try:
@@ -395,11 +445,13 @@ class RedisFaqCacheProjection:
 
     def apply(self, event: FaqKnowledgeEvent, index_version: str) -> ProjectionOutcome:
         prepared = self.prepare(event)
-        if prepared is ProjectionOutcome.STALE:
-            return prepared
+        if prepared is CachePreparation.AUTHORITY_REQUIRED:
+            raise KnowledgeSyncError("authoritative_projection_required")
+        if prepared is CachePreparation.STALE:
+            return ProjectionOutcome.STALE
         finalized = self.finalize(event, index_version)
-        if prepared is ProjectionOutcome.REPLAYED:
-            return prepared
+        if prepared is CachePreparation.REPLAY_PREPARED:
+            return ProjectionOutcome.REPLAYED
         return finalized
 
     def _eval(self, script: str, key_count: int, *values: str) -> object:
@@ -427,3 +479,26 @@ def _cache_commitment(event_commitment: str, index_version: str) -> str:
         sort_keys=True,
     ).encode("utf-8")
     return hashlib.sha256(canonical).hexdigest()
+
+
+_LUA_RETURN = re.compile(r"return\s+\{\s*'([^']+)'\s*,\s*'([^']+)'\s*\}")
+_LUA_STATE_FIELD = re.compile(r"HGET',\s*state,\s*'([^']+)'\)")
+
+
+def lua_result_branch_inventory() -> frozenset[str]:
+    branches: set[str] = set()
+    for script_name, script in (("prepare", _PREPARE_SCRIPT), ("finalize", _FINALIZE_SCRIPT)):
+        total_returns = len(re.findall(r"return\s+\{", script))
+        matches = _LUA_RETURN.findall(script)
+        if len(matches) != total_returns:
+            raise RuntimeError(f"{script_name} contains an unlabelled result branch")
+        for outcome, detail in matches:
+            branch = f"{script_name}:{outcome}:{detail}"
+            if branch in branches:
+                raise RuntimeError(f"duplicate Lua result branch: {branch}")
+            branches.add(branch)
+    return frozenset(branches)
+
+
+def lua_state_field_inventory() -> frozenset[str]:
+    return frozenset(_LUA_STATE_FIELD.findall(_PREPARE_SCRIPT + _FINALIZE_SCRIPT))

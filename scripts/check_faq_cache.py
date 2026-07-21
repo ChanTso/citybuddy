@@ -15,11 +15,11 @@ from citybuddy_indexer.faq_cache import (
     FAQ_PREPARATION_LEASE_MS,
     FAQ_PREPARATION_TTL_MS,
     FAQ_PREPARATION_TTL_SAFETY_MS,
+    CachePreparation,
     RedisFaqCacheProjection,
 )
 from citybuddy_indexer.incremental import (
     FaqKnowledgeEvent,
-    KnowledgeSyncConflict,
     KnowledgeSyncError,
     ProjectionOutcome,
 )
@@ -131,10 +131,10 @@ def normal(port: int, values: dict[str, str]) -> dict[str, object]:
             event(2, event_id="99999999-9999-4999-8999-999999999999"),
             "knowledge_docs_v1",
         )
-    except KnowledgeSyncConflict as error:
-        assert str(error) == "conflicting_source_version"
+    except KnowledgeSyncError as error:
+        assert str(error) == "authoritative_projection_required"
     else:
-        raise AssertionError("equal-version conflict overwrote cache state")
+        raise AssertionError("owner-local contradiction became a terminal cache decision")
 
     assert (
         projection.apply(event(3, tombstone=True), "knowledge_docs_v1") is ProjectionOutcome.APPLIED
@@ -147,7 +147,7 @@ def normal(port: int, values: dict[str, str]) -> dict[str, object]:
     assert projection.apply(event(4), "knowledge_docs_v1") is ProjectionOutcome.APPLIED
     assert cache.populate_mapping(raw_query, "faq-refund", 4)
     answer_v4 = f"{FAQ_CACHE_PREFIX}answer:faq-refund:4"
-    assert projection.prepare(event(5)) is None
+    assert projection.prepare(event(5)) is CachePreparation.PREPARED
     assert admin.hget(state_key, "source_version") == "5"
     assert admin.hget(state_key, "ready") == "0"
     lease_deadline_ms = cast(str, admin.hget(state_key, "lease_deadline_ms"))
@@ -181,7 +181,7 @@ def normal(port: int, values: dict[str, str]) -> dict[str, object]:
         for key in admin.scan_iter(match="cb112:eviction:*"):
             admin.delete(key)
     if not admin.exists(state_key):
-        assert projection.prepare(event(5)) is None
+        assert projection.prepare(event(5)) is CachePreparation.PREPARED
     try:
         projection.prepare(event(6))
     except KnowledgeSyncError as error:
@@ -191,20 +191,20 @@ def normal(port: int, values: dict[str, str]) -> dict[str, object]:
     projection.abort(event(6))
     assert admin.hget(state_key, "source_version") == "5"
     admin.hset(state_key, "lease_deadline_ms", "1")
-    assert projection.prepare(event(6)) is None
+    assert projection.prepare(event(6)) is CachePreparation.PREPARED
     assert admin.hget(state_key, "source_version") == "6"
     projection.abort(event(5))
     assert admin.hget(state_key, "source_version") == "6"
     projection.abort(event(6))
     assert not admin.exists(state_key)
-    assert projection.prepare(event(5)) is None
+    assert projection.prepare(event(5)) is CachePreparation.PREPARED
     projection.abort(event(5))
     assert not admin.exists(state_key)
     assert not cache.populate_mapping(raw_query, "faq-refund", 4)
     assert projection.apply(event(4), "knowledge_docs_v1") is ProjectionOutcome.APPLIED
     assert cache.populate_mapping(raw_query, "faq-refund", 4)
     assert cache.lookup(raw_query) is not None
-    assert projection.prepare(event(5)) is None
+    assert projection.prepare(event(5)) is CachePreparation.PREPARED
     admin.pexpire(state_key, 50)
     time.sleep(0.1)
     assert not admin.exists(state_key)
@@ -220,7 +220,8 @@ def normal(port: int, values: dict[str, str]) -> dict[str, object]:
     admin.delete(answer_v4)
     assert cache.lookup(raw_query) is None
     assert not admin.exists(mapping_key)
-    assert projection.apply(event(4), "knowledge_docs_v1") is ProjectionOutcome.REPLAYED
+    assert projection.prepare_authoritatively(event(4)) is CachePreparation.PREPARED
+    assert projection.finalize(event(4), "knowledge_docs_v1") is ProjectionOutcome.APPLIED
     assert cache.populate_mapping(raw_query, "faq-refund", 4)
     admin.hset(mapping_key, "unexpected", "field")
     assert cache.lookup(raw_query) is None
