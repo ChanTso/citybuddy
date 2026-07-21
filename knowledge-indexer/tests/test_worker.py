@@ -151,54 +151,87 @@ def test_missing_projection_does_not_ack_a_valid_event() -> None:
 class ElasticsearchProjection:
     outcome: ProjectionOutcome
     index_version: str = "knowledge_docs_v1"
+    observed: FaqKnowledgeEvent | None = None
 
     def apply_with_index(self, event: FaqKnowledgeEvent) -> tuple[ProjectionOutcome, str]:
-        del event
+        self.observed = event
         return self.outcome, self.index_version
 
 
 @dataclass
 class CacheProjection:
     outcome: ProjectionOutcome | Exception
-    observed: tuple[FaqKnowledgeEvent, str] | None = None
+    prepare_error: Exception | None = None
+    prepared: FaqKnowledgeEvent | None = None
+    finalized: tuple[FaqKnowledgeEvent, str] | None = None
+    aborted: FaqKnowledgeEvent | None = None
 
-    def apply(self, event: FaqKnowledgeEvent, index_version: str) -> ProjectionOutcome:
-        self.observed = (event, index_version)
+    def prepare(self, event: FaqKnowledgeEvent) -> ProjectionOutcome | None:
+        self.prepared = event
+        if self.prepare_error is not None:
+            raise self.prepare_error
+        return None
+
+    def finalize(self, event: FaqKnowledgeEvent, index_version: str) -> ProjectionOutcome:
+        self.finalized = (event, index_version)
         if isinstance(self.outcome, Exception):
             raise self.outcome
         return self.outcome
 
+    def abort(self, event: FaqKnowledgeEvent) -> None:
+        self.aborted = event
 
-def test_stale_elasticsearch_delivery_cannot_mutate_support_cache() -> None:
+
+def test_stale_elasticsearch_delivery_is_fenced_before_es_and_not_finalized() -> None:
     cache = CacheProjection(ProjectionOutcome.APPLIED)
     projection = VersionedKnowledgeProjection(
         ElasticsearchProjection(ProjectionOutcome.STALE),  # type: ignore[arg-type]
-        cache,  # type: ignore[arg-type]
+        cache,
     )
 
     assert projection.apply(FaqKnowledgeEvent.from_bytes(valid_body())) is ProjectionOutcome.STALE
-    assert cache.observed is None
+    assert cache.prepared is not None
+    assert cache.finalized is None
+    assert cache.aborted is not None
 
 
 def test_elasticsearch_replay_repairs_cache_before_acknowledgement() -> None:
     cache = CacheProjection(ProjectionOutcome.APPLIED)
     projection = VersionedKnowledgeProjection(
         ElasticsearchProjection(ProjectionOutcome.REPLAYED),  # type: ignore[arg-type]
-        cache,  # type: ignore[arg-type]
+        cache,
     )
 
     assert (
         projection.apply(FaqKnowledgeEvent.from_bytes(valid_body())) is ProjectionOutcome.REPLAYED
     )
-    assert cache.observed is not None and cache.observed[1] == "knowledge_docs_v1"
+    assert cache.prepared is not None
+    assert cache.finalized is not None and cache.finalized[1] == "knowledge_docs_v1"
 
 
 def test_cache_unavailability_after_elasticsearch_apply_remains_retryable() -> None:
     cache = CacheProjection(KnowledgeSyncError("support_cache_unavailable"))
     projection = VersionedKnowledgeProjection(
         ElasticsearchProjection(ProjectionOutcome.APPLIED),  # type: ignore[arg-type]
-        cache,  # type: ignore[arg-type]
+        cache,
     )
 
     with pytest.raises(KnowledgeSyncError, match="support_cache_unavailable"):
         projection.apply(FaqKnowledgeEvent.from_bytes(valid_body()))
+
+
+def test_cache_prepare_unavailability_prevents_elasticsearch_mutation() -> None:
+    elasticsearch = ElasticsearchProjection(ProjectionOutcome.APPLIED)
+    cache = CacheProjection(
+        ProjectionOutcome.APPLIED,
+        prepare_error=KnowledgeSyncError("support_cache_unavailable"),
+    )
+    projection = VersionedKnowledgeProjection(
+        elasticsearch,  # type: ignore[arg-type]
+        cache,
+    )
+
+    with pytest.raises(KnowledgeSyncError, match="support_cache_unavailable"):
+        projection.apply(FaqKnowledgeEvent.from_bytes(valid_body()))
+    assert elasticsearch.observed is None
+    assert cache.finalized is None

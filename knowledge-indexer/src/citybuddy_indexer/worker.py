@@ -65,16 +65,30 @@ class KnowledgeProjection(Protocol):
     def apply(self, event: FaqKnowledgeEvent) -> ProjectionOutcome: ...
 
 
+class FaqCacheProjection(Protocol):
+    def prepare(self, event: FaqKnowledgeEvent) -> ProjectionOutcome | None: ...
+
+    def finalize(self, event: FaqKnowledgeEvent, index_version: str) -> ProjectionOutcome: ...
+
+    def abort(self, event: FaqKnowledgeEvent) -> None: ...
+
+
 @dataclass(frozen=True)
 class VersionedKnowledgeProjection:
     elasticsearch: ElasticsearchKnowledgeProjection
-    faq_cache: RedisFaqCacheProjection
+    faq_cache: FaqCacheProjection
 
     def apply(self, event: FaqKnowledgeEvent) -> ProjectionOutcome:
-        outcome, index_version = self.elasticsearch.apply_with_index(event)
+        self.faq_cache.prepare(event)
+        try:
+            outcome, index_version = self.elasticsearch.apply_with_index(event)
+        except KnowledgeSyncConflict:
+            self.faq_cache.abort(event)
+            raise
         if outcome is ProjectionOutcome.STALE:
+            self.faq_cache.abort(event)
             return outcome
-        self.faq_cache.apply(event, index_version)
+        self.faq_cache.finalize(event, index_version)
         return outcome
 
 

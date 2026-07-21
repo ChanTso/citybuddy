@@ -28,9 +28,26 @@ from citybuddy_agent.retrieval import RetrievalDecision, load_calibration
 from citybuddy_indexer import (
     ElasticsearchKnowledgeProjection,
     FaqKnowledgeEvent,
+    KnowledgeSyncError,
     ProjectionOutcome,
     RedisFaqCacheProjection,
 )
+from citybuddy_indexer.worker import VersionedKnowledgeProjection
+
+
+class FinalizeUnavailableCache:
+    def __init__(self, delegate: RedisFaqCacheProjection) -> None:
+        self._delegate = delegate
+
+    def prepare(self, event: FaqKnowledgeEvent) -> ProjectionOutcome | None:
+        return self._delegate.prepare(event)
+
+    def finalize(self, event: FaqKnowledgeEvent, index_version: str) -> ProjectionOutcome:
+        del event, index_version
+        raise KnowledgeSyncError("support_cache_unavailable")
+
+    def abort(self, event: FaqKnowledgeEvent) -> None:
+        self._delegate.abort(event)
 
 
 def connection(
@@ -554,7 +571,28 @@ def main() -> None:
     if outage_decision.evidence != first_cache_decision.evidence:
         raise AssertionError("Support Redis outage changed Elasticsearch fallback evidence")
 
-    tombstone = cache_event(2, tombstone=True)
+    interrupted_publication = cache_event(2)
+    interrupted_projection = VersionedKnowledgeProjection(
+        es_projection,
+        FinalizeUnavailableCache(cache_projection),
+    )
+    try:
+        interrupted_projection.apply(interrupted_publication)
+    except KnowledgeSyncError as error:
+        if str(error) != "support_cache_unavailable":
+            raise
+    else:
+        raise AssertionError("Injected Redis finalization failure unexpectedly acknowledged")
+    agent_cache = RedisFaqCache(args.agent_cache_url)
+    if agent_cache.lookup(cache_message) is not None:
+        raise AssertionError("Old query mapping survived the Redis finalization failure window")
+    if (
+        VersionedKnowledgeProjection(es_projection, cache_projection).apply(interrupted_publication)
+        is not ProjectionOutcome.REPLAYED
+    ):
+        raise AssertionError("Elasticsearch replay did not repair the pending Redis projection")
+
+    tombstone = cache_event(3, tombstone=True)
     assert es_projection.apply(tombstone) is ProjectionOutcome.APPLIED
     assert cache_projection.apply(tombstone, "knowledge_docs_v1") is ProjectionOutcome.APPLIED
     replay = store.begin_turn(
@@ -572,6 +610,7 @@ def main() -> None:
             {
                 "atomicRollback": "passed",
                 "cacheDurableReplay": True,
+                "cacheFinalizeWindow": True,
                 "cacheHitEvidence": True,
                 "cacheOutageFallback": True,
                 "calibrationVersion": "cb091-calibration-v1",

@@ -22,6 +22,7 @@ from .knowledge import (
 FAQ_CACHE_SCHEMA = "cb112-v1"
 FAQ_CACHE_PREFIX = "cb:faq:v1:"
 QUERY_MAPPING_TTL_MS = 300_000
+FAQ_ENTRY_TTL_MS = 900_000
 MAX_QUERY_CODE_UNITS = 512
 MAX_QUERY_BYTES = 2_048
 MAX_SOURCE_VERSION = 9_223_372_036_854_775_807
@@ -38,6 +39,8 @@ _STATE_FIELDS = {
     "index_version",
     "event_id",
     "occurred_time",
+    "ready",
+    "cache_commitment",
 }
 _ANSWER_FIELDS = {
     "schema",
@@ -49,6 +52,7 @@ _ANSWER_FIELDS = {
     "answer",
     "index_version",
     "commitment",
+    "cache_commitment",
     "public_category",
     "public_language",
 }
@@ -76,7 +80,12 @@ end
 
 local state = prefix .. 'state:' .. source_id
 local answer = prefix .. 'answer:' .. source_id .. ':' .. source_version
-if redis.call('HLEN', state) ~= 8 or redis.call('HLEN', answer) ~= 11 then
+local pending = prefix .. 'pending:' .. source_id
+if redis.call('EXISTS', pending) ~= 0 then
+  redis.call('DEL', mapping)
+  return {}
+end
+if redis.call('HLEN', state) ~= 10 or redis.call('HLEN', answer) ~= 12 then
   redis.call('DEL', mapping)
   return {}
 end
@@ -84,10 +93,13 @@ if redis.call('HGET', state, 'schema') ~= ARGV[3]
   or redis.call('HGET', state, 'source_id') ~= source_id
   or redis.call('HGET', state, 'source_version') ~= source_version
   or redis.call('HGET', state, 'tombstone') ~= '0'
+  or redis.call('HGET', state, 'ready') ~= '1'
   or redis.call('HGET', answer, 'schema') ~= ARGV[3]
   or redis.call('HGET', answer, 'source_id') ~= source_id
   or redis.call('HGET', answer, 'source_version') ~= source_version
-  or redis.call('HGET', answer, 'commitment') ~= redis.call('HGET', state, 'commitment') then
+  or redis.call('HGET', answer, 'commitment') ~= redis.call('HGET', state, 'commitment')
+  or redis.call('HGET', answer, 'cache_commitment')
+    ~= redis.call('HGET', state, 'cache_commitment') then
   redis.call('DEL', mapping)
   return {}
 end
@@ -95,6 +107,8 @@ local mapping_ttl = redis.call('PTTL', mapping)
 local state_ttl = redis.call('PTTL', state)
 local answer_ttl = redis.call('PTTL', answer)
 if mapping_ttl <= 0 or state_ttl <= 0 or answer_ttl <= 0
+  or mapping_ttl > tonumber(ARGV[4])
+  or state_ttl > tonumber(ARGV[5]) or answer_ttl > tonumber(ARGV[5])
   or mapping_ttl > state_ttl or mapping_ttl > answer_ttl then
   redis.call('DEL', mapping)
   return {}
@@ -112,23 +126,29 @@ local max_ttl = tonumber(ARGV[5])
 local prefix = ARGV[6]
 local state = prefix .. 'state:' .. source_id
 local answer = prefix .. 'answer:' .. source_id .. ':' .. source_version
+local pending = prefix .. 'pending:' .. source_id
 
-if redis.call('HLEN', state) ~= 8 or redis.call('HLEN', answer) ~= 11 then
+if redis.call('EXISTS', pending) ~= 0
+  or redis.call('HLEN', state) ~= 10 or redis.call('HLEN', answer) ~= 12 then
   return 0
 end
 if redis.call('HGET', state, 'schema') ~= schema
   or redis.call('HGET', state, 'source_id') ~= source_id
   or redis.call('HGET', state, 'source_version') ~= source_version
   or redis.call('HGET', state, 'tombstone') ~= '0'
+  or redis.call('HGET', state, 'ready') ~= '1'
   or redis.call('HGET', answer, 'schema') ~= schema
   or redis.call('HGET', answer, 'source_id') ~= source_id
   or redis.call('HGET', answer, 'source_version') ~= source_version
-  or redis.call('HGET', answer, 'commitment') ~= redis.call('HGET', state, 'commitment') then
+  or redis.call('HGET', answer, 'commitment') ~= redis.call('HGET', state, 'commitment')
+  or redis.call('HGET', answer, 'cache_commitment')
+    ~= redis.call('HGET', state, 'cache_commitment') then
   return 0
 end
 local state_ttl = redis.call('PTTL', state)
 local answer_ttl = redis.call('PTTL', answer)
-if state_ttl <= 0 or answer_ttl <= 0 then
+if state_ttl <= 0 or answer_ttl <= 0
+  or state_ttl > tonumber(ARGV[7]) or answer_ttl > tonumber(ARGV[7]) then
   return 0
 end
 local ttl = math.min(max_ttl, state_ttl, answer_ttl)
@@ -183,6 +203,8 @@ class RedisFaqCache:
                 FAQ_CACHE_PREFIX,
                 query_hash,
                 FAQ_CACHE_SCHEMA,
+                str(QUERY_MAPPING_TTL_MS),
+                str(FAQ_ENTRY_TTL_MS),
             )
             snapshot = _cache_snapshot(raw)
             if snapshot is None:
@@ -215,6 +237,7 @@ class RedisFaqCache:
                 str(source_version),
                 str(QUERY_MAPPING_TTL_MS),
                 FAQ_CACHE_PREFIX,
+                str(FAQ_ENTRY_TTL_MS),
             )
         except (RedisError, OSError, ValueError, TypeError):
             return False
@@ -276,8 +299,10 @@ def _knowledge_output(state: dict[str, str], answer: dict[str, str]) -> Knowledg
         or state["source_id"] != source_id
         or state["source_version"] != source_version_text
         or state["tombstone"] != "0"
+        or state["ready"] != "1"
         or state["index_version"] != index_version
         or state["commitment"] != answer["commitment"]
+        or state["cache_commitment"] != answer["cache_commitment"]
         or answer["doc_type"] != "faq"
         or answer["chunk_id"] != "answer"
         or answer["public_category"] != "faq"
@@ -311,6 +336,14 @@ def _knowledge_output(state: dict[str, str], answer: dict[str, str]) -> Knowledg
     ).encode("utf-8")
     if not hashlib.sha256(canonical).hexdigest() == state["commitment"]:
         raise ValueError("Malformed FAQ cache commitment")
+    cache_canonical = json.dumps(
+        {"eventCommitment": state["commitment"], "indexVersion": index_version},
+        ensure_ascii=False,
+        separators=(",", ":"),
+        sort_keys=True,
+    ).encode("utf-8")
+    if not hashlib.sha256(cache_canonical).hexdigest() == state["cache_commitment"]:
+        raise ValueError("Malformed FAQ cache projection commitment")
     return KnowledgeSearchOutput(
         index_version=index_version,
         results=(

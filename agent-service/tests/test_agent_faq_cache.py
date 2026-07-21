@@ -64,6 +64,21 @@ def commitment(
     return hashlib.sha256(canonical).hexdigest()
 
 
+def cache_commitment(
+    *, event_commitment: str | None = None, index_version: str = "knowledge_docs_v3"
+) -> str:
+    canonical = json.dumps(
+        {
+            "eventCommitment": event_commitment or commitment(),
+            "indexVersion": index_version,
+        },
+        ensure_ascii=False,
+        separators=(",", ":"),
+        sort_keys=True,
+    ).encode()
+    return hashlib.sha256(canonical).hexdigest()
+
+
 def answer_hash(**overrides: str) -> list[str]:
     values = {
         "schema": FAQ_CACHE_SCHEMA,
@@ -75,6 +90,7 @@ def answer_hash(**overrides: str) -> list[str]:
         "answer": "A bounded public answer.",
         "index_version": "knowledge_docs_v3",
         "commitment": commitment(),
+        "cache_commitment": cache_commitment(),
         "public_category": "faq",
         "public_language": "und",
         **overrides,
@@ -92,6 +108,8 @@ def state_hash(**overrides: str) -> list[str]:
         "index_version": "knowledge_docs_v3",
         "event_id": "11111111-1111-4111-8111-111111111111",
         "occurred_time": "2026-07-21T12:34:56Z",
+        "ready": "1",
+        "cache_commitment": cache_commitment(),
         **overrides,
     }
     return [item for pair in values.items() for item in pair]
@@ -153,6 +171,11 @@ def test_exact_valid_answer_hash_projects_one_bounded_faq_candidate() -> None:
         snapshot(answer_overrides={"answer": "tampered answer"}),
         snapshot(state_overrides={"occurred_time": "2026-07-21T12:34:57Z"}),
         snapshot(state_overrides={"index_version": "knowledge_docs_v2"}),
+        snapshot(
+            answer_overrides={"index_version": "knowledge_docs_v9"},
+            state_overrides={"index_version": "knowledge_docs_v9"},
+        ),
+        snapshot(state_overrides={"ready": "0"}),
         ConnectionError("unavailable"),
         RedisTimeoutError("timeout"),
     ],

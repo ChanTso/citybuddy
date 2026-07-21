@@ -8,6 +8,7 @@ import json
 import time
 import unicodedata
 from copy import deepcopy
+from dataclasses import dataclass
 from typing import Any, cast
 from urllib.error import HTTPError
 from urllib.request import Request, urlopen
@@ -15,11 +16,18 @@ from uuid import uuid4
 
 from citybuddy_indexer import (
     DeliveryAction,
+    ElasticsearchKnowledgeProjection,
+    FaqKnowledgeEvent,
     IndexerSettings,
+    IndexerWorker,
+    KnowledgeSyncError,
+    ProjectionOutcome,
+    RedisFaqCacheProjection,
     RocketMqKnowledgeConsumer,
     create_worker,
 )
 from citybuddy_indexer.incremental import EVENT_TAG, RESERVED_SANDBOX_PROPERTY
+from citybuddy_indexer.worker import VersionedKnowledgeProjection
 from redis import Redis
 from rocketmq.v5.client import ClientConfiguration, Credentials  # type: ignore[import-untyped]
 from rocketmq.v5.model import Message  # type: ignore[import-untyped]
@@ -175,11 +183,29 @@ def mapping_is_current(client: Redis, query: str, expected_version: int) -> bool
         client.hgetall(f"{FAQ_CACHE_PREFIX}answer:{source_id}:{source_version}"),
     )
     return (
-        state.get("source_version") == source_version
+        not client.exists(f"{FAQ_CACHE_PREFIX}pending:{source_id}")
+        and state.get("source_version") == source_version
         and state.get("tombstone") == "0"
+        and state.get("ready") == "1"
         and answer.get("source_version") == source_version
         and answer.get("commitment") == state.get("commitment")
+        and answer.get("cache_commitment") == state.get("cache_commitment")
     )
+
+
+@dataclass(frozen=True)
+class FinalizeUnavailableCache:
+    delegate: RedisFaqCacheProjection
+
+    def prepare(self, event: FaqKnowledgeEvent) -> ProjectionOutcome | None:
+        return self.delegate.prepare(event)
+
+    def finalize(self, event: FaqKnowledgeEvent, index_version: str) -> ProjectionOutcome:
+        del event, index_version
+        raise KnowledgeSyncError("support_cache_unavailable")
+
+    def abort(self, event: FaqKnowledgeEvent) -> None:
+        self.delegate.abort(event)
 
 
 def main() -> None:
@@ -300,7 +326,11 @@ def main() -> None:
         send(producer, args.topic, encode(restored), event_id=cast(str, restored["eventId"]))
         consume_expected(consumer, DeliveryAction.ACK, "applied")
         seed_mapping(cache, cache_query, "faq-cb111-delivery", 4)
-        assert mapping_is_current(cache, cache_query, 4)
+        assert mapping_is_current(cache, cache_query, 4), {
+            "mapping": cache.hgetall(f"{FAQ_CACHE_PREFIX}query:{query_hash(cache_query)}"),
+            "state": cache.hgetall(f"{FAQ_CACHE_PREFIX}state:faq-cb111-delivery"),
+            "answer": cache.hgetall(f"{FAQ_CACHE_PREFIX}answer:faq-cb111-delivery:4"),
+        }
 
         interrupted = event(5)
         send(
@@ -351,6 +381,9 @@ def main() -> None:
     finally:
         recovered.shutdown()
 
+    seed_mapping(cache, cache_query, "faq-cb111-delivery", 7)
+    assert mapping_is_current(cache, cache_query, 7)
+
     cache_unavailable = event(8)
     send(
         producer,
@@ -358,14 +391,31 @@ def main() -> None:
         encode(cache_unavailable),
         event_id=cast(str, cache_unavailable["eventId"]),
     )
+    cache_settings = settings(args, args.elasticsearch_url)
     cache_failing = RocketMqKnowledgeConsumer(
-        create_worker(settings(args, args.elasticsearch_url, "redis://127.0.0.1:9/0"))
+        IndexerWorker(
+            cache_settings,
+            VersionedKnowledgeProjection(
+                ElasticsearchKnowledgeProjection(args.elasticsearch_url),
+                FinalizeUnavailableCache(RedisFaqCacheProjection.from_url(args.support_redis_url)),
+            ),
+        )
     )
     cache_failing.startup()
     try:
         consume_expected(cache_failing, DeliveryAction.RETRY, "support_cache_unavailable")
     finally:
         cache_failing.shutdown()
+    assert not mapping_is_current(cache, cache_query, 7)
+    pending_state = cast(
+        dict[str, str], cache.hgetall(f"{FAQ_CACHE_PREFIX}pending:faq-cb111-delivery")
+    )
+    assert pending_state.get("source_version") == "8"
+    current_state = cast(
+        dict[str, str], cache.hgetall(f"{FAQ_CACHE_PREFIX}state:faq-cb111-delivery")
+    )
+    assert current_state.get("source_version") == "7"
+    assert current_state.get("ready") == "1"
     time.sleep(11)
     cache_recovered = RocketMqKnowledgeConsumer(
         create_worker(settings(args, args.elasticsearch_url))

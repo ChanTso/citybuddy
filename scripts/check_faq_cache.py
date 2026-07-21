@@ -106,8 +106,12 @@ def normal(port: int, values: dict[str, str]) -> dict[str, object]:
     state_key = f"{FAQ_CACHE_PREFIX}state:faq-refund"
     answer_v1 = f"{FAQ_CACHE_PREFIX}answer:faq-refund:1"
     mapping_ttl = cast(int, admin.pttl(mapping_key))
-    assert 0 < mapping_ttl <= cast(int, admin.pttl(state_key))
-    assert mapping_ttl <= cast(int, admin.pttl(answer_v1))
+    state_ttl = cast(int, admin.pttl(state_key))
+    answer_ttl = cast(int, admin.pttl(answer_v1))
+    assert 0 < mapping_ttl <= 300_000
+    assert 0 < state_ttl <= 900_000
+    assert 0 < answer_ttl <= 900_000
+    assert mapping_ttl <= state_ttl and mapping_ttl <= answer_ttl
 
     assert projection.apply(event(2), "knowledge_docs_v1") is ProjectionOutcome.APPLIED
     assert cache.lookup(raw_query) is None
@@ -139,6 +143,11 @@ def normal(port: int, values: dict[str, str]) -> dict[str, object]:
     assert projection.apply(event(4), "knowledge_docs_v1") is ProjectionOutcome.APPLIED
     assert cache.populate_mapping(raw_query, "faq-refund", 4)
     answer_v4 = f"{FAQ_CACHE_PREFIX}answer:faq-refund:4"
+    assert projection.prepare(event(5)) is None
+    assert cache.lookup(raw_query) is None
+    projection.abort(event(5))
+    assert cache.populate_mapping(raw_query, "faq-refund", 4)
+    assert cache.lookup(raw_query) is not None
     admin.delete(answer_v4)
     assert cache.lookup(raw_query) is None
     assert not admin.exists(mapping_key)
@@ -162,9 +171,22 @@ def normal(port: int, values: dict[str, str]) -> dict[str, object]:
     assert cache.lookup(raw_query) is None
     admin.hset(state_key, "occurred_time", "2026-07-21T12:00:04Z")
     assert cache.populate_mapping(raw_query, "faq-refund", 4)
+    admin.hset(state_key, "index_version", "knowledge_docs_v9")
+    admin.hset(answer_v4, "index_version", "knowledge_docs_v9")
+    assert cache.lookup(raw_query) is None
+    admin.hset(state_key, "index_version", "knowledge_docs_v1")
+    admin.hset(answer_v4, "index_version", "knowledge_docs_v1")
+    assert cache.populate_mapping(raw_query, "faq-refund", 4)
     admin.hset(answer_v4, "unexpected", "field")
     assert cache.lookup(raw_query) is None
     admin.hdel(answer_v4, "unexpected")
+
+    assert cache.populate_mapping(raw_query, "faq-refund", 4)
+    admin.pexpire(mapping_key, 600_000)
+    admin.pexpire(state_key, 1_800_000)
+    admin.pexpire(answer_v4, 1_800_000)
+    assert cache.lookup(raw_query) is None
+    assert not admin.exists(mapping_key)
 
     bad_cache = RedisFaqCache(local_url("agent_cache", "wrong-password", port))
     assert bad_cache.lookup(raw_query) is None
@@ -204,6 +226,8 @@ def normal(port: int, values: dict[str, str]) -> dict[str, object]:
         "index_version",
         "event_id",
         "occurred_time",
+        "ready",
+        "cache_commitment",
     }
     return {
         "aclDenials": 4,
@@ -211,7 +235,7 @@ def normal(port: int, values: dict[str, str]) -> dict[str, object]:
         "normalizationStable": True,
         "rawQueryStored": False,
         "tombstoneFenced": True,
-        "ttlRelationship": "mapping<=state,answer",
+        "ttlBounds": "mapping<=300000;state,answer<=900000",
     }
 
 

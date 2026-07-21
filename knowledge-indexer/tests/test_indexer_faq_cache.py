@@ -21,19 +21,20 @@ from test_incremental import encoded, event_payload
 
 
 class FakeRedis:
-    def __init__(self, result: object) -> None:
-        self.result = result
+    def __init__(self, results: list[object]) -> None:
+        self.results = results
         self.calls: list[tuple[object, ...]] = []
 
     def eval(self, *args: object) -> object:
         self.calls.append(args)
-        if isinstance(self.result, Exception):
-            raise self.result
-        return self.result
+        result = self.results.pop(0)
+        if isinstance(result, Exception):
+            raise result
+        return result
 
 
-def projection(result: object) -> tuple[RedisFaqCacheProjection, FakeRedis]:
-    fake = FakeRedis(result)
+def projection(*results: object) -> tuple[RedisFaqCacheProjection, FakeRedis]:
+    fake = FakeRedis(list(results))
     return RedisFaqCacheProjection(cast(Redis, fake)), fake
 
 
@@ -44,27 +45,27 @@ def event(*, tombstone: bool = False) -> FaqKnowledgeEvent:
 
 
 @pytest.mark.parametrize(
-    ("raw", "expected"),
+    ("results", "expected"),
     [
-        (["applied", "3"], ProjectionOutcome.APPLIED),
-        (["replayed", "3"], ProjectionOutcome.REPLAYED),
-        (["stale", "4"], ProjectionOutcome.STALE),
+        ([["prepared", "3"], ["applied", "3"]], ProjectionOutcome.APPLIED),
+        ([["replayed", "3"], ["replayed", "3"]], ProjectionOutcome.REPLAYED),
+        ([["stale", "4"]], ProjectionOutcome.STALE),
     ],
 )
 def test_projection_returns_only_closed_monotonic_outcomes(
-    raw: object, expected: ProjectionOutcome
+    results: list[object], expected: ProjectionOutcome
 ) -> None:
-    cache, fake = projection(raw)
+    cache, fake = projection(*results)
 
     assert cache.apply(event(), "knowledge_docs_v1") is expected
     call = repr(fake.calls)
     assert "faq-delivery-window" in call
-    assert "knowledge_docs_v1" in call
-    assert "When is delivery?" in call
+    assert ("knowledge_docs_v1" in call) is (expected is not ProjectionOutcome.STALE)
+    assert ("When is delivery?" in call) is (expected is not ProjectionOutcome.STALE)
 
 
 def test_tombstone_is_sent_as_a_closed_flag_without_answer_availability() -> None:
-    cache, fake = projection(["applied", "3"])
+    cache, fake = projection(["prepared", "3"], ["applied", "3"])
 
     assert cache.apply(event(tombstone=True), "knowledge_docs_v1") is ProjectionOutcome.APPLIED
     assert "'1'" in repr(fake.calls)

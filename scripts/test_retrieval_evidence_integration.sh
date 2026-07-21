@@ -115,7 +115,7 @@ for _ in {1..40}; do
 done
 curl --fail --silent "http://127.0.0.1:$model_port/fixture/counts" >/dev/null
 
-probe_expected='{"atomicRollback":"passed","cacheDurableReplay":true,"cacheHitEvidence":true,"cacheOutageFallback":true,"calibrationVersion":"cb091-calibration-v1","indexVersion":"knowledge_docs_v1","outcomes":10,"replayWithoutExecution":true,"runtimeIsolation":"passed","storedEvidenceCount":3}'
+probe_expected='{"atomicRollback":"passed","cacheDurableReplay":true,"cacheFinalizeWindow":true,"cacheHitEvidence":true,"cacheOutageFallback":true,"calibrationVersion":"cb091-calibration-v1","indexVersion":"knowledge_docs_v1","outcomes":10,"replayWithoutExecution":true,"runtimeIsolation":"passed","storedEvidenceCount":3}'
 probe_output="$(
   uv run python scripts/check_retrieval_evidence.py \
     --mysql-host 127.0.0.1 \
