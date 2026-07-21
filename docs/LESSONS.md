@@ -245,6 +245,7 @@ This file records only factual pitfalls supported by merged pull-request, commit
 ## Maintenance — Probed integration-test port allocation
 
 - 现象：CB-111 final-head CI 的 evaluation sandbox 集成曾随机在服务启动时遇到 host port 已占用；原有 13 个集成脚本分别以 `PID % range` 直接生成端口且从不探测，其中多数区间落在 Linux 默认临时端口范围 32768–60999，runner 上无关进程的短连接也能与其竞争。
+- 证据链接：[maintenance PR #46](https://github.com/ChanTso/citybuddy/pull/46)
 - 根因：PID 取模只是在有限范围内猜测端口，不构成可用性检查或并发所有权；不同脚本重复实现不同区间，既无法统一避开系统临时端口，也无法阻止两个测试进程选择同一候选。受控预占夹具本身若未先证明 holder 已监听，还会制造“探测后才被抢占”的错误证据。
 - 解决：全部集成脚本统一使用共享端口租约器，只在 20000–31999 分配；每个候选先以真实 loopback bind 探测，再以原子目录租约协调并发套件，冲突时最多顺延 4096 个候选，进程退出后释放或由后续分配回收失效租约。行为回归真实预占首选端口，并让知识搜索与 evaluation identity 两个完整套件同时从同一候选开始；两者均成功且最终无残余租约或 Docker 资源。
 - 结论：测试端口不得落在系统临时端口范围内，且分配必须探测可用性；PID 取模是无保留的猜测，失败随机且易被误判为切片缺陷。并发正确性还需要共享租约而非彼此独立的“看起来空闲”；受控预占证据必须先证明占用方已就绪。
