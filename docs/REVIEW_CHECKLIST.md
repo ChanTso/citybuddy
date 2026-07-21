@@ -224,7 +224,9 @@ request. A later semantic diff change requires the checklist to be executed and 
 - Prove the behavior with real concurrent suites and controlled cleanup failure: two projects must
   start concurrently with disjoint runtime-owned ports; after a failed `down`, the residual project
   must keep its port while a new project starts on another port. Repeated normal execution must leave
-  no containers, networks, or host-port registry artifacts.
+  no containers, networks, or host-port registry artifacts. A resource-stop failure must always emit
+  an unambiguous diagnostic even when the primary test already failed; preserve the primary exit code
+  without making the secondary cleanup failure invisible.
 
 ## Closeout maintenance
 

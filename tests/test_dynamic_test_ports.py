@@ -92,10 +92,33 @@ def test_process_port_ignores_a_prior_restart_log_entry(tmp_path: Path) -> None:
 def test_cleanup_failure_is_visible_without_a_lease_state_machine() -> None:
     failed = run_bash(f'source "{HELPER}"; finish_test_cleanup 0 9')
     assert failed.returncode == 9
+    assert "cleanup failed with status 9 (original test status: 0)" in failed.stderr
     original = run_bash(f'source "{HELPER}"; finish_test_cleanup 7 9')
     assert original.returncode == 7
+    assert "cleanup failed with status 9 (original test status: 7)" in original.stderr
     success = run_bash(f'source "{HELPER}"; finish_test_cleanup 0 0')
     assert success.returncode == 0
+    assert success.stderr == ""
+
+
+@pytest.mark.parametrize("binding", ["127.0.0.1:0", "127.0.0.1:99999"])
+def test_compose_port_discovery_rejects_out_of_range_ports(binding: str) -> None:
+    result = run_bash(
+        f'source "{HELPER}"; fake_compose() {{ printf "%s\\n" "{binding}"; }}; '
+        "compose=(fake_compose); compose_host_port actual mysql 3306"
+    )
+    assert result.returncode == 1
+    assert f"Unexpected published port for mysql:3306: {binding}" in result.stderr
+
+
+@pytest.mark.parametrize("binding", ["127.0.0.1:0", "127.0.0.1:99999"])
+def test_container_port_discovery_rejects_out_of_range_ports(binding: str) -> None:
+    result = run_bash(
+        f'source "{HELPER}"; docker() {{ printf "%s\\n" "{binding}"; }}; '
+        "container_host_port actual auth 8080"
+    )
+    assert result.returncode == 1
+    assert f"Unexpected published port for container auth:8080: {binding}" in result.stderr
 
 
 def test_every_integration_suite_uses_runtime_owned_ports() -> None:

@@ -1,16 +1,22 @@
 #!/usr/bin/env bash
 
+runtime_port_is_valid() {
+  local port="$1"
+  [[ "$port" =~ ^[0-9]{1,5}$ ]] && ((10#$port > 0 && 10#$port <= 65535))
+}
+
 compose_host_port() {
   local variable_name="$1"
   local service="$2"
   local container_port="$3"
   local binding
   binding="$("${compose[@]}" port "$service" "$container_port")"
-  if [[ ! "$binding" =~ ^127\.0\.0\.1:[0-9]{1,5}$ ]]; then
+  local port="${binding##*:}"
+  if [[ ! "$binding" =~ ^127\.0\.0\.1:[0-9]{1,5}$ ]] || ! runtime_port_is_valid "$port"; then
     echo "Unexpected published port for $service:$container_port: $binding" >&2
     return 1
   fi
-  printf -v "$variable_name" '%s' "${binding##*:}"
+  printf -v "$variable_name" '%s' "$port"
 }
 
 container_host_port() {
@@ -19,11 +25,12 @@ container_host_port() {
   local container_port="$3"
   local binding
   binding="$(docker port "$container" "$container_port/tcp")"
-  if [[ ! "$binding" =~ ^127\.0\.0\.1:[0-9]{1,5}$ ]]; then
+  local port="${binding##*:}"
+  if [[ ! "$binding" =~ ^127\.0\.0\.1:[0-9]{1,5}$ ]] || ! runtime_port_is_valid "$port"; then
     echo "Unexpected published port for container $container:$container_port: $binding" >&2
     return 1
   fi
-  printf -v "$variable_name" '%s' "${binding##*:}"
+  printf -v "$variable_name" '%s' "$port"
 }
 
 port_log_offset() {
@@ -64,7 +71,7 @@ process_bound_port() {
     if [[ -f "$log" ]]; then
       port="$(tail -n +"$first_line" "$log" | sed -En "$pattern" | tail -n 1)"
     fi
-    if [[ "$port" =~ ^[0-9]{1,5}$ ]] && ((port > 0 && port <= 65535)); then
+    if runtime_port_is_valid "$port"; then
       printf -v "$variable_name" '%s' "$port"
       return 0
     fi
@@ -83,6 +90,9 @@ process_bound_port() {
 finish_test_cleanup() {
   local original_status="$1"
   local resource_stop_status="$2"
+  if ((resource_stop_status != 0)); then
+    echo "Test resource cleanup failed with status $resource_stop_status (original test status: $original_status)." >&2
+  fi
   if ((original_status != 0)); then
     return "$original_status"
   fi
