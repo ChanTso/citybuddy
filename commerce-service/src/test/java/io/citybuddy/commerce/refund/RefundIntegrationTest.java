@@ -183,6 +183,11 @@ class RefundIntegrationTest {
     assertThat(attemptRefunded(paid.attemptId())).isEqualTo(1500);
     assertThat(refundMovementCount(paid.orderId())).isEqualTo(2);
     assertThat(refundCount(paid.orderId())).isEqualTo(2);
+    long paymentMovementsBeforeReplay = paymentMovementCount(paid.orderId());
+    var paymentReplay = payments.callback(paid.callbackKey(), paid.callback());
+    assertThat(paymentReplay.state()).isEqualTo("SUCCEEDED");
+    assertThat(paymentReplay.replayed()).isTrue();
+    assertThat(paymentMovementCount(paid.orderId())).isEqualTo(paymentMovementsBeforeReplay);
     assertThatThrownBy(
             () ->
                 jdbc.update(
@@ -537,16 +542,17 @@ class RefundIntegrationTest {
     MockPaymentResult attempt =
         payments.start(
             USER, orderId, "payment-refund-" + suffix, new MockPaymentRequest(amount, "AUD", null));
-    payments.callback(
-        "callback-refund-" + suffix,
+    String callbackKey = "callback-refund-" + suffix;
+    MockPaymentCallbackRequest callback =
         new MockPaymentCallbackRequest(
             UUID.randomUUID().toString(),
             attempt.callbackCorrelationId(),
             orderId,
             amount,
             "AUD",
-            "SUCCEEDED"));
-    return new PaidFixture(orderId, attempt.attemptId(), productId);
+            "SUCCEEDED");
+    payments.callback(callbackKey, callback);
+    return new PaidFixture(orderId, attempt.attemptId(), productId, callbackKey, callback);
   }
 
   private String seedStandardOrder(String user, long amount, String suffix) {
@@ -843,6 +849,15 @@ class RefundIntegrationTest {
     return count == null ? 0 : count;
   }
 
+  private long paymentMovementCount(String orderId) {
+    Long count =
+        jdbc.queryForObject(
+            "SELECT COUNT(*) FROM inventory_ledger WHERE order_id = ? AND movement_type = 'STANDARD_PAYMENT'",
+            Long.class,
+            orderId);
+    return count == null ? 0 : count;
+  }
+
   private long refundCount(String orderId) {
     Long count =
         jdbc.queryForObject(
@@ -945,7 +960,12 @@ class RefundIntegrationTest {
     return value;
   }
 
-  private record PaidFixture(String orderId, String attemptId, String productId) {}
+  private record PaidFixture(
+      String orderId,
+      String attemptId,
+      String productId,
+      String callbackKey,
+      MockPaymentCallbackRequest callback) {}
 
   private record RawRefund(String refundId, String attemptId) {}
 

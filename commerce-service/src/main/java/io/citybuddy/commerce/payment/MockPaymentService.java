@@ -353,7 +353,7 @@ public final class MockPaymentService {
                     attempt.amountMinor(),
                     attempt.currency(),
                     attempt.sandboxId()))
-        || attempt.refundedAmountMinor() != 0
+        || (attempt.sandboxId() != null && attempt.refundedAmountMinor() != 0)
         || !"PAID".equals(order.status())
         || order.stateVersion() != 2
         || callback == null

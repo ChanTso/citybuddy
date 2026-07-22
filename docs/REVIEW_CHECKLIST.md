@@ -276,6 +276,12 @@ request. A later semantic diff change requires the checklist to be executed and 
   conflicts, not unexpected server errors. Use a dedicated internal integrity signal and translate it at
   the owning operation boundary; do not allow a repository `IllegalStateException` or multi-row helper
   failure to escape as 500.
+- Before adding an internal-surface invariant to a validator shared with production, enumerate every
+  caller and every later legal lifecycle state of the same durable row. A historical committed result
+  remains replayable after a later valid transition unless the business contract explicitly revokes
+  it; for payment, a legitimate partial or full refund changes the accumulator but must not invalidate
+  the immutable original callback result. Add a cross-lifecycle regression that executes the later
+  transition and then replays the earlier result, including a no-duplicate durable-side-effect check.
 
 ### Faults never become terminal business decisions
 
