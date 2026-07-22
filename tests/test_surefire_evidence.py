@@ -19,7 +19,9 @@ def report(class_name: str, *, tests: int, skipped: int = 0) -> str:
     )
 
 
-def run_helper(report_dir: Path, function: str, class_name: str) -> subprocess.CompletedProcess[str]:
+def run_helper(
+    report_dir: Path, function: str, class_name: str
+) -> subprocess.CompletedProcess[str]:
     return subprocess.run(
         [
             "bash",
@@ -93,9 +95,7 @@ def test_every_surefire_integration_entry_has_a_fresh_complete_report_gate() -> 
         if not selected_names:
             continue
 
-        array_match = re.search(
-            r"required_surefire_classes=\(\s*(.*?)\s*\)", content, re.DOTALL
-        )
+        array_match = re.search(r"required_surefire_classes=\(\s*(.*?)\s*\)", content, re.DOTALL)
         assert array_match is not None, f"{script.name} has no required Surefire class inventory"
         inventory = set(shlex.split(array_match.group(1)))
         expected: set[str] = set()
