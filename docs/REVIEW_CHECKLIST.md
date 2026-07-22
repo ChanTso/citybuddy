@@ -258,6 +258,14 @@ request. A later semantic diff change requires the checklist to be executed and 
   completeness boundary for the internal evaluation view: later internal-only completeness proposals
   are recorded as residual risk, while any finding affecting production payment/refund, transaction
   consistency, identity authorization, or another business-core path remains blocking.
+- For the owner-capped internal evaluation callback only, verify that every column named
+  participating by the shared face metadata is independently read and asserted by both callback and
+  state/audit reconciliation, and has a single-column three-path fault cell; a compound mutation may
+  not stand in for its constituent columns. Any excluded column needs an executable per-column
+  disposition and an explicit residual-risk rationale. The currently accepted no-second-anchor
+  residuals are start `request_idempotency_key`, fixture `evaluation_owner_handle`, and generated
+  ledger `movement_id`; do not generalize this exception to production idempotency, refund, inventory,
+  transaction, or authorization truth.
 - Review exception-to-HTTP mappings against the full subtype hierarchy. Do not map a broad database
   superclass such as `DataAccessException` to unavailable when it also contains lock-contention and
   constraint-conflict subtypes. Prove connection/resource failure, lock timeout/deadlock, duplicate

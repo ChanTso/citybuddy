@@ -471,8 +471,11 @@ public final class EvaluationViewRepository {
                a.callback_correlation_id AS attempt_correlation_id,
                a.user_subject AS attempt_user_subject, a.order_id AS attempt_order_id,
                a.order_kind AS attempt_order_kind, a.sandbox_id AS attempt_sandbox_id,
+               a.intent_hash AS attempt_intent_hash,
                a.amount_minor AS attempt_amount_minor, a.currency AS attempt_currency,
-               a.state AS attempt_state, a.state_version AS attempt_state_version
+               a.refunded_amount_minor AS attempt_refunded_amount_minor,
+               a.state AS attempt_state, a.state_version AS attempt_state_version,
+               a.succeeded_at AS attempt_succeeded_at
         FROM %s c
         LEFT JOIN %s a ON a.attempt_id = c.attempt_id
         WHERE c.callback_correlation_id IN (
@@ -507,10 +510,15 @@ public final class EvaluationViewRepository {
                 result.getString("attempt_order_id"),
                 result.getString("attempt_order_kind"),
                 result.getString("attempt_sandbox_id"),
+                result.getString("attempt_intent_hash"),
                 result.getLong("attempt_amount_minor"),
                 result.getString("attempt_currency"),
+                result.getLong("attempt_refunded_amount_minor"),
                 result.getString("attempt_state"),
-                result.getLong("attempt_state_version")),
+                result.getLong("attempt_state_version"),
+                result.getTimestamp("attempt_succeeded_at") == null
+                    ? null
+                    : result.getTimestamp("attempt_succeeded_at").toInstant()),
         sandboxId,
         sandboxId);
   }
@@ -705,6 +713,16 @@ public final class EvaluationViewRepository {
         && callback.attemptOrderId().equals(order.orderId())
         && callback.attemptAmountMinor() == order.totalPriceMinor()
         && callback.attemptCurrency().equals(order.currency())
+        && callback
+            .attemptIntentHash()
+            .equals(
+                EvaluationPaymentCommittedFaces.attemptIntentHash(
+                    callback.attemptOrderId(),
+                    callback.attemptAmountMinor(),
+                    callback.attemptCurrency(),
+                    callback.attemptSandboxId()))
+        && callback.attemptRefundedAmountMinor() == 0
+        && Objects.equals(callback.attemptSucceededAt(), callback.createdAt())
         && ledger.businessEventKey().equals("mock-payment:" + callback.attemptId())
         && "STANDARD_PAYMENT".equals(ledger.movementType())
         && ledger.orderId().equals(order.orderId())
@@ -858,10 +876,13 @@ public final class EvaluationViewRepository {
       String attemptOrderId,
       String attemptOrderKind,
       String attemptSandboxId,
+      String attemptIntentHash,
       long attemptAmountMinor,
       String attemptCurrency,
+      long attemptRefundedAmountMinor,
       String attemptState,
-      long attemptStateVersion) {}
+      long attemptStateVersion,
+      Instant attemptSucceededAt) {}
 
   private record PaymentAuditTruth(
       String sandboxId,

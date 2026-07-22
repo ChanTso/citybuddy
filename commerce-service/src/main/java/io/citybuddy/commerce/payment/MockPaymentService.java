@@ -62,14 +62,8 @@ public final class MockPaymentService {
     requireIdempotency(idempotencyKey, "Payment idempotency key is invalid");
     MockPaymentRequest valid = requireRequest(request);
     String intentHash =
-        hash(
-            orderId
-                + "\n"
-                + valid.amountMinor()
-                + "\n"
-                + valid.currency()
-                + "\n"
-                + nullable(sandboxId));
+        EvaluationPaymentCommittedFaces.attemptIntentHash(
+            orderId, valid.amountMinor(), valid.currency(), sandboxId);
     return withDuplicateRetry(
         () -> startOnce(userSubject, sandboxId, orderId, idempotencyKey, valid, intentHash));
   }
@@ -351,6 +345,15 @@ public final class MockPaymentService {
         || !attempt.userSubject().equals(order.userSubject())
         || attempt.amountMinor() != order.amountMinor()
         || !attempt.currency().equals(order.currency())
+        || !attempt
+            .intentHash()
+            .equals(
+                EvaluationPaymentCommittedFaces.attemptIntentHash(
+                    attempt.orderId(),
+                    attempt.amountMinor(),
+                    attempt.currency(),
+                    attempt.sandboxId()))
+        || attempt.refundedAmountMinor() != 0
         || !"PAID".equals(order.status())
         || order.stateVersion() != 2
         || callback == null

@@ -1841,6 +1841,8 @@ mysql_query root "$root_password" commerce_db \
 
 payment_attempt_succeeded_at="$(mysql_query root "$root_password" commerce_db \
   "SELECT DATE_FORMAT(succeeded_at, '%Y-%m-%d %H:%i:%s.%f') FROM mock_payment_attempt WHERE attempt_id = '$payment_attempt_id'")"
+payment_attempt_intent_hash="$(mysql_query root "$root_password" commerce_db \
+  "SELECT intent_hash FROM mock_payment_attempt WHERE attempt_id = '$payment_attempt_id'")"
 tampered_callback_event_id='00000000-0000-0000-0000-000000000181'
 tampered_callback_attempt_id='00000000-0000-0000-0000-000000000182'
 tampered_attempt_id='00000000-0000-0000-0000-000000000183'
@@ -1858,7 +1860,8 @@ UPDATE standard_order SET user_subject = '$payment_subject', product_id = '$paym
   sandbox_id = 'sandbox-payment' WHERE order_id = '$payment_order_id';
 UPDATE mock_payment_attempt SET callback_correlation_id = '$payment_correlation_id',
   user_subject = '$payment_subject', order_id = '$payment_order_id', order_kind = 'STANDARD',
-  sandbox_id = 'sandbox-payment', amount_minor = 1800, currency = 'CNY',
+  sandbox_id = 'sandbox-payment', intent_hash = '$payment_attempt_intent_hash',
+  amount_minor = 1800, refunded_amount_minor = 0, currency = 'CNY',
   state = 'SUCCEEDED', state_version = 2, succeeded_at = '$payment_attempt_succeeded_at'
   WHERE attempt_id = '$payment_attempt_id';
 DELETE FROM mock_payment_callback
@@ -2010,6 +2013,10 @@ mysql_query root "$root_password" commerce_db \
 
 mysql_query root "$root_password" commerce_db \
   "ALTER TABLE inventory_ledger DROP CHECK chk_inventory_ledger_movement"
+mysql_query root "$root_password" commerce_db \
+  "ALTER TABLE mock_payment_attempt DROP CHECK chk_mock_payment_attempt_state"
+mysql_query root "$root_password" commerce_db \
+  "ALTER TABLE standard_order DROP CHECK chk_standard_order_payment_state"
 
 payment_callback_fault_locator="callback_event_id IN ('$payment_event_id', '$tampered_callback_event_id') OR callback_idempotency_key IN ('$payment_callback_key', 'tampered-callback-key') OR attempt_id IN ('$payment_attempt_id', '$tampered_callback_attempt_id')"
 payment_attempt_fault_locator="request_idempotency_key = 'payment-evaluation'"
@@ -2019,9 +2026,12 @@ payment_predicate_labels=(
   audit-row callback-row ledger-row
   callback-event callback-idempotency-key callback-attempt callback-correlation callback-sandbox
   callback-session callback-trace callback-operation callback-intent callback-outcome callback-result
+  callback-created-at
   attempt-id attempt-correlation attempt-owner attempt-order attempt-order-kind attempt-sandbox
-  attempt-amount attempt-currency attempt-state
-  order-id order-sandbox order-owner order-product order-amount order-currency order-state
+  attempt-intent attempt-amount attempt-refunded-amount attempt-currency attempt-state
+  attempt-state-version attempt-succeeded-at
+  order-id order-sandbox order-owner order-product order-amount order-currency order-status
+  order-state-version
   ledger-key ledger-sandbox ledger-movement ledger-order ledger-product ledger-reservation
   ledger-activity ledger-inventory-delta ledger-activity-delta ledger-amount ledger-currency
 )
@@ -2040,22 +2050,28 @@ payment_predicate_mutations=(
   "UPDATE mock_payment_callback SET intent_hash = REPEAT('f', 64) WHERE $payment_callback_fault_locator"
   "SET SESSION sql_mode = 'NO_ENGINE_SUBSTITUTION'; UPDATE mock_payment_callback SET requested_outcome = 'CORRUPTED' WHERE $payment_callback_fault_locator"
   "SET SESSION sql_mode = 'NO_ENGINE_SUBSTITUTION'; UPDATE mock_payment_callback SET result_state = 'CORRUPTED' WHERE $payment_callback_fault_locator"
+  "UPDATE mock_payment_callback SET created_at = TIMESTAMPADD(MICROSECOND, 1, created_at) WHERE $payment_callback_fault_locator"
   "UPDATE mock_payment_attempt SET attempt_id = '$tampered_attempt_id' WHERE $payment_attempt_fault_locator"
   "UPDATE mock_payment_attempt SET callback_correlation_id = '00000000-0000-0000-0000-000000000194' WHERE $payment_attempt_fault_locator"
   "UPDATE mock_payment_attempt SET user_subject = 'tampered-attempt-owner' WHERE $payment_attempt_fault_locator"
   "UPDATE mock_payment_attempt SET order_id = '$tampered_attempt_order_id' WHERE $payment_attempt_fault_locator"
   "UPDATE mock_payment_attempt SET order_kind = 'SECKILL' WHERE $payment_attempt_fault_locator"
   "UPDATE mock_payment_attempt SET sandbox_id = 'sandbox-main' WHERE $payment_attempt_fault_locator"
+  "UPDATE mock_payment_attempt SET intent_hash = REPEAT('f', 64) WHERE $payment_attempt_fault_locator"
   "UPDATE mock_payment_attempt SET amount_minor = 1801 WHERE $payment_attempt_fault_locator"
+  "UPDATE mock_payment_attempt SET refunded_amount_minor = 1 WHERE $payment_attempt_fault_locator"
   "UPDATE mock_payment_attempt SET currency = 'AUD' WHERE $payment_attempt_fault_locator"
-  "UPDATE mock_payment_attempt SET state = 'FAILED', state_version = 2, succeeded_at = NULL WHERE $payment_attempt_fault_locator"
+  "UPDATE mock_payment_attempt SET state = 'FAILED' WHERE $payment_attempt_fault_locator"
+  "UPDATE mock_payment_attempt SET state_version = 3 WHERE $payment_attempt_fault_locator"
+  "UPDATE mock_payment_attempt SET succeeded_at = TIMESTAMPADD(MICROSECOND, 1, succeeded_at) WHERE $payment_attempt_fault_locator"
   "UPDATE standard_order SET order_id = '$tampered_order_id' WHERE $payment_order_fault_locator"
   "UPDATE standard_order SET sandbox_id = 'sandbox-main' WHERE $payment_order_fault_locator"
   "UPDATE standard_order SET user_subject = 'tampered-order-user' WHERE $payment_order_fault_locator"
   "UPDATE standard_order SET product_id = 'tampered-order-product' WHERE $payment_order_fault_locator"
   "UPDATE standard_order SET total_price_minor = 1801 WHERE $payment_order_fault_locator"
   "UPDATE standard_order SET currency = 'AUD' WHERE $payment_order_fault_locator"
-  "UPDATE standard_order SET status = 'UNPAID', state_version = 1 WHERE $payment_order_fault_locator"
+  "UPDATE standard_order SET status = 'UNPAID' WHERE $payment_order_fault_locator"
+  "UPDATE standard_order SET state_version = 1 WHERE $payment_order_fault_locator"
   "UPDATE inventory_ledger SET business_event_key = 'tampered-payment-event-key' WHERE movement_id = '$payment_movement_id'"
   "UPDATE inventory_ledger SET sandbox_id = 'sandbox-main' WHERE movement_id = '$payment_movement_id'"
   "UPDATE inventory_ledger SET movement_type = 'STANDARD_REFUND' WHERE movement_id = '$payment_movement_id'"
@@ -2069,7 +2085,7 @@ payment_predicate_mutations=(
   "UPDATE inventory_ledger SET payment_currency = 'AUD' WHERE movement_id = '$payment_movement_id'"
 )
 
-assert_equal 41 "${#payment_predicate_labels[@]}" \
+assert_equal 47 "${#payment_predicate_labels[@]}" \
   "complete physical JOIN/WHERE corruption label matrix"
 assert_equal "${#payment_predicate_labels[@]}" "${#payment_predicate_mutations[@]}" \
   "physical JOIN/WHERE corruption labels and mutations stay aligned"
@@ -2120,6 +2136,20 @@ for ((left_index = 0; left_index < ${#payment_predicate_mutations[@]}; left_inde
 done
 
 mysql_query root "$root_password" commerce_db "
+ALTER TABLE standard_order ADD CONSTRAINT chk_standard_order_payment_state CHECK (
+  (status = 'UNPAID' AND state_version = 1)
+  OR (status = 'PAID' AND state_version = 2)
+);
+ALTER TABLE mock_payment_attempt ADD CONSTRAINT chk_mock_payment_attempt_state CHECK (
+  refunded_amount_minor <= amount_minor
+  AND (
+    (state = 'PENDING' AND state_version = 1 AND succeeded_at IS NULL
+      AND refunded_amount_minor = 0)
+    OR (state = 'SUCCEEDED' AND state_version = 2 AND succeeded_at IS NOT NULL)
+    OR (state = 'FAILED' AND state_version = 2 AND succeeded_at IS NULL
+      AND refunded_amount_minor = 0)
+  )
+);
 ALTER TABLE inventory_ledger ADD CONSTRAINT chk_inventory_ledger_movement CHECK (
   (movement_type = 'SECKILL_ORDER_CREATE'
     AND reservation_id IS NOT NULL AND activity_id IS NOT NULL

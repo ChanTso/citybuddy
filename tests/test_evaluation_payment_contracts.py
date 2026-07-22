@@ -134,6 +134,28 @@ def test_payment_schema_and_code_keep_production_and_evaluation_truth_separate()
     assert "seckillOrderByIdSql(String lockClause)" in committed_faces
     assert "EvaluationPaymentCommittedFaces.orderFaceUnionSql()" in evaluation_view
     assert "EvaluationPaymentCommittedFaces.evaluationOrderKeysBySandboxSql()" in evaluation_view
+    for attempt_projection in (
+        "a.intent_hash AS attempt_intent_hash",
+        "a.refunded_amount_minor AS attempt_refunded_amount_minor",
+        "a.succeeded_at AS attempt_succeeded_at",
+    ):
+        assert attempt_projection in evaluation_view
+    for exact_attempt_assertion in (
+        "attemptIntentHash()",
+        "attemptRefundedAmountMinor() == 0",
+        "Objects.equals(callback.attemptSucceededAt(), callback.createdAt())",
+    ):
+        assert exact_attempt_assertion in evaluation_view
+    assert "EvaluationPaymentCommittedFaces.attemptIntentHash" in service
+    assert 'sandboxId == null ? "" : sandboxId' in committed_faces
+    for residual_column in (
+        "request_idempotency_key",
+        "evaluation_owner_handle",
+        "movement_id",
+    ):
+        assert f'"{residual_column}",' in committed_faces
+    assert "residualColumnDispositions" in committed_faces
+    assert "participatingColumns()" in committed_faces
     callback_order_closure = repository[
         repository.index("private Optional<OrderTruth> findOrder") : repository.index(
             "public Optional<AttemptRecord> findAttemptByRequestForUpdate"
@@ -159,6 +181,20 @@ def test_payment_schema_and_code_keep_production_and_evaluation_truth_separate()
     for closure in (callback_order_closure, view_order_closure):
         assert "FROM standard_order" not in closure
         assert "FROM seckill_order" not in closure
+
+    integration = (ROOT / "scripts/test_evaluation_sandbox_integration.sh").read_text(
+        encoding="utf-8"
+    )
+    for independent_fault in (
+        "callback-created-at",
+        "attempt-intent",
+        "attempt-refunded-amount",
+        "attempt-state-version",
+        "attempt-succeeded-at",
+        "order-state-version",
+    ):
+        assert independent_fault in integration
+    assert "assert_equal 47" in integration
 
 
 def test_auth_provision_response_remains_minimally_disclosing() -> None:

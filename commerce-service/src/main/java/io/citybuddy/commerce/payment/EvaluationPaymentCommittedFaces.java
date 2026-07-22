@@ -1,6 +1,10 @@
 package io.citybuddy.commerce.payment;
 
+import java.nio.charset.StandardCharsets;
+import java.security.MessageDigest;
+import java.security.NoSuchAlgorithmException;
 import java.util.Collections;
+import java.util.HexFormat;
 import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
@@ -31,6 +35,11 @@ public final class EvaluationPaymentCommittedFaces {
       face(
           "attempt",
           List.of("callback_correlation_id", "attempt_id", "order_id"),
+          Map.of(
+              "request_idempotency_key",
+              "The start-command key has no independent durable anchor after creation; its "
+                  + "database uniqueness and bounded-format invariant remain, and exact historical "
+                  + "value recovery is an owner-accepted internal-view residual risk."),
           table(
               "mock_payment_attempt",
               "attempt_id",
@@ -52,6 +61,11 @@ public final class EvaluationPaymentCommittedFaces {
       face(
           "order",
           List.of("order_id"),
+          Map.of(
+              "evaluation_owner_handle",
+              "The fixture-owner handle is reset provenance; committed replay is anchored to the "
+                  + "effective user_subject, while historical handle recovery is an owner-accepted "
+                  + "internal-view residual risk."),
           table(
               "standard_order",
               "order_id",
@@ -79,6 +93,11 @@ public final class EvaluationPaymentCommittedFaces {
       face(
           "ledger",
           List.of("order_id", "business_event_key"),
+          Map.of(
+              "movement_id",
+              "The database-generated movement primary key has uniqueness but no second content "
+                  + "anchor; valid-UUID substitution is an owner-accepted internal-view residual "
+                  + "risk."),
           table(
               "inventory_ledger",
               "movement_id",
@@ -127,6 +146,24 @@ public final class EvaluationPaymentCommittedFaces {
 
   public static String columnsCsv(FaceDefinition face) {
     return String.join(", ", face.tables().get(onlyTable(face)));
+  }
+
+  public static String attemptIntentHash(
+      String orderId, long amountMinor, String currency, String sandboxId) {
+    try {
+      MessageDigest digest = MessageDigest.getInstance("SHA-256");
+      String canonical =
+          orderId
+              + "\n"
+              + amountMinor
+              + "\n"
+              + currency
+              + "\n"
+              + (sandboxId == null ? "" : sandboxId);
+      return HexFormat.of().formatHex(digest.digest(canonical.getBytes(StandardCharsets.UTF_8)));
+    } catch (NoSuchAlgorithmException exception) {
+      throw new IllegalStateException("SHA-256 is unavailable", exception);
+    }
   }
 
   public static String standardOrderByIdSql(String lockClause) {
@@ -186,13 +223,21 @@ public final class EvaluationPaymentCommittedFaces {
 
   private static FaceDefinition face(
       String name, List<String> stableKeys, TableDefinition... tables) {
+    return face(name, stableKeys, Map.of(), tables);
+  }
+
+  private static FaceDefinition face(
+      String name,
+      List<String> stableKeys,
+      Map<String, String> residualColumnDispositions,
+      TableDefinition... tables) {
     Map<String, List<String>> physicalTables = new LinkedHashMap<>();
     for (TableDefinition table : tables) {
       if (physicalTables.put(table.name(), table.columns()) != null) {
         throw new IllegalArgumentException("Duplicate face table " + table.name());
       }
     }
-    return new FaceDefinition(name, stableKeys, physicalTables);
+    return new FaceDefinition(name, stableKeys, physicalTables, residualColumnDispositions);
   }
 
   private static TableDefinition table(String name, String... columns) {
@@ -200,15 +245,31 @@ public final class EvaluationPaymentCommittedFaces {
   }
 
   public record FaceDefinition(
-      String name, List<String> stableKeys, Map<String, List<String>> tables) {
+      String name,
+      List<String> stableKeys,
+      Map<String, List<String>> tables,
+      Map<String, String> residualColumnDispositions) {
     public FaceDefinition {
       stableKeys = List.copyOf(stableKeys);
       Map<String, List<String>> copy = new LinkedHashMap<>();
       tables.forEach((table, columns) -> copy.put(table, List.copyOf(columns)));
       tables = Collections.unmodifiableMap(copy);
+      residualColumnDispositions = Map.copyOf(residualColumnDispositions);
       if (stableKeys.isEmpty() || tables.isEmpty()) {
         throw new IllegalArgumentException("A committed face requires keys and tables");
       }
+      LinkedHashSet<String> declaredColumns = new LinkedHashSet<>();
+      tables.values().forEach(declaredColumns::addAll);
+      if (!declaredColumns.containsAll(residualColumnDispositions.keySet())) {
+        throw new IllegalArgumentException("Residual disposition names an undeclared column");
+      }
+    }
+
+    public List<String> participatingColumns() {
+      LinkedHashSet<String> participating = new LinkedHashSet<>();
+      tables.values().forEach(participating::addAll);
+      participating.removeAll(residualColumnDispositions.keySet());
+      return List.copyOf(participating);
     }
   }
 
