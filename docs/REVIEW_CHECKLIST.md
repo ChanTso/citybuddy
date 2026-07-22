@@ -233,6 +233,13 @@ request. A later semantic diff change requires the checklist to be executed and 
   mutable admission or liveness state. Exact replay returns that result without mutation even after
   admission closes; conflicting intent or damaged committed truth remains a deterministic conflict.
   Only an operation with no committed result may enter the current liveness and locking path.
+- **Evaluation mock-payment owner-approved closure boundary:** enumerate the complete committed result
+  as callback, payment attempt, order, payment ledger, and evaluation audit, anchored first by callback
+  correlation and retained through signed order/event/context locators when one face is missing. Lock
+  and reconcile that five-face set in the mutation transaction before sandbox liveness. Real evidence
+  covers every single face, every pair, and replay waiting across concurrent commit plus completion. A
+  same-class completeness blocker must identify a newly persisted sixth committed-result face; other
+  proposed dimensions are bounded design-review observations under the recorded Level 3 residual risk.
 - Review exception-to-HTTP mappings against the full subtype hierarchy. Do not map a broad database
   superclass such as `DataAccessException` to unavailable when it also contains lock-contention and
   constraint-conflict subtypes. Prove connection/resource failure, lock timeout/deadlock, duplicate

@@ -1871,13 +1871,23 @@ assert_equal 41 "${#payment_predicate_labels[@]}" \
 assert_equal "${#payment_predicate_labels[@]}" "${#payment_predicate_mutations[@]}" \
   "physical JOIN/WHERE corruption labels and mutations stay aligned"
 
+is_committed_payment_face_index() {
+  local index="$1"
+  [[ "$index" == 0 || "$index" == 1 || "$index" == 2 || "$index" == 15 || "$index" == 27 ]]
+}
+
 for ((predicate_index = 0; predicate_index < ${#payment_predicate_mutations[@]}; predicate_index++)); do
   mutation_count="$(mysql_query root "$root_password" commerce_db \
     "${payment_predicate_mutations[$predicate_index]}; SELECT ROW_COUNT()")"
   assert_equal 1 "$mutation_count" \
     "single consistency fault injection changed exactly one row: ${payment_predicate_labels[$predicate_index]}"
-  assert_payment_audit_reconciliation_fails_closed \
-    "single enumerator predicate corruption ${payment_predicate_labels[$predicate_index]}"
+  if is_committed_payment_face_index "$predicate_index"; then
+    assert_payment_truth_fails_closed \
+      "single committed-face corruption ${payment_predicate_labels[$predicate_index]}"
+  else
+    assert_payment_audit_reconciliation_fails_closed \
+      "single enumerator predicate corruption ${payment_predicate_labels[$predicate_index]}"
+  fi
   restore_complete_payment_truth
 done
 
@@ -1899,8 +1909,14 @@ for ((left_index = 0; left_index < ${#payment_predicate_mutations[@]}; left_inde
       "$first_mutation; SELECT ROW_COUNT(); $second_mutation; SELECT ROW_COUNT()")"
     assert_equal $'1\n1' "$mutation_counts" \
       "paired consistency fault injection changed one row per fault: ${payment_predicate_labels[$left_index]} + ${payment_predicate_labels[$right_index]}"
-    assert_payment_audit_reconciliation_fails_closed \
-      "paired enumerator predicate corruption ${payment_predicate_labels[$left_index]} + ${payment_predicate_labels[$right_index]}"
+    if is_committed_payment_face_index "$left_index" \
+      && is_committed_payment_face_index "$right_index"; then
+      assert_payment_truth_fails_closed \
+        "paired committed-face corruption ${payment_predicate_labels[$left_index]} + ${payment_predicate_labels[$right_index]}"
+    else
+      assert_payment_audit_reconciliation_fails_closed \
+        "paired enumerator predicate corruption ${payment_predicate_labels[$left_index]} + ${payment_predicate_labels[$right_index]}"
+    fi
     restore_complete_payment_truth
   done
 done

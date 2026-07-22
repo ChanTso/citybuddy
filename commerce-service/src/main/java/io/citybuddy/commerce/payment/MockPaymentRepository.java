@@ -16,10 +16,6 @@ public class MockPaymentRepository {
     this.jdbc = jdbc;
   }
 
-  public Optional<OrderTruth> findOrder(String orderId) {
-    return findOrder(orderId, "");
-  }
-
   public Optional<OrderTruth> findOrderForUpdate(String orderId) {
     return findOrder(orderId, " FOR UPDATE");
   }
@@ -155,6 +151,14 @@ public class MockPaymentRepository {
         correlationId);
   }
 
+  public Optional<AttemptRecord> findAttemptByCorrelation(String correlationId) {
+    return queryAttempt(
+        "SELECT "
+            + attemptColumns()
+            + " FROM mock_payment_attempt WHERE callback_correlation_id = ?",
+        correlationId);
+  }
+
   public Optional<AttemptRecord> findEvaluationAttemptByCorrelationForUpdate(
       String correlationId, String sandboxId) {
     return queryAttempt(
@@ -210,6 +214,14 @@ public class MockPaymentRepository {
     return queryCallback(
         "SELECT " + callbackColumns() + " FROM mock_payment_callback WHERE callback_event_id = ?",
         eventId);
+  }
+
+  public Optional<CallbackRecord> findCallbackByCorrelation(String correlationId) {
+    return queryCallback(
+        "SELECT "
+            + callbackColumns()
+            + " FROM mock_payment_callback WHERE callback_correlation_id = ?",
+        correlationId);
   }
 
   public Optional<CallbackRecord> findCallbackByAttempt(String attemptId) {
@@ -332,6 +344,19 @@ public class MockPaymentRepository {
     return count != null && count == 1;
   }
 
+  public boolean hasEvaluationPaymentMovementFace(String orderId, String sandboxId) {
+    Integer count =
+        jdbc.queryForObject(
+            """
+            SELECT COUNT(*) FROM inventory_ledger
+            WHERE order_id = ? AND sandbox_id = ? AND movement_type = 'STANDARD_PAYMENT'
+            """,
+            Integer.class,
+            orderId,
+            sandboxId);
+    return count != null && count > 0;
+  }
+
   public boolean hasPaymentAuditReference(CallbackRecord callback, long entityVersion) {
     Integer count =
         jdbc.queryForObject(
@@ -349,6 +374,28 @@ public class MockPaymentRepository {
             callback.callbackEventId(),
             entityVersion);
     return count != null && count == 1;
+  }
+
+  public boolean hasEvaluationPaymentAuditFace(
+      String sandboxId,
+      String supportSessionId,
+      String traceId,
+      String operationId,
+      String callbackEventId) {
+    Integer count =
+        jdbc.queryForObject(
+            """
+            SELECT COUNT(*) FROM eval_commerce_audit_reference
+            WHERE sandbox_id = ? AND entity_type = 'PAYMENT_CALLBACK'
+              AND (entity_id = ? OR support_session_id = ? OR trace_id = ? OR operation_id = ?)
+            """,
+            Integer.class,
+            sandboxId,
+            callbackEventId,
+            supportSessionId,
+            traceId,
+            operationId);
+    return count != null && count > 0;
   }
 
   private Optional<AttemptRecord> queryAttempt(String sql, Object... arguments) {
