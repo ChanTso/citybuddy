@@ -63,10 +63,30 @@ def test_payment_schema_and_code_keep_production_and_evaluation_truth_separate()
     assert "chk_standard_order_eval_binding" in migration
     assert "chk_mock_payment_callback_eval_context" in migration
     assert "PAYMENT_CALLBACK" in migration
-    assert "fenceSandbox(request.sandboxId());" in service
-    assert service.index("fenceSandbox(request.sandboxId());") < service.index(
-        "findAttemptByCorrelationForUpdate"
+    callback_once = service[
+        service.index("private MockPaymentCallbackResult callbackOnce") : service.index(
+            "private MockPaymentCallbackResult resolveCommittedStandardCallback"
+        )
+    ]
+    assert callback_once.index("findEvaluationAttemptByCorrelationForUpdate") < callback_once.index(
+        "resolveCommittedEvaluationCallback"
     )
+    assert callback_once.index("resolveCommittedEvaluationCallback") < callback_once.index(
+        "fenceSandbox(request.sandboxId());"
+    )
+    committed_replay = service[
+        service.index(
+            "private MockPaymentCallbackResult resolveCommittedEvaluationCallback"
+        ) : service.index("private static void requireSameCallbackFace")
+    ]
+    for committed_face in (
+        "findCallbackByCorrelation",
+        "findCallbackByAttempt",
+        "findEvaluationOrderForUpdate",
+        "hasEvaluationPaymentMovementFace",
+        "hasEvaluationPaymentAuditFace",
+    ):
+        assert committed_face in committed_replay
     assert "monotonicEvaluationAuditCreatedAt" in service
     assert service.index("fenceSandbox(request.sandboxId());") < service.index(
         "monotonicEvaluationAuditCreatedAt"
