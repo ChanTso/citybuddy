@@ -265,3 +265,11 @@ This file records only factual pitfalls supported by merged pull-request, commit
 - 根因：既有连续执行规则把已经无歧义归因的外部基础设施失败也作为必须停止的基础设施阻塞，无法区分需要所有者决策的代码或编排失败与唯一合理动作始终相同的瞬时外部故障，因而重复产生没有决策含量的授权往返。
 - 解决：仅当 required-check 证据证明失败发生在仓库代码执行前或明显独立于仓库代码，且属于镜像仓库拉取失败/超时、runner 网络故障、runner 资源耗尽或 CI 平台错误时，允许 unchanged check/workflow 自动重跑一次；该次重跑不消耗恢复周期，但必须记录原始证据与结论。同类外部失败重跑后复现即停止，产品代码、测试、仓库编排或归因不唯一的失败不得使用该豁免。
 - 结论：无决策含量的停顿应转为窄边界规则；一次性外部基础设施重跑豁免必须以唯一归因、完整证据和复现即停为前提，不能成为掩盖真实失败的后门。
+
+## Maintenance — Standard-order concurrency truth and fresh test evidence
+
+- 现象：标准订单八路同 key、同意图并发中，兄弟请求已经成功提交订单时，另一请求仍可能耗尽有限竞争重试并返回 `CONCURRENCY_EXHAUSTED` 503。另一个聚焦 Maven 命令在两个 required class 全部因环境条件跳过时仍以 0 退出；若只记录命令结果，便会把未执行误作证据。
+- 证据链接：[maintenance PR #51](https://github.com/ChanTso/citybuddy/pull/51)
+- 根因：`OrderService` 的竞争耗尽分支直接渲染不可用，没有在独立的最终只读事务中重新锁定用户/幂等键并解析已提交真值。集成编排则没有在运行前精确移除 required class 的旧 Surefire XML，也没有在运行后核对每个选中类的 executed/skipped/failure/error 计数；命令退出码因此不能证明目标测试实际执行。
+- 解决：有限写入重试耗尽后只进行一次加锁真值解析：同意图兄弟提交返回既有订单且不再执行库存、订单或 Outbox 写入，冲突意图保持 409，确认没有提交结果的耗尽固定为 409，只有明确数据库资源或事务获取失败使用 `DEPENDENCY_UNAVAILABLE` 503。catalog 真实集成用五轮八路同意图并发和 MySQL `offline_mode` 断连/恢复分别证明收敛与不可用分类。共享 shell 门禁在 Maven 前删除每个 required class 的旧报告，运行后逐类要求 `tests > 0` 且 `skipped/failures/errors = 0`；静态库存测试绑定所有 `-Dtest` 入口与完整类清单，catalog 和 identity 两条真实 Surefire 集成入口均通过。
+- 结论：并发幂等的正确性不仅是不重复写入；竞争耗尽时必须回到已提交真值，因为兄弟请求可能已完成，直接报告不可用会制造相互矛盾的结果。条件测试的进程退出 0 也不是执行证据；fresh runner 报告与逐类零跳过计数必须成为编排自身的 fail-closed 门禁。
