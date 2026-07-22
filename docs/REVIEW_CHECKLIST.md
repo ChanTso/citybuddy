@@ -239,7 +239,9 @@ request. A later semantic diff change requires the checklist to be executed and 
   and reconcile that five-face set in the mutation transaction before sandbox liveness. Treat each
   face's cardinality as the closed partition `0`, `1`, or `>=2`: zero is missing, one must match every
   committed content column exactly, and two or more is inconsistent even when one row is otherwise
-  valid. Real evidence covers the five faces across all three cardinalities, every persisted content
+  valid. Use sandbox ownership only to derive the stable-key set under review; enumerate every row for
+  those keys before asserting sandbox/type/status content, so a damaged sibling cannot leave scope. Real
+  evidence covers the five faces across all three cardinalities, every persisted content
   column, face pairs, and replay waiting across concurrent commit plus completion; it must observe the
   signed callback boundary and reject inconsistency with 409 rather than 403 or 500. A further proposed
   damage dimension must be named explicitly and classified by the owner: a mechanically bounded axis

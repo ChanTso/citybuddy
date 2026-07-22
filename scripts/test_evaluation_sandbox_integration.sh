@@ -1821,7 +1821,7 @@ INSERT INTO mock_payment_callback (callback_event_id, callback_idempotency_key, 
   callback_correlation_id, sandbox_id, support_session_id, trace_id, operation_id, intent_hash,
   requested_outcome, result_state, created_at)
 SELECT '$duplicate_callback_event_id', 'duplicate-cardinality-callback',
-  '$duplicate_callback_attempt_id', callback_correlation_id, sandbox_id, support_session_id,
+  '$duplicate_callback_attempt_id', callback_correlation_id, 'sandbox-main', support_session_id,
   trace_id, operation_id, intent_hash, requested_outcome, result_state, created_at
 FROM mock_payment_callback WHERE callback_event_id = '$payment_event_id'
 "
@@ -1838,7 +1838,7 @@ INSERT INTO mock_payment_attempt (attempt_id, callback_correlation_id, user_subj
   order_kind, sandbox_id, request_idempotency_key, intent_hash, amount_minor, refunded_amount_minor,
   currency, state, state_version, succeeded_at, created_at)
 SELECT '$duplicate_attempt_id', callback_correlation_id, user_subject,
-  '$duplicate_attempt_order_id', order_kind, sandbox_id, 'duplicate-cardinality-attempt',
+  '$duplicate_attempt_order_id', order_kind, 'sandbox-main', 'duplicate-cardinality-attempt',
   intent_hash, amount_minor, refunded_amount_minor, currency, state, state_version, succeeded_at,
   created_at FROM mock_payment_attempt WHERE attempt_id = '$payment_attempt_id'
 "
@@ -1854,7 +1854,7 @@ mysql_query root "$root_password" commerce_db "
 INSERT INTO standard_order (order_id, user_subject, sandbox_id, evaluation_owner_handle,
   product_id, product_name, unit_price_minor, currency, quantity, total_price_minor,
   product_version, status, state_version, created_at)
-SELECT order_id, user_subject, sandbox_id, evaluation_owner_handle, product_id,
+SELECT order_id, user_subject, 'sandbox-main', evaluation_owner_handle, product_id,
   CONCAT(product_name, ' duplicate-cardinality'), unit_price_minor, currency, quantity,
   total_price_minor, product_version, status, state_version, created_at
 FROM standard_order WHERE order_id = '$payment_order_id' LIMIT 1
@@ -1873,7 +1873,7 @@ INSERT INTO inventory_ledger (movement_id, business_event_key, movement_type, or
   reservation_id, activity_id, product_id, sandbox_id, inventory_delta, activity_quota_delta,
   payment_amount_minor, payment_currency, created_at)
 SELECT '$duplicate_ledger_movement_id', 'duplicate-cardinality-ledger', movement_type, order_id,
-  reservation_id, activity_id, product_id, sandbox_id, inventory_delta, activity_quota_delta,
+  reservation_id, activity_id, product_id, 'sandbox-main', inventory_delta, activity_quota_delta,
   payment_amount_minor, payment_currency, created_at
 FROM inventory_ledger WHERE movement_id = '$payment_movement_id'
 "
@@ -1889,7 +1889,7 @@ mysql_query root "$root_password" commerce_db "
 INSERT INTO eval_commerce_audit_reference (audit_reference_id, sandbox_id, support_session_id,
   trace_id, operation_id, entity_type, entity_id, entity_version, outcome, created_at,
   created_at_anchor)
-SELECT '$duplicate_audit_reference_id', sandbox_id, support_session_id, trace_id,
+SELECT '$duplicate_audit_reference_id', 'sandbox-main', support_session_id, trace_id,
   '$duplicate_audit_operation_id', entity_type, entity_id, entity_version, outcome, created_at,
   created_at_anchor FROM eval_commerce_audit_reference
 WHERE audit_reference_id = '$payment_audit_reference_id'

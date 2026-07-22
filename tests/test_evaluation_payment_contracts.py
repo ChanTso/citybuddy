@@ -96,9 +96,20 @@ def test_payment_schema_and_code_keep_production_and_evaluation_truth_separate()
     assert "insertPaymentAuditReference" in repository
     assert "sandbox_id <=> ?" in repository
     assert "findEvaluationOrderForUpdate" in repository
-    assert "WHERE order_id = ? AND sandbox_id = ?" in repository
+    assert "FROM standard_order WHERE order_id = ?" in repository
+    assert "filter(row -> sandboxId.equals(row.sandboxId()))" in repository
     assert "findEvaluationAttemptByCorrelationForUpdate" in repository
-    assert "AND sandbox_id = ? FOR UPDATE" in repository
+    assert "FROM mock_payment_attempt WHERE callback_correlation_id = ? FOR UPDATE" in repository
+    assert "filter(attempt -> sandboxId.equals(attempt.sandboxId()))" in repository
+    audit_cardinality = repository[
+        repository.index("public int evaluationPaymentAuditFaceCardinality") : repository.index(
+            "private Optional<AttemptRecord> queryAttempt"
+        )
+    ]
+    assert "WHERE entity_id = ?" in audit_cardinality
+    assert "OR (sandbox_id = ?" in audit_cardinality
+    for signed_context_locator in ("support_session_id", "trace_id", "operation_id"):
+        assert signed_context_locator in audit_cardinality
     assert "l.product_id = o.product_id" in (
         ROOT
         / "commerce-service/src/main/java/io/citybuddy/commerce/evaluation"

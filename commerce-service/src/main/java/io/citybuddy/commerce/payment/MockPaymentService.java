@@ -294,7 +294,7 @@ public final class MockPaymentService {
     boolean committedOrder =
         order != null && (!"UNPAID".equals(order.status()) || order.stateVersion() != 1);
     int movementCardinality =
-        repository.evaluationPaymentMovementFaceCardinality(request.orderId(), request.sandboxId());
+        repository.evaluationPaymentMovementFaceCardinality(request.orderId());
     int auditCardinality =
         repository.evaluationPaymentAuditFaceCardinality(
             request.sandboxId(),

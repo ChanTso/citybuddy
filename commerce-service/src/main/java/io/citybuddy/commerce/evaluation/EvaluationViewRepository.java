@@ -280,7 +280,9 @@ public final class EvaluationViewRepository {
                 """
                 SELECT callback_correlation_id
                 FROM mock_payment_callback
-                WHERE sandbox_id = ?
+                WHERE callback_correlation_id IN (
+                  SELECT callback_correlation_id FROM mock_payment_callback WHERE sandbox_id = ?
+                )
                 GROUP BY callback_correlation_id HAVING COUNT(*) > 1
                 """,
                 sandboxId)
@@ -289,7 +291,9 @@ public final class EvaluationViewRepository {
                 """
                 SELECT callback_correlation_id
                 FROM mock_payment_attempt
-                WHERE sandbox_id = ?
+                WHERE callback_correlation_id IN (
+                  SELECT callback_correlation_id FROM mock_payment_attempt WHERE sandbox_id = ?
+                )
                 GROUP BY callback_correlation_id HAVING COUNT(*) > 1
                 """,
                 sandboxId)
@@ -298,7 +302,7 @@ public final class EvaluationViewRepository {
                 """
                 SELECT order_id
                 FROM standard_order
-                WHERE sandbox_id = ?
+                WHERE order_id IN (SELECT order_id FROM standard_order WHERE sandbox_id = ?)
                 GROUP BY order_id HAVING COUNT(*) > 1
                 """,
                 sandboxId)
@@ -307,18 +311,19 @@ public final class EvaluationViewRepository {
                 """
                 SELECT order_id
                 FROM inventory_ledger
-                WHERE sandbox_id = ?
+                WHERE order_id IN (SELECT order_id FROM standard_order WHERE sandbox_id = ?)
                 GROUP BY order_id HAVING COUNT(*) > 1
                 """,
                 sandboxId)
             == 0
         && duplicateGroupCount(
                 """
-                SELECT audit.entity_id
-                FROM eval_commerce_audit_reference audit
-                JOIN mock_payment_callback callback ON callback.callback_event_id = audit.entity_id
-                WHERE audit.sandbox_id = ?
-                GROUP BY audit.entity_id HAVING COUNT(*) > 1
+                SELECT entity_id
+                FROM eval_commerce_audit_reference
+                WHERE entity_id IN (
+                  SELECT callback_event_id FROM mock_payment_callback WHERE sandbox_id = ?
+                )
+                GROUP BY entity_id HAVING COUNT(*) > 1
                 """,
                 sandboxId)
             == 0;
@@ -403,7 +408,7 @@ public final class EvaluationViewRepository {
                activity_id, product_id, sandbox_id, inventory_delta, activity_quota_delta,
                payment_amount_minor, payment_currency
         FROM inventory_ledger
-        WHERE sandbox_id = ? AND movement_type = 'STANDARD_PAYMENT'
+        WHERE order_id IN (SELECT order_id FROM standard_order WHERE sandbox_id = ?)
         ORDER BY order_id, movement_id
         """,
         (result, row) ->
@@ -435,9 +440,13 @@ public final class EvaluationViewRepository {
                a.amount_minor AS attempt_amount_minor, a.currency AS attempt_currency,
                a.state AS attempt_state, a.state_version AS attempt_state_version
         FROM mock_payment_callback c
-        JOIN mock_payment_attempt a ON a.attempt_id = c.attempt_id
-        WHERE c.sandbox_id = ?
-          AND c.requested_outcome = 'SUCCEEDED' AND c.result_state = 'APPLIED'
+        LEFT JOIN mock_payment_attempt a ON a.attempt_id = c.attempt_id
+        WHERE c.callback_correlation_id IN (
+                SELECT callback_correlation_id FROM mock_payment_attempt WHERE sandbox_id = ?
+              )
+           OR c.callback_event_id IN (
+                SELECT entity_id FROM eval_commerce_audit_reference WHERE sandbox_id = ?
+              )
         ORDER BY a.order_id, c.callback_event_id
         """,
         (result, row) ->
@@ -463,6 +472,7 @@ public final class EvaluationViewRepository {
                 result.getString("attempt_currency"),
                 result.getString("attempt_state"),
                 result.getLong("attempt_state_version")),
+        sandboxId,
         sandboxId);
   }
 
@@ -569,6 +579,7 @@ public final class EvaluationViewRepository {
                     callbacks.stream()
                         .filter(callback -> callback.callbackEventId().equals(reference.entityId()))
                         .map(SucceededCallbackTruth::attemptOrderId)
+                        .filter(Objects::nonNull)
                         .findFirst()
                         .orElse(null))
             .filter(Objects::nonNull)

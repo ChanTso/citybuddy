@@ -81,7 +81,7 @@ public class MockPaymentRepository {
         jdbc.query(
             "SELECT order_id, user_subject, sandbox_id, evaluation_owner_handle, product_id, "
                 + "total_price_minor, currency, status, state_version "
-                + "FROM standard_order WHERE order_id = ? AND sandbox_id = ?"
+                + "FROM standard_order WHERE order_id = ?"
                 + lockClause,
             (result, row) ->
                 new OrderTruth(
@@ -97,12 +97,11 @@ public class MockPaymentRepository {
                     result.getString("currency"),
                     result.getString("status"),
                     result.getLong("state_version")),
-            orderId,
-            sandboxId);
+            orderId);
     if (rows.size() > 1) {
       throw new MockPaymentIntegrityException("Evaluation payment order uniqueness is corrupted");
     }
-    return rows.stream().findFirst();
+    return rows.stream().filter(row -> sandboxId.equals(row.sandboxId())).findFirst();
   }
 
   public Optional<AttemptRecord> findAttemptByRequestForUpdate(String user, String key) {
@@ -163,12 +162,11 @@ public class MockPaymentRepository {
   public Optional<AttemptRecord> findEvaluationAttemptByCorrelationForUpdate(
       String correlationId, String sandboxId) {
     return queryAttempt(
-        "SELECT "
-            + attemptColumns()
-            + " FROM mock_payment_attempt WHERE callback_correlation_id = ? "
-            + "AND sandbox_id = ? FOR UPDATE",
-        correlationId,
-        sandboxId);
+            "SELECT "
+                + attemptColumns()
+                + " FROM mock_payment_attempt WHERE callback_correlation_id = ? FOR UPDATE",
+            correlationId)
+        .filter(attempt -> sandboxId.equals(attempt.sandboxId()));
   }
 
   public Optional<AttemptRecord> findAttemptByIdForUpdate(String attemptId) {
@@ -345,16 +343,15 @@ public class MockPaymentRepository {
     return count != null && count == 1;
   }
 
-  public int evaluationPaymentMovementFaceCardinality(String orderId, String sandboxId) {
+  public int evaluationPaymentMovementFaceCardinality(String orderId) {
     Integer count =
         jdbc.queryForObject(
             """
             SELECT COUNT(*) FROM inventory_ledger
-            WHERE order_id = ? AND sandbox_id = ?
+            WHERE order_id = ?
             """,
             Integer.class,
-            orderId,
-            sandboxId);
+            orderId);
     return count == null ? 0 : count;
   }
 
@@ -409,12 +406,13 @@ public class MockPaymentRepository {
         jdbc.queryForObject(
             """
             SELECT COUNT(*) FROM eval_commerce_audit_reference
-            WHERE sandbox_id = ?
-              AND (entity_id = ? OR support_session_id = ? OR trace_id = ? OR operation_id = ?)
+            WHERE entity_id = ?
+              OR (sandbox_id = ?
+                  AND (support_session_id = ? OR trace_id = ? OR operation_id = ?))
             """,
             Integer.class,
-            sandboxId,
             callbackEventId,
+            sandboxId,
             supportSessionId,
             traceId,
             operationId);
