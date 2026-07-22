@@ -13,12 +13,17 @@ import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.when;
 
+import java.nio.charset.StandardCharsets;
+import java.security.MessageDigest;
+import java.security.NoSuchAlgorithmException;
+import java.util.HexFormat;
 import java.util.Optional;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.mockito.ArgumentCaptor;
 import org.springframework.dao.CannotAcquireLockException;
 import org.springframework.dao.DataAccessResourceFailureException;
+import org.springframework.transaction.CannotCreateTransactionException;
 import org.springframework.transaction.PlatformTransactionManager;
 import org.springframework.transaction.TransactionStatus;
 import org.springframework.transaction.support.TransactionTemplate;
@@ -145,24 +150,123 @@ class OrderServiceTest {
   }
 
   @Test
-  void recognizedConcurrencyExhaustsAtConfiguredBound() {
+  void recognizedConcurrencyExhaustionResolvesACommittedSiblingResult() {
     when(repository.findIdempotencyForUpdate("user-1", "key-1"))
-        .thenThrow(new CannotAcquireLockException("controlled lock conflict"));
+        .thenThrow(new CannotAcquireLockException("controlled lock conflict"))
+        .thenThrow(new CannotAcquireLockException("controlled lock conflict"))
+        .thenThrow(new CannotAcquireLockException("controlled lock conflict"))
+        .thenReturn(
+            Optional.of(
+                new OrderRepository.IdempotencyRecord(intentHash("product-1", 1, 7), "order-1")));
+    when(repository.findOwnedOrder("user-1", "order-1", "corr")).thenReturn(result("corr", false));
+
+    OrderResult resolved = service.create("user-1", "key-1", request("product-1", 1, 7), "corr");
+
+    assertThat(resolved.replayed()).isTrue();
+    verify(repository, times(4)).findIdempotencyForUpdate("user-1", "key-1");
+    verify(repository, never())
+        .reserveIdempotency(anyString(), anyString(), anyString(), anyString());
+    verify(transactionManager, times(3)).rollback(any());
+    verify(transactionManager).commit(any());
+  }
+
+  @Test
+  void recognizedConcurrencyExhaustionWithoutCommittedTruthIsAStableConflict() {
+    when(repository.findIdempotencyForUpdate("user-1", "key-1"))
+        .thenThrow(new CannotAcquireLockException("controlled lock conflict"))
+        .thenThrow(new CannotAcquireLockException("controlled lock conflict"))
+        .thenThrow(new CannotAcquireLockException("controlled lock conflict"))
+        .thenReturn(Optional.empty());
 
     assertThatThrownBy(() -> service.create("user-1", "key-1", request("product-1", 1, 7), "corr"))
         .isInstanceOfSatisfying(
             OrderException.class,
-            exception ->
-                assertThat(exception.category()).isEqualTo(OrderCategory.CONCURRENCY_EXHAUSTED));
+            exception -> {
+              assertThat(exception.status()).isEqualTo(409);
+              assertThat(exception.category()).isEqualTo(OrderCategory.CONCURRENCY_EXHAUSTED);
+            });
 
-    verify(repository, times(3)).findIdempotencyForUpdate("user-1", "key-1");
+    verify(repository, times(4)).findIdempotencyForUpdate("user-1", "key-1");
     verify(transactionManager, times(3)).rollback(any());
+    verify(transactionManager).commit(any());
   }
 
   @Test
-  void unexpectedDatabaseFailureStaysVisibleAndIsNotRetried() {
+  void recognizedConcurrencyExhaustionPreservesACommittedConflictingIntent() {
+    when(repository.findIdempotencyForUpdate("user-1", "key-1"))
+        .thenThrow(new CannotAcquireLockException("controlled lock conflict"))
+        .thenThrow(new CannotAcquireLockException("controlled lock conflict"))
+        .thenThrow(new CannotAcquireLockException("controlled lock conflict"))
+        .thenReturn(Optional.of(new OrderRepository.IdempotencyRecord("different", "order-1")));
+
+    assertThatThrownBy(() -> service.create("user-1", "key-1", request("product-1", 1, 7), "corr"))
+        .isInstanceOfSatisfying(
+            OrderException.class,
+            exception -> {
+              assertThat(exception.status()).isEqualTo(409);
+              assertThat(exception.category()).isEqualTo(OrderCategory.IDEMPOTENCY_CONFLICT);
+            });
+
+    verify(repository, times(4)).findIdempotencyForUpdate("user-1", "key-1");
+    verify(repository, never()).findOwnedOrder(anyString(), anyString(), anyString());
+  }
+
+  @Test
+  void finalCommittedTruthResolutionPreservesDatabaseUnavailability() {
+    when(repository.findIdempotencyForUpdate("user-1", "key-1"))
+        .thenThrow(new CannotAcquireLockException("controlled lock conflict"))
+        .thenThrow(new CannotAcquireLockException("controlled lock conflict"))
+        .thenThrow(new CannotAcquireLockException("controlled lock conflict"))
+        .thenThrow(new DataAccessResourceFailureException("controlled database outage"));
+
+    assertThatThrownBy(() -> service.create("user-1", "key-1", request("product-1", 1, 7), "corr"))
+        .isInstanceOfSatisfying(
+            OrderException.class,
+            exception -> {
+              assertThat(exception.status()).isEqualTo(503);
+              assertThat(exception.category()).isEqualTo(OrderCategory.DEPENDENCY_UNAVAILABLE);
+            });
+
+    verify(repository, times(4)).findIdempotencyForUpdate("user-1", "key-1");
+  }
+
+  @Test
+  void databaseResourceFailureIsUnavailableAndIsNotRetried() {
     DataAccessResourceFailureException failure =
-        new DataAccessResourceFailureException("controlled non-concurrency failure");
+        new DataAccessResourceFailureException("controlled database outage");
+    when(repository.findIdempotencyForUpdate("user-1", "key-1")).thenThrow(failure);
+
+    assertThatThrownBy(() -> service.create("user-1", "key-1", request("product-1", 1, 7), "corr"))
+        .isInstanceOfSatisfying(
+            OrderException.class,
+            exception -> {
+              assertThat(exception.status()).isEqualTo(503);
+              assertThat(exception.category()).isEqualTo(OrderCategory.DEPENDENCY_UNAVAILABLE);
+            });
+
+    verify(repository).findIdempotencyForUpdate("user-1", "key-1");
+    verify(transactionManager).rollback(any());
+  }
+
+  @Test
+  void transactionAcquisitionFailureIsUnavailable() {
+    when(transactionManager.getTransaction(any()))
+        .thenThrow(new CannotCreateTransactionException("controlled database outage"));
+
+    assertThatThrownBy(() -> service.create("user-1", "key-1", request("product-1", 1, 7), "corr"))
+        .isInstanceOfSatisfying(
+            OrderException.class,
+            exception -> {
+              assertThat(exception.status()).isEqualTo(503);
+              assertThat(exception.category()).isEqualTo(OrderCategory.DEPENDENCY_UNAVAILABLE);
+            });
+
+    verifyNoInteractions(repository);
+  }
+
+  @Test
+  void unexpectedProgrammerFailureStaysVisibleAndIsNotRetried() {
+    IllegalStateException failure = new IllegalStateException("controlled programmer failure");
     when(repository.findIdempotencyForUpdate("user-1", "key-1")).thenThrow(failure);
 
     assertThatThrownBy(() -> service.create("user-1", "key-1", request("product-1", 1, 7), "corr"))
@@ -183,6 +287,18 @@ class OrderServiceTest {
   private static OrderRepository.ProductSnapshot product(long stock, long version) {
     return new OrderRepository.ProductSnapshot(
         "product-1", "Product", 500, "AUD", stock, true, "PUBLISHED", version);
+  }
+
+  private static String intentHash(String productId, int quantity, long version) {
+    String canonical = productId.length() + ":" + productId + ":" + quantity + ":" + version;
+    try {
+      return HexFormat.of()
+          .formatHex(
+              MessageDigest.getInstance("SHA-256")
+                  .digest(canonical.getBytes(StandardCharsets.UTF_8)));
+    } catch (NoSuchAlgorithmException exception) {
+      throw new IllegalStateException(exception);
+    }
   }
 
   private static OrderResult result(String correlationId, boolean replayed) {

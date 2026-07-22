@@ -6,7 +6,9 @@ import java.security.NoSuchAlgorithmException;
 import java.util.HexFormat;
 import java.util.Set;
 import java.util.UUID;
+import org.springframework.dao.DataAccessResourceFailureException;
 import org.springframework.dao.PessimisticLockingFailureException;
+import org.springframework.transaction.CannotCreateTransactionException;
 import org.springframework.transaction.support.TransactionTemplate;
 
 public final class OrderService {
@@ -39,12 +41,10 @@ public final class OrderService {
           | OrderRepository.IdempotencyRaceException
           | StockRaceException exception) {
         if (attempt == properties.maximumConcurrencyAttempts()) {
-          throw failure(
-              503,
-              OrderCategory.CONCURRENCY_EXHAUSTED,
-              "Order concurrency retry bound exhausted",
-              correlationId);
+          return resolveCommittedAfterConcurrency(user, idempotencyKey, validated, correlationId);
         }
+      } catch (DataAccessResourceFailureException | CannotCreateTransactionException exception) {
+        throw unavailable(correlationId);
       }
     }
     throw new IllegalStateException("Unreachable order retry state");
@@ -52,16 +52,9 @@ public final class OrderService {
 
   private OrderResult createOnce(
       String user, String idempotencyKey, ValidatedRequest request, String correlationId) {
-    var existing = repository.findIdempotencyForUpdate(user, idempotencyKey);
-    if (existing.isPresent()) {
-      if (!existing.get().intentHash().equals(request.intentHash())) {
-        throw failure(
-            409,
-            OrderCategory.IDEMPOTENCY_CONFLICT,
-            "Idempotency key is already bound to a different order intent",
-            correlationId);
-      }
-      return repository.findOwnedOrder(user, existing.get().orderId(), correlationId).asReplay();
+    OrderResult committed = resolveCommitted(user, idempotencyKey, request, correlationId);
+    if (committed != null) {
+      return committed;
     }
 
     String orderId = UUID.randomUUID().toString();
@@ -94,6 +87,43 @@ public final class OrderService {
     repository.insertOrder(user, orderId, product, request.quantity());
     repository.insertOutbox(orderId, product, request.quantity());
     return repository.findOwnedOrder(user, orderId, correlationId);
+  }
+
+  private OrderResult resolveCommittedAfterConcurrency(
+      String user, String idempotencyKey, ValidatedRequest request, String correlationId) {
+    try {
+      OrderResult committed =
+          transactions.execute(
+              status -> resolveCommitted(user, idempotencyKey, request, correlationId));
+      if (committed != null) {
+        return committed;
+      }
+    } catch (PessimisticLockingFailureException exception) {
+      // The bounded mutation attempts are exhausted; this final transaction only observes truth.
+    } catch (DataAccessResourceFailureException | CannotCreateTransactionException exception) {
+      throw unavailable(correlationId);
+    }
+    throw failure(
+        409,
+        OrderCategory.CONCURRENCY_EXHAUSTED,
+        "Order concurrency retry bound exhausted without a committed result",
+        correlationId);
+  }
+
+  private OrderResult resolveCommitted(
+      String user, String idempotencyKey, ValidatedRequest request, String correlationId) {
+    var existing = repository.findIdempotencyForUpdate(user, idempotencyKey);
+    if (existing.isEmpty()) {
+      return null;
+    }
+    if (!existing.get().intentHash().equals(request.intentHash())) {
+      throw failure(
+          409,
+          OrderCategory.IDEMPOTENCY_CONFLICT,
+          "Idempotency key is already bound to a different order intent",
+          correlationId);
+    }
+    return repository.findOwnedOrder(user, existing.get().orderId(), correlationId).asReplay();
   }
 
   private ValidatedRequest validate(
@@ -149,6 +179,11 @@ public final class OrderService {
   private static OrderException failure(
       int status, OrderCategory category, String message, String correlationId) {
     return new OrderException(status, category, message, correlationId);
+  }
+
+  private static OrderException unavailable(String correlationId) {
+    return failure(
+        503, OrderCategory.DEPENDENCY_UNAVAILABLE, "Order database is unavailable", correlationId);
   }
 
   private record ValidatedRequest(

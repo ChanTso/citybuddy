@@ -124,6 +124,7 @@ def test_order_result_and_rejection_expose_safe_deterministic_evidence() -> None
         "STALE_VERSION",
         "INSUFFICIENT_STOCK",
         "CONCURRENCY_EXHAUSTED",
+        "DEPENDENCY_UNAVAILABLE",
     }
 
 
