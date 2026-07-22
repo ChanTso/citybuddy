@@ -229,6 +229,16 @@ request. A later semantic diff change requires the checklist to be executed and 
   cached dependencies, force cache expiry before the failure; include timing pressure and retain the
   reason code, response, authoritative state, and reached fault boundary so a status coincidence
   cannot pass as attribution.
+- Resolve an already committed idempotent result from its complete durable truth before consulting
+  mutable admission or liveness state. Exact replay returns that result without mutation even after
+  admission closes; conflicting intent or damaged committed truth remains a deterministic conflict.
+  Only an operation with no committed result may enter the current liveness and locking path.
+- Review exception-to-HTTP mappings against the full subtype hierarchy. Do not map a broad database
+  superclass such as `DataAccessException` to unavailable when it also contains lock-contention and
+  constraint-conflict subtypes. Prove connection/resource failure, lock timeout/deadlock, duplicate
+  constraint, same-intent replay, and conflicting-intent replay independently; transient contention
+  must converge inside the service to committed truth or conflict rather than escape into a 503
+  boundary handler.
 
 ### Faults never become terminal business decisions
 
@@ -314,6 +324,17 @@ request. A later semantic diff change requires the checklist to be executed and 
   no containers, networks, or host-port registry artifacts. A resource-stop failure must always emit
   an unambiguous diagnostic even when the primary test already failed; preserve the primary exit code
   without making the secondary cleanup failure invisible.
+
+### Application-level readiness after dependency recovery
+
+- Treat container health and application readiness as separate facts. After restarting or restoring
+  a dependency, gate follow-up assertions on an application endpoint that actually exercises the
+  recovered client or connection pool and returns its expected success status; a healthy database,
+  search, cache, or broker container does not prove the surviving application has reconnected.
+- Keep the controlled outage faithful to the runtime topology. If a dependency restart can receive a
+  new runtime-owned host port, either refresh every dependent endpoint first or inject the outage in
+  place without changing the published endpoint. A readiness timeout must retain application logs
+  and fail the test; it must not reinterpret a correct unavailable response as a product defect.
 
 ## Closeout maintenance
 
