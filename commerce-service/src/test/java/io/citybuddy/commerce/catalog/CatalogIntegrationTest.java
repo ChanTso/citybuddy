@@ -10,12 +10,19 @@ import com.nimbusds.jose.JWSHeader;
 import com.nimbusds.jose.crypto.RSASSASigner;
 import com.nimbusds.jwt.JWTClaimsSet;
 import com.nimbusds.jwt.SignedJWT;
+import io.citybuddy.commerce.order.OrderCategory;
+import io.citybuddy.commerce.order.OrderException;
+import io.citybuddy.commerce.order.OrderProperties;
 import io.citybuddy.commerce.order.OrderRepository;
+import io.citybuddy.commerce.order.OrderRequest;
+import io.citybuddy.commerce.order.OrderResult;
+import io.citybuddy.commerce.order.OrderService;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.security.KeyFactory;
 import java.security.interfaces.RSAPrivateKey;
 import java.security.spec.PKCS8EncodedKeySpec;
+import java.sql.Connection;
 import java.sql.DriverManager;
 import java.time.Duration;
 import java.time.Instant;
@@ -29,6 +36,7 @@ import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 import org.apache.rocketmq.client.apis.ClientConfiguration;
@@ -51,6 +59,8 @@ import org.springframework.http.HttpMethod;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
 import org.springframework.jdbc.core.JdbcTemplate;
+import org.springframework.jdbc.datasource.DataSourceTransactionManager;
+import org.springframework.jdbc.datasource.DriverManagerDataSource;
 import org.springframework.test.context.DynamicPropertyRegistry;
 import org.springframework.test.context.DynamicPropertySource;
 import org.springframework.transaction.support.TransactionTemplate;
@@ -319,6 +329,7 @@ class CatalogIntegrationTest {
     proveRealMysqlRollback();
     proveLimitedStockConcurrency();
     proveConcurrentDuplicateIdempotency();
+    proveControlledRetryExhaustionClassifications();
     proveOrderDatabaseUnavailabilityClassification();
   }
 
@@ -441,6 +452,143 @@ class CatalogIntegrationTest {
     assertTotalIdempotencyCount(10);
   }
 
+  private void proveControlledRetryExhaustionClassifications() throws Exception {
+    proveCommittedSiblingAfterControlledExhaustion();
+    proveConflictingSiblingAfterControlledExhaustion();
+    proveMissingTruthAfterControlledExhaustion();
+    assertTotalIdempotencyCount(12);
+  }
+
+  private void proveCommittedSiblingAfterControlledExhaustion() throws Exception {
+    String productId = "order-exhaustion-committed";
+    String idempotencyKey = "exhaustion-committed-key";
+    seedOrderProduct(productId, 5, true, "PUBLISHED", 1);
+    ControlledExhaustion result =
+        exhaustAgainstGapLock(
+            productId,
+            idempotencyKey,
+            1,
+            () -> postOrder(token(), idempotencyKey, orderIntent(productId, 1)));
+
+    assertThat(result.sibling().getStatusCode()).isEqualTo(HttpStatus.CREATED);
+    assertThat(result.target().replayed()).isTrue();
+    assertThat(result.target().orderId())
+        .isEqualTo(result.sibling().getBody().get("orderId").asText());
+    assertThat(result.finalResolutionReads()).isEqualTo(1);
+    assertOrderCardinality(productId, 4, 1, 1, 1);
+  }
+
+  private void proveConflictingSiblingAfterControlledExhaustion() throws Exception {
+    String productId = "order-exhaustion-conflict";
+    String idempotencyKey = "exhaustion-conflict-key";
+    seedOrderProduct(productId, 5, true, "PUBLISHED", 1);
+    ControlledExhaustion result =
+        exhaustAgainstGapLock(
+            productId,
+            idempotencyKey,
+            1,
+            () -> postOrder(token(), idempotencyKey, orderIntent(productId, 2)));
+
+    assertThat(result.sibling().getStatusCode()).isEqualTo(HttpStatus.CREATED);
+    assertThat(result.failure()).isNotNull();
+    assertThat(result.failure().status()).isEqualTo(409);
+    assertThat(result.failure().category()).isEqualTo(OrderCategory.IDEMPOTENCY_CONFLICT);
+    assertThat(result.finalResolutionReads()).isEqualTo(1);
+    assertOrderCardinality(productId, 3, 1, 1, 1);
+  }
+
+  private void proveMissingTruthAfterControlledExhaustion() throws Exception {
+    String productId = "order-exhaustion-missing";
+    String idempotencyKey = "exhaustion-missing-key";
+    seedOrderProduct(productId, 5, true, "PUBLISHED", 1);
+    ControlledExhaustion result = exhaustAgainstGapLock(productId, idempotencyKey, 1, () -> null);
+
+    assertThat(result.sibling()).isNull();
+    assertThat(result.failure()).isNotNull();
+    assertThat(result.failure().status()).isEqualTo(409);
+    assertThat(result.failure().category()).isEqualTo(OrderCategory.CONCURRENCY_EXHAUSTED);
+    assertThat(result.finalResolutionReads()).isEqualTo(1);
+    assertOrderCardinality(productId, 5, 0, 0, 0);
+  }
+
+  private ControlledExhaustion exhaustAgainstGapLock(
+      String productId,
+      String idempotencyKey,
+      int quantity,
+      java.util.concurrent.Callable<ResponseEntity<JsonNode>> sibling)
+      throws Exception {
+    var targetDataSource =
+        new DriverManagerDataSource(
+            required("CATALOG_MYSQL_URL"), "commerce_app", required("MYSQL_COMMERCE_APP_PASSWORD"));
+    JdbcTemplate targetJdbc = new JdbcTemplate(targetDataSource);
+    ExhaustionProbeRepository probe = new ExhaustionProbeRepository(targetJdbc, objectMapper);
+    OrderService oneAttemptService =
+        new OrderService(
+            probe,
+            new TransactionTemplate(new DataSourceTransactionManager(targetDataSource)),
+            new OrderProperties("order:create", 100, 1));
+    OrderRequest request = orderRequest(productId, quantity);
+    var executor = Executors.newSingleThreadExecutor();
+    Future<OrderResult> target = null;
+    ResponseEntity<JsonNode> siblingResponse = null;
+    try (Connection blocker = lockMissingIdempotencyGap(idempotencyKey)) {
+      target =
+          executor.submit(
+              () ->
+                  oneAttemptService.create(
+                      "catalog-user", idempotencyKey, request, "controlled-exhaustion"));
+      assertThat(probe.awaitFinalResolution()).isTrue();
+      blocker.rollback();
+      siblingResponse = sibling.call();
+      probe.allowFinalResolution();
+      try {
+        return new ControlledExhaustion(
+            target.get(10, TimeUnit.SECONDS), null, siblingResponse, probe.finalResolutionReads());
+      } catch (java.util.concurrent.ExecutionException exception) {
+        assertThat(exception.getCause()).isInstanceOf(OrderException.class);
+        return new ControlledExhaustion(
+            null,
+            (OrderException) exception.getCause(),
+            siblingResponse,
+            probe.finalResolutionReads());
+      }
+    } finally {
+      probe.allowFinalResolution();
+      if (target != null && !target.isDone()) {
+        target.cancel(true);
+      }
+      executor.shutdownNow();
+    }
+  }
+
+  private Connection lockMissingIdempotencyGap(String idempotencyKey) throws Exception {
+    Connection blocker =
+        DriverManager.getConnection(
+            required("CATALOG_MYSQL_URL"), "root", required("MYSQL_BOOTSTRAP_PASSWORD"));
+    blocker.setAutoCommit(false);
+    blocker.setTransactionIsolation(Connection.TRANSACTION_REPEATABLE_READ);
+    try (var statement =
+        blocker.prepareStatement(
+            "SELECT intent_hash FROM order_idempotency WHERE user_subject = ? AND idempotency_key = ? FOR UPDATE")) {
+      statement.setString(1, "catalog-user");
+      statement.setString(2, idempotencyKey);
+      statement.executeQuery();
+    }
+    return blocker;
+  }
+
+  private static Map<String, Object> orderIntent(String productId, int quantity) {
+    return Map.of("productId", productId, "quantity", quantity, "expectedProductVersion", 1);
+  }
+
+  private static OrderRequest orderRequest(String productId, int quantity) {
+    OrderRequest request = new OrderRequest();
+    request.setProductId(productId);
+    request.setQuantity(quantity);
+    request.setExpectedProductVersion(1L);
+    return request;
+  }
+
   private void proveOrderDatabaseUnavailabilityClassification() throws Exception {
     String productId = "order-database-outage";
     String idempotencyKey = "database-outage-key";
@@ -466,7 +614,7 @@ class CatalogIntegrationTest {
     assertThat(postOrder(token(), idempotencyKey, intent).getStatusCode())
         .isEqualTo(HttpStatus.CREATED);
     assertOrderCardinality(productId, 4, 1, 1, 1);
-    assertTotalIdempotencyCount(11);
+    assertTotalIdempotencyCount(13);
   }
 
   private void waitForApplicationDatabase() throws InterruptedException {
@@ -483,6 +631,57 @@ class CatalogIntegrationTest {
     }
     throw new AssertionError("Commerce application database pool did not recover", lastFailure);
   }
+
+  private static final class ExhaustionProbeRepository extends OrderRepository {
+    private final JdbcTemplate jdbc;
+    private final AtomicInteger reads = new AtomicInteger();
+    private final CountDownLatch finalResolutionEntered = new CountDownLatch(1);
+    private final CountDownLatch continueFinalResolution = new CountDownLatch(1);
+
+    private ExhaustionProbeRepository(JdbcTemplate jdbc, ObjectMapper objectMapper) {
+      super(jdbc, objectMapper);
+      this.jdbc = jdbc;
+    }
+
+    @Override
+    public Optional<IdempotencyRecord> findIdempotencyForUpdate(String user, String key) {
+      int read = reads.incrementAndGet();
+      if (read == 1) {
+        jdbc.execute("SET SESSION innodb_lock_wait_timeout = 1");
+      } else if (read == 2) {
+        // With one mutation attempt, only the post-exhaustion truth resolver can issue this read.
+        finalResolutionEntered.countDown();
+        try {
+          if (!continueFinalResolution.await(10, TimeUnit.SECONDS)) {
+            throw new IllegalStateException("Final committed-truth resolution was not released");
+          }
+        } catch (InterruptedException exception) {
+          Thread.currentThread().interrupt();
+          throw new IllegalStateException(
+              "Final committed-truth resolution was interrupted", exception);
+        }
+      }
+      return super.findIdempotencyForUpdate(user, key);
+    }
+
+    private boolean awaitFinalResolution() throws InterruptedException {
+      return finalResolutionEntered.await(10, TimeUnit.SECONDS);
+    }
+
+    private void allowFinalResolution() {
+      continueFinalResolution.countDown();
+    }
+
+    private int finalResolutionReads() {
+      return Math.max(0, reads.get() - 1);
+    }
+  }
+
+  private record ControlledExhaustion(
+      OrderResult target,
+      OrderException failure,
+      ResponseEntity<JsonNode> sibling,
+      int finalResolutionReads) {}
 
   private void seedOrderProduct(
       String productId, long stock, boolean available, String publicationState, long version) {
