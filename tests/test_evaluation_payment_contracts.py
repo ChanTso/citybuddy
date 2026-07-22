@@ -59,6 +59,16 @@ def test_payment_schema_and_code_keep_production_and_evaluation_truth_separate()
         ROOT
         / "commerce-service/src/main/java/io/citybuddy/commerce/payment/MockPaymentRepository.java"
     ).read_text(encoding="utf-8")
+    committed_faces = (
+        ROOT
+        / "commerce-service/src/main/java/io/citybuddy/commerce/payment"
+        / "EvaluationPaymentCommittedFaces.java"
+    ).read_text(encoding="utf-8")
+    evaluation_view = (
+        ROOT
+        / "commerce-service/src/main/java/io/citybuddy/commerce/evaluation"
+        / "EvaluationViewRepository.java"
+    ).read_text(encoding="utf-8")
 
     assert "chk_standard_order_eval_binding" in migration
     assert "chk_mock_payment_callback_eval_context" in migration
@@ -96,10 +106,12 @@ def test_payment_schema_and_code_keep_production_and_evaluation_truth_separate()
     assert "insertPaymentAuditReference" in repository
     assert "sandbox_id <=> ?" in repository
     assert "findEvaluationOrderForUpdate" in repository
-    assert "FROM standard_order WHERE order_id = ?" in repository
+    assert "EvaluationPaymentCommittedFaces.standardOrderByIdSql" in repository
+    assert "EvaluationPaymentCommittedFaces.seckillOrderByIdSql" in repository
     assert "filter(row -> sandboxId.equals(row.sandboxId()))" in repository
     assert "findEvaluationAttemptByCorrelationForUpdate" in repository
-    assert "FROM mock_payment_attempt WHERE callback_correlation_id = ? FOR UPDATE" in repository
+    assert "+ attemptTable()" in repository
+    assert "WHERE callback_correlation_id = ? FOR UPDATE" in repository
     assert "filter(attempt -> sandboxId.equals(attempt.sandboxId()))" in repository
     audit_cardinality = repository[
         repository.index("public int evaluationPaymentAuditFaceCardinality") : repository.index(
@@ -108,13 +120,45 @@ def test_payment_schema_and_code_keep_production_and_evaluation_truth_separate()
     ]
     assert "WHERE entity_id = ?" in audit_cardinality
     assert "OR (sandbox_id = ?" in audit_cardinality
-    for signed_context_locator in ("support_session_id", "trace_id", "operation_id"):
-        assert signed_context_locator in audit_cardinality
-    assert "l.product_id = o.product_id" in (
-        ROOT
-        / "commerce-service/src/main/java/io/citybuddy/commerce/evaluation"
-        / "EvaluationViewRepository.java"
-    ).read_text(encoding="utf-8")
+    assert "support_session_id = ? " in audit_cardinality
+    assert "AND trace_id = ? AND operation_id = ?" in audit_cardinality
+    assert "support_session_id = ? OR" not in audit_cardinality
+    assert "l.product_id = o.product_id" in evaluation_view
+
+    for face in ("CALLBACK", "ATTEMPT", "ORDER", "LEDGER", "AUDIT"):
+        assert f"public static final FaceDefinition {face}" in committed_faces
+    assert 'table(\n              "standard_order"' in committed_faces
+    assert 'table(\n              "seckill_order"' in committed_faces
+    assert "orderFaceUnionSql()" in committed_faces
+    assert "standardOrderByIdSql(String lockClause)" in committed_faces
+    assert "seckillOrderByIdSql(String lockClause)" in committed_faces
+    assert "EvaluationPaymentCommittedFaces.orderFaceUnionSql()" in evaluation_view
+    assert "EvaluationPaymentCommittedFaces.evaluationOrderKeysBySandboxSql()" in evaluation_view
+    callback_order_closure = repository[
+        repository.index("private Optional<OrderTruth> findOrder") : repository.index(
+            "public Optional<AttemptRecord> findAttemptByRequestForUpdate"
+        )
+    ]
+    view_order_closure = (
+        evaluation_view[
+            evaluation_view.index("private static String paymentViewSql") : evaluation_view.index(
+                "public List<AuditReference> audit"
+            )
+        ]
+        + evaluation_view[
+            evaluation_view.index(
+                "private boolean paymentFaceCardinalitiesConsistent"
+            ) : evaluation_view.index("private int duplicateGroupCount")
+        ]
+        + evaluation_view[
+            evaluation_view.index(
+                "private List<PaidOrderTruth> paidOrderTruths"
+            ) : evaluation_view.index("private List<PaymentLedgerTruth> paymentLedgerTruths")
+        ]
+    )
+    for closure in (callback_order_closure, view_order_closure):
+        assert "FROM standard_order" not in closure
+        assert "FROM seckill_order" not in closure
 
 
 def test_auth_provision_response_remains_minimally_disclosing() -> None:

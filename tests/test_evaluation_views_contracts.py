@@ -182,7 +182,8 @@ def test_evaluation_audit_is_append_only_scoped_and_not_agent_evidence() -> None
     callback_enumerator = repository.split(
         "private List<SucceededCallbackTruth> succeededCallbackTruths", maxsplit=1
     )[1].split("private boolean productObservationIsAuthoritative", maxsplit=1)[0]
-    assert "JOIN mock_payment_attempt a ON a.attempt_id = c.attempt_id" in callback_enumerator
+    assert "LEFT JOIN %s a ON a.attempt_id = c.attempt_id" in callback_enumerator
+    assert "EvaluationPaymentCommittedFaces.ATTEMPT" in callback_enumerator
     for filtered_validity_predicate in (
         "c.intent_hash =",
         "a.sandbox_id = c.sandbox_id",

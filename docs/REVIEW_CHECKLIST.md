@@ -247,6 +247,17 @@ request. A later semantic diff change requires the checklist to be executed and 
   damage dimension must be named explicitly and classified by the owner: a mechanically bounded axis
   is added to the closure, while an unbounded value partition follows the recorded CB-112 residual-risk
   process instead of reopening an unbounded matrix.
+- Define each committed face once as executable metadata: its physical tables, stable keys, and
+  participating columns. Both the signed callback resolver and evaluation state/audit reconciler must
+  derive their enumeration from that same definition; for the order face, `order_id` spans both
+  `standard_order` and `seckill_order`. Every injected closure cell must drive the signed callback,
+  `/api/eval/state`, and `/api/eval/audit` together and require the same `409` classification. Audit
+  cardinality uses the callback entity id or the complete exact sandbox/session/trace/operation tuple,
+  never an `OR` over individual context columns; prove that two legitimate operations in one support
+  session coexist without a false duplicate. This structural closure is the owner-approved final
+  completeness boundary for the internal evaluation view: later internal-only completeness proposals
+  are recorded as residual risk, while any finding affecting production payment/refund, transaction
+  consistency, identity authorization, or another business-core path remains blocking.
 - Review exception-to-HTTP mappings against the full subtype hierarchy. Do not map a broad database
   superclass such as `DataAccessException` to unavailable when it also contains lock-contention and
   constraint-conflict subtypes. Prove connection/resource failure, lock timeout/deadlock, duplicate
