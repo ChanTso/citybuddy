@@ -79,7 +79,11 @@ public final class MockPaymentService {
     requireIdempotency(idempotencyKey, "Callback idempotency key is invalid");
     MockPaymentCallbackRequest valid = requireCallback(request);
     String intentHash = hash(callbackIntent(idempotencyKey, valid));
-    return withCallbackDeadlockRetry(idempotencyKey, valid, intentHash);
+    try {
+      return withCallbackDeadlockRetry(idempotencyKey, valid, intentHash);
+    } catch (MockPaymentIntegrityException exception) {
+      throw conflict("Committed payment truth is inconsistent");
+    }
   }
 
   private MockPaymentResult startOnce(
@@ -216,7 +220,10 @@ public final class MockPaymentService {
             request.supportSessionId(),
             request.traceId(),
             request.operationId(),
-            intentHash);
+            intentHash,
+            "SUCCEEDED",
+            "APPLIED",
+            paymentEventTime);
     repository.insertCallback(callback, paymentEventTime);
     if (attempt.sandboxId() != null) {
       repository.insertPaymentAuditReference(
@@ -286,15 +293,20 @@ public final class MockPaymentService {
         attempt != null && (!"PENDING".equals(attempt.state()) || attempt.stateVersion() != 1);
     boolean committedOrder =
         order != null && (!"UNPAID".equals(order.status()) || order.stateVersion() != 1);
-    boolean committedMovement =
-        repository.hasEvaluationPaymentMovementFace(request.orderId(), request.sandboxId());
-    boolean committedAudit =
-        repository.hasEvaluationPaymentAuditFace(
+    int movementCardinality =
+        repository.evaluationPaymentMovementFaceCardinality(request.orderId(), request.sandboxId());
+    int auditCardinality =
+        repository.evaluationPaymentAuditFaceCardinality(
             request.sandboxId(),
             request.supportSessionId(),
             request.traceId(),
             request.operationId(),
             request.callbackEventId());
+    if (movementCardinality > 1 || auditCardinality > 1) {
+      throw conflict("Committed payment truth is inconsistent");
+    }
+    boolean committedMovement = movementCardinality == 1;
+    boolean committedAudit = auditCardinality == 1;
     if (!committedAttempt
         && !committedOrder
         && !committedMovement
@@ -342,6 +354,10 @@ public final class MockPaymentService {
         || !"PAID".equals(order.status())
         || order.stateVersion() != 2
         || callback == null
+        || !"SUCCEEDED".equals(callback.requestedOutcome())
+        || !"APPLIED".equals(callback.resultState())
+        || attempt.succeededAt() == null
+        || !attempt.succeededAt().equals(callback.createdAt())
         || !java.util.Objects.equals(attempt.sandboxId(), callback.sandboxId())
         || !attempt.callbackCorrelationId().equals(callback.callbackCorrelationId())
         || !callback.intentHash().equals(hash(callbackIntent(attempt, callback)))

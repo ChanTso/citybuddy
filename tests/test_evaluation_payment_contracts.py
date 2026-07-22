@@ -83,8 +83,8 @@ def test_payment_schema_and_code_keep_production_and_evaluation_truth_separate()
         "findCallbackByCorrelation",
         "findCallbackByAttempt",
         "findEvaluationOrderForUpdate",
-        "hasEvaluationPaymentMovementFace",
-        "hasEvaluationPaymentAuditFace",
+        "evaluationPaymentMovementFaceCardinality",
+        "evaluationPaymentAuditFaceCardinality",
     ):
         assert committed_face in committed_replay
     assert "monotonicEvaluationAuditCreatedAt" in service

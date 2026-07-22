@@ -1,6 +1,7 @@
 package io.citybuddy.commerce.payment;
 
 import io.citybuddy.commerce.evaluation.EvaluationAuditEntityType;
+import io.citybuddy.commerce.evaluation.EvaluationAuditReferenceIdentity;
 import io.citybuddy.commerce.evaluation.EvaluationAuditReferenceWriter;
 import java.sql.Timestamp;
 import java.time.Instant;
@@ -65,7 +66,7 @@ public class MockPaymentRepository {
                     result.getLong("state_version")),
             orderId);
     if (standard.size() + seckill.size() > 1) {
-      throw new IllegalStateException("Payment order identifier is ambiguous");
+      throw new MockPaymentIntegrityException("Payment order identifier is ambiguous");
     }
     return standard.isEmpty() ? seckill.stream().findFirst() : standard.stream().findFirst();
   }
@@ -99,7 +100,7 @@ public class MockPaymentRepository {
             orderId,
             sandboxId);
     if (rows.size() > 1) {
-      throw new IllegalStateException("Evaluation payment order uniqueness is corrupted");
+      throw new MockPaymentIntegrityException("Evaluation payment order uniqueness is corrupted");
     }
     return rows.stream().findFirst();
   }
@@ -344,29 +345,51 @@ public class MockPaymentRepository {
     return count != null && count == 1;
   }
 
-  public boolean hasEvaluationPaymentMovementFace(String orderId, String sandboxId) {
+  public int evaluationPaymentMovementFaceCardinality(String orderId, String sandboxId) {
     Integer count =
         jdbc.queryForObject(
             """
             SELECT COUNT(*) FROM inventory_ledger
-            WHERE order_id = ? AND sandbox_id = ? AND movement_type = 'STANDARD_PAYMENT'
+            WHERE order_id = ? AND sandbox_id = ?
             """,
             Integer.class,
             orderId,
             sandboxId);
-    return count != null && count > 0;
+    return count == null ? 0 : count;
   }
 
   public boolean hasPaymentAuditReference(CallbackRecord callback, long entityVersion) {
+    String referenceId =
+        EvaluationAuditReferenceIdentity.paymentCallback(
+            callback.sandboxId(),
+            callback.supportSessionId(),
+            callback.traceId(),
+            callback.operationId(),
+            callback.callbackEventId(),
+            entityVersion);
     Integer count =
         jdbc.queryForObject(
             """
-            SELECT COUNT(*) FROM eval_commerce_audit_reference
-            WHERE sandbox_id = ? AND support_session_id = ? AND trace_id = ? AND operation_id = ?
-              AND entity_type = 'PAYMENT_CALLBACK' AND entity_id = ? AND entity_version = ?
-              AND outcome = 'OBSERVED'
+            SELECT COUNT(*)
+            FROM eval_commerce_audit_reference audit
+            JOIN mock_payment_callback callback
+              ON callback.callback_event_id = audit.entity_id
+            JOIN mock_payment_attempt attempt ON attempt.attempt_id = callback.attempt_id
+            WHERE audit.audit_reference_id = ?
+              AND audit.sandbox_id = ?
+              AND audit.support_session_id = ?
+              AND audit.trace_id = ?
+              AND audit.operation_id = ?
+              AND audit.entity_type = 'PAYMENT_CALLBACK'
+              AND audit.entity_id = ?
+              AND audit.entity_version = ?
+              AND audit.outcome = 'OBSERVED'
+              AND audit.created_at_anchor = 'BUSINESS_EVENT'
+              AND audit.created_at = callback.created_at
+              AND audit.created_at = attempt.succeeded_at
             """,
             Integer.class,
+            referenceId,
             callback.sandboxId(),
             callback.supportSessionId(),
             callback.traceId(),
@@ -376,7 +399,7 @@ public class MockPaymentRepository {
     return count != null && count == 1;
   }
 
-  public boolean hasEvaluationPaymentAuditFace(
+  public int evaluationPaymentAuditFaceCardinality(
       String sandboxId,
       String supportSessionId,
       String traceId,
@@ -386,7 +409,7 @@ public class MockPaymentRepository {
         jdbc.queryForObject(
             """
             SELECT COUNT(*) FROM eval_commerce_audit_reference
-            WHERE sandbox_id = ? AND entity_type = 'PAYMENT_CALLBACK'
+            WHERE sandbox_id = ?
               AND (entity_id = ? OR support_session_id = ? OR trace_id = ? OR operation_id = ?)
             """,
             Integer.class,
@@ -395,13 +418,13 @@ public class MockPaymentRepository {
             supportSessionId,
             traceId,
             operationId);
-    return count != null && count > 0;
+    return count == null ? 0 : count;
   }
 
   private Optional<AttemptRecord> queryAttempt(String sql, Object... arguments) {
     List<AttemptRecord> rows = jdbc.query(sql, MockPaymentRepository::mapAttempt, arguments);
     if (rows.size() > 1) {
-      throw new IllegalStateException("Payment attempt uniqueness is corrupted");
+      throw new MockPaymentIntegrityException("Payment attempt uniqueness is corrupted");
     }
     return rows.stream().findFirst();
   }
@@ -409,13 +432,14 @@ public class MockPaymentRepository {
   private Optional<CallbackRecord> queryCallback(String sql, Object... arguments) {
     List<CallbackRecord> rows = jdbc.query(sql, MockPaymentRepository::mapCallback, arguments);
     if (rows.size() > 1) {
-      throw new IllegalStateException("Payment callback uniqueness is corrupted");
+      throw new MockPaymentIntegrityException("Payment callback uniqueness is corrupted");
     }
     return rows.stream().findFirst();
   }
 
   private static AttemptRecord mapAttempt(java.sql.ResultSet result, int row)
       throws java.sql.SQLException {
+    Timestamp succeededAt = result.getTimestamp("succeeded_at");
     return new AttemptRecord(
         result.getString("attempt_id"),
         result.getString("callback_correlation_id"),
@@ -429,7 +453,8 @@ public class MockPaymentRepository {
         result.getLong("refunded_amount_minor"),
         result.getString("currency"),
         result.getString("state"),
-        result.getLong("state_version"));
+        result.getLong("state_version"),
+        succeededAt == null ? null : succeededAt.toInstant());
   }
 
   private static CallbackRecord mapCallback(java.sql.ResultSet result, int row)
@@ -443,19 +468,22 @@ public class MockPaymentRepository {
         result.getString("support_session_id"),
         result.getString("trace_id"),
         result.getString("operation_id"),
-        result.getString("intent_hash"));
+        result.getString("intent_hash"),
+        result.getString("requested_outcome"),
+        result.getString("result_state"),
+        result.getTimestamp("created_at").toInstant());
   }
 
   private static String attemptColumns() {
     return "attempt_id, callback_correlation_id, user_subject, order_id, order_kind, sandbox_id, "
         + "request_idempotency_key, intent_hash, amount_minor, refunded_amount_minor, currency, "
-        + "state, state_version";
+        + "state, state_version, succeeded_at";
   }
 
   private static String callbackColumns() {
     return "callback_event_id, callback_idempotency_key, attempt_id, "
         + "callback_correlation_id, sandbox_id, support_session_id, trace_id, operation_id, "
-        + "intent_hash";
+        + "intent_hash, requested_outcome, result_state, created_at";
   }
 
   public record OrderTruth(
@@ -485,7 +513,8 @@ public class MockPaymentRepository {
       long refundedAmountMinor,
       String currency,
       String state,
-      long stateVersion) {
+      long stateVersion,
+      Instant succeededAt) {
     static AttemptRecord pending(
         String attemptId,
         String callbackCorrelationId,
@@ -510,7 +539,8 @@ public class MockPaymentRepository {
           0,
           currency,
           "PENDING",
-          1);
+          1,
+          null);
     }
   }
 
@@ -523,5 +553,8 @@ public class MockPaymentRepository {
       String supportSessionId,
       String traceId,
       String operationId,
-      String intentHash) {}
+      String intentHash,
+      String requestedOutcome,
+      String resultState,
+      Instant createdAt) {}
 }

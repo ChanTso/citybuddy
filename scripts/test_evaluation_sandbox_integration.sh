@@ -1574,7 +1574,7 @@ assert_payment_truth_fails_closed() {
 
 assert_payment_audit_reconciliation_fails_closed() {
   local description="$1"
-  assert_audit_totality_fails_closed sandbox-payment "$payment_session" "$description"
+  assert_payment_truth_fails_closed "$description"
 }
 
 assert_audit_totality_fails_closed() {
@@ -1805,6 +1805,99 @@ ON DUPLICATE KEY UPDATE sandbox_id = VALUES(sandbox_id),
 "
 }
 
+assert_status 200 "one-row committed faces replay the existing payment result" \
+  --request POST "http://127.0.0.1:$commerce_port/internal/mock-payments/callback" \
+  --header "X-Mock-Payment-Key-Id: $mock_payment_key" \
+  --header "X-Mock-Payment-Timestamp: $payment_timestamp" \
+  --header "X-Mock-Payment-Signature: $payment_signature" \
+  --header "Idempotency-Key: $payment_callback_key" \
+  --header 'Content-Type: application/json' \
+  --data "$payment_callback_body"
+
+duplicate_callback_event_id='00000000-0000-0000-0000-000000000201'
+duplicate_callback_attempt_id='00000000-0000-0000-0000-000000000202'
+mysql_query root "$root_password" commerce_db "
+INSERT INTO mock_payment_callback (callback_event_id, callback_idempotency_key, attempt_id,
+  callback_correlation_id, sandbox_id, support_session_id, trace_id, operation_id, intent_hash,
+  requested_outcome, result_state, created_at)
+SELECT '$duplicate_callback_event_id', 'duplicate-cardinality-callback',
+  '$duplicate_callback_attempt_id', callback_correlation_id, sandbox_id, support_session_id,
+  trace_id, operation_id, intent_hash, requested_outcome, result_state, created_at
+FROM mock_payment_callback WHERE callback_event_id = '$payment_event_id'
+"
+assert_payment_truth_fails_closed "duplicate callback correlation cardinality"
+mysql_query root "$root_password" commerce_db \
+  "DELETE FROM mock_payment_callback WHERE callback_event_id = '$duplicate_callback_event_id'"
+
+duplicate_attempt_id='00000000-0000-0000-0000-000000000203'
+duplicate_attempt_order_id='00000000-0000-0000-0000-000000000204'
+mysql_query root "$root_password" commerce_db \
+  "ALTER TABLE mock_payment_attempt DROP INDEX uq_mock_payment_callback_correlation"
+mysql_query root "$root_password" commerce_db "
+INSERT INTO mock_payment_attempt (attempt_id, callback_correlation_id, user_subject, order_id,
+  order_kind, sandbox_id, request_idempotency_key, intent_hash, amount_minor, refunded_amount_minor,
+  currency, state, state_version, succeeded_at, created_at)
+SELECT '$duplicate_attempt_id', callback_correlation_id, user_subject,
+  '$duplicate_attempt_order_id', order_kind, sandbox_id, 'duplicate-cardinality-attempt',
+  intent_hash, amount_minor, refunded_amount_minor, currency, state, state_version, succeeded_at,
+  created_at FROM mock_payment_attempt WHERE attempt_id = '$payment_attempt_id'
+"
+assert_payment_truth_fails_closed "duplicate attempt correlation cardinality"
+mysql_query root "$root_password" commerce_db \
+  "DELETE FROM mock_payment_attempt WHERE attempt_id = '$duplicate_attempt_id'"
+mysql_query root "$root_password" commerce_db \
+  "ALTER TABLE mock_payment_attempt ADD CONSTRAINT uq_mock_payment_callback_correlation UNIQUE (callback_correlation_id)"
+
+mysql_query root "$root_password" commerce_db \
+  "ALTER TABLE standard_order DROP PRIMARY KEY"
+mysql_query root "$root_password" commerce_db "
+INSERT INTO standard_order (order_id, user_subject, sandbox_id, evaluation_owner_handle,
+  product_id, product_name, unit_price_minor, currency, quantity, total_price_minor,
+  product_version, status, state_version, created_at)
+SELECT order_id, user_subject, sandbox_id, evaluation_owner_handle, product_id,
+  CONCAT(product_name, ' duplicate-cardinality'), unit_price_minor, currency, quantity,
+  total_price_minor, product_version, status, state_version, created_at
+FROM standard_order WHERE order_id = '$payment_order_id' LIMIT 1
+"
+assert_payment_truth_fails_closed "duplicate order stable-key cardinality"
+mysql_query root "$root_password" commerce_db \
+  "DELETE FROM standard_order WHERE order_id = '$payment_order_id' AND product_name LIKE '% duplicate-cardinality'"
+mysql_query root "$root_password" commerce_db \
+  "ALTER TABLE standard_order ADD PRIMARY KEY (order_id)"
+
+duplicate_ledger_movement_id='00000000-0000-0000-0000-000000000205'
+mysql_query root "$root_password" commerce_db \
+  "ALTER TABLE inventory_ledger DROP INDEX uq_inventory_ledger_single_movement"
+mysql_query root "$root_password" commerce_db "
+INSERT INTO inventory_ledger (movement_id, business_event_key, movement_type, order_id,
+  reservation_id, activity_id, product_id, sandbox_id, inventory_delta, activity_quota_delta,
+  payment_amount_minor, payment_currency, created_at)
+SELECT '$duplicate_ledger_movement_id', 'duplicate-cardinality-ledger', movement_type, order_id,
+  reservation_id, activity_id, product_id, sandbox_id, inventory_delta, activity_quota_delta,
+  payment_amount_minor, payment_currency, created_at
+FROM inventory_ledger WHERE movement_id = '$payment_movement_id'
+"
+assert_payment_truth_fails_closed "duplicate ledger stable-key cardinality"
+mysql_query root "$root_password" commerce_db \
+  "DELETE FROM inventory_ledger WHERE movement_id = '$duplicate_ledger_movement_id'"
+mysql_query root "$root_password" commerce_db \
+  "ALTER TABLE inventory_ledger ADD CONSTRAINT uq_inventory_ledger_single_movement UNIQUE (order_id, single_movement_type)"
+
+duplicate_audit_reference_id="$(printf '5%.0s' {1..64})"
+duplicate_audit_operation_id="$(printf '4%.0s' {1..64})"
+mysql_query root "$root_password" commerce_db "
+INSERT INTO eval_commerce_audit_reference (audit_reference_id, sandbox_id, support_session_id,
+  trace_id, operation_id, entity_type, entity_id, entity_version, outcome, created_at,
+  created_at_anchor)
+SELECT '$duplicate_audit_reference_id', sandbox_id, support_session_id, trace_id,
+  '$duplicate_audit_operation_id', entity_type, entity_id, entity_version, outcome, created_at,
+  created_at_anchor FROM eval_commerce_audit_reference
+WHERE audit_reference_id = '$payment_audit_reference_id'
+"
+assert_payment_truth_fails_closed "duplicate audit stable-identity cardinality"
+mysql_query root "$root_password" commerce_db \
+  "DELETE FROM eval_commerce_audit_reference WHERE audit_reference_id = '$duplicate_audit_reference_id'"
+
 mysql_query root "$root_password" commerce_db \
   "ALTER TABLE inventory_ledger DROP CHECK chk_inventory_ledger_movement"
 
@@ -1881,13 +1974,8 @@ for ((predicate_index = 0; predicate_index < ${#payment_predicate_mutations[@]};
     "${payment_predicate_mutations[$predicate_index]}; SELECT ROW_COUNT()")"
   assert_equal 1 "$mutation_count" \
     "single consistency fault injection changed exactly one row: ${payment_predicate_labels[$predicate_index]}"
-  if is_committed_payment_face_index "$predicate_index"; then
-    assert_payment_truth_fails_closed \
-      "single committed-face corruption ${payment_predicate_labels[$predicate_index]}"
-  else
-    assert_payment_audit_reconciliation_fails_closed \
-      "single enumerator predicate corruption ${payment_predicate_labels[$predicate_index]}"
-  fi
+  assert_payment_truth_fails_closed \
+    "single committed-face content corruption ${payment_predicate_labels[$predicate_index]}"
   restore_complete_payment_truth
 done
 

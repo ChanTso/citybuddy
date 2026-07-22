@@ -236,16 +236,25 @@ request. A later semantic diff change requires the checklist to be executed and 
 - **Evaluation mock-payment owner-approved closure boundary:** enumerate the complete committed result
   as callback, payment attempt, order, payment ledger, and evaluation audit, anchored first by callback
   correlation and retained through signed order/event/context locators when one face is missing. Lock
-  and reconcile that five-face set in the mutation transaction before sandbox liveness. Real evidence
-  covers every single face, every pair, and replay waiting across concurrent commit plus completion. A
-  same-class completeness blocker must identify a newly persisted sixth committed-result face; other
-  proposed dimensions are bounded design-review observations under the recorded Level 3 residual risk.
+  and reconcile that five-face set in the mutation transaction before sandbox liveness. Treat each
+  face's cardinality as the closed partition `0`, `1`, or `>=2`: zero is missing, one must match every
+  committed content column exactly, and two or more is inconsistent even when one row is otherwise
+  valid. Real evidence covers the five faces across all three cardinalities, every persisted content
+  column, face pairs, and replay waiting across concurrent commit plus completion; it must observe the
+  signed callback boundary and reject inconsistency with 409 rather than 403 or 500. A further proposed
+  damage dimension must be named explicitly and classified by the owner: a mechanically bounded axis
+  is added to the closure, while an unbounded value partition follows the recorded CB-112 residual-risk
+  process instead of reopening an unbounded matrix.
 - Review exception-to-HTTP mappings against the full subtype hierarchy. Do not map a broad database
   superclass such as `DataAccessException` to unavailable when it also contains lock-contention and
   constraint-conflict subtypes. Prove connection/resource failure, lock timeout/deadlock, duplicate
   constraint, same-intent replay, and conflicting-intent replay independently; transient contention
   must converge inside the service to committed truth or conflict rather than escape into a 503
   boundary handler.
+- Integrity and uniqueness failures discovered while resolving already committed truth are deterministic
+  conflicts, not unexpected server errors. Use a dedicated internal integrity signal and translate it at
+  the owning operation boundary; do not allow a repository `IllegalStateException` or multi-row helper
+  failure to escape as 500.
 
 ### Faults never become terminal business decisions
 

@@ -230,6 +230,7 @@ public final class EvaluationViewRepository {
     List<ProductObservationTruth> productTruths = productObservationTruths(sandboxId);
     if (!EvaluationLegacyAuditCommitmentStore.load(jdbc).isConsistent()
         || !sequenceOrderConsistent(references)
+        || !paymentFaceCardinalitiesConsistent(sandboxId)
         || !paymentTruthsConsistent(
             references,
             paidOrderTruths(sandboxId),
@@ -272,6 +273,64 @@ public final class EvaluationViewRepository {
       }
     }
     return true;
+  }
+
+  private boolean paymentFaceCardinalitiesConsistent(String sandboxId) {
+    return duplicateGroupCount(
+                """
+                SELECT callback_correlation_id
+                FROM mock_payment_callback
+                WHERE sandbox_id = ?
+                GROUP BY callback_correlation_id HAVING COUNT(*) > 1
+                """,
+                sandboxId)
+            == 0
+        && duplicateGroupCount(
+                """
+                SELECT callback_correlation_id
+                FROM mock_payment_attempt
+                WHERE sandbox_id = ?
+                GROUP BY callback_correlation_id HAVING COUNT(*) > 1
+                """,
+                sandboxId)
+            == 0
+        && duplicateGroupCount(
+                """
+                SELECT order_id
+                FROM standard_order
+                WHERE sandbox_id = ?
+                GROUP BY order_id HAVING COUNT(*) > 1
+                """,
+                sandboxId)
+            == 0
+        && duplicateGroupCount(
+                """
+                SELECT order_id
+                FROM inventory_ledger
+                WHERE sandbox_id = ?
+                GROUP BY order_id HAVING COUNT(*) > 1
+                """,
+                sandboxId)
+            == 0
+        && duplicateGroupCount(
+                """
+                SELECT audit.entity_id
+                FROM eval_commerce_audit_reference audit
+                JOIN mock_payment_callback callback ON callback.callback_event_id = audit.entity_id
+                WHERE audit.sandbox_id = ?
+                GROUP BY audit.entity_id HAVING COUNT(*) > 1
+                """,
+                sandboxId)
+            == 0;
+  }
+
+  private int duplicateGroupCount(String groupedQuery, String sandboxId) {
+    Integer count =
+        jdbc.queryForObject(
+            "SELECT COUNT(*) FROM (" + groupedQuery + ") duplicate_groups",
+            Integer.class,
+            sandboxId);
+    return count == null ? 0 : count;
   }
 
   public static Set<EvaluationAuditEntityType> reconciledAuditTypes() {

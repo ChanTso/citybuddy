@@ -719,6 +719,43 @@ class MockPaymentIntegrationTest {
   }
 
   @Test
+  void committedEvaluationCallbackDuplicateCorrelationIsAnIntegrityConflict() {
+    EvaluationPaymentFixture fixture = seedEvaluationPayment("committed-replay-duplicate");
+    MockPaymentService evaluation = evaluationPayments(new MockPaymentRepository(jdbc));
+    MockPaymentResult attempt =
+        evaluation.start(
+            fixture.userSubject(),
+            fixture.sandboxId(),
+            fixture.orderId(),
+            "payment-committed-replay-duplicate",
+            new MockPaymentRequest(1800L, "CNY", null));
+    MockPaymentCallbackRequest callback =
+        evaluationCallback(attempt, fixture.sandboxId(), "committed-replay-duplicate");
+    String callbackKey = "callback-committed-replay-duplicate";
+    evaluation.callback(callbackKey, callback);
+    assertThat(
+            jdbc.update(
+                """
+                INSERT INTO mock_payment_callback
+                  (callback_event_id, callback_idempotency_key, attempt_id,
+                   callback_correlation_id, sandbox_id, support_session_id, trace_id,
+                   operation_id, intent_hash, requested_outcome, result_state, created_at)
+                SELECT ?, ?, ?, callback_correlation_id, sandbox_id, support_session_id, trace_id,
+                       operation_id, intent_hash, requested_outcome, result_state, created_at
+                FROM mock_payment_callback WHERE attempt_id = ?
+                """,
+                UUID.randomUUID().toString(),
+                "duplicate-correlation-key",
+                UUID.randomUUID().toString(),
+                attempt.attemptId()))
+        .isOne();
+
+    assertThatThrownBy(() -> evaluation.callback(callbackKey, callback))
+        .isInstanceOfSatisfying(
+            MockPaymentException.class, exception -> assertThat(exception.status()).isEqualTo(409));
+  }
+
+  @Test
   void committedEvaluationCallbackReplayDoesNotDependOnLivenessRead() {
     EvaluationPaymentFixture fixture = seedEvaluationPayment("committed-replay-unavailable");
     MockPaymentService healthy = evaluationPayments(new MockPaymentRepository(jdbc));

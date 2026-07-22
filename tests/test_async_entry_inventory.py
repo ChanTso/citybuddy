@@ -47,6 +47,12 @@ INTEGRITY_ENUMERATOR_PREDICATE_HEURISTICS = {
         "c.result_state": "terminal truth-face classifier",
         "c.sandbox_id": "stable sandbox scope",
     },
+    (EVALUATION_VIEW_REPOSITORY, "paymentFaceCardinalitiesConsistent"): {
+        "sandbox_id": "stable sandbox scope for callback, attempt, order, and ledger faces",
+        "audit.sandbox_id": "stable sandbox scope for the audit face",
+        "audit.entity_id": "stable audit/callback entity correlation key",
+        "callback.callback_event_id": "stable audit/callback entity correlation key",
+    },
     (LEGACY_COMMITMENT_STORE, "load"): {
         "created_at_anchor": "fixed committed legacy-set classifier",
     },
