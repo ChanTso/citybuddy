@@ -5,7 +5,6 @@ import shlex
 import subprocess
 from pathlib import Path
 
-
 ROOT = Path(__file__).parents[1]
 HELPER = ROOT / "scripts" / "surefire_evidence.sh"
 
