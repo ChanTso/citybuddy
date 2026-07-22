@@ -4,6 +4,7 @@ set -euo pipefail
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$repo_root"
 source "$repo_root/scripts/test_dynamic_ports.sh"
+source "$repo_root/scripts/surefire_evidence.sh"
 
 tmp_dir="$(mktemp -d)"
 env_file="$tmp_dir/.env"
@@ -466,6 +467,19 @@ admin updateSubGroup --namesrvAddr rocketmq-namesrv:9876 --clusterName DefaultCl
   --groupName "$timeout_group" --consumeEnable true --retryMaxTimes 3
 groups_created=1
 
+required_surefire_classes=(
+  io.citybuddy.commerce.catalog.CatalogIntegrationTest
+  io.citybuddy.commerce.faq.FaqPublicationIntegrationTest
+  io.citybuddy.commerce.seckill.SeckillIntegrationTest
+  io.citybuddy.commerce.seckill.SeckillReservationIntegrationTest
+  io.citybuddy.commerce.seckill.SeckillTransactionIntegrationTest
+  io.citybuddy.commerce.payment.MockPaymentIntegrationTest
+  io.citybuddy.commerce.refund.RefundIntegrationTest
+)
+clear_surefire_reports \
+  "$repo_root/commerce-service/target/surefire-reports" \
+  "${required_surefire_classes[@]}"
+
 docker run --rm \
   --user "$(id -u):$(id -g)" \
   --network "${project}_default" \
@@ -497,6 +511,10 @@ docker run --rm \
   mvn --batch-mode --no-transfer-progress -Dmaven.repo.local=/m2 \
   -pl commerce-service \
   -Dtest=CatalogIntegrationTest,FaqPublicationIntegrationTest,SeckillIntegrationTest,SeckillReservationIntegrationTest,SeckillTransactionIntegrationTest,MockPaymentIntegrationTest,RefundIntegrationTest test
+
+assert_surefire_classes_executed \
+  "$repo_root/commerce-service/target/surefire-reports" \
+  "${required_surefire_classes[@]}"
 
 terminal_key='00000000-0000-0000-0000-000000000060'
 terminal_output=''

@@ -27,6 +27,12 @@ request. A later semantic diff change requires the checklist to be executed and 
   or normalized differently between write and replay paths.
 - Prove same-intent convergence and one-field-at-a-time conflicting reuse against durable truth;
   use a locking current read where a concurrent winner must be observed.
+- When bounded mutation retries exhaust, perform one final read-only, locking resolution of the
+  committed idempotency truth before classifying the request. A same-intent sibling commit returns
+  the existing result without another mutation; a conflicting intent remains a deterministic
+  conflict; absence after the final resolution is a stable concurrency rejection, not dependency
+  unavailability. Only a positively identified database resource or transaction-acquisition failure
+  may use the unavailable response. Exercise all three outcomes independently.
 
 ### Total parsing exception boundary
 
@@ -299,3 +305,9 @@ At each slice or authorized non-slice closeout, append every newly evidenced rec
 class that is not already covered above. Do not weaken or delete an existing check merely because
 the current slice is unaffected. When the available evidence contains no new class, record that
 explicit conclusion in the pull request rather than adding a placeholder checklist entry.
+
+For any conditionally enabled test class used as acceptance or rejection evidence, inspect the
+runner report rather than trusting process exit zero. Record the executed and skipped counts, and
+make the owning integration script fail unless every named required class has a report with
+`tests > 0`, `skipped = 0`, `failures = 0`, and `errors = 0`. A command whose selected tests were
+all skipped is not evidence, even when the build succeeds.

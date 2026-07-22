@@ -16,6 +16,7 @@ import java.nio.file.Path;
 import java.security.KeyFactory;
 import java.security.interfaces.RSAPrivateKey;
 import java.security.spec.PKCS8EncodedKeySpec;
+import java.sql.DriverManager;
 import java.time.Duration;
 import java.time.Instant;
 import java.util.ArrayList;
@@ -65,6 +66,7 @@ class CatalogIntegrationTest {
     registry.add("spring.datasource.url", () -> required("CATALOG_MYSQL_URL"));
     registry.add("spring.datasource.username", () -> "commerce_app");
     registry.add("spring.datasource.password", () -> required("MYSQL_COMMERCE_APP_PASSWORD"));
+    registry.add("spring.datasource.hikari.connection-timeout", () -> "1000");
     registry.add("spring.data.redis.url", () -> required("CATALOG_REDIS_URL"));
     registry.add("citybuddy.catalog.enabled", () -> "true");
     registry.add("citybuddy.catalog.issuer", () -> "https://identity.citybuddy.test");
@@ -317,6 +319,7 @@ class CatalogIntegrationTest {
     proveRealMysqlRollback();
     proveLimitedStockConcurrency();
     proveConcurrentDuplicateIdempotency();
+    proveOrderDatabaseUnavailabilityClassification();
   }
 
   private void proveRealMysqlRollback() {
@@ -388,53 +391,97 @@ class CatalogIntegrationTest {
   }
 
   private void proveConcurrentDuplicateIdempotency() throws Exception {
-    seedOrderProduct("order-duplicate", 5, true, "PUBLISHED", 1);
-    var executor = Executors.newFixedThreadPool(8);
-    CountDownLatch ready = new CountDownLatch(8);
-    CountDownLatch start = new CountDownLatch(1);
-    List<java.util.concurrent.Future<ResponseEntity<JsonNode>>> futures = new ArrayList<>();
-    for (int index = 0; index < 8; index++) {
-      futures.add(
-          executor.submit(
-              () -> {
-                ready.countDown();
-                start.await();
-                return postOrder(
-                    token(),
-                    "duplicate-key",
-                    Map.of(
-                        "productId",
-                        "order-duplicate",
-                        "quantity",
-                        1,
-                        "expectedProductVersion",
-                        1));
-              }));
-    }
-    assertThat(ready.await(5, TimeUnit.SECONDS)).isTrue();
-    start.countDown();
-    int created = 0;
-    int replayed = 0;
-    String orderId = null;
-    for (var future : futures) {
-      ResponseEntity<JsonNode> response = future.get(15, TimeUnit.SECONDS);
-      assertThat(response.getStatusCode()).isIn(HttpStatus.CREATED, HttpStatus.OK);
-      if (response.getStatusCode() == HttpStatus.CREATED) {
-        created++;
-      } else {
-        replayed++;
+    for (int round = 1; round <= 5; round++) {
+      String productId = "order-duplicate-" + round;
+      String idempotencyKey = "duplicate-key-" + round;
+      seedOrderProduct(productId, 5, true, "PUBLISHED", 1);
+      var executor = Executors.newFixedThreadPool(8);
+      try {
+        CountDownLatch ready = new CountDownLatch(8);
+        CountDownLatch start = new CountDownLatch(1);
+        List<java.util.concurrent.Future<ResponseEntity<JsonNode>>> futures = new ArrayList<>();
+        for (int index = 0; index < 8; index++) {
+          futures.add(
+              executor.submit(
+                  () -> {
+                    ready.countDown();
+                    start.await();
+                    return postOrder(
+                        token(),
+                        idempotencyKey,
+                        Map.of("productId", productId, "quantity", 1, "expectedProductVersion", 1));
+                  }));
+        }
+        assertThat(ready.await(5, TimeUnit.SECONDS)).isTrue();
+        start.countDown();
+        int created = 0;
+        int replayed = 0;
+        String orderId = null;
+        for (var future : futures) {
+          ResponseEntity<JsonNode> response = future.get(15, TimeUnit.SECONDS);
+          assertThat(response.getStatusCode()).isIn(HttpStatus.CREATED, HttpStatus.OK);
+          if (response.getStatusCode() == HttpStatus.CREATED) {
+            created++;
+          } else {
+            replayed++;
+          }
+          String current = response.getBody().get("orderId").asText();
+          if (orderId == null) {
+            orderId = current;
+          }
+          assertThat(current).isEqualTo(orderId);
+        }
+        assertThat(created).isEqualTo(1);
+        assertThat(replayed).isEqualTo(7);
+      } finally {
+        executor.shutdownNow();
       }
-      String current = response.getBody().get("orderId").asText();
-      if (orderId == null) {
-        orderId = current;
-      }
-      assertThat(current).isEqualTo(orderId);
+      assertOrderCardinality(productId, 4, 1, 1, 1);
     }
-    executor.shutdownNow();
-    assertThat(created).isEqualTo(1);
-    assertThat(replayed).isEqualTo(7);
-    assertOrderCardinality("order-duplicate", 4, 1, 1, 1);
-    assertTotalIdempotencyCount(6);
+    assertTotalIdempotencyCount(10);
+  }
+
+  private void proveOrderDatabaseUnavailabilityClassification() throws Exception {
+    String productId = "order-database-outage";
+    String idempotencyKey = "database-outage-key";
+    Map<String, Object> intent =
+        Map.of("productId", productId, "quantity", 1, "expectedProductVersion", 1);
+    seedOrderProduct(productId, 5, true, "PUBLISHED", 1);
+
+    try (var admin =
+        DriverManager.getConnection(
+            required("CATALOG_MYSQL_URL"), "root", required("MYSQL_BOOTSTRAP_PASSWORD"))) {
+      admin.createStatement().execute("SET GLOBAL offline_mode = ON");
+      try {
+        assertOrderError(
+            postOrder(token(), idempotencyKey, intent),
+            HttpStatus.SERVICE_UNAVAILABLE,
+            "DEPENDENCY_UNAVAILABLE");
+      } finally {
+        admin.createStatement().execute("SET GLOBAL offline_mode = OFF");
+      }
+    }
+
+    waitForApplicationDatabase();
+    assertThat(postOrder(token(), idempotencyKey, intent).getStatusCode())
+        .isEqualTo(HttpStatus.CREATED);
+    assertOrderCardinality(productId, 4, 1, 1, 1);
+    assertTotalIdempotencyCount(11);
+  }
+
+  private void waitForApplicationDatabase() throws InterruptedException {
+    long deadline = System.nanoTime() + Duration.ofSeconds(20).toNanos();
+    RuntimeException lastFailure = null;
+    while (System.nanoTime() < deadline) {
+      try {
+        assertThat(jdbc.queryForObject("SELECT 1", Integer.class)).isEqualTo(1);
+        return;
+      } catch (RuntimeException exception) {
+        lastFailure = exception;
+        Thread.sleep(100);
+      }
+    }
+    throw new AssertionError("Commerce application database pool did not recover", lastFailure);
   }
 
   private void seedOrderProduct(

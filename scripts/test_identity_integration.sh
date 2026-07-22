@@ -4,6 +4,7 @@ set -euo pipefail
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$repo_root"
 source "$repo_root/scripts/test_dynamic_ports.sh"
+source "$repo_root/scripts/surefire_evidence.sh"
 
 tmp_dir="$(mktemp -d)"
 env_file="$tmp_dir/.env"
@@ -970,11 +971,18 @@ assert_status 401 "auth exchange rejects production evaluation header" \
   --header 'Content-Type: application/json' \
   --data "{\"sessionId\":\"$session_id\",\"userSubject\":\"user-integration\",\"scope\":\"catalog:read\"}"
 
+required_surefire_classes=(io.citybuddy.commerce.identity.OboChainIntegrationTest)
+clear_surefire_reports \
+  "$repo_root/commerce-service/target/surefire-reports" \
+  "${required_surefire_classes[@]}"
 IDENTITY_PROBE_OBO="$obo_token" \
 IDENTITY_PROBE_DIRECT="$direct_token" \
 IDENTITY_JWKS_URL="http://127.0.0.1:$auth_port/auth/jwks" \
 SUPPORT_SESSION_ID="$session_id" \
 ./mvnw -q -pl commerce-service -Dtest=OboChainIntegrationTest test
+assert_surefire_classes_executed \
+  "$repo_root/commerce-service/target/surefire-reports" \
+  "${required_surefire_classes[@]}"
 
 mysql_query auth_app "$auth_app_password" commerce_db \
   "UPDATE auth_user_principal SET state = 'DISABLED' WHERE subject = 'user-integration'"

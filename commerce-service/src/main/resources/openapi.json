@@ -647,7 +647,7 @@
         "additionalProperties": false,
         "required": ["category", "message", "correlationId"],
         "properties": {
-          "category": {"type": "string", "enum": ["AUTHENTICATION", "AUTHORIZATION", "VALIDATION", "OWNERSHIP", "IDEMPOTENCY_CONFLICT", "STALE_VERSION", "INSUFFICIENT_STOCK", "CONCURRENCY_EXHAUSTED"]},
+          "category": {"type": "string", "enum": ["AUTHENTICATION", "AUTHORIZATION", "VALIDATION", "OWNERSHIP", "IDEMPOTENCY_CONFLICT", "STALE_VERSION", "INSUFFICIENT_STOCK", "CONCURRENCY_EXHAUSTED", "DEPENDENCY_UNAVAILABLE"]},
           "message": {"type": "string"},
           "correlationId": {"type": "string"}
         }
