@@ -16,16 +16,21 @@ public class MockPaymentRepository {
     this.jdbc = jdbc;
   }
 
+  public Optional<OrderTruth> findOrder(String orderId) {
+    return findOrder(orderId, "");
+  }
+
   public Optional<OrderTruth> findOrderForUpdate(String orderId) {
+    return findOrder(orderId, " FOR UPDATE");
+  }
+
+  private Optional<OrderTruth> findOrder(String orderId, String lockClause) {
     List<OrderTruth> standard =
         jdbc.query(
-            """
-            SELECT order_id, user_subject, sandbox_id, evaluation_owner_handle, product_id,
-                   total_price_minor, currency, status, state_version
-            FROM standard_order
-            WHERE order_id = ?
-            FOR UPDATE
-            """,
+            "SELECT order_id, user_subject, sandbox_id, evaluation_owner_handle, product_id, "
+                + "total_price_minor, currency, status, state_version "
+                + "FROM standard_order WHERE order_id = ?"
+                + lockClause,
             (result, row) ->
                 new OrderTruth(
                     "STANDARD",
@@ -43,14 +48,11 @@ public class MockPaymentRepository {
             orderId);
     List<OrderTruth> seckill =
         jdbc.query(
-            """
-            SELECT order_id, user_subject, NULL AS sandbox_id, NULL AS evaluation_owner_handle,
-                   product_id, reservation_id, activity_id, total_price_minor, currency, status,
-                   state_version
-            FROM seckill_order
-            WHERE order_id = ?
-            FOR UPDATE
-            """,
+            "SELECT order_id, user_subject, NULL AS sandbox_id, "
+                + "NULL AS evaluation_owner_handle, product_id, reservation_id, activity_id, "
+                + "total_price_minor, currency, status, state_version "
+                + "FROM seckill_order WHERE order_id = ?"
+                + lockClause,
             (result, row) ->
                 new OrderTruth(
                     "SECKILL",
@@ -73,15 +75,17 @@ public class MockPaymentRepository {
   }
 
   public Optional<OrderTruth> findEvaluationOrderForUpdate(String orderId, String sandboxId) {
+    return findEvaluationOrder(orderId, sandboxId, " FOR UPDATE");
+  }
+
+  private Optional<OrderTruth> findEvaluationOrder(
+      String orderId, String sandboxId, String lockClause) {
     List<OrderTruth> rows =
         jdbc.query(
-            """
-            SELECT order_id, user_subject, sandbox_id, evaluation_owner_handle, product_id,
-                   total_price_minor, currency, status, state_version
-            FROM standard_order
-            WHERE order_id = ? AND sandbox_id = ?
-            FOR UPDATE
-            """,
+            "SELECT order_id, user_subject, sandbox_id, evaluation_owner_handle, product_id, "
+                + "total_price_minor, currency, status, state_version "
+                + "FROM standard_order WHERE order_id = ? AND sandbox_id = ?"
+                + lockClause,
             (result, row) ->
                 new OrderTruth(
                     "STANDARD",
@@ -165,6 +169,12 @@ public class MockPaymentRepository {
   public Optional<AttemptRecord> findAttemptByIdForUpdate(String attemptId) {
     return queryAttempt(
         "SELECT " + attemptColumns() + " FROM mock_payment_attempt WHERE attempt_id = ? FOR UPDATE",
+        attemptId);
+  }
+
+  public Optional<AttemptRecord> findAttemptById(String attemptId) {
+    return queryAttempt(
+        "SELECT " + attemptColumns() + " FROM mock_payment_attempt WHERE attempt_id = ?",
         attemptId);
   }
 

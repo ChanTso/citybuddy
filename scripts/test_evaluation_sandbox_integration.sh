@@ -276,8 +276,21 @@ wait_http() {
   local url="$1"
   local pid="$2"
   local log="$3"
+  local expected_status="${4:-}"
+  local actual_status
+  if (( $# >= 4 )); then
+    shift 4
+  else
+    shift 3
+  fi
   for _ in {1..90}; do
-    if [[ "$(curl --silent --output /dev/null --write-out '%{http_code}' "$url" 2>/dev/null)" != 000 ]]; then
+    actual_status="$(
+      curl --silent --output /dev/null --write-out '%{http_code}' "$@" "$url" 2>/dev/null || true
+    )"
+    if [[ -n "$expected_status" && "$actual_status" == "$expected_status" ]]; then
+      return
+    fi
+    if [[ -z "$expected_status" && "$actual_status" != 000 ]]; then
       return
     fi
     if ! kill -0 "$pid" >/dev/null 2>&1; then
@@ -353,6 +366,7 @@ start_commerce() {
     --server.port=0 \
     --spring.datasource.url="jdbc:mysql://127.0.0.1:$MYSQL_PORT/commerce_db?useSSL=false&allowPublicKeyRetrieval=true" \
     --spring.datasource.username=commerce_app \
+    --spring.datasource.hikari.connection-timeout=2000 \
     --citybuddy.obo.enabled=true \
     --citybuddy.obo.issuer=https://identity.citybuddy.test \
     --citybuddy.obo.jwks-url="http://127.0.0.1:$auth_port/auth/jwks" \
@@ -1434,9 +1448,8 @@ for payment_invalid_body in \
     --header 'Content-Type: application/json' \
     --data "$payment_invalid_body"
 done
-mysql_query root "$root_password" commerce_db \
-  "REVOKE SELECT ON commerce_db.eval_sandbox FROM 'commerce_app'@'%'"
-assert_status 503 "sandbox truth outage is indeterminate and never authorizes payment" \
+mysql_query root "$root_password" '' "SET GLOBAL offline_mode = ON"
+assert_status 503 "database disconnection is unavailable and never authorizes payment" \
   --request POST "http://127.0.0.1:$commerce_port/internal/mock-payments/callback" \
   --header "X-Mock-Payment-Key-Id: $mock_payment_key" \
   --header "X-Mock-Payment-Timestamp: $payment_timestamp" \
@@ -1444,8 +1457,14 @@ assert_status 503 "sandbox truth outage is indeterminate and never authorizes pa
   --header "Idempotency-Key: $payment_callback_key" \
   --header 'Content-Type: application/json' \
   --data "$payment_callback_body"
-mysql_query root "$root_password" '' \
-  "GRANT SELECT ON commerce_db.eval_sandbox TO 'commerce_app'@'%'"
+mysql_query root "$root_password" '' "SET GLOBAL offline_mode = OFF"
+wait_http \
+  "http://127.0.0.1:$commerce_port/api/eval/state" \
+  "$commerce_pid" \
+  "$tmp_dir/commerce.log" \
+  200 \
+  --user "evaluation-manager:$management_password" \
+  --header 'X-Eval-Sandbox-Id: sandbox-payment'
 test "$(mysql_query commerce_app "$commerce_app_password" commerce_db \
   "SELECT CONCAT(status, ':', state_version) FROM standard_order WHERE order_id = '$payment_order_id'")" = 'UNPAID:1'
 test "$(mysql_query commerce_app "$commerce_app_password" commerce_db \
@@ -1487,9 +1506,12 @@ assert_conflicting_payment_replay() {
     --data "$body"
 }
 
-assert_conflicting_payment_replay "replay rejects a different callback key" \
-  callback-evaluation-new-key "$payment_event_id" "$payment_order_id" 1800 CNY SUCCEEDED \
-  "$payment_session" "$payment_trace" "$payment_operation"
+for repetition in {1..5}; do
+  assert_conflicting_payment_replay \
+    "replay rejects a different callback key (repetition $repetition)" \
+    callback-evaluation-new-key "$payment_event_id" "$payment_order_id" 1800 CNY SUCCEEDED \
+    "$payment_session" "$payment_trace" "$payment_operation"
+done
 assert_conflicting_payment_replay "replay rejects a different callback event" \
   "$payment_callback_key" 00000000-0000-0000-0000-000000000197 "$payment_order_id" \
   1800 CNY SUCCEEDED "$payment_session" "$payment_trace" "$payment_operation"
@@ -1911,7 +1933,7 @@ ALTER TABLE inventory_ledger ADD CONSTRAINT chk_inventory_ledger_movement CHECK 
 
 mysql_query root "$root_password" commerce_db \
   "UPDATE mock_payment_attempt SET callback_correlation_id = '00000000-0000-0000-0000-000000000194' WHERE attempt_id = '$payment_attempt_id'"
-assert_payment_truth_fails_closed "corrupted attempt correlation" 404
+assert_payment_truth_fails_closed "corrupted attempt correlation"
 mysql_query root "$root_password" commerce_db \
   "UPDATE mock_payment_attempt SET callback_correlation_id = '$payment_correlation_id' WHERE attempt_id = '$payment_attempt_id'"
 mysql_query root "$root_password" commerce_db \
@@ -1921,7 +1943,7 @@ mysql_query root "$root_password" commerce_db \
   "UPDATE mock_payment_attempt SET user_subject = '$payment_subject' WHERE attempt_id = '$payment_attempt_id'"
 mysql_query root "$root_password" commerce_db \
   "UPDATE mock_payment_attempt SET sandbox_id = 'sandbox-main' WHERE attempt_id = '$payment_attempt_id'"
-assert_payment_truth_fails_closed "corrupted attempt sandbox" 404
+assert_payment_truth_fails_closed "corrupted attempt sandbox"
 mysql_query root "$root_password" commerce_db \
   "UPDATE mock_payment_attempt SET sandbox_id = 'sandbox-payment' WHERE attempt_id = '$payment_attempt_id'"
 mysql_query root "$root_password" commerce_db \
@@ -2041,7 +2063,7 @@ payment_dead_timestamp="$(date +%s)"
 payment_dead_signature="$(sign_payment_callback "$payment_dead_timestamp" \
   "$payment_callback_key" "$payment_event_id" "$payment_correlation_id" "$payment_order_id" \
   sandbox-payment "$payment_session" "$payment_trace" "$payment_operation")"
-assert_status 403 "dead sandbox rejects even an authenticated durable callback replay" \
+assert_status 200 "dead sandbox returns the authenticated durable callback result without mutation" \
   --request POST "http://127.0.0.1:$commerce_port/internal/mock-payments/callback" \
   --header "X-Mock-Payment-Key-Id: $mock_payment_key" \
   --header "X-Mock-Payment-Timestamp: $payment_dead_timestamp" \

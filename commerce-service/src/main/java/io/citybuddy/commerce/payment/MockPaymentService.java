@@ -79,7 +79,12 @@ public final class MockPaymentService {
     requireIdempotency(idempotencyKey, "Callback idempotency key is invalid");
     MockPaymentCallbackRequest valid = requireCallback(request);
     String intentHash = hash(callbackIntent(idempotencyKey, valid));
-    return withCallbackDeadlockRetry(() -> callbackOnce(idempotencyKey, valid, intentHash));
+    MockPaymentCallbackResult committed =
+        resolveCommittedCallbackInNewTransaction(idempotencyKey, valid, intentHash);
+    if (committed != null) {
+      return committed;
+    }
+    return withCallbackDeadlockRetry(idempotencyKey, valid, intentHash);
   }
 
   private MockPaymentResult startOnce(
@@ -249,11 +254,43 @@ public final class MockPaymentService {
     return callbackResult(succeeded, false);
   }
 
+  private MockPaymentCallbackResult resolveCommittedCallback(
+      String idempotencyKey, MockPaymentCallbackRequest request, String intentHash) {
+    MockPaymentRepository.CallbackRecord keyed =
+        repository.findCallbackByKey(idempotencyKey).orElse(null);
+    MockPaymentRepository.CallbackRecord event =
+        repository.findCallbackByEvent(request.callbackEventId()).orElse(null);
+    MockPaymentRepository.CallbackRecord observed = keyed == null ? event : keyed;
+    if (observed == null) {
+      return null;
+    }
+    if (keyed != null && event != null && !keyed.equals(event)) {
+      throw conflict("Callback identity conflicts with its existing result");
+    }
+    MockPaymentRepository.AttemptRecord attempt =
+        repository
+            .findAttemptById(observed.attemptId())
+            .orElseThrow(() -> conflict("Committed payment truth is inconsistent"));
+    if (attempt.sandboxId() == null) {
+      requireCallbackReplay(observed, request, intentHash);
+      requireCallbackAttempt(observed, attempt);
+    } else {
+      requireEvaluationCallbackReplay(observed, attempt, idempotencyKey, request, intentHash);
+    }
+    return callbackResult(requireSucceededTruth(attempt, false), true);
+  }
+
   private MockPaymentRepository.AttemptRecord requireSucceededTruth(
       MockPaymentRepository.AttemptRecord attempt) {
+    return requireSucceededTruth(attempt, true);
+  }
+
+  private MockPaymentRepository.AttemptRecord requireSucceededTruth(
+      MockPaymentRepository.AttemptRecord attempt, boolean lock) {
     MockPaymentRepository.OrderTruth order =
-        repository
-            .findOrderForUpdate(attempt.orderId())
+        (lock
+                ? repository.findOrderForUpdate(attempt.orderId())
+                : repository.findOrder(attempt.orderId()))
             .orElseThrow(() -> conflict("Committed payment truth is inconsistent"));
     MockPaymentRepository.CallbackRecord callback =
         repository.findCallbackByAttempt(attempt.attemptId()).orElse(null);
@@ -342,26 +379,47 @@ public final class MockPaymentService {
     }
   }
 
-  private <T> T withCallbackDeadlockRetry(java.util.function.Supplier<T> work) {
+  private MockPaymentCallbackResult withCallbackDeadlockRetry(
+      String idempotencyKey, MockPaymentCallbackRequest request, String intentHash) {
     for (int attempt = 1; attempt <= MAXIMUM_CONCURRENCY_ATTEMPTS; attempt++) {
       try {
-        return execute(work);
+        return execute(() -> callbackOnce(idempotencyKey, request, intentHash));
       } catch (DuplicateKeyException exception) {
-        throw conflict("Callback identity conflicts with a concurrent result");
+        return resolveAfterCallbackCompetition(idempotencyKey, request, intentHash);
       } catch (CannotAcquireLockException exception) {
-        if (attempt == MAXIMUM_CONCURRENCY_ATTEMPTS || !isMySqlDeadlock(exception)) {
-          throw exception;
+        if (attempt < MAXIMUM_CONCURRENCY_ATTEMPTS && isRetryableMySqlLockCompetition(exception)) {
+          continue;
         }
+        return resolveAfterCallbackCompetition(idempotencyKey, request, intentHash);
       }
     }
     throw new IllegalStateException("Unreachable payment callback retry state");
   }
 
-  private static boolean isMySqlDeadlock(Throwable failure) {
+  private MockPaymentCallbackResult resolveAfterCallbackCompetition(
+      String idempotencyKey, MockPaymentCallbackRequest request, String intentHash) {
+    MockPaymentCallbackResult committed =
+        resolveCommittedCallbackInNewTransaction(idempotencyKey, request, intentHash);
+    if (committed != null) {
+      return committed;
+    }
+    throw conflict("Callback could not be serialized with its concurrent result");
+  }
+
+  private MockPaymentCallbackResult resolveCommittedCallbackInNewTransaction(
+      String idempotencyKey, MockPaymentCallbackRequest request, String intentHash) {
+    return execute(
+            () ->
+                java.util.Optional.ofNullable(
+                    resolveCommittedCallback(idempotencyKey, request, intentHash)))
+        .orElse(null);
+  }
+
+  private static boolean isRetryableMySqlLockCompetition(Throwable failure) {
     Throwable current = failure;
     while (current != null) {
-      if (current instanceof SQLException sqlException && sqlException.getErrorCode() == 1213) {
-        return true;
+      if (current instanceof SQLException sqlException) {
+        return sqlException.getErrorCode() == 1205 || sqlException.getErrorCode() == 1213;
       }
       current = current.getCause();
     }
