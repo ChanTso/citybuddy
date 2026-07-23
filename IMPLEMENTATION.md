@@ -1,8 +1,8 @@
 # CityBuddy implementation index
 
-**Document version:** v0.31\
-**Verification date:** 2026-07-21\
-**Repository phase:** Versioned two-level FAQ cache ready
+**Document version:** v0.32\
+**Verification date:** 2026-07-23\
+**Repository phase:** Knowledge rebuild validation and atomic alias switch verified
 
 ## How to use this index
 
@@ -17,7 +17,7 @@
 
 CityBuddy targets local-commerce transactions and text-only AI customer support with independent identity, side-effect, retrieval, and evaluation boundaries.
 
-The repository contains the verified local-runtime foundations, identity vertical slice, product catalog vertical slice, standard-ordering vertical slice, seckill reservation, durable-order, cancellation, mock-payment, refund, and reconciliation mainline, support conversation lifecycle, bounded agent/tool control, filtered SSE, append-only feedback, versioned hybrid public-knowledge retrieval, calibrated durable retrieval evidence, evaluation identity and sandbox lifecycles, sandbox-bound evaluation payment callbacks, commerce-owned FAQ publication truth with transactional Outbox, and incremental FAQ knowledge synchronization:
+The repository contains the verified local-runtime foundations, identity vertical slice, product catalog vertical slice, standard-ordering vertical slice, seckill reservation, durable-order, cancellation, mock-payment, refund, and reconciliation mainline, support conversation lifecycle, bounded agent/tool control, filtered SSE, append-only feedback, versioned hybrid public-knowledge retrieval, calibrated durable retrieval evidence, evaluation identity and sandbox lifecycles, sandbox-bound evaluation payment callbacks, commerce-owned FAQ publication truth with transactional Outbox, incremental FAQ knowledge synchronization, versioned FAQ caching, and validated knowledge rebuild with an atomic forward alias switch:
 
 - executable non-business skeletons for `auth-service`, `commerce-service`, `agent-service`, `knowledge-indexer`, and `web`;
 - one Maven reactor and wrapper, one locked `uv` workspace, and one npm lockfile;
@@ -41,6 +41,7 @@ The repository contains the verified local-runtime foundations, identity vertica
 - commerce-owned product and CRM truth, authenticated published-product reads, a non-authoritative Redis cache with bounded penetration and hot-key protection, and transactional Outbox plus idempotent RocketMQ invalidation;
 - commerce-owned FAQ draft and publication truth with immutable draft/publication command commitments, exact current-state reconciliation across the closed `DRAFT`/`PUBLISHED` state machine and every physical durable column, and atomic normal-message Outbox publication;
 - a production Python knowledge-indexer consumer for the closed bounded FAQ publication envelope, with deterministic document identity, durable source-version/event-intent commitments, stale/conflicting delivery rejection, tombstone resurrection fencing, bounded permanent poison disposition, and restart/outage/indeterminate-response convergence in the current aliased physical index;
+- one server-owned knowledge rebuild coordinator with closed owner snapshots, Broker-journal catch-up and durable grow-only checkpoints, complete candidate validation, version-CAS guarded control records, and one atomic verified forward alias switch that preserves predecessor and rollback-lease evidence without executing rollback or cleanup;
 - direct-user standard ordering with server-authoritative product and price snapshots, user-scoped idempotency, atomic MySQL stock/order/Outbox commit, bounded recognized-conflict retries, and least-privilege runtime grants;
 - MySQL-authoritative seckill activity allocation with versioned post-commit Commerce Redis projection, stale/conflicting/malformed write rejection, MySQL-only rebuild, and exact least-privilege activity grants;
 - MySQL-authoritative seckill reservation intent/status with owner-scoped idempotency and polling, atomic Commerce Redis Lua admission and deterministic decisions, bounded TTL/version/number invariants, MySQL-only reservation rebuild, and exact least-privilege reservation grants;
@@ -78,6 +79,12 @@ Cross-slice target architecture, preflight conclusions, service/data ownership, 
 
 ## Complete route
 
+The owner-approved continuous P0/P1 route terminates at `CB-152`. `CB-900`, `CB-910`, and `CB-920`
+remain deferred outlines outside this Goal and must not be promoted, expanded, or used to create
+post-`CB-152` work. `CB-150` retains its minimal optional no-op trace-sink scope, and `CB-152` must
+close with real load, latency, and quality evidence measured and environment-labelled in the local
+Docker Compose topology.
+
 The linked slice name is the canonical detailed specification. Target outcomes are retained separately in the [route outcome catalog](docs/CONTRACTS.md#contracts-route-outcomes).
 
 | Slice | Priority | State | Depends on |
@@ -112,10 +119,10 @@ The linked slice name is the canonical detailed specification. Target outcomes a
 | [CB-110 — FAQ publication truth and transactional Outbox](docs/slices/CB-110.md) | P1 | `VERIFIED` | `CB-030`, `CB-085`, `CB-091` |
 | [CB-111 — Incremental knowledge synchronization and version/tombstone convergence](docs/slices/CB-111.md) | P1 | `VERIFIED` | `CB-110` |
 | [CB-112 — Versioned two-level FAQ cache](docs/slices/CB-112.md) | P1 | `VERIFIED` | `CB-111` |
-| [CB-113 — Knowledge rebuild validation and atomic alias switch](docs/slices/CB-113.md) | P1 | `READY` | `CB-112` |
-| [CB-114 — Knowledge rollback catch-up and atomic restoration](docs/slices/CB-114.md) | P1 | `PLANNED` | `CB-113` |
+| [CB-113 — Knowledge rebuild validation and atomic alias switch](docs/slices/CB-113.md) | P1 | `VERIFIED` | `CB-112` |
+| [CB-114 — Knowledge rollback catch-up and atomic restoration](docs/slices/CB-114.md) | P1 | `READY` | `CB-113` |
 | [CB-115 — Expired knowledge-index candidate and predecessor cleanup](docs/slices/CB-115.md) | P1 | `PLANNED` | `CB-114` |
-| `CB-120 — Commerce PendingAction and atomic ActionReceipt transaction` | P1 | `PLANNED` | `CB-071`, `CB-082` |
+| [CB-120 — Commerce PendingAction and atomic ActionReceipt transaction](docs/slices/CB-120.md) | P1 | `PLANNED` | `CB-071`, `CB-082` |
 | `CB-121 — Agent confirmation, receipt projection, and turn commit` | P1 | `PLANNED` | `CB-120`, `CB-082` |
 | `CB-130 — Memory watermarks, prompt/PII, and tiered output safety` | P1 | `PLANNED` | `CB-115`, `CB-121` |
 | `CB-131 — Authoritative handoff tickets and agent projection` | P1 | `PLANNED` | `CB-130` |

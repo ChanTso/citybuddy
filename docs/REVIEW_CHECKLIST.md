@@ -59,6 +59,56 @@ request. A later semantic diff change requires the checklist to be executed and 
 - Exercise a class-based malformed-input battery, including raw and decoded non-ASCII, invalid
   encoding, missing structure, wrong primitive types, bounds, control bytes, and nulls where the
   protocol permits them to reach the parser.
+- For JSON from an untrusted dependency, reject duplicate object keys at the decoder boundary.
+  A later schema check cannot recover the overwritten first value once a permissive decoder has
+  accepted the duplicate. Apply the same duplicate-key hook to success and error responses.
+
+### Bounds apply before materialization
+
+- Enforce every count and byte bound at the acquisition boundary, before an untrusted query,
+  response, message batch, or collection is fully materialized. A size check after an unbounded
+  fetch is not a bounded boundary; use an exact limit or at most `maximum + 1` rows/items so the
+  extra item proves overflow and fails closed without loading the full source.
+- Exercise the production acquisition path with more underlying rows/items than the configured
+  maximum. Confirm the fetch itself remains bounded, the response or state transition is rejected,
+  and no prefix is misreported as a complete snapshot.
+- Elasticsearch search evidence must require an object-valued `hits.total` with
+  `relation == "eq"`. A `gte` relation is a lower bound, not an exact set/count commitment. For a
+  deliberately bounded top-k query the exact total may exceed returned hits; for a complete
+  candidate enumeration it must equal the materialized set under the explicit `maximum + 1` cap.
+
+### Projection marker and owner-journal set equality
+
+- Enumerate owner snapshot truth, accepted Broker journal events, and candidate control markers as
+  independent faces. First classify which journal events are covered by the captured owner
+  snapshot; then require the candidate `SYNC_EVENT` stable event-id set to equal that covered journal
+  set and compare every marker content field to the canonical event commitment. Marker shape
+  validity is only a local assertion and cannot establish membership.
+- Materialize every owner-covered accepted event before candidate validation, including stale
+  historical versions whose public document is already newer. Exercise real deletion of an expected
+  marker and insertion of a shape-valid orphan marker; both must fail validation. Future journal
+  events not yet visible in the owner snapshot remain unacknowledged and outside the committed set,
+  never silently promoted to owner truth.
+- When Broker receipt disposition is non-atomic, durably seal the exact validated marker set before
+  the first ACK. Recheck every currently pending receipt against that sealed set before acknowledging
+  any of them; an owner-covered event that arrives after validation must remain unacknowledged and
+  force revalidation. Exercise a controlled multi-message partial ACK where the first disposition
+  succeeds and a later one fails, then prove restart reconstructs the already-ACKed prefix from the
+  durable checkpoint and converges with the redelivered suffix. A completion flag written after ACK
+  is not a substitute because the acknowledged prefix is no longer reconstructable from Broker
+  delivery alone.
+- Treat a durable receipt checkpoint as grow-only under every concurrent control-record transition.
+  Read and retain the storage engine's compare-and-set version, create with create-only semantics,
+  and update only against that exact version. After a conflict, reread the latest record and
+  re-evaluate the transition; never resubmit a stale full document. Pass one immutable canonical
+  checkpoint value—complete descriptor tuple plus its deterministically derived marker map—to both
+  receipt disposition and subsequent completion. Completion must verify every expected descriptor
+  by stable identity and exact content as an immutable subset of the latest record, preserve any
+  concurrent superset, and apply the same check on an already-completed idempotent path. Exercise a
+  deterministic interleaving where a stale completion pauses after reading, another coordinator
+  seals a new descriptor, the stale write loses the compare-and-set, and restart still reconstructs
+  the exact checkpoint and marker that authorized ACK. Audit all writes to the control record; one
+  remaining unconditional update invalidates the evidence.
 
 ### One total-order contract in all three places
 
@@ -328,6 +378,10 @@ request. A later semantic diff change requires the checklist to be executed and 
   not reclaim abandoned state. Prove owner crash or lost redelivery cannot accumulate immortal keys,
   early eviction remains fail-closed, expiry becomes retryable absence, exact retry renews safely,
   and stale finalize/abort calls cannot mutate a replacement owner.
+- Persist a terminal completion marker only after every required authoritative mutation and
+  receipt/journal disposition has succeeded. If the final receipt commit fails or discovers a
+  contradictory event, the durable state must remain resumable and must not claim completion;
+  prove the crash/failure window and the subsequent redelivery or owner-truth recovery path.
 - When two operations consume the same persisted transition shape, define their guard set once and
   reuse it. Review the shared guard against the semantic invariants, including TTL upper bound and the
   strict physical-TTL versus remaining-lease-plus-safety-margin relation; runtime code coverage can
@@ -385,6 +439,12 @@ At each slice or authorized non-slice closeout, append every newly evidenced rec
 class that is not already covered above. Do not weaken or delete an existing check merely because
 the current slice is unaffected. When the available evidence contains no new class, record that
 explicit conclusion in the pull request rather than adding a placeholder checklist entry.
+
+For a pure internal evaluation/audit/state surface, an owner-approved closeout boundary may be the
+Cartesian product of mechanically enumerable ground truths plus an explicit residual-risk record.
+That boundary must name every included axis and excluded unbounded dimension. It does not apply to
+transaction messages, inventory consistency, identity authorization, idempotent ordering, or other
+business-core paths, whose established strict evidence remains blocking.
 
 For any conditionally enabled test class used as acceptance or rejection evidence, inspect the
 runner report rather than trusting process exit zero. Record the executed and skipped counts, and

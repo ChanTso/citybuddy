@@ -25,6 +25,7 @@ from .knowledge import (
 )
 
 MAX_EVENT_BYTES = 8192
+MAX_ELASTICSEARCH_RESPONSE_BYTES = 4 * 1024 * 1024
 MAX_QUESTION_LENGTH = 500
 MAX_ANSWER_LENGTH = 4000
 MAX_SOURCE_VERSION = 9_223_372_036_854_775_807
@@ -33,6 +34,7 @@ EVENT_TAG = "knowledge-sync"
 RESERVED_SANDBOX_PROPERTY = "citybuddy-eval-sandbox-id"
 
 _SOURCE_ID = re.compile(r"^[a-z0-9][a-z0-9-]{0,63}$")
+_INDEX_NAME = re.compile(r"^knowledge_docs_v[1-9][0-9]*$")
 _INSTANT = re.compile(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.(\d{3}|\d{6}|\d{9}))?Z$")
 _EVENT_FIELDS = {
     "eventId",
@@ -267,6 +269,16 @@ class ElasticsearchKnowledgeProjection:
 
     def apply_with_index(self, event: FaqKnowledgeEvent) -> tuple[ProjectionOutcome, str]:
         index = self._resolve_current_index()
+        return self.apply_to_index(event, index), index
+
+    def apply_to_index(self, event: FaqKnowledgeEvent, index: str) -> ProjectionOutcome:
+        if _INDEX_NAME.fullmatch(index) is None:
+            raise KnowledgeSyncError("invalid_index")
+        _, mapping = self._request("GET", f"/{quote(index)}/_mapping")
+        try:
+            validate_knowledge_mapping(mapping, index)
+        except KnowledgeBootstrapError as error:
+            raise KnowledgeSyncError("incompatible_mapping") from error
         self._bind_event_identity(index, event)
         for _ in range(MAX_CAS_ATTEMPTS):
             current = self._get(index, event.document_id)
@@ -279,16 +291,16 @@ class ElasticsearchKnowledgeProjection:
                 )
                 if status == 409:
                     continue
-                return ProjectionOutcome.APPLIED, index
+                return ProjectionOutcome.APPLIED
             current_version = current.source.get("source_version")
             if type(current_version) is not int or current_version < 1:
                 raise KnowledgeSyncError("inconsistent_projection")
             if current_version > event.source_version:
-                return ProjectionOutcome.STALE, index
+                return ProjectionOutcome.STALE
             if current_version == event.source_version:
                 if not self._matches_projection(current.source, event):
                     raise KnowledgeSyncConflict("conflicting_source_version")
-                return ProjectionOutcome.REPLAYED, index
+                return ProjectionOutcome.REPLAYED
             status, _ = self._request(
                 "PUT",
                 self._document_path(
@@ -301,7 +313,7 @@ class ElasticsearchKnowledgeProjection:
             )
             if status == 409:
                 continue
-            return ProjectionOutcome.APPLIED, index
+            return ProjectionOutcome.APPLIED
         raise KnowledgeSyncError("concurrent_projection_contention")
 
     def _resolve_current_index(self) -> str:
@@ -430,12 +442,14 @@ class ElasticsearchKnowledgeProjection:
         try:
             with urlopen(request, timeout=self._timeout_seconds) as response:  # noqa: S310
                 status = response.status
-                body = response.read()
+                body = response.read(MAX_ELASTICSEARCH_RESPONSE_BYTES + 1)
         except HTTPError as error:
             status = error.code
-            body = error.read()
+            body = error.read(MAX_ELASTICSEARCH_RESPONSE_BYTES + 1)
         except (URLError, TimeoutError, OSError) as error:
             raise KnowledgeSyncError("elasticsearch_unavailable") from error
+        if len(body) > MAX_ELASTICSEARCH_RESPONSE_BYTES:
+            raise KnowledgeSyncError("malformed_elasticsearch_response")
         if status not in expected:
             raise KnowledgeSyncError(
                 "elasticsearch_unavailable" if status >= 500 else "elasticsearch_rejected"
@@ -443,8 +457,8 @@ class ElasticsearchKnowledgeProjection:
         if not body:
             return status, {}
         try:
-            decoded = json.loads(body)
-        except (json.JSONDecodeError, UnicodeDecodeError) as error:
+            decoded = json.loads(body, object_pairs_hook=_unique_object)
+        except (ValueError, UnicodeDecodeError, RecursionError) as error:
             raise KnowledgeSyncError("malformed_elasticsearch_response") from error
         if not isinstance(decoded, dict):
             raise KnowledgeSyncError("malformed_elasticsearch_response")
