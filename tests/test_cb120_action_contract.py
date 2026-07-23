@@ -10,9 +10,7 @@ def source(path: str) -> str:
 
 
 def test_pending_action_and_receipt_schema_are_bounded_and_immutable() -> None:
-    migration = source(
-        "infra/mysql/migrations/commerce/V015__pending_action_receipt.sql"
-    )
+    migration = source("infra/mysql/migrations/commerce/V015__pending_action_receipt.sql")
     assert "CREATE TABLE pending_action" in migration
     assert "uq_pending_action_idempotency" in migration
     assert "uq_pending_action_turn" in migration
@@ -32,10 +30,7 @@ def test_runtime_grants_keep_action_truth_in_commerce_only() -> None:
         "ON commerce_db.pending_action "
         "TO 'commerce_app'@'%';"
     ) in grants
-    assert (
-        "GRANT SELECT, INSERT ON commerce_db.action_receipt "
-        "TO 'commerce_app'@'%';"
-    ) in grants
+    assert ("GRANT SELECT, INSERT ON commerce_db.action_receipt TO 'commerce_app'@'%';") in grants
     for identity in ("auth_app", "agent_app"):
         assert f"commerce_db.pending_action TO '{identity}'" not in grants
         assert f"commerce_db.action_receipt TO '{identity}'" not in grants
@@ -45,9 +40,7 @@ def test_runtime_grants_keep_action_truth_in_commerce_only() -> None:
 
 
 def test_openapi_exposes_only_closed_prepare_and_confirm_shapes() -> None:
-    document = json.loads(
-        source("commerce-service/src/main/resources/openapi.json")
-    )
+    document = json.loads(source("commerce-service/src/main/resources/openapi.json"))
     paths = document["paths"]
     assert "/internal/tools/actions/prepare" in paths
     assert "/internal/tools/actions/{pendingActionId}/confirm" in paths
