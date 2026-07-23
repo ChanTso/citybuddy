@@ -93,6 +93,7 @@ class CatalogIntegrationTest {
     registry.add("citybuddy.orders.required-permission", () -> "order:create");
     registry.add("citybuddy.orders.maximum-quantity", () -> "100");
     registry.add("citybuddy.orders.maximum-concurrency-attempts", () -> "10");
+    registry.add("citybuddy.orders.lock-wait-timeout-seconds", () -> "1");
     registry.add("citybuddy.catalog.cache-ttl", () -> "30s");
     registry.add("citybuddy.catalog.cache-jitter", () -> "10s");
     registry.add("citybuddy.catalog.null-ttl", () -> "3s");
@@ -499,7 +500,7 @@ class CatalogIntegrationTest {
         new OrderService(
             probe,
             new TransactionTemplate(new DataSourceTransactionManager(targetDataSource)),
-            new OrderProperties("order:create", 100, 1));
+            new OrderProperties("order:create", 100, 1, 1));
     var executor = Executors.newSingleThreadExecutor();
 
     try (Connection sibling =
@@ -592,7 +593,7 @@ class CatalogIntegrationTest {
         new OrderService(
             probe,
             new TransactionTemplate(new DataSourceTransactionManager(targetDataSource)),
-            new OrderProperties("order:create", 100, 1));
+            new OrderProperties("order:create", 100, 1, 1));
     OrderRequest request = orderRequest(productId, quantity);
     var executor = Executors.newSingleThreadExecutor();
     Future<OrderResult> target = null;
@@ -756,23 +757,22 @@ class CatalogIntegrationTest {
   }
 
   private static final class IndeterminateObservationRepository extends OrderRepository {
-    private final JdbcTemplate jdbc;
     private final AtomicInteger reads = new AtomicInteger();
     private final AtomicInteger indeterminateObservations = new AtomicInteger();
     private final CountDownLatch indeterminateObservation = new CountDownLatch(1);
 
     private IndeterminateObservationRepository(JdbcTemplate jdbc, ObjectMapper objectMapper) {
       super(jdbc, objectMapper);
-      this.jdbc = jdbc;
     }
 
     @Override
     public Optional<IdempotencyRecord> findIdempotencyForUpdate(String user, String key) {
       int read = reads.incrementAndGet();
-      jdbc.execute("SET SESSION innodb_lock_wait_timeout = 1");
       try {
         return super.findIdempotencyForUpdate(user, key);
-      } catch (org.springframework.dao.PessimisticLockingFailureException exception) {
+      } catch (org.springframework.dao.PessimisticLockingFailureException
+          | org.springframework.dao.QueryTimeoutException
+          | org.springframework.transaction.TransactionTimedOutException exception) {
         if (read > 1) {
           indeterminateObservations.incrementAndGet();
           indeterminateObservation.countDown();

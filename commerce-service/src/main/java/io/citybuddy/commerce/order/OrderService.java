@@ -8,27 +8,25 @@ import java.util.Set;
 import java.util.UUID;
 import org.springframework.dao.DataAccessResourceFailureException;
 import org.springframework.dao.PessimisticLockingFailureException;
+import org.springframework.dao.QueryTimeoutException;
 import org.springframework.transaction.CannotCreateTransactionException;
+import org.springframework.transaction.TransactionTimedOutException;
 import org.springframework.transaction.support.TransactionTemplate;
 
 public final class OrderService {
   private static final int COMMITTED_OBSERVATION_ATTEMPTS = 3;
-  private static final int COMMITTED_OBSERVATION_TIMEOUT_SECONDS = 1;
   private static final long COMMITTED_OBSERVATION_BACKOFF_MILLIS = 25;
   private static final Set<String> OWNER_FIELDS =
       Set.of("owner", "ownersubject", "user", "userid", "usersubject");
   private final OrderRepository repository;
-  private final TransactionTemplate transactions;
-  private final TransactionTemplate observationTransactions;
+  private final OrderTransactions transactions;
   private final OrderProperties properties;
 
   public OrderService(
       OrderRepository repository, TransactionTemplate transactions, OrderProperties properties) {
     this.repository = repository;
-    this.transactions = transactions;
-    this.observationTransactions =
-        new TransactionTemplate(transactions.getTransactionManager(), transactions);
-    this.observationTransactions.setTimeout(COMMITTED_OBSERVATION_TIMEOUT_SECONDS);
+    this.transactions =
+        new OrderTransactions(repository, transactions, properties.lockWaitTimeoutSeconds());
     this.properties = properties;
   }
 
@@ -38,7 +36,7 @@ public final class OrderService {
     for (int attempt = 1; attempt <= properties.maximumConcurrencyAttempts(); attempt++) {
       try {
         OrderResult result =
-            transactions.execute(
+            transactions.mutate(
                 status -> createOnce(user, idempotencyKey, validated, correlationId));
         if (result == null) {
           throw new IllegalStateException("Order transaction returned no result");
@@ -109,7 +107,7 @@ public final class OrderService {
 
     try {
       OrderResult result =
-          transactions.execute(status -> createOnce(user, idempotencyKey, request, correlationId));
+          transactions.mutate(status -> createOnce(user, idempotencyKey, request, correlationId));
       if (result == null) {
         throw new IllegalStateException("Order recovery transaction returned no result");
       }
@@ -146,12 +144,14 @@ public final class OrderService {
       String user, String idempotencyKey, ValidatedRequest request, String correlationId) {
     try {
       OrderResult committed =
-          observationTransactions.execute(
+          transactions.observe(
               status -> resolveCommitted(user, idempotencyKey, request, correlationId));
       return committed == null
           ? CommittedObservation.confirmedAbsent()
           : CommittedObservation.found(committed);
-    } catch (PessimisticLockingFailureException exception) {
+    } catch (PessimisticLockingFailureException
+        | QueryTimeoutException
+        | TransactionTimedOutException exception) {
       return CommittedObservation.indeterminate();
     } catch (DataAccessResourceFailureException | CannotCreateTransactionException exception) {
       throw unavailable(correlationId);
@@ -170,7 +170,15 @@ public final class OrderService {
 
   private OrderResult resolveCommitted(
       String user, String idempotencyKey, ValidatedRequest request, String correlationId) {
-    var existing = repository.findIdempotencyForUpdate(user, idempotencyKey);
+    return resolveCommitted(
+        repository.findIdempotencyForUpdate(user, idempotencyKey), user, request, correlationId);
+  }
+
+  private OrderResult resolveCommitted(
+      java.util.Optional<OrderRepository.IdempotencyRecord> existing,
+      String user,
+      ValidatedRequest request,
+      String correlationId) {
     if (existing.isEmpty()) {
       return null;
     }

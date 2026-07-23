@@ -20,7 +20,7 @@ class OrderControllerEvaluationBoundaryTest {
     MockMvc http =
         MockMvcBuilders.standaloneSetup(
                 new OrderController(
-                    identity.authorizer(), service, new OrderProperties(null, 0, 0)))
+                    identity.authorizer(), service, new OrderProperties(null, 0, 0, 0)))
             .setControllerAdvice(new OrderExceptionHandler())
             .build();
 

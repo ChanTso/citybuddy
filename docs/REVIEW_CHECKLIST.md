@@ -34,6 +34,14 @@ request. A later semantic diff change requires the checklist to be executed and 
   permit one bounded final mutation attempt. A lock timeout, observation failure, or interrupted
   read is `INDETERMINATE`, never evidence of absence and never a terminal conflict or unavailable
   conclusion; use bounded re-observation and, if truth remains indeterminate, a retryable response.
+  Prove the database lock wait itself is physically bounded on every production transaction path
+  that can acquire the contended lock, including initial mutation, retry, final mutation, and truth
+  observation; bounding only the recovery read leaves the flow blocked before it can enter the
+  three-state resolver. Apply the boundary at a shared transaction/connection layer so new paths
+  inherit it instead of relying on per-query opt-in. A framework transaction deadline is
+  insufficient unless the real driver demonstrably interrupts row-lock waits. If a pooled session
+  variable supplies the bound, capture and restore its prior value in `finally` so the recovery
+  policy cannot leak into later borrowers.
   Only a positively identified database resource or transaction-acquisition failure may use the
   unavailable response. Exercise found, confirmed-absent recovery, indeterminate-then-found,
   persistently indeterminate, conflicting intent, and real dependency unavailability independently.

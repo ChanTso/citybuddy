@@ -4,8 +4,10 @@ import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import java.util.List;
 import java.util.Optional;
+import java.util.function.Supplier;
 import org.springframework.dao.DuplicateKeyException;
 import org.springframework.jdbc.core.JdbcTemplate;
+import org.springframework.transaction.support.TransactionSynchronizationManager;
 
 public class OrderRepository {
   private final JdbcTemplate jdbc;
@@ -32,6 +34,25 @@ public class OrderRepository {
             key)
         .stream()
         .findFirst();
+  }
+
+  <T> T withLockWaitTimeout(int timeoutSeconds, Supplier<T> work) {
+    if (timeoutSeconds < 1 || timeoutSeconds > 60) {
+      throw new IllegalArgumentException("Lock wait timeout must be between 1 and 60 seconds");
+    }
+    if (!TransactionSynchronizationManager.isActualTransactionActive()) {
+      throw new IllegalStateException("Lock wait timeout guard requires an active transaction");
+    }
+    Long previous = jdbc.queryForObject("SELECT @@SESSION.innodb_lock_wait_timeout", Long.class);
+    if (previous == null) {
+      throw new IllegalStateException("MySQL lock wait timeout is unavailable");
+    }
+    try {
+      jdbc.execute("SET SESSION innodb_lock_wait_timeout = " + timeoutSeconds);
+      return work.get();
+    } finally {
+      jdbc.execute("SET SESSION innodb_lock_wait_timeout = " + previous);
+    }
   }
 
   public void reserveIdempotency(String user, String key, String intentHash, String orderId) {
