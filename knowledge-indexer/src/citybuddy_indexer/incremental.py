@@ -25,6 +25,7 @@ from .knowledge import (
 )
 
 MAX_EVENT_BYTES = 8192
+MAX_ELASTICSEARCH_RESPONSE_BYTES = 4 * 1024 * 1024
 MAX_QUESTION_LENGTH = 500
 MAX_ANSWER_LENGTH = 4000
 MAX_SOURCE_VERSION = 9_223_372_036_854_775_807
@@ -441,12 +442,14 @@ class ElasticsearchKnowledgeProjection:
         try:
             with urlopen(request, timeout=self._timeout_seconds) as response:  # noqa: S310
                 status = response.status
-                body = response.read()
+                body = response.read(MAX_ELASTICSEARCH_RESPONSE_BYTES + 1)
         except HTTPError as error:
             status = error.code
-            body = error.read()
+            body = error.read(MAX_ELASTICSEARCH_RESPONSE_BYTES + 1)
         except (URLError, TimeoutError, OSError) as error:
             raise KnowledgeSyncError("elasticsearch_unavailable") from error
+        if len(body) > MAX_ELASTICSEARCH_RESPONSE_BYTES:
+            raise KnowledgeSyncError("malformed_elasticsearch_response")
         if status not in expected:
             raise KnowledgeSyncError(
                 "elasticsearch_unavailable" if status >= 500 else "elasticsearch_rejected"

@@ -1004,6 +1004,8 @@ class ElasticsearchRebuildClient:
                 documents[document_id] = cast(dict[str, object], source)
             elif record_type == "SYNC_EVENT":
                 self._validate_sync_marker(document_id, cast(dict[str, object], source))
+                if document_id in sync_markers:
+                    raise KnowledgeRebuildError("candidate_public_boundary_violation")
                 sync_markers[document_id] = cast(dict[str, object], source)
             elif record_type == "REBUILD_SWITCH" and document_id == REBUILD_RECORD_ID:
                 control_records += 1

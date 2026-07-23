@@ -4,7 +4,10 @@ import threading
 from collections.abc import Callable
 from copy import deepcopy
 from datetime import UTC, datetime
+from email.message import Message
 from http.client import HTTPException
+from io import BytesIO
+from urllib.error import HTTPError
 from uuid import UUID
 
 import citybuddy_indexer.incremental as incremental_module
@@ -12,6 +15,7 @@ import citybuddy_indexer.rebuild as rebuild_module
 import citybuddy_indexer.rebuild_runtime as rebuild_runtime_module
 import pytest
 from citybuddy_indexer.incremental import (
+    MAX_ELASTICSEARCH_RESPONSE_BYTES,
     RESERVED_SANDBOX_PROPERTY,
     ElasticsearchKnowledgeProjection,
     FaqKnowledgeEvent,
@@ -356,6 +360,173 @@ class Elasticsearch:
 
     def complete_switch(self, candidate: str, completion: KnowledgeSnapshot) -> None:
         self.calls.append(("complete", candidate))
+
+
+class CheckpointElasticsearch(ElasticsearchRebuildClient):
+    def __init__(
+        self,
+        *,
+        current: str = "knowledge_docs_v1",
+        pending: bool = False,
+        records: dict[str, dict[str, object] | None] | None = None,
+        actual_markers: dict[str, dict[str, object]] | None = None,
+    ) -> None:
+        super().__init__("http://elasticsearch:9200")
+        self.current = current
+        self.pending = pending
+        self.completed: list[str] = []
+        self.records = records or {"knowledge_docs_v2": building_rebuild_record()}
+        self.actual_markers = actual_markers or {}
+        self.sealed_markers: dict[str, dict[str, object]] = {}
+
+    def resolve_alias(self) -> str:
+        return self.current
+
+    def pending_switch(self, current: str) -> RebuildResult | None:
+        if not self.pending or current != "knowledge_docs_v2":
+            return None
+        return RebuildResult(
+            predecessor="knowledge_docs_v1",
+            candidate="knowledge_docs_v2",
+            handoff_watermark="a" * 64,
+            rollback_lease_expires_at="2026-07-22T01:00:00Z",
+            document_count=2,
+            replayed=True,
+        )
+
+    def existing_result(self, current: str, initial: KnowledgeSnapshot) -> RebuildResult | None:
+        del current, initial
+        return None
+
+    def candidate_for(self, predecessor: str, initial: KnowledgeSnapshot) -> str:
+        del predecessor, initial
+        return "knowledge_docs_v2"
+
+    def create_or_resume_candidate(
+        self, predecessor: str, candidate: str, initial: KnowledgeSnapshot
+    ) -> None:
+        record = self.records[candidate]
+        assert record is not None
+        record["predecessor"] = predecessor
+        record["initialSnapshotId"] = initial.snapshot_id
+        record["initialSnapshotCommitment"] = initial.content_commitment
+
+    def load_snapshot(self, candidate: str, selected: KnowledgeSnapshot) -> None:
+        del candidate, selected
+
+    def apply_event(self, candidate: str, event: FaqKnowledgeEvent) -> ProjectionOutcome:
+        del candidate
+        self.actual_markers.update(markers(event))
+        return ProjectionOutcome.APPLIED
+
+    def seal_journal_events(
+        self,
+        candidate: str,
+        accepted_events: tuple[FaqKnowledgeEvent, ...],
+    ) -> dict[str, dict[str, object]]:
+        self.sealed_markers = super().seal_journal_events(candidate, accepted_events)
+        return deepcopy(self.sealed_markers)
+
+    def validate_candidate(
+        self,
+        candidate: str,
+        selected: KnowledgeSnapshot,
+        accepted_events: tuple[FaqKnowledgeEvent, ...],
+    ) -> None:
+        del candidate, selected, accepted_events
+        if self.actual_markers != self.sealed_markers:
+            raise KnowledgeRebuildError("candidate_commitment_mismatch")
+
+    def prepare_switch(
+        self,
+        candidate: str,
+        initial: KnowledgeSnapshot,
+        handoff: KnowledgeSnapshot,
+    ) -> str:
+        lease = super().prepare_switch(candidate, initial, handoff)
+        self.pending = True
+        return lease
+
+    def atomic_switch(self, predecessor: str, candidate: str) -> None:
+        assert predecessor == "knowledge_docs_v1"
+        self.current = candidate
+
+    def complete_switch(self, candidate: str, completion: KnowledgeSnapshot) -> None:
+        super().complete_switch(candidate, completion)
+        self.pending = False
+        self.completed.append(candidate)
+
+    def _read_rebuild_record(self, index: str) -> dict[str, object] | None:
+        return self.records.get(index)
+
+    def _write_rebuild_record(
+        self,
+        index: str,
+        record: dict[str, object],
+        *,
+        create: bool = False,
+    ) -> None:
+        del create
+        self.records[index] = deepcopy(record)
+
+
+def broker_journal(
+    consumer: "FakeBrokerConsumer",
+    messages: list["FakeBrokerMessage"],
+) -> RocketMqAcceptedEventJournal:
+    journal = RocketMqAcceptedEventJournal.__new__(RocketMqAcceptedEventJournal)
+    journal._consumer = consumer
+    journal._events = {}
+    journal._pending_messages = {}
+    journal._condition = threading.Condition()
+    journal._failure = None
+    for message in messages:
+        assert journal._accept(message) is True
+    return journal
+
+
+def test_partial_ack_restart_reconstructs_prefix_through_coordinator() -> None:
+    first = faq_record(version=1)
+    second = faq_record(version=1)
+    second["eventId"] = "22222222-2222-4222-8222-222222222222"
+    second["sourceId"] = "faq-delivery"
+    owner = snapshot([second, first])
+    messages = [
+        FakeBrokerMessage("broker-message-first", event_bytes(first)),
+        FakeBrokerMessage("broker-message-second", event_bytes(second)),
+    ]
+    elasticsearch = CheckpointElasticsearch()
+    first_consumer = FailSecondAckConsumer()
+
+    with pytest.raises(KnowledgeRebuildError, match="broker_unavailable"):
+        KnowledgeRebuildCoordinator(elasticsearch, catch_up_wait_seconds=0.1).rebuild(
+            Source([owner]),
+            broker_journal(first_consumer, messages),
+        )
+
+    assert first_consumer.acked == [messages[0]]
+    assert elasticsearch.pending is True
+    assert elasticsearch.completed == []
+    assert len(elasticsearch.sealed_markers) == 2
+
+    restarted = CheckpointElasticsearch(
+        current=elasticsearch.current,
+        pending=elasticsearch.pending,
+        records=deepcopy(elasticsearch.records),
+        actual_markers=deepcopy(elasticsearch.actual_markers),
+    )
+    second_consumer = FakeBrokerConsumer()
+    recovered = KnowledgeRebuildCoordinator(restarted, catch_up_wait_seconds=0.1).rebuild(
+        Source([owner]),
+        broker_journal(second_consumer, [messages[1]]),
+    )
+
+    assert recovered.replayed is True
+    assert second_consumer.acked == [messages[1]]
+    assert restarted.actual_markers == restarted.sealed_markers
+    assert len(restarted.sealed_markers) == 2
+    assert restarted.pending is False
+    assert restarted.completed == ["knowledge_docs_v2"]
 
 
 def test_coordinator_confirms_handoff_before_durable_prepare() -> None:
@@ -867,6 +1038,12 @@ def test_candidate_sync_markers_equal_committed_broker_journal_face() -> None:
     with pytest.raises(KnowledgeRebuildError, match="candidate_commitment_mismatch"):
         client._candidate_public_documents("knowledge_docs_v2", (event,))  # noqa: SLF001
 
+    client.responses["/knowledge_docs_v2/_search"] = response(
+        [exact_hits[0], exact_hits[1], exact_hits[1]]
+    )
+    with pytest.raises(KnowledgeRebuildError, match="candidate_public_boundary_violation"):
+        client._candidate_public_documents("knowledge_docs_v2", (event,))  # noqa: SLF001
+
 
 def test_search_requires_exact_total_relation() -> None:
     client = RecordingClient()
@@ -918,10 +1095,55 @@ def test_incremental_catch_up_response_rejects_duplicate_keys(
         def __exit__(self, *_: object) -> None:
             return None
 
-        def read(self) -> bytes:
+        def read(self, _maximum: int) -> bytes:
             return b'{"found":true,"found":false}'
 
     monkeypatch.setattr(incremental_module, "urlopen", lambda *_args, **_kwargs: Response())
+
+    with pytest.raises(KnowledgeRebuildError, match="malformed_elasticsearch_response"):
+        ElasticsearchRebuildClient("http://elasticsearch:9200").apply_event(
+            "knowledge_docs_v2",
+            snapshot([faq_record()]).records[0].as_faq_event(),
+        )
+
+
+@pytest.mark.parametrize("http_error", [False, True])
+def test_incremental_catch_up_response_is_bounded_before_parsing(
+    monkeypatch: pytest.MonkeyPatch,
+    http_error: bool,
+) -> None:
+    oversized = b"x" * (MAX_ELASTICSEARCH_RESPONSE_BYTES + 2)
+    if http_error:
+        error = HTTPError(
+            "http://elasticsearch:9200/knowledge_docs_v2",
+            500,
+            "controlled oversized error",
+            Message(),
+            BytesIO(oversized),
+        )
+
+        def respond(*_args: object, **_kwargs: object) -> object:
+            raise error
+
+    else:
+
+        class Response:
+            status = 200
+
+            def __enter__(self) -> object:
+                return self
+
+            def __exit__(self, *_: object) -> None:
+                return None
+
+            def read(self, maximum: int) -> bytes:
+                assert maximum == MAX_ELASTICSEARCH_RESPONSE_BYTES + 1
+                return oversized[:maximum]
+
+        def respond(*_args: object, **_kwargs: object) -> object:
+            return Response()
+
+    monkeypatch.setattr(incremental_module, "urlopen", respond)
 
     with pytest.raises(KnowledgeRebuildError, match="malformed_elasticsearch_response"):
         ElasticsearchRebuildClient("http://elasticsearch:9200").apply_event(
