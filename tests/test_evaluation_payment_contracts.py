@@ -97,6 +97,9 @@ def test_payment_schema_and_code_keep_production_and_evaluation_truth_separate()
         "evaluationPaymentAuditFaceCardinality",
     ):
         assert committed_face in committed_replay
+    assert "peer.sequence_id < audit.sequence_id" in repository
+    assert "peer.sequence_id > audit.sequence_id" in repository
+    assert "Committed payment truth is inconsistent" in service
     assert "monotonicEvaluationAuditCreatedAt" in service
     assert service.index("fenceSandbox(request.sandboxId());") < service.index(
         "monotonicEvaluationAuditCreatedAt"
@@ -186,6 +189,8 @@ def test_payment_schema_and_code_keep_production_and_evaluation_truth_separate()
         encoding="utf-8"
     )
     for independent_fault in (
+        "audit-sequence",
+        "audit-anchor",
         "callback-created-at",
         "attempt-intent",
         "attempt-refunded-amount",
@@ -194,7 +199,7 @@ def test_payment_schema_and_code_keep_production_and_evaluation_truth_separate()
         "order-state-version",
     ):
         assert independent_fault in integration
-    assert "assert_equal 47" in integration
+    assert "assert_equal 49" in integration
 
 
 def test_auth_provision_response_remains_minimally_disclosing() -> None:

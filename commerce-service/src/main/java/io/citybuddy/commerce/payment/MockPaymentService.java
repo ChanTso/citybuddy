@@ -64,8 +64,12 @@ public final class MockPaymentService {
     String intentHash =
         EvaluationPaymentCommittedFaces.attemptIntentHash(
             orderId, valid.amountMinor(), valid.currency(), sandboxId);
-    return withDuplicateRetry(
-        () -> startOnce(userSubject, sandboxId, orderId, idempotencyKey, valid, intentHash));
+    try {
+      return withDuplicateRetry(
+          () -> startOnce(userSubject, sandboxId, orderId, idempotencyKey, valid, intentHash));
+    } catch (MockPaymentIntegrityException exception) {
+      throw conflict("Committed payment truth is inconsistent");
+    }
   }
 
   public MockPaymentCallbackResult callback(

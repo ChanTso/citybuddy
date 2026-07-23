@@ -368,12 +368,25 @@ public class MockPaymentRepository {
               AND audit.created_at_anchor = 'BUSINESS_EVENT'
               AND audit.created_at = callback.created_at
               AND audit.created_at = attempt.succeeded_at
+              AND NOT EXISTS (
+                SELECT 1 FROM %s peer
+                WHERE peer.sandbox_id = audit.sandbox_id
+                  AND (
+                    (peer.sequence_id < audit.sequence_id
+                      AND peer.created_at > audit.created_at)
+                    OR
+                    (peer.sequence_id > audit.sequence_id
+                      AND peer.created_at < audit.created_at)
+                  )
+              )
             """
                 .formatted(
                     EvaluationPaymentCommittedFaces.onlyTable(
                         EvaluationPaymentCommittedFaces.AUDIT),
                     callbackTable(),
-                    attemptTable()),
+                    attemptTable(),
+                    EvaluationPaymentCommittedFaces.onlyTable(
+                        EvaluationPaymentCommittedFaces.AUDIT)),
             Integer.class,
             referenceId,
             callback.sandboxId(),

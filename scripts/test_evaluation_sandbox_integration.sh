@@ -1756,8 +1756,9 @@ mysql_query root "$root_password" commerce_db \
 assert_payment_audit_reconciliation_fails_closed "duplicate payment audit reference"
 mysql_query root "$root_password" commerce_db \
   "DELETE FROM eval_commerce_audit_reference WHERE audit_reference_id = REPEAT('d', 64)"
+# Keep the sequence/time invariant valid so this cell isolates only the orphan-face fault.
 mysql_query root "$root_password" commerce_db \
-  "INSERT INTO eval_commerce_audit_reference (audit_reference_id, sandbox_id, support_session_id, trace_id, operation_id, entity_type, entity_id, entity_version, outcome, created_at, created_at_anchor) VALUES (REPEAT('c', 64), 'sandbox-payment', '$payment_session', '$payment_trace', REPEAT('a', 64), 'PAYMENT_CALLBACK', '00000000-0000-0000-0000-000000000197', 2, 'OBSERVED', CURRENT_TIMESTAMP(6), 'BUSINESS_EVENT')"
+  "INSERT INTO eval_commerce_audit_reference (audit_reference_id, sandbox_id, support_session_id, trace_id, operation_id, entity_type, entity_id, entity_version, outcome, created_at, created_at_anchor) SELECT REPEAT('c', 64), 'sandbox-payment', '$payment_session', '$payment_trace', REPEAT('a', 64), 'PAYMENT_CALLBACK', '00000000-0000-0000-0000-000000000197', 2, 'OBSERVED', TIMESTAMPADD(MICROSECOND, 1, MAX(created_at)), 'BUSINESS_EVENT' FROM eval_commerce_audit_reference WHERE sandbox_id = 'sandbox-payment'"
 assert_unrelated_payment_audit_reconciliation_fails_closed "orphan payment audit reference"
 mysql_query root "$root_password" commerce_db \
   "DELETE FROM eval_commerce_audit_reference WHERE audit_reference_id = REPEAT('c', 64)"
@@ -1843,6 +1844,8 @@ payment_attempt_succeeded_at="$(mysql_query root "$root_password" commerce_db \
   "SELECT DATE_FORMAT(succeeded_at, '%Y-%m-%d %H:%i:%s.%f') FROM mock_payment_attempt WHERE attempt_id = '$payment_attempt_id'")"
 payment_attempt_intent_hash="$(mysql_query root "$root_password" commerce_db \
   "SELECT intent_hash FROM mock_payment_attempt WHERE attempt_id = '$payment_attempt_id'")"
+payment_audit_tampered_sequence_id="$(mysql_query root "$root_password" commerce_db \
+  "SELECT MAX(sequence_id) + 1 FROM eval_commerce_audit_reference WHERE sandbox_id = 'sandbox-payment'")"
 tampered_callback_event_id='00000000-0000-0000-0000-000000000181'
 tampered_callback_attempt_id='00000000-0000-0000-0000-000000000182'
 tampered_attempt_id='00000000-0000-0000-0000-000000000183'
@@ -1892,6 +1895,7 @@ VALUES ($payment_audit_sequence_id, '$payment_audit_reference_id', 'sandbox-paym
   '$payment_session', '$payment_trace', '$payment_operation', 'PAYMENT_CALLBACK',
   '$payment_event_id', 2, 'OBSERVED', '$payment_audit_created_at', 'BUSINESS_EVENT')
 ON DUPLICATE KEY UPDATE sandbox_id = VALUES(sandbox_id),
+  sequence_id = VALUES(sequence_id),
   support_session_id = VALUES(support_session_id), trace_id = VALUES(trace_id),
   operation_id = VALUES(operation_id), entity_type = VALUES(entity_type),
   entity_id = VALUES(entity_id), entity_version = VALUES(entity_version),
@@ -2023,7 +2027,7 @@ payment_attempt_fault_locator="request_idempotency_key = 'payment-evaluation'"
 payment_order_fault_locator="order_id IN ('$payment_order_id', '$tampered_order_id')"
 
 payment_predicate_labels=(
-  audit-row callback-row ledger-row
+  audit-row audit-sequence audit-anchor callback-row ledger-row
   callback-event callback-idempotency-key callback-attempt callback-correlation callback-sandbox
   callback-session callback-trace callback-operation callback-intent callback-outcome callback-result
   callback-created-at
@@ -2037,6 +2041,8 @@ payment_predicate_labels=(
 )
 payment_predicate_mutations=(
   "DELETE FROM eval_commerce_audit_reference WHERE audit_reference_id = '$payment_audit_reference_id'"
+  "UPDATE eval_commerce_audit_reference SET sequence_id = $payment_audit_tampered_sequence_id WHERE audit_reference_id = '$payment_audit_reference_id'"
+  "SET SESSION sql_mode = 'NO_ENGINE_SUBSTITUTION'; UPDATE eval_commerce_audit_reference SET created_at_anchor = 'CORRUPTED' WHERE audit_reference_id = '$payment_audit_reference_id'"
   "DELETE FROM mock_payment_callback WHERE $payment_callback_fault_locator"
   "DELETE FROM inventory_ledger WHERE movement_id = '$payment_movement_id'"
   "UPDATE mock_payment_callback SET callback_event_id = '$tampered_callback_event_id' WHERE $payment_callback_fault_locator"
@@ -2085,14 +2091,14 @@ payment_predicate_mutations=(
   "UPDATE inventory_ledger SET payment_currency = 'AUD' WHERE movement_id = '$payment_movement_id'"
 )
 
-assert_equal 47 "${#payment_predicate_labels[@]}" \
+assert_equal 49 "${#payment_predicate_labels[@]}" \
   "complete physical JOIN/WHERE corruption label matrix"
 assert_equal "${#payment_predicate_labels[@]}" "${#payment_predicate_mutations[@]}" \
   "physical JOIN/WHERE corruption labels and mutations stay aligned"
 
 is_committed_payment_face_index() {
   local index="$1"
-  [[ "$index" == 0 || "$index" == 1 || "$index" == 2 || "$index" == 15 || "$index" == 27 ]]
+  [[ "$index" == 0 || "$index" == 3 || "$index" == 4 || "$index" == 17 || "$index" == 29 ]]
 }
 
 for ((predicate_index = 0; predicate_index < ${#payment_predicate_mutations[@]}; predicate_index++)); do
@@ -2109,7 +2115,9 @@ for ((left_index = 0; left_index < ${#payment_predicate_mutations[@]}; left_inde
   for ((right_index = left_index + 1; right_index < ${#payment_predicate_mutations[@]}; right_index++)); do
     left_mutation="${payment_predicate_mutations[$left_index]}"
     right_mutation="${payment_predicate_mutations[$right_index]}"
-    if [[ "${payment_predicate_labels[$left_index]}" == callback-row \
+    if [[ "${payment_predicate_labels[$left_index]}" == audit-row \
+        && "${payment_predicate_labels[$right_index]}" == audit-* ]] \
+      || [[ "${payment_predicate_labels[$left_index]}" == callback-row \
         && "${payment_predicate_labels[$right_index]}" == callback-* ]] \
       || [[ "${payment_predicate_labels[$left_index]}" == ledger-row \
         && "${payment_predicate_labels[$right_index]}" == ledger-* ]]; then

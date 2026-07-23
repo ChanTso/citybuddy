@@ -215,6 +215,36 @@ class MockPaymentIntegrationTest {
   }
 
   @Test
+  void productionStartMapsCrossTypeOrderCardinalityDamageToConflict() {
+    String standardOrderId = seedStandardOrder(USER, 1600);
+    SeckillFixture sibling =
+        seedSeckillOrder("ambiguous-" + UUID.randomUUID().toString().substring(0, 8), 1600);
+    assertThat(
+            jdbc.update(
+                "UPDATE seckill_order SET order_id = ? WHERE order_id = ?",
+                standardOrderId,
+                sibling.orderId()))
+        .isOne();
+    long attemptsBefore = count("mock_payment_attempt");
+
+    try {
+      ResponseEntity<String> response =
+          startRaw(directToken(), standardOrderId, "payment-ambiguous-order", body(1600));
+
+      assertThat(response.getStatusCode()).isEqualTo(HttpStatus.CONFLICT);
+      assertThat(response.getBody()).contains("\"category\":\"CONFLICT\"");
+      assertThat(count("mock_payment_attempt")).isEqualTo(attemptsBefore);
+    } finally {
+      assertThat(
+              jdbc.update(
+                  "UPDATE seckill_order SET order_id = ? WHERE order_id = ?",
+                  sibling.orderId(),
+                  standardOrderId))
+          .isOne();
+    }
+  }
+
+  @Test
   void paymentJsonRejectionClosesUnknownAndMalformedInputClasses() {
     String orderId = seedStandardOrder(USER, 1700);
     List<Map<String, Object>> startBodies =
