@@ -21,7 +21,7 @@ public final class MockPaymentService {
   private static final int MAXIMUM_CONCURRENCY_ATTEMPTS = 2;
 
   private final MockPaymentRepository repository;
-  private final MockPaymentTruthValidator truth;
+  private final CommittedPaymentTruthResolver truth;
   private final TransactionTemplate transactions;
   private final Clock clock;
   private final EvaluationSandboxRepository sandboxes;
@@ -37,7 +37,7 @@ public final class MockPaymentService {
       Clock clock,
       EvaluationSandboxRepository sandboxes) {
     this.repository = repository;
-    this.truth = new MockPaymentTruthValidator(repository);
+    this.truth = new CommittedPaymentTruthResolver(repository);
     this.transactions = transactions;
     this.clock = clock;
     this.sandboxes = sandboxes;
@@ -246,26 +246,7 @@ public final class MockPaymentService {
       String idempotencyKey,
       MockPaymentCallbackRequest request,
       String intentHash) {
-    if (attempt == null) {
-      return null;
-    }
-    requireCallbackMatches(attempt, request);
-    MockPaymentRepository.CallbackRecord keyed =
-        repository.findCallbackByKey(idempotencyKey).orElse(null);
-    MockPaymentRepository.CallbackRecord event =
-        repository.findCallbackByEvent(request.callbackEventId()).orElse(null);
-    MockPaymentRepository.CallbackRecord durable = keyed == null ? event : keyed;
-    if (keyed != null && event != null && !keyed.equals(event)) {
-      throw conflict("Callback identity conflicts with its existing result");
-    }
-    if (durable != null) {
-      requireCallbackReplay(durable, request, intentHash);
-      requireCallbackAttempt(durable, attempt);
-      return callbackResult(requireSucceededTruth(attempt), true);
-    }
-    return "SUCCEEDED".equals(attempt.state())
-        ? callbackResult(requireSucceededTruth(attempt), true)
-        : null;
+    return resolveCommittedCallback(attempt, idempotencyKey, request, intentHash, false);
   }
 
   private MockPaymentCallbackResult resolveCommittedEvaluationCallback(
@@ -273,70 +254,48 @@ public final class MockPaymentService {
       String idempotencyKey,
       MockPaymentCallbackRequest request,
       String intentHash) {
-    MockPaymentRepository.CallbackRecord keyed =
-        repository.findCallbackByKey(idempotencyKey).orElse(null);
-    MockPaymentRepository.CallbackRecord event =
-        repository.findCallbackByEvent(request.callbackEventId()).orElse(null);
-    MockPaymentRepository.CallbackRecord correlated =
-        repository.findCallbackByCorrelation(request.callbackCorrelationId()).orElse(null);
-    MockPaymentRepository.CallbackRecord byAttempt =
-        attempt == null ? null : repository.findCallbackByAttempt(attempt.attemptId()).orElse(null);
-    MockPaymentRepository.OrderTruth order =
-        repository
-            .findEvaluationOrderForUpdate(request.orderId(), request.sandboxId())
-            .orElse(null);
-    boolean committedAttempt =
-        attempt != null && (!"PENDING".equals(attempt.state()) || attempt.stateVersion() != 1);
-    boolean committedOrder =
-        order != null && (!"UNPAID".equals(order.status()) || order.stateVersion() != 1);
-    int movementCardinality =
-        repository.evaluationPaymentMovementFaceCardinality(request.orderId());
-    int auditCardinality =
-        repository.evaluationPaymentAuditFaceCardinality(
-            request.sandboxId(),
-            request.supportSessionId(),
-            request.traceId(),
-            request.operationId(),
-            request.callbackEventId());
-    if (movementCardinality > 1 || auditCardinality > 1) {
-      throw conflict("Committed payment truth is inconsistent");
-    }
-    boolean committedMovement = movementCardinality == 1;
-    boolean committedAudit = auditCardinality == 1;
-    if (!committedAttempt
-        && !committedOrder
-        && !committedMovement
-        && !committedAudit
-        && keyed == null
-        && event == null
-        && correlated == null
-        && byAttempt == null) {
-      return null;
-    }
-    if (attempt == null || byAttempt == null) {
-      throw conflict("Committed payment truth is inconsistent");
-    }
-    requireCallbackMatches(attempt, request);
-    requireSameCallbackFace(byAttempt, keyed);
-    requireSameCallbackFace(byAttempt, event);
-    requireSameCallbackFace(byAttempt, correlated);
-    requireEvaluationCallbackReplay(byAttempt, attempt, idempotencyKey, request, intentHash);
-    return callbackResult(requireSucceededTruth(attempt), true);
+    return resolveCommittedCallback(attempt, idempotencyKey, request, intentHash, true);
   }
 
-  private static void requireSameCallbackFace(
-      MockPaymentRepository.CallbackRecord authoritative,
-      MockPaymentRepository.CallbackRecord observed) {
-    if (observed != null && !authoritative.equals(observed)) {
-      throw conflict("Callback identity conflicts with its existing result");
+  private MockPaymentCallbackResult resolveCommittedCallback(
+      MockPaymentRepository.AttemptRecord attempt,
+      String idempotencyKey,
+      MockPaymentCallbackRequest request,
+      String intentHash,
+      boolean evaluation) {
+    CommittedPaymentTruthResolver.CommittedPaymentTruth committed;
+    try {
+      committed = truth.resolveReplayLocked(attempt, idempotencyKey, request).orElse(null);
+    } catch (CommittedPaymentIntegrityException exception) {
+      throw conflict("Committed payment truth is inconsistent");
     }
+    if (committed == null) {
+      return null;
+    }
+    requireCallbackMatches(committed.attempt(), request);
+    if (evaluation) {
+      requireEvaluationCallbackReplay(
+          committed.callback(), committed.attempt(), idempotencyKey, request, intentHash);
+      if (committed.attempt().refundedAmountMinor() != 0) {
+        throw conflict("Committed payment truth is inconsistent");
+      }
+    } else {
+      boolean addressesCanonicalCallback =
+          committed.callback().callbackIdempotencyKey().equals(idempotencyKey)
+              || committed.callback().callbackEventId().equals(request.callbackEventId());
+      if (addressesCanonicalCallback) {
+        requireCallbackReplay(committed.callback(), request, intentHash);
+      }
+      requireCallbackAttempt(committed.callback(), committed.attempt());
+    }
+    return callbackResult(committed.attempt(), true);
   }
 
   private MockPaymentRepository.AttemptRecord requireSucceededTruth(
       MockPaymentRepository.AttemptRecord attempt) {
     try {
-      truth.requireSucceededTruth(attempt);
-    } catch (IllegalStateException exception) {
+      truth.resolveLocked(attempt);
+    } catch (CommittedPaymentIntegrityException exception) {
       throw conflict("Committed payment truth is inconsistent");
     }
     if (attempt.sandboxId() != null && attempt.refundedAmountMinor() != 0) {

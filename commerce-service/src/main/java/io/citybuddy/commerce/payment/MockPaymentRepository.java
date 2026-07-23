@@ -22,46 +22,27 @@ public class MockPaymentRepository {
   }
 
   private Optional<OrderTruth> findOrder(String orderId, String lockClause) {
-    List<OrderTruth> standard =
-        jdbc.query(
-            EvaluationPaymentCommittedFaces.standardOrderByIdSql(lockClause),
-            (result, row) ->
-                new OrderTruth(
-                    "STANDARD",
-                    result.getString("order_id"),
-                    result.getString("user_subject"),
-                    result.getString("sandbox_id"),
-                    result.getString("evaluation_owner_handle"),
-                    result.getString("product_id"),
-                    null,
-                    null,
-                    result.getLong("total_price_minor"),
-                    result.getString("currency"),
-                    result.getString("status"),
-                    result.getLong("state_version")),
-            orderId);
-    List<OrderTruth> seckill =
-        jdbc.query(
-            EvaluationPaymentCommittedFaces.seckillOrderByIdSql(lockClause),
-            (result, row) ->
-                new OrderTruth(
-                    "SECKILL",
-                    result.getString("order_id"),
-                    result.getString("user_subject"),
-                    result.getString("sandbox_id"),
-                    result.getString("evaluation_owner_handle"),
-                    result.getString("product_id"),
-                    result.getString("reservation_id"),
-                    result.getString("activity_id"),
-                    result.getLong("total_price_minor"),
-                    result.getString("currency"),
-                    result.getString("status"),
-                    result.getLong("state_version")),
-            orderId);
-    if (standard.size() + seckill.size() > 1) {
+    List<OrderTruth> rows = enumerateOrderClosure(orderId, lockClause);
+    if (rows.size() > 1) {
       throw new MockPaymentIntegrityException("Payment order identifier is ambiguous");
     }
-    return standard.isEmpty() ? seckill.stream().findFirst() : standard.stream().findFirst();
+    return rows.stream().findFirst();
+  }
+
+  List<OrderTruth> enumerateOrderClosure(String orderId, String lockClause) {
+    requireEnumerationKeys(EvaluationPaymentCommittedFaces.ORDER.enumerationKeys(), "order_id");
+    List<OrderTruth> rows = new java.util.ArrayList<>();
+    rows.addAll(
+        jdbc.query(
+            EvaluationPaymentCommittedFaces.standardOrderByIdSql(lockClause),
+            (result, row) -> mapOrder(result, "STANDARD"),
+            orderId));
+    rows.addAll(
+        jdbc.query(
+            EvaluationPaymentCommittedFaces.seckillOrderByIdSql(lockClause),
+            (result, row) -> mapOrder(result, "SECKILL"),
+            orderId));
+    return List.copyOf(rows);
   }
 
   public Optional<OrderTruth> findEvaluationOrderForUpdate(String orderId, String sandboxId) {
@@ -421,6 +402,321 @@ public class MockPaymentRepository {
     return count == null ? 0 : count;
   }
 
+  List<AttemptRecord> enumerateAttemptClosure(AttemptRecord target, String lockClause) {
+    List<String> keys = EvaluationPaymentCommittedFaces.ATTEMPT.enumerationKeys();
+    requireEnumerationKeys(keys, "attempt_id", "callback_correlation_id", "order_id");
+    return jdbc.query(
+        "SELECT "
+            + attemptColumns()
+            + " FROM "
+            + attemptTable()
+            + " WHERE "
+            + keys.get(0)
+            + " = ? OR "
+            + keys.get(1)
+            + " = ? OR "
+            + keys.get(2)
+            + " = ?"
+            + lockClause,
+        MockPaymentRepository::mapAttempt,
+        target.attemptId(),
+        target.callbackCorrelationId(),
+        target.orderId());
+  }
+
+  List<AttemptRecord> enumerateAttemptReplayClosure(
+      String callbackCorrelationId, String orderId, String lockClause) {
+    List<String> keys = EvaluationPaymentCommittedFaces.ATTEMPT.enumerationKeys();
+    requireEnumerationKeys(keys, "attempt_id", "callback_correlation_id", "order_id");
+    return jdbc.query(
+        "SELECT "
+            + attemptColumns()
+            + " FROM "
+            + attemptTable()
+            + " WHERE "
+            + keys.get(1)
+            + " = ? OR "
+            + keys.get(2)
+            + " = ?"
+            + lockClause,
+        MockPaymentRepository::mapAttempt,
+        callbackCorrelationId,
+        orderId);
+  }
+
+  List<CallbackRecord> discoverCallbackClosure(AttemptRecord target, String lockClause) {
+    List<String> relations = EvaluationPaymentCommittedFaces.CALLBACK.relationKeys();
+    if (!relations.equals(List.of("attempt_id"))) {
+      throw new IllegalStateException("Callback relation-key inventory is unsupported");
+    }
+    String correlation = EvaluationPaymentCommittedFaces.CALLBACK.stableKeys().getFirst();
+    return jdbc.query(
+        "SELECT "
+            + callbackColumns()
+            + " FROM "
+            + callbackTable()
+            + " WHERE "
+            + correlation
+            + " = ? OR "
+            + relations.getFirst()
+            + " = ?"
+            + lockClause,
+        MockPaymentRepository::mapCallback,
+        target.callbackCorrelationId(),
+        target.attemptId());
+  }
+
+  List<CallbackRecord> enumerateCallbackClosure(
+      AttemptRecord target, CallbackRecord canonical, String lockClause) {
+    List<String> keys = EvaluationPaymentCommittedFaces.CALLBACK.enumerationKeys();
+    requireEnumerationKeys(
+        keys,
+        "callback_correlation_id",
+        "callback_event_id",
+        "callback_idempotency_key",
+        "attempt_id");
+    return jdbc.query(
+        "SELECT "
+            + callbackColumns()
+            + " FROM "
+            + callbackTable()
+            + " WHERE "
+            + keys.get(0)
+            + " = ? OR "
+            + keys.get(1)
+            + " = ? OR "
+            + keys.get(2)
+            + " = ? OR "
+            + keys.get(3)
+            + " = ?"
+            + lockClause,
+        MockPaymentRepository::mapCallback,
+        target.callbackCorrelationId(),
+        canonical.callbackEventId(),
+        canonical.callbackIdempotencyKey(),
+        target.attemptId());
+  }
+
+  List<CallbackRecord> enumerateCallbackReplayClosure(
+      AttemptRecord target,
+      String callbackIdempotencyKey,
+      MockPaymentCallbackRequest request,
+      String lockClause) {
+    List<String> keys = EvaluationPaymentCommittedFaces.CALLBACK.enumerationKeys();
+    requireEnumerationKeys(
+        keys,
+        "callback_correlation_id",
+        "callback_event_id",
+        "callback_idempotency_key",
+        "attempt_id");
+    String relationPredicate = target == null ? "" : " OR " + keys.get(3) + " = ?";
+    java.util.ArrayList<Object> arguments =
+        new java.util.ArrayList<>(
+            List.of(
+                request.callbackCorrelationId(),
+                request.callbackEventId(),
+                callbackIdempotencyKey));
+    if (target != null) {
+      arguments.add(target.attemptId());
+    }
+    return jdbc.query(
+        "SELECT "
+            + callbackColumns()
+            + " FROM "
+            + callbackTable()
+            + " WHERE "
+            + keys.get(0)
+            + " = ? OR "
+            + keys.get(1)
+            + " = ? OR "
+            + keys.get(2)
+            + " = ?"
+            + relationPredicate
+            + lockClause,
+        MockPaymentRepository::mapCallback,
+        arguments.toArray());
+  }
+
+  List<PaymentLedgerRecord> enumerateLedgerClosure(
+      AttemptRecord target, OrderTruth order, String lockClause) {
+    List<String> keys = EvaluationPaymentCommittedFaces.LEDGER.enumerationKeys();
+    requireEnumerationKeys(keys, "business_event_key", "order_id");
+    return jdbc.query(
+        "SELECT "
+            + EvaluationPaymentCommittedFaces.columnsCsv(EvaluationPaymentCommittedFaces.LEDGER)
+            + " FROM "
+            + EvaluationPaymentCommittedFaces.onlyTable(EvaluationPaymentCommittedFaces.LEDGER)
+            + " WHERE "
+            + keys.get(0)
+            + " = ? OR "
+            + keys.get(1)
+            + " = ?"
+            + lockClause,
+        MockPaymentRepository::mapLedger,
+        "mock-payment:" + target.attemptId(),
+        order.orderId());
+  }
+
+  List<PaymentLedgerRecord> enumerateLedgerReplayClosure(
+      AttemptRecord target, String orderId, String lockClause) {
+    List<String> keys = EvaluationPaymentCommittedFaces.LEDGER.enumerationKeys();
+    requireEnumerationKeys(keys, "business_event_key", "order_id");
+    String identityPredicate = target == null ? "" : keys.get(0) + " = ? OR ";
+    java.util.ArrayList<Object> arguments = new java.util.ArrayList<>();
+    if (target != null) {
+      arguments.add("mock-payment:" + target.attemptId());
+    }
+    arguments.add(orderId);
+    return jdbc.query(
+        "SELECT "
+            + EvaluationPaymentCommittedFaces.columnsCsv(EvaluationPaymentCommittedFaces.LEDGER)
+            + " FROM "
+            + EvaluationPaymentCommittedFaces.onlyTable(EvaluationPaymentCommittedFaces.LEDGER)
+            + " WHERE "
+            + identityPredicate
+            + keys.get(1)
+            + " = ?"
+            + lockClause,
+        MockPaymentRepository::mapLedger,
+        arguments.toArray());
+  }
+
+  List<PaymentAuditRecord> enumerateAuditClosure(
+      CallbackRecord callback, long entityVersion, String lockClause) {
+    List<String> keys = EvaluationPaymentCommittedFaces.AUDIT.enumerationKeys();
+    requireEnumerationKeys(
+        keys,
+        "audit_reference_id",
+        "entity_id",
+        "sandbox_id+support_session_id+trace_id+operation_id");
+    String referenceId =
+        callback.sandboxId() == null
+            ? ""
+            : EvaluationAuditReferenceIdentity.paymentCallback(
+                callback.sandboxId(),
+                callback.supportSessionId(),
+                callback.traceId(),
+                callback.operationId(),
+                callback.callbackEventId(),
+                entityVersion);
+    return jdbc.query(
+        "SELECT "
+            + EvaluationPaymentCommittedFaces.columnsCsv(EvaluationPaymentCommittedFaces.AUDIT)
+            + " FROM "
+            + EvaluationPaymentCommittedFaces.onlyTable(EvaluationPaymentCommittedFaces.AUDIT)
+            + " WHERE "
+            + keys.get(0)
+            + " = ? OR "
+            + keys.get(1)
+            + " = ? OR (sandbox_id <=> ? AND support_session_id <=> ? "
+            + "AND trace_id <=> ? AND operation_id <=> ?)"
+            + lockClause,
+        MockPaymentRepository::mapAudit,
+        referenceId,
+        callback.callbackEventId(),
+        callback.sandboxId(),
+        callback.supportSessionId(),
+        callback.traceId(),
+        callback.operationId());
+  }
+
+  List<PaymentAuditRecord> enumerateAuditReplayClosure(
+      MockPaymentCallbackRequest request, String lockClause) {
+    List<String> keys = EvaluationPaymentCommittedFaces.AUDIT.enumerationKeys();
+    requireEnumerationKeys(
+        keys,
+        "audit_reference_id",
+        "entity_id",
+        "sandbox_id+support_session_id+trace_id+operation_id");
+    String referenceId =
+        request.sandboxId() == null
+            ? ""
+            : EvaluationAuditReferenceIdentity.paymentCallback(
+                request.sandboxId(),
+                request.supportSessionId(),
+                request.traceId(),
+                request.operationId(),
+                request.callbackEventId(),
+                2);
+    return jdbc.query(
+        "SELECT "
+            + EvaluationPaymentCommittedFaces.columnsCsv(EvaluationPaymentCommittedFaces.AUDIT)
+            + " FROM "
+            + EvaluationPaymentCommittedFaces.onlyTable(EvaluationPaymentCommittedFaces.AUDIT)
+            + " WHERE "
+            + keys.get(0)
+            + " = ? OR "
+            + keys.get(1)
+            + " = ? OR (sandbox_id <=> ? AND support_session_id <=> ? "
+            + "AND trace_id <=> ? AND operation_id <=> ?)"
+            + lockClause,
+        MockPaymentRepository::mapAudit,
+        referenceId,
+        request.callbackEventId(),
+        request.sandboxId(),
+        request.supportSessionId(),
+        request.traceId(),
+        request.operationId());
+  }
+
+  Optional<RefundMovementAnchor> refundMovementAnchor(String refundId, String lockClause) {
+    List<RefundMovementAnchor> rows =
+        jdbc.query(
+            """
+            SELECT refund_id, payment_attempt_id, order_id, order_kind, user_subject,
+                   requested_amount_minor, refunded_amount_minor, currency, state
+            FROM mock_refund
+            WHERE refund_id = ?
+            """
+                + lockClause,
+            (result, row) ->
+                new RefundMovementAnchor(
+                    result.getString("refund_id"),
+                    result.getString("payment_attempt_id"),
+                    result.getString("order_id"),
+                    result.getString("order_kind"),
+                    result.getString("user_subject"),
+                    result.getLong("requested_amount_minor"),
+                    result.getLong("refunded_amount_minor"),
+                    result.getString("currency"),
+                    result.getString("state")),
+            refundId);
+    if (rows.size() > 1) {
+      throw new MockPaymentIntegrityException("Refund movement anchor is not unique");
+    }
+    return rows.stream().findFirst();
+  }
+
+  boolean auditSequenceOrderConsistent(String sandboxId) {
+    Integer contradictions =
+        jdbc.queryForObject(
+            """
+            SELECT COUNT(*)
+            FROM eval_commerce_audit_reference audit
+            WHERE audit.sandbox_id = ?
+              AND EXISTS (
+                SELECT 1 FROM eval_commerce_audit_reference peer
+                WHERE peer.sandbox_id = audit.sandbox_id
+                  AND (
+                    (peer.sequence_id < audit.sequence_id
+                      AND peer.created_at > audit.created_at)
+                    OR
+                    (peer.sequence_id > audit.sequence_id
+                      AND peer.created_at < audit.created_at)
+                  )
+              )
+            """,
+            Integer.class,
+            sandboxId);
+    return contradictions != null && contradictions == 0;
+  }
+
+  private static void requireEnumerationKeys(List<String> actual, String... expected) {
+    if (!actual.equals(List.of(expected))) {
+      throw new IllegalStateException("Committed payment enumeration-key inventory changed");
+    }
+  }
+
   private Optional<AttemptRecord> queryAttempt(String sql, Object... arguments) {
     List<AttemptRecord> rows = jdbc.query(sql, MockPaymentRepository::mapAttempt, arguments);
     if (rows.size() > 1) {
@@ -472,6 +768,57 @@ public class MockPaymentRepository {
         result.getString("requested_outcome"),
         result.getString("result_state"),
         result.getTimestamp("created_at").toInstant());
+  }
+
+  private static OrderTruth mapOrder(java.sql.ResultSet result, String kind)
+      throws java.sql.SQLException {
+    return new OrderTruth(
+        kind,
+        result.getString("order_id"),
+        result.getString("user_subject"),
+        result.getString("sandbox_id"),
+        result.getString("evaluation_owner_handle"),
+        result.getString("product_id"),
+        result.getString("reservation_id"),
+        result.getString("activity_id"),
+        result.getLong("total_price_minor"),
+        result.getString("currency"),
+        result.getString("status"),
+        result.getLong("state_version"));
+  }
+
+  private static PaymentLedgerRecord mapLedger(java.sql.ResultSet result, int row)
+      throws java.sql.SQLException {
+    return new PaymentLedgerRecord(
+        result.getString("movement_id"),
+        result.getString("business_event_key"),
+        result.getString("movement_type"),
+        result.getString("order_id"),
+        result.getString("reservation_id"),
+        result.getString("activity_id"),
+        result.getString("product_id"),
+        result.getString("sandbox_id"),
+        result.getLong("inventory_delta"),
+        result.getLong("activity_quota_delta"),
+        result.getObject("payment_amount_minor", Long.class),
+        result.getString("payment_currency"));
+  }
+
+  private static PaymentAuditRecord mapAudit(java.sql.ResultSet result, int row)
+      throws java.sql.SQLException {
+    return new PaymentAuditRecord(
+        result.getLong("sequence_id"),
+        result.getString("audit_reference_id"),
+        result.getString("sandbox_id"),
+        result.getString("support_session_id"),
+        result.getString("trace_id"),
+        result.getString("operation_id"),
+        result.getString("entity_type"),
+        result.getString("entity_id"),
+        result.getLong("entity_version"),
+        result.getString("outcome"),
+        result.getTimestamp("created_at").toInstant(),
+        result.getString("created_at_anchor"));
   }
 
   private static String attemptColumns() {
@@ -561,4 +908,43 @@ public class MockPaymentRepository {
       String requestedOutcome,
       String resultState,
       Instant createdAt) {}
+
+  public record PaymentLedgerRecord(
+      String movementId,
+      String businessEventKey,
+      String movementType,
+      String orderId,
+      String reservationId,
+      String activityId,
+      String productId,
+      String sandboxId,
+      long inventoryDelta,
+      long activityQuotaDelta,
+      Long paymentAmountMinor,
+      String paymentCurrency) {}
+
+  public record PaymentAuditRecord(
+      long sequenceId,
+      String auditReferenceId,
+      String sandboxId,
+      String supportSessionId,
+      String traceId,
+      String operationId,
+      String entityType,
+      String entityId,
+      long entityVersion,
+      String outcome,
+      Instant createdAt,
+      String createdAtAnchor) {}
+
+  record RefundMovementAnchor(
+      String refundId,
+      String paymentAttemptId,
+      String orderId,
+      String orderKind,
+      String userSubject,
+      long requestedAmountMinor,
+      long refundedAmountMinor,
+      String currency,
+      String state) {}
 }

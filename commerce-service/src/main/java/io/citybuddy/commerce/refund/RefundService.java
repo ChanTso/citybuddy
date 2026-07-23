@@ -1,7 +1,8 @@
 package io.citybuddy.commerce.refund;
 
+import io.citybuddy.commerce.payment.CommittedPaymentIntegrityException;
+import io.citybuddy.commerce.payment.CommittedPaymentTruthResolver;
 import io.citybuddy.commerce.payment.MockPaymentRepository;
-import io.citybuddy.commerce.payment.MockPaymentTruthValidator;
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
 import java.time.Clock;
@@ -23,7 +24,7 @@ public final class RefundService {
 
   private final RefundRepository refunds;
   private final MockPaymentRepository payments;
-  private final MockPaymentTruthValidator paymentTruth;
+  private final CommittedPaymentTruthResolver paymentTruth;
   private final TransactionTemplate transactions;
   private final Clock clock;
 
@@ -34,7 +35,7 @@ public final class RefundService {
       Clock clock) {
     this.refunds = refunds;
     this.payments = payments;
-    this.paymentTruth = new MockPaymentTruthValidator(payments);
+    this.paymentTruth = new CommittedPaymentTruthResolver(payments);
     this.transactions = transactions;
     this.clock = clock;
   }
@@ -233,9 +234,10 @@ public final class RefundService {
     if (!userSubject.equals(order.userSubject())) {
       throw notFound("Refund order is missing or not owned");
     }
-    requireEligiblePayment(attempt, order);
+    CommittedPaymentTruthResolver.CommittedPaymentTruth committed =
+        requireEligiblePayment(attempt, order);
     if (enforceActionSandbox) {
-      requireActionSandbox(expectedSandboxId, attempt, order);
+      requireActionSandbox(expectedSandboxId, committed);
     }
     if (!attempt.currency().equals(request.currency())) {
       throw conflict("Refund request conflicts with authoritative payment currency");
@@ -343,6 +345,15 @@ public final class RefundService {
     List<RefundRepository.RefundRecord> all = refunds.findByAttemptForUpdate(attempt.attemptId());
     List<String> contradictions = new ArrayList<>();
 
+    try {
+      CommittedPaymentTruthResolver.CommittedPaymentTruth committed =
+          paymentTruth.resolveLocked(attempt);
+      if (!committed.order().equals(order)) {
+        contradictions.add("PAYMENT_ORDER_MISMATCH");
+      }
+    } catch (CommittedPaymentIntegrityException exception) {
+      contradictions.add("PAYMENT_CLOSURE_INCONSISTENT");
+    }
     if (!attempt.orderKind().equals(order.orderKind())
         || !attempt.orderId().equals(order.orderId())
         || !attempt.userSubject().equals(order.userSubject())
@@ -473,7 +484,7 @@ public final class RefundService {
     }
   }
 
-  private void requireEligiblePayment(
+  private CommittedPaymentTruthResolver.CommittedPaymentTruth requireEligiblePayment(
       MockPaymentRepository.AttemptRecord attempt, MockPaymentRepository.OrderTruth order) {
     if (!attempt.orderKind().equals(order.orderKind())
         || !attempt.orderId().equals(order.orderId())
@@ -483,13 +494,16 @@ public final class RefundService {
         || !attempt.currency().equals(order.currency())) {
       throw new IllegalStateException("Payment conflicts with refund order truth");
     }
+    CommittedPaymentTruthResolver.CommittedPaymentTruth committed;
     try {
-      if (!paymentTruth.requireSucceededTruth(attempt).equals(order)) {
-        throw new IllegalStateException("Payment order truth changed during refund validation");
-      }
-    } catch (IllegalStateException exception) {
+      committed = paymentTruth.resolveLocked(attempt);
+    } catch (CommittedPaymentIntegrityException exception) {
       throw conflict("Order has no eligible successful payment");
     }
+    if (!committed.order().equals(order)) {
+      throw conflict("Order has no eligible successful payment");
+    }
+    return committed;
   }
 
   private boolean hasMatchingCallback(MockPaymentRepository.AttemptRecord attempt) {
@@ -502,14 +516,12 @@ public final class RefundService {
   }
 
   private void requireActionSandbox(
-      String expectedSandboxId,
-      MockPaymentRepository.AttemptRecord attempt,
-      MockPaymentRepository.OrderTruth order) {
-    RefundRepository.MovementRecord paymentMovement =
-        refunds.findMovement("mock-payment:" + attempt.attemptId()).orElse(null);
+      String expectedSandboxId, CommittedPaymentTruthResolver.CommittedPaymentTruth committed) {
+    MockPaymentRepository.AttemptRecord attempt = committed.attempt();
+    MockPaymentRepository.OrderTruth order = committed.order();
+    MockPaymentRepository.PaymentLedgerRecord paymentMovement = committed.paymentMovement();
     if (!java.util.Objects.equals(expectedSandboxId, order.sandboxId())
         || !java.util.Objects.equals(expectedSandboxId, attempt.sandboxId())
-        || paymentMovement == null
         || !java.util.Objects.equals(expectedSandboxId, paymentMovement.sandboxId())) {
       throw new IllegalStateException("Action target sandbox truth is inconsistent");
     }

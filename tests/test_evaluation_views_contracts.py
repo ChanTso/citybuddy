@@ -96,6 +96,11 @@ def test_evaluation_audit_is_append_only_scoped_and_not_agent_evidence() -> None
         / "commerce-service/src/main/java/io/citybuddy/commerce/evaluation"
         / "EvaluationViewRepository.java"
     ).read_text(encoding="utf-8")
+    payment_resolver = (
+        ROOT
+        / "commerce-service/src/main/java/io/citybuddy/commerce/payment"
+        / "CommittedPaymentTruthResolver.java"
+    ).read_text(encoding="utf-8")
     audit_service = (
         ROOT
         / "commerce-service/src/main/java/io/citybuddy/commerce/evaluation"
@@ -193,10 +198,15 @@ def test_evaluation_audit_is_append_only_scoped_and_not_agent_evidence() -> None
         "l.business_event_key =",
     ):
         assert filtered_validity_predicate not in callback_enumerator
-    assert "callback.intentHash().equals(expectedIntentHash)" in repository
-    assert "callback.callbackCorrelationId().equals(callback.attemptCorrelationId())" in repository
-    assert 'ledger.businessEventKey().equals("mock-payment:" + callback.attemptId())' in repository
-    assert "reference.createdAt().equals(truth.createdAt())" in repository
+    assert "paymentTruth.resolveSnapshot(attempt)" in repository
+    assert "callback.intentHash().equals(callbackIntentHash(attempt, callback))" in payment_resolver
+    assert "callback.callbackCorrelationId().equals(attempt.callbackCorrelationId())" in (
+        payment_resolver
+    )
+    assert 'movement.businessEventKey().equals("mock-payment:" + attempt.attemptId())' in (
+        payment_resolver
+    )
+    assert "audit.createdAt().equals(callback.createdAt())" in payment_resolver
     assert '"LEGACY_CUTOFF".equals(reference.createdAtAnchor())' in repository
     assert "FROM eval_sandbox" in audit_service
     assert "FOR UPDATE" in audit_service

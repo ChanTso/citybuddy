@@ -64,6 +64,11 @@ def test_payment_schema_and_code_keep_production_and_evaluation_truth_separate()
         / "commerce-service/src/main/java/io/citybuddy/commerce/payment"
         / "EvaluationPaymentCommittedFaces.java"
     ).read_text(encoding="utf-8")
+    committed_resolver = (
+        ROOT
+        / "commerce-service/src/main/java/io/citybuddy/commerce/payment"
+        / "CommittedPaymentTruthResolver.java"
+    ).read_text(encoding="utf-8")
     evaluation_view = (
         ROOT
         / "commerce-service/src/main/java/io/citybuddy/commerce/evaluation"
@@ -87,16 +92,25 @@ def test_payment_schema_and_code_keep_production_and_evaluation_truth_separate()
     committed_replay = service[
         service.index(
             "private MockPaymentCallbackResult resolveCommittedEvaluationCallback"
-        ) : service.index("private static void requireSameCallbackFace")
+        ) : service.index("private MockPaymentRepository.AttemptRecord requireSucceededTruth")
     ]
-    for committed_face in (
+    assert "truth.resolveReplayLocked(attempt, idempotencyKey, request)" in committed_replay
+    for forbidden_private_face in (
         "findCallbackByCorrelation",
         "findCallbackByAttempt",
         "findEvaluationOrderForUpdate",
         "evaluationPaymentMovementFaceCardinality",
         "evaluationPaymentAuditFaceCardinality",
     ):
-        assert committed_face in committed_replay
+        assert forbidden_private_face not in committed_replay
+    for shared_replay_enumerator in (
+        "enumerateAttemptReplayClosure",
+        "enumerateOrderClosure",
+        "enumerateCallbackReplayClosure",
+        "enumerateLedgerReplayClosure",
+        "enumerateAuditReplayClosure",
+    ):
+        assert shared_replay_enumerator in committed_resolver
     assert "peer.sequence_id < audit.sequence_id" in repository
     assert "peer.sequence_id > audit.sequence_id" in repository
     assert "Committed payment truth is inconsistent" in service
@@ -143,12 +157,14 @@ def test_payment_schema_and_code_keep_production_and_evaluation_truth_separate()
         "a.succeeded_at AS attempt_succeeded_at",
     ):
         assert attempt_projection in evaluation_view
+    assert "paymentTruth.resolveSnapshot(attempt)" in evaluation_view
     for exact_attempt_assertion in (
-        "attemptIntentHash()",
-        "attemptRefundedAmountMinor() == 0",
-        "Objects.equals(callback.attemptSucceededAt(), callback.createdAt())",
+        "attempt.succeededAt().equals(callback.createdAt())",
+        "callback.intentHash().equals(callbackIntentHash(attempt, callback))",
     ):
-        assert exact_attempt_assertion in evaluation_view
+        assert exact_attempt_assertion in committed_resolver
+    assert ".intentHash()" in committed_resolver
+    assert "attempt.refundedAmountMinor() != 0" in evaluation_view
     assert "EvaluationPaymentCommittedFaces.attemptIntentHash" in service
     assert 'sandboxId == null ? "" : sandboxId' in committed_faces
     for residual_column in (
@@ -172,15 +188,11 @@ def test_payment_schema_and_code_keep_production_and_evaluation_truth_separate()
         ]
         + evaluation_view[
             evaluation_view.index(
-                "private boolean paymentFaceCardinalitiesConsistent"
-            ) : evaluation_view.index("private int duplicateGroupCount")
-        ]
-        + evaluation_view[
-            evaluation_view.index(
                 "private List<PaidOrderTruth> paidOrderTruths"
             ) : evaluation_view.index("private List<PaymentLedgerTruth> paymentLedgerTruths")
         ]
     )
+    assert "paymentFaceCardinalitiesConsistent" not in evaluation_view
     for closure in (callback_order_closure, view_order_closure):
         assert "FROM standard_order" not in closure
         assert "FROM seckill_order" not in closure

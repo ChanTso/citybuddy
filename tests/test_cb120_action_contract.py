@@ -73,8 +73,17 @@ def test_action_refund_reuses_payment_truth_and_one_transaction_event_time() -> 
     payment = source(
         "commerce-service/src/main/java/io/citybuddy/commerce/payment/MockPaymentService.java"
     )
-    validator = source(
-        "commerce-service/src/main/java/io/citybuddy/commerce/payment/MockPaymentTruthValidator.java"
+    resolver = source(
+        "commerce-service/src/main/java/io/citybuddy/commerce/payment/"
+        "CommittedPaymentTruthResolver.java"
+    )
+    faces = source(
+        "commerce-service/src/main/java/io/citybuddy/commerce/payment/"
+        "EvaluationPaymentCommittedFaces.java"
+    )
+    evaluation = source(
+        "commerce-service/src/main/java/io/citybuddy/commerce/evaluation/"
+        "EvaluationViewRepository.java"
     )
     refund = source(
         "commerce-service/src/main/java/io/citybuddy/commerce/refund/RefundService.java"
@@ -82,13 +91,28 @@ def test_action_refund_reuses_payment_truth_and_one_transaction_event_time() -> 
     action = source(
         "commerce-service/src/main/java/io/citybuddy/commerce/action/ActionService.java"
     )
-    assert "new MockPaymentTruthValidator(repository)" in payment
-    assert "new MockPaymentTruthValidator(payments)" in refund
-    assert "truth.requireSucceededTruth(attempt)" in payment
-    assert "paymentTruth.requireSucceededTruth(attempt)" in refund
-    assert "requireZeroEvaluationRefundAccumulator" not in validator
+    assert "new CommittedPaymentTruthResolver(repository)" in payment
+    assert "new CommittedPaymentTruthResolver(payments)" in refund
+    assert "truth.resolveLocked(attempt)" in payment
+    assert "paymentTruth.resolveLocked(attempt)" in refund
+    assert "paymentTruth.resolveSnapshot(attempt)" in evaluation
+    assert "catch (CommittedPaymentIntegrityException exception)" in payment
+    assert "catch (CommittedPaymentIntegrityException exception)" in refund
+    assert "catch (CommittedPaymentIntegrityException exception)" in evaluation
+    assert "attempt.refundedAmountMinor() < 0" in resolver
+    assert "attempt.refundedAmountMinor() > attempt.amountMinor()" in resolver
+    assert "requireZeroEvaluationRefundAccumulator" not in resolver
     assert "attempt.sandboxId() != null && attempt.refundedAmountMinor() != 0" in payment
-    assert "refundedAmountMinor()" not in validator
+    assert "attempt.refundedAmountMinor() != 0" not in resolver
+    assert "relationKeys" in faces
+    assert "enumerationKeys()" in faces
+    for face in ("CALLBACK", "ATTEMPT", "ORDER", "LEDGER", "AUDIT"):
+        assert f"EvaluationPaymentCommittedFaces.{face}.enumerationKeys()" in (
+            source(
+                "commerce-service/src/main/java/io/citybuddy/commerce/payment/"
+                "MockPaymentRepository.java"
+            )
+        )
     assert "requestActionInCurrentTransaction(" in action
     assert "context.sandboxId(),\n                    committedAt" in action
     assert action.count("Instant observedNow = clock.instant();") == 1
