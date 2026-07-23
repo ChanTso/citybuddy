@@ -301,9 +301,13 @@ def test_inventory_closes_all_runtime_rocketmq_builders_and_outbox_readers() -> 
         casefold=True,
     )
     assert outbox_readers == {
+        "commerce-service/src/main/java/io/citybuddy/commerce/action/ActionRepository.java",
         "commerce-service/src/main/java/io/citybuddy/commerce/catalog/ProductRepository.java",
         "commerce-service/src/main/java/io/citybuddy/commerce/faq/FaqRepository.java",
     }
+    action_query = source(
+        "commerce-service/src/main/java/io/citybuddy/commerce/action/ActionRepository.java"
+    )
     product_query = source(
         "commerce-service/src/main/java/io/citybuddy/commerce/catalog/ProductRepository.java"
     )
@@ -328,6 +332,10 @@ def test_inventory_closes_all_runtime_rocketmq_builders_and_outbox_readers() -> 
     assert "public List<OutboxEvent> allOutboxEvents()" in faq_query
     assert "public List<FaqSource> allSources()" in faq_query
     assert "public List<DraftCommand> allDraftCommands()" in faq_query
+    assert action_query.casefold().count("from commerce_outbox") == 1
+    assert "WHERE event_id = ?" in action_query
+    assert "aggregate_type = " not in action_query[action_query.index("FROM commerce_outbox") :]
+    assert "event_type = " not in action_query[action_query.index("FROM commerce_outbox") :]
     for outbox_query in (product_query, faq_query):
         assert "STANDARD_ORDER" not in outbox_query[outbox_query.index("FROM commerce_outbox") :]
         assert "REFUND_" not in outbox_query[outbox_query.index("FROM commerce_outbox") :]

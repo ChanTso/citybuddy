@@ -232,15 +232,16 @@ public class RefundRepository {
     jdbc.update(
         """
         INSERT INTO inventory_ledger
-          (movement_id, business_event_key, movement_type, order_id, reservation_id,
+          (movement_id, business_event_key, movement_type, order_id, sandbox_id, reservation_id,
            activity_id, product_id, inventory_delta, activity_quota_delta,
            payment_amount_minor, payment_currency)
-        VALUES (?, ?, ?, ?, ?, ?, ?, 0, 0, ?, ?)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0, 0, ?, ?)
         """,
         UUID.randomUUID().toString(),
         refundEventKey(refund.refundId()),
         refund.orderKind() + "_REFUND",
         refund.orderId(),
+        order.sandboxId(),
         order.reservationId(),
         order.activityId(),
         order.productId(),
@@ -252,7 +253,7 @@ public class RefundRepository {
     List<MovementRecord> rows =
         jdbc.query(
             """
-            SELECT business_event_key, movement_type, order_id, reservation_id, activity_id,
+            SELECT business_event_key, movement_type, order_id, sandbox_id, reservation_id, activity_id,
                    product_id, inventory_delta, activity_quota_delta,
                    payment_amount_minor, payment_currency
             FROM inventory_ledger
@@ -264,6 +265,7 @@ public class RefundRepository {
                     result.getString("business_event_key"),
                     result.getString("movement_type"),
                     result.getString("order_id"),
+                    result.getString("sandbox_id"),
                     result.getString("reservation_id"),
                     result.getString("activity_id"),
                     result.getString("product_id"),
@@ -281,7 +283,7 @@ public class RefundRepository {
   public List<MovementRecord> findRefundMovements(String orderId) {
     return jdbc.query(
         """
-        SELECT business_event_key, movement_type, order_id, reservation_id, activity_id,
+        SELECT business_event_key, movement_type, order_id, sandbox_id, reservation_id, activity_id,
                product_id, inventory_delta, activity_quota_delta,
                payment_amount_minor, payment_currency
         FROM inventory_ledger
@@ -294,6 +296,7 @@ public class RefundRepository {
                 result.getString("business_event_key"),
                 result.getString("movement_type"),
                 result.getString("order_id"),
+                result.getString("sandbox_id"),
                 result.getString("reservation_id"),
                 result.getString("activity_id"),
                 result.getString("product_id"),
@@ -448,6 +451,7 @@ public class RefundRepository {
       String businessEventKey,
       String movementType,
       String orderId,
+      String sandboxId,
       String reservationId,
       String activityId,
       String productId,

@@ -145,7 +145,8 @@ public final class ActionService {
                     refunds.prepareActionInCurrentTransaction(
                         context.userSubject(),
                         command.orderId(),
-                        new RefundRequest(command.amountMinor(), command.currency(), null)));
+                        new RefundRequest(command.amountMinor(), command.currency(), null),
+                        context.sandboxId()));
         requireTarget(existing, target);
       }
       return pendingView(existing, true);
@@ -157,7 +158,8 @@ public final class ActionService {
                 refunds.prepareActionInCurrentTransaction(
                     context.userSubject(),
                     command.orderId(),
-                    new RefundRequest(command.amountMinor(), command.currency(), null)));
+                    new RefundRequest(command.amountMinor(), command.currency(), null),
+                    context.sandboxId()));
     Instant createdAt = clock.instant().truncatedTo(ChronoUnit.MICROS);
     PendingActionRecord created =
         new PendingActionRecord(
@@ -239,7 +241,8 @@ public final class ActionService {
                 refunds.prepareActionInCurrentTransaction(
                     context.userSubject(),
                     command.orderId(),
-                    new RefundRequest(command.amountMinor(), command.currency(), null)));
+                    new RefundRequest(command.amountMinor(), command.currency(), null),
+                    context.sandboxId()));
     requireTarget(pending, target);
 
     String refundKey = refundIdempotencyKey(pending.pendingActionId());
@@ -250,7 +253,8 @@ public final class ActionService {
                     context.userSubject(),
                     pending.orderId(),
                     refundKey,
-                    new RefundRequest(pending.amountMinor(), pending.currency(), null)));
+                    new RefundRequest(pending.amountMinor(), pending.currency(), null),
+                    context.sandboxId()));
     RefundResult refund = mutation.refund();
     if (refund.replayed()) {
       throw integrityFailure("Prepared PendingAction points to an existing refund result");
@@ -413,7 +417,8 @@ public final class ActionService {
                     pending.orderId(),
                     refundIdempotencyKey(pending.pendingActionId()),
                     new RefundRequest(pending.amountMinor(), pending.currency(), null),
-                    receipt.refundId()));
+                    receipt.refundId(),
+                    pending.sandboxId()));
     requireTarget(pending, replay.target());
     RefundResult refund = replay.refund();
     if (!refund.refundId().equals(receipt.refundId())
