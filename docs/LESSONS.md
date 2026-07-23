@@ -277,6 +277,7 @@ This file records only factual pitfalls supported by merged pull-request, commit
 ## Maintenance — Standard-order indeterminate committed-truth observation
 
 - 现象：PR #51 把并发耗尽后的已提交真值缺失改为 409 后，五轮八路同 key、同意图真实并发仍偶发一条 409；兄弟请求随后已完整提交同一订单。连续修正曾在 403、503、409 之间左右翻转，但没有表达“尚未成功观测真值”。
+- 证据链接：[maintenance PR #52](https://github.com/ChanTso/citybuddy/pull/52)
 - 根因：`resolveCommittedAfterConcurrency` 捕获并吞掉 `PessimisticLockingFailureException`，随后把控制流落入“没有已提交结果”的 409。该异常只证明 `FOR UPDATE` 观测被兄弟事务持锁阻塞，并不证明行不存在；未能观测被错误当成了确认不存在。
 - 解决：已提交真值解析显式区分 `FOUND`、`CONFIRMED_ABSENT`、`INDETERMINATE`。每次观测使用一秒事务超时，`INDETERMINATE` 在三次有界退避窗口内只重观测；找到同意图提交即 replay，找到异意图仍 409，确认缺失允许一次最终变更，仍无法确定或再次竞争耗尽只返回可重试 429，明确数据库不可用保持 503。真实 MySQL 夹具先在未提交兄弟事务内落下完整订单真值并持有幂等行锁，确定第二次观测真实超时后才提交，证明后续观测收敛为同一订单；五轮八路并发、冲突意图和断连分类同时通过 fresh Surefire 零跳过门。
 - 结论：未能观测不等于观测到不存在。只有成功完成的权威读取可以形成终态业务结论；超时、锁竞争和读取中断必须作为显式 `INDETERMINATE` 进入有界重观测，不能被异常兜底折叠成拒绝、不可用或冲突。
