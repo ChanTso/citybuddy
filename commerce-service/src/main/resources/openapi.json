@@ -273,7 +273,8 @@
           "403": {"description": "Authorization or ownership rejection", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/OrderError"}}}},
           "409": {"description": "Idempotency, stale-version, or insufficient-stock rejection", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/OrderError"}}}},
           "422": {"description": "Missing, unpublished, or unavailable authoritative product", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/OrderError"}}}},
-          "503": {"description": "Finite recognized-concurrency retry exhaustion", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/OrderError"}}}}
+          "429": {"description": "Committed truth remains indeterminate after bounded concurrency recovery", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/OrderError"}}}},
+          "503": {"description": "Authoritative order database unavailable", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/OrderError"}}}}
         }
       }
     },

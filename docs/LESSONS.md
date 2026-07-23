@@ -273,3 +273,11 @@ This file records only factual pitfalls supported by merged pull-request, commit
 - 根因：`OrderService` 的竞争耗尽分支直接渲染不可用，没有在独立的最终只读事务中重新锁定用户/幂等键并解析已提交真值。集成编排则没有在运行前精确移除 required class 的旧 Surefire XML，也没有在运行后核对每个选中类的 executed/skipped/failure/error 计数；命令退出码因此不能证明目标测试实际执行。
 - 解决：有限写入重试耗尽后只进行一次加锁真值解析：同意图兄弟提交返回既有订单且不再执行库存、订单或 Outbox 写入，冲突意图保持 409，确认没有提交结果的耗尽固定为 409，只有明确数据库资源或事务获取失败使用 `DEPENDENCY_UNAVAILABLE` 503。catalog 真实集成用五轮八路同意图并发和 MySQL `offline_mode` 断连/恢复分别证明收敛与不可用分类。共享 shell 门禁在 Maven 前删除每个 required class 的旧报告，运行后逐类要求 `tests > 0` 且 `skipped/failures/errors = 0`；静态库存测试绑定所有 `-Dtest` 入口与完整类清单，catalog 和 identity 两条真实 Surefire 集成入口均通过。
 - 结论：并发幂等的正确性不仅是不重复写入；竞争耗尽时必须回到已提交真值，因为兄弟请求可能已完成，直接报告不可用会制造相互矛盾的结果。条件测试的进程退出 0 也不是执行证据；fresh runner 报告与逐类零跳过计数必须成为编排自身的 fail-closed 门禁。
+
+## Maintenance — Standard-order indeterminate committed-truth observation
+
+- 现象：PR #51 把并发耗尽后的已提交真值缺失改为 409 后，五轮八路同 key、同意图真实并发仍偶发一条 409；兄弟请求随后已完整提交同一订单。连续修正曾在 403、503、409 之间左右翻转，但没有表达“尚未成功观测真值”。
+- 证据链接：[maintenance PR #52](https://github.com/ChanTso/citybuddy/pull/52)
+- 根因：`resolveCommittedAfterConcurrency` 捕获并吞掉 `PessimisticLockingFailureException`，随后把控制流落入“没有已提交结果”的 409。该异常只证明 `FOR UPDATE` 观测被兄弟事务持锁阻塞，并不证明行不存在；未能观测被错误当成了确认不存在。
+- 解决：已提交真值解析显式区分 `FOUND`、`CONFIRMED_ABSENT`、`INDETERMINATE`。订单服务不再直接持有可执行的裸事务模板，而由一个共享事务执行器包装初始变更、重试、最终变更与真值观测；执行器在 transaction-bound MySQL session 中读取、临时收紧并于 `finally` 恢复 `innodb_lock_wait_timeout`，使每一次可能争抢幂等行的事务默认继承同一个物理等待边界。删除会先于恢复语句过期的冗余 framework transaction deadline，只保留 MySQL 1205 这一可真实约束且允许随后恢复 session 的物理边界；`PessimisticLockingFailureException`、`QueryTimeoutException` 与 `TransactionTimedOutException` 仍全部归入不确定态。`INDETERMINATE` 在三次有界退避窗口内只重观测；找到同意图提交即 replay，找到异意图仍 409，确认缺失允许一次最终变更，仍无法确定或再次竞争耗尽只返回可重试 429，明确数据库不可用保持 503。真实 MySQL 夹具先在未提交兄弟事务内落下完整订单真值并持有幂等行锁，由生产变更路径的超时确定性转入三态解析，观察到不确定态后才提交并收敛到同一订单；夹具使用单连接 Hikari 池，完成后重新借用同一物理 session 并证明 timeout 原值已恢复。五轮八路并发、冲突意图和断连分类同时通过 fresh Surefire 零跳过门。
+- 结论：未能观测不等于观测到不存在。只有成功完成的权威读取可以形成终态业务结论；超时、锁竞争和读取中断必须作为显式 `INDETERMINATE` 进入有界重观测，不能被异常兜底折叠成拒绝、不可用或冲突。给恢复读单点增加超时而变更入口仍使用数据库默认锁等待，等于恢复状态机不可达；高并发路径的等待边界必须在共享事务/连接层统一施加，使所有现有与新增路径默认继承，避免线程长期堆积。清理代码写在 `finally` 不代表资源状态已恢复：cleanup 不能依赖已经失败或过期的同一受控资源，池化 session 必须以跨借用的真实状态证明没有污染后续请求。

@@ -10,6 +10,8 @@ import com.nimbusds.jose.JWSHeader;
 import com.nimbusds.jose.crypto.RSASSASigner;
 import com.nimbusds.jwt.JWTClaimsSet;
 import com.nimbusds.jwt.SignedJWT;
+import com.zaxxer.hikari.HikariConfig;
+import com.zaxxer.hikari.HikariDataSource;
 import io.citybuddy.commerce.order.OrderCategory;
 import io.citybuddy.commerce.order.OrderException;
 import io.citybuddy.commerce.order.OrderProperties;
@@ -20,6 +22,8 @@ import io.citybuddy.commerce.order.OrderService;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.security.KeyFactory;
+import java.security.MessageDigest;
+import java.security.NoSuchAlgorithmException;
 import java.security.interfaces.RSAPrivateKey;
 import java.security.spec.PKCS8EncodedKeySpec;
 import java.sql.Connection;
@@ -29,6 +33,7 @@ import java.time.Instant;
 import java.util.ArrayList;
 import java.util.Base64;
 import java.util.Date;
+import java.util.HexFormat;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
@@ -61,6 +66,7 @@ import org.springframework.http.ResponseEntity;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.jdbc.datasource.DataSourceTransactionManager;
 import org.springframework.jdbc.datasource.DriverManagerDataSource;
+import org.springframework.jdbc.datasource.SingleConnectionDataSource;
 import org.springframework.test.context.DynamicPropertyRegistry;
 import org.springframework.test.context.DynamicPropertySource;
 import org.springframework.transaction.support.TransactionTemplate;
@@ -89,6 +95,7 @@ class CatalogIntegrationTest {
     registry.add("citybuddy.orders.required-permission", () -> "order:create");
     registry.add("citybuddy.orders.maximum-quantity", () -> "100");
     registry.add("citybuddy.orders.maximum-concurrency-attempts", () -> "10");
+    registry.add("citybuddy.orders.lock-wait-timeout-seconds", () -> "1");
     registry.add("citybuddy.catalog.cache-ttl", () -> "30s");
     registry.add("citybuddy.catalog.cache-jitter", () -> "10s");
     registry.add("citybuddy.catalog.null-ttl", () -> "3s");
@@ -454,9 +461,10 @@ class CatalogIntegrationTest {
 
   private void proveControlledRetryExhaustionClassifications() throws Exception {
     proveCommittedSiblingAfterControlledExhaustion();
+    proveIndeterminateObservationWaitsForCommittedSibling();
     proveConflictingSiblingAfterControlledExhaustion();
     proveMissingTruthAfterControlledExhaustion();
-    assertTotalIdempotencyCount(12);
+    assertTotalIdempotencyCount(14);
   }
 
   private void proveCommittedSiblingAfterControlledExhaustion() throws Exception {
@@ -476,6 +484,82 @@ class CatalogIntegrationTest {
         .isEqualTo(result.sibling().getBody().get("orderId").asText());
     assertThat(result.finalResolutionReads()).isEqualTo(1);
     assertOrderCardinality(productId, 4, 1, 1, 1);
+  }
+
+  private void proveIndeterminateObservationWaitsForCommittedSibling() throws Exception {
+    String productId = "order-exhaustion-indeterminate";
+    String idempotencyKey = "exhaustion-indeterminate-key";
+    String orderId = UUID.randomUUID().toString();
+    seedOrderProduct(productId, 5, true, "PUBLISHED", 1);
+
+    var executor = Executors.newSingleThreadExecutor();
+    try (HikariDataSource targetDataSource = singleConnectionOrderDataSource();
+        Connection sibling =
+            DriverManager.getConnection(
+                required("CATALOG_MYSQL_URL"),
+                "commerce_app",
+                required("MYSQL_COMMERCE_APP_PASSWORD"))) {
+      JdbcTemplate targetJdbc = new JdbcTemplate(targetDataSource);
+      Long originalLockWait =
+          targetJdbc.queryForObject("SELECT @@SESSION.innodb_lock_wait_timeout", Long.class);
+      assertThat(originalLockWait).isGreaterThan(1L);
+      IndeterminateObservationRepository probe =
+          new IndeterminateObservationRepository(targetJdbc, objectMapper);
+      OrderService oneAttemptService =
+          new OrderService(
+              probe,
+              new TransactionTemplate(new DataSourceTransactionManager(targetDataSource)),
+              new OrderProperties("order:create", 100, 1, 1));
+      sibling.setAutoCommit(false);
+      var siblingJdbc = new JdbcTemplate(new SingleConnectionDataSource(sibling, true));
+      OrderRepository siblingRepository = new OrderRepository(siblingJdbc, objectMapper);
+      OrderRepository.ProductSnapshot product =
+          siblingRepository.findProduct(productId).orElseThrow();
+      siblingRepository.reserveIdempotency(
+          "catalog-user", idempotencyKey, intentHash(productId, 1, 1), orderId);
+      assertThat(siblingRepository.decrementStock(product, 1)).isTrue();
+      siblingRepository.insertOrder("catalog-user", orderId, product, 1);
+      siblingRepository.insertOutbox(orderId, product, 1);
+
+      Future<OrderResult> target =
+          executor.submit(
+              () ->
+                  oneAttemptService.create(
+                      "catalog-user",
+                      idempotencyKey,
+                      orderRequest(productId, 1),
+                      "indeterminate-observation"));
+      try {
+        assertThat(probe.awaitIndeterminateObservation()).isTrue();
+        sibling.commit();
+        OrderResult resolved = target.get(10, TimeUnit.SECONDS);
+        assertThat(resolved.replayed()).isTrue();
+        assertThat(resolved.orderId()).isEqualTo(orderId);
+        assertThat(probe.indeterminateObservations()).isGreaterThanOrEqualTo(1);
+        assertThat(
+                targetJdbc.queryForObject("SELECT @@SESSION.innodb_lock_wait_timeout", Long.class))
+            .isEqualTo(originalLockWait);
+      } finally {
+        if (!target.isDone()) {
+          target.cancel(true);
+        }
+      }
+    } finally {
+      executor.shutdownNow();
+    }
+    assertOrderCardinality(productId, 4, 1, 1, 1);
+  }
+
+  private static HikariDataSource singleConnectionOrderDataSource() {
+    HikariConfig config = new HikariConfig();
+    config.setPoolName("order-lock-boundary-" + UUID.randomUUID());
+    config.setJdbcUrl(required("CATALOG_MYSQL_URL"));
+    config.setUsername("commerce_app");
+    config.setPassword(required("MYSQL_COMMERCE_APP_PASSWORD"));
+    config.setMaximumPoolSize(1);
+    config.setMinimumIdle(1);
+    config.setConnectionTimeout(5000);
+    return new HikariDataSource(config);
   }
 
   private void proveConflictingSiblingAfterControlledExhaustion() throws Exception {
@@ -504,11 +588,11 @@ class CatalogIntegrationTest {
     ControlledExhaustion result = exhaustAgainstGapLock(productId, idempotencyKey, 1, () -> null);
 
     assertThat(result.sibling()).isNull();
-    assertThat(result.failure()).isNotNull();
-    assertThat(result.failure().status()).isEqualTo(409);
-    assertThat(result.failure().category()).isEqualTo(OrderCategory.CONCURRENCY_EXHAUSTED);
-    assertThat(result.finalResolutionReads()).isEqualTo(1);
-    assertOrderCardinality(productId, 5, 0, 0, 0);
+    assertThat(result.failure()).isNull();
+    assertThat(result.target()).isNotNull();
+    assertThat(result.target().replayed()).isFalse();
+    assertThat(result.finalResolutionReads()).isEqualTo(2);
+    assertOrderCardinality(productId, 4, 1, 1, 1);
   }
 
   private ControlledExhaustion exhaustAgainstGapLock(
@@ -526,7 +610,7 @@ class CatalogIntegrationTest {
         new OrderService(
             probe,
             new TransactionTemplate(new DataSourceTransactionManager(targetDataSource)),
-            new OrderProperties("order:create", 100, 1));
+            new OrderProperties("order:create", 100, 1, 1));
     OrderRequest request = orderRequest(productId, quantity);
     var executor = Executors.newSingleThreadExecutor();
     Future<OrderResult> target = null;
@@ -589,6 +673,18 @@ class CatalogIntegrationTest {
     return request;
   }
 
+  private static String intentHash(String productId, int quantity, long version) {
+    String canonical = productId.length() + ":" + productId + ":" + quantity + ":" + version;
+    try {
+      return HexFormat.of()
+          .formatHex(
+              MessageDigest.getInstance("SHA-256")
+                  .digest(canonical.getBytes(java.nio.charset.StandardCharsets.UTF_8)));
+    } catch (NoSuchAlgorithmException exception) {
+      throw new IllegalStateException("SHA-256 is unavailable", exception);
+    }
+  }
+
   private void proveOrderDatabaseUnavailabilityClassification() throws Exception {
     String productId = "order-database-outage";
     String idempotencyKey = "database-outage-key";
@@ -614,7 +710,7 @@ class CatalogIntegrationTest {
     assertThat(postOrder(token(), idempotencyKey, intent).getStatusCode())
         .isEqualTo(HttpStatus.CREATED);
     assertOrderCardinality(productId, 4, 1, 1, 1);
-    assertTotalIdempotencyCount(13);
+    assertTotalIdempotencyCount(15);
   }
 
   private void waitForApplicationDatabase() throws InterruptedException {
@@ -674,6 +770,40 @@ class CatalogIntegrationTest {
 
     private int finalResolutionReads() {
       return Math.max(0, reads.get() - 1);
+    }
+  }
+
+  private static final class IndeterminateObservationRepository extends OrderRepository {
+    private final AtomicInteger reads = new AtomicInteger();
+    private final AtomicInteger indeterminateObservations = new AtomicInteger();
+    private final CountDownLatch indeterminateObservation = new CountDownLatch(1);
+
+    private IndeterminateObservationRepository(JdbcTemplate jdbc, ObjectMapper objectMapper) {
+      super(jdbc, objectMapper);
+    }
+
+    @Override
+    public Optional<IdempotencyRecord> findIdempotencyForUpdate(String user, String key) {
+      int read = reads.incrementAndGet();
+      try {
+        return super.findIdempotencyForUpdate(user, key);
+      } catch (org.springframework.dao.PessimisticLockingFailureException
+          | org.springframework.dao.QueryTimeoutException
+          | org.springframework.transaction.TransactionTimedOutException exception) {
+        if (read > 1) {
+          indeterminateObservations.incrementAndGet();
+          indeterminateObservation.countDown();
+        }
+        throw exception;
+      }
+    }
+
+    private boolean awaitIndeterminateObservation() throws InterruptedException {
+      return indeterminateObservation.await(10, TimeUnit.SECONDS);
+    }
+
+    private int indeterminateObservations() {
+      return indeterminateObservations.get();
     }
   }
 

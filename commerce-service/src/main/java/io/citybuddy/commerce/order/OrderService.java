@@ -8,20 +8,25 @@ import java.util.Set;
 import java.util.UUID;
 import org.springframework.dao.DataAccessResourceFailureException;
 import org.springframework.dao.PessimisticLockingFailureException;
+import org.springframework.dao.QueryTimeoutException;
 import org.springframework.transaction.CannotCreateTransactionException;
+import org.springframework.transaction.TransactionTimedOutException;
 import org.springframework.transaction.support.TransactionTemplate;
 
 public final class OrderService {
+  private static final int COMMITTED_OBSERVATION_ATTEMPTS = 3;
+  private static final long COMMITTED_OBSERVATION_BACKOFF_MILLIS = 25;
   private static final Set<String> OWNER_FIELDS =
       Set.of("owner", "ownersubject", "user", "userid", "usersubject");
   private final OrderRepository repository;
-  private final TransactionTemplate transactions;
+  private final OrderTransactions transactions;
   private final OrderProperties properties;
 
   public OrderService(
       OrderRepository repository, TransactionTemplate transactions, OrderProperties properties) {
     this.repository = repository;
-    this.transactions = transactions;
+    this.transactions =
+        new OrderTransactions(repository, transactions, properties.lockWaitTimeoutSeconds());
     this.properties = properties;
   }
 
@@ -31,7 +36,7 @@ public final class OrderService {
     for (int attempt = 1; attempt <= properties.maximumConcurrencyAttempts(); attempt++) {
       try {
         OrderResult result =
-            transactions.execute(
+            transactions.mutate(
                 status -> createOnce(user, idempotencyKey, validated, correlationId));
         if (result == null) {
           throw new IllegalStateException("Order transaction returned no result");
@@ -91,28 +96,89 @@ public final class OrderService {
 
   private OrderResult resolveCommittedAfterConcurrency(
       String user, String idempotencyKey, ValidatedRequest request, String correlationId) {
+    CommittedObservation observation =
+        observeCommittedWithinBound(user, idempotencyKey, request, correlationId);
+    if (observation.state() == CommittedObservationState.FOUND) {
+      return observation.result();
+    }
+    if (observation.state() == CommittedObservationState.INDETERMINATE) {
+      throw retryableConcurrency(correlationId);
+    }
+
     try {
-      OrderResult committed =
-          transactions.execute(
-              status -> resolveCommitted(user, idempotencyKey, request, correlationId));
-      if (committed != null) {
-        return committed;
+      OrderResult result =
+          transactions.mutate(status -> createOnce(user, idempotencyKey, request, correlationId));
+      if (result == null) {
+        throw new IllegalStateException("Order recovery transaction returned no result");
       }
-    } catch (PessimisticLockingFailureException exception) {
-      // The bounded mutation attempts are exhausted; this final transaction only observes truth.
+      return result;
+    } catch (PessimisticLockingFailureException
+        | OrderRepository.IdempotencyRaceException
+        | StockRaceException exception) {
+      observation = observeCommittedWithinBound(user, idempotencyKey, request, correlationId);
+      if (observation.state() == CommittedObservationState.FOUND) {
+        return observation.result();
+      }
+      throw retryableConcurrency(correlationId);
     } catch (DataAccessResourceFailureException | CannotCreateTransactionException exception) {
       throw unavailable(correlationId);
     }
-    throw failure(
-        409,
-        OrderCategory.CONCURRENCY_EXHAUSTED,
-        "Order concurrency retry bound exhausted without a committed result",
-        correlationId);
+  }
+
+  private CommittedObservation observeCommittedWithinBound(
+      String user, String idempotencyKey, ValidatedRequest request, String correlationId) {
+    for (int attempt = 1; attempt <= COMMITTED_OBSERVATION_ATTEMPTS; attempt++) {
+      CommittedObservation observation =
+          observeCommitted(user, idempotencyKey, request, correlationId);
+      if (observation.state() != CommittedObservationState.INDETERMINATE) {
+        return observation;
+      }
+      if (attempt < COMMITTED_OBSERVATION_ATTEMPTS && !pauseBeforeObservation(attempt)) {
+        return CommittedObservation.indeterminate();
+      }
+    }
+    return CommittedObservation.indeterminate();
+  }
+
+  private CommittedObservation observeCommitted(
+      String user, String idempotencyKey, ValidatedRequest request, String correlationId) {
+    try {
+      OrderResult committed =
+          transactions.observe(
+              status -> resolveCommitted(user, idempotencyKey, request, correlationId));
+      return committed == null
+          ? CommittedObservation.confirmedAbsent()
+          : CommittedObservation.found(committed);
+    } catch (PessimisticLockingFailureException
+        | QueryTimeoutException
+        | TransactionTimedOutException exception) {
+      return CommittedObservation.indeterminate();
+    } catch (DataAccessResourceFailureException | CannotCreateTransactionException exception) {
+      throw unavailable(correlationId);
+    }
+  }
+
+  private static boolean pauseBeforeObservation(int attempt) {
+    try {
+      Thread.sleep(COMMITTED_OBSERVATION_BACKOFF_MILLIS * attempt);
+      return true;
+    } catch (InterruptedException exception) {
+      Thread.currentThread().interrupt();
+      return false;
+    }
   }
 
   private OrderResult resolveCommitted(
       String user, String idempotencyKey, ValidatedRequest request, String correlationId) {
-    var existing = repository.findIdempotencyForUpdate(user, idempotencyKey);
+    return resolveCommitted(
+        repository.findIdempotencyForUpdate(user, idempotencyKey), user, request, correlationId);
+  }
+
+  private OrderResult resolveCommitted(
+      java.util.Optional<OrderRepository.IdempotencyRecord> existing,
+      String user,
+      ValidatedRequest request,
+      String correlationId) {
     if (existing.isEmpty()) {
       return null;
     }
@@ -186,8 +252,36 @@ public final class OrderService {
         503, OrderCategory.DEPENDENCY_UNAVAILABLE, "Order database is unavailable", correlationId);
   }
 
+  private static OrderException retryableConcurrency(String correlationId) {
+    return failure(
+        429,
+        OrderCategory.CONCURRENCY_EXHAUSTED,
+        "Order concurrency is indeterminate; retry the same idempotency key",
+        correlationId);
+  }
+
   private record ValidatedRequest(
       String productId, int quantity, long expectedProductVersion, String intentHash) {}
+
+  private enum CommittedObservationState {
+    FOUND,
+    CONFIRMED_ABSENT,
+    INDETERMINATE
+  }
+
+  private record CommittedObservation(CommittedObservationState state, OrderResult result) {
+    private static CommittedObservation found(OrderResult result) {
+      return new CommittedObservation(CommittedObservationState.FOUND, result);
+    }
+
+    private static CommittedObservation confirmedAbsent() {
+      return new CommittedObservation(CommittedObservationState.CONFIRMED_ABSENT, null);
+    }
+
+    private static CommittedObservation indeterminate() {
+      return new CommittedObservation(CommittedObservationState.INDETERMINATE, null);
+    }
+  }
 
   static final class StockRaceException extends RuntimeException {}
 }
