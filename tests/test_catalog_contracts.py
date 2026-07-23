@@ -31,6 +31,8 @@ def test_catalog_contract_exposes_only_authenticated_published_reads() -> None:
         "/api/seckill/activities/{activityId}/reservations",
         "/api/reservations/{reservationId}",
         "/internal/tools/catalog.product.get",
+        "/internal/tools/actions/prepare",
+        "/internal/tools/actions/{pendingActionId}/confirm",
         "/internal/knowledge/snapshot",
         "/internal/eval/sandboxes/{sandboxId}/liveness",
         "/internal/mock-payments/callback",

@@ -1,6 +1,9 @@
 package io.citybuddy.commerce.evaluation;
 
+import io.citybuddy.commerce.payment.CommittedPaymentIntegrityException;
+import io.citybuddy.commerce.payment.CommittedPaymentTruthResolver;
 import io.citybuddy.commerce.payment.EvaluationPaymentCommittedFaces;
+import io.citybuddy.commerce.payment.MockPaymentRepository;
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
 import java.sql.ResultSet;
@@ -25,9 +28,13 @@ public final class EvaluationViewRepository {
               EvaluationAuditEntityType.PAYMENT_CALLBACK));
 
   private final JdbcTemplate jdbc;
+  private final MockPaymentRepository payments;
+  private final CommittedPaymentTruthResolver paymentTruth;
 
   public EvaluationViewRepository(JdbcTemplate jdbc) {
     this.jdbc = jdbc;
+    this.payments = new MockPaymentRepository(jdbc);
+    this.paymentTruth = new CommittedPaymentTruthResolver(payments);
   }
 
   public void validateSchema() {
@@ -242,7 +249,6 @@ public final class EvaluationViewRepository {
     List<ProductObservationTruth> productTruths = productObservationTruths(sandboxId);
     if (!EvaluationLegacyAuditCommitmentStore.load(jdbc).isConsistent()
         || !sequenceOrderConsistent(references)
-        || !paymentFaceCardinalitiesConsistent(sandboxId)
         || !paymentTruthsConsistent(
             references,
             paidOrderTruths(sandboxId),
@@ -285,84 +291,6 @@ public final class EvaluationViewRepository {
       }
     }
     return true;
-  }
-
-  private boolean paymentFaceCardinalitiesConsistent(String sandboxId) {
-    String callbackTable =
-        EvaluationPaymentCommittedFaces.onlyTable(EvaluationPaymentCommittedFaces.CALLBACK);
-    String callbackKey = EvaluationPaymentCommittedFaces.CALLBACK.stableKeys().getFirst();
-    String attemptTable =
-        EvaluationPaymentCommittedFaces.onlyTable(EvaluationPaymentCommittedFaces.ATTEMPT);
-    String attemptKey = EvaluationPaymentCommittedFaces.ATTEMPT.stableKeys().getFirst();
-    String ledgerTable =
-        EvaluationPaymentCommittedFaces.onlyTable(EvaluationPaymentCommittedFaces.LEDGER);
-    String auditTable =
-        EvaluationPaymentCommittedFaces.onlyTable(EvaluationPaymentCommittedFaces.AUDIT);
-    return duplicateGroupCount(
-                "SELECT "
-                    + callbackKey
-                    + " FROM "
-                    + callbackTable
-                    + " WHERE "
-                    + callbackKey
-                    + " IN (SELECT "
-                    + callbackKey
-                    + " FROM "
-                    + callbackTable
-                    + " WHERE sandbox_id = ?) GROUP BY "
-                    + callbackKey
-                    + " HAVING COUNT(*) > 1",
-                sandboxId)
-            == 0
-        && duplicateGroupCount(
-                "SELECT "
-                    + attemptKey
-                    + " FROM "
-                    + attemptTable
-                    + " WHERE "
-                    + attemptKey
-                    + " IN (SELECT "
-                    + attemptKey
-                    + " FROM "
-                    + attemptTable
-                    + " WHERE sandbox_id = ?) GROUP BY "
-                    + attemptKey
-                    + " HAVING COUNT(*) > 1",
-                sandboxId)
-            == 0
-        && duplicateGroupCount(
-                "SELECT order_id FROM ("
-                    + EvaluationPaymentCommittedFaces.orderFaceUnionSql()
-                    + ") committed_order WHERE order_id IN ("
-                    + EvaluationPaymentCommittedFaces.evaluationOrderKeysBySandboxSql()
-                    + ") GROUP BY order_id HAVING COUNT(*) > 1",
-                sandboxId)
-            == 0
-        && duplicateGroupCount(
-                "SELECT order_id FROM "
-                    + ledgerTable
-                    + " WHERE order_id IN ("
-                    + EvaluationPaymentCommittedFaces.evaluationOrderKeysBySandboxSql()
-                    + ") GROUP BY order_id HAVING COUNT(*) > 1",
-                sandboxId)
-            == 0
-        && duplicateGroupCount(
-                "SELECT entity_id FROM "
-                    + auditTable
-                    + " WHERE entity_id IN (SELECT callback_event_id FROM "
-                    + callbackTable
-                    + " WHERE sandbox_id = ?) GROUP BY entity_id HAVING COUNT(*) > 1",
-                sandboxId)
-            == 0;
-  }
-
-  private int duplicateGroupCount(String groupedQuery, String sandboxId) {
-    Integer count =
-        jdbc.queryForObject(
-            "SELECT COUNT(*) FROM (" + groupedQuery + ") duplicate_groups",
-            Integer.class,
-            sandboxId);
-    return count == null ? 0 : count;
   }
 
   public static Set<EvaluationAuditEntityType> reconciledAuditTypes() {
@@ -600,7 +528,7 @@ public final class EvaluationViewRepository {
         && "LEGACY_CUTOFF".equals(reference.createdAtAnchor());
   }
 
-  private static boolean paymentTruthsConsistent(
+  private boolean paymentTruthsConsistent(
       List<IntegrityAuditReference> references,
       List<PaidOrderTruth> orders,
       List<PaymentLedgerTruth> ledgers,
@@ -660,104 +588,31 @@ public final class EvaluationViewRepository {
           paymentReferences.stream()
               .filter(reference -> reference.entityId().equals(callback.callbackEventId()))
               .toList();
-      if (matchingReferences.size() != 1
-          || !paymentTruthIsAuthoritative(order, ledger, callback, matchingReferences.getFirst())) {
+      try {
+        MockPaymentRepository.AttemptRecord attempt =
+            payments.findAttemptById(callback.attemptId()).orElse(null);
+        if (attempt == null) {
+          return false;
+        }
+        CommittedPaymentTruthResolver.CommittedPaymentTruth committed =
+            paymentTruth.resolveSnapshot(attempt);
+        if (!committed.order().orderId().equals(order.orderId())
+            || !committed.paymentMovement().businessEventKey().equals(ledger.businessEventKey())
+            || !committed.callback().callbackEventId().equals(callback.callbackEventId())
+            || committed.evaluationAudit().isEmpty()
+            || !committed
+                .evaluationAudit()
+                .orElseThrow()
+                .auditReferenceId()
+                .equals(matchingReferences.getFirst().auditReferenceId())
+            || attempt.refundedAmountMinor() != 0) {
+          return false;
+        }
+      } catch (CommittedPaymentIntegrityException exception) {
         return false;
       }
     }
     return true;
-  }
-
-  private static boolean paymentTruthIsAuthoritative(
-      PaidOrderTruth order,
-      PaymentLedgerTruth ledger,
-      SucceededCallbackTruth callback,
-      IntegrityAuditReference reference) {
-    String expectedIntentHash =
-        sha256(
-            String.join(
-                "\n",
-                callback.callbackEventId(),
-                callback.callbackCorrelationId(),
-                callback.attemptOrderId(),
-                Long.toString(callback.attemptAmountMinor()),
-                callback.attemptCurrency(),
-                callback.requestedOutcome(),
-                callback.sandboxId(),
-                callback.supportSessionId(),
-                callback.traceId(),
-                callback.operationId(),
-                callback.callbackIdempotencyKey()));
-    PaymentAuditTruth truth =
-        new PaymentAuditTruth(
-            callback.sandboxId(),
-            callback.supportSessionId(),
-            callback.traceId(),
-            callback.operationId(),
-            callback.callbackEventId(),
-            callback.attemptStateVersion(),
-            callback.createdAt());
-    return "STANDARD".equals(order.orderKind())
-        && "PAID".equals(order.status())
-        && order.stateVersion() == 2
-        && "STANDARD".equals(callback.attemptOrderKind())
-        && "SUCCEEDED".equals(callback.attemptState())
-        && callback.attemptStateVersion() == 2
-        && "SUCCEEDED".equals(callback.requestedOutcome())
-        && "APPLIED".equals(callback.resultState())
-        && callback.intentHash().equals(expectedIntentHash)
-        && callback.callbackCorrelationId().equals(callback.attemptCorrelationId())
-        && callback.sandboxId().equals(callback.attemptSandboxId())
-        && callback.sandboxId().equals(order.sandboxId())
-        && callback.attemptUserSubject().equals(order.userSubject())
-        && callback.attemptOrderId().equals(order.orderId())
-        && callback.attemptAmountMinor() == order.totalPriceMinor()
-        && callback.attemptCurrency().equals(order.currency())
-        && callback
-            .attemptIntentHash()
-            .equals(
-                EvaluationPaymentCommittedFaces.attemptIntentHash(
-                    callback.attemptOrderId(),
-                    callback.attemptAmountMinor(),
-                    callback.attemptCurrency(),
-                    callback.attemptSandboxId()))
-        && callback.attemptRefundedAmountMinor() == 0
-        && Objects.equals(callback.attemptSucceededAt(), callback.createdAt())
-        && ledger.businessEventKey().equals("mock-payment:" + callback.attemptId())
-        && "STANDARD_PAYMENT".equals(ledger.movementType())
-        && ledger.orderId().equals(order.orderId())
-        && ledger.reservationId() == null
-        && ledger.activityId() == null
-        && ledger.productId().equals(order.productId())
-        && ledger.sandboxId().equals(order.sandboxId())
-        && ledger.inventoryDelta() == 0
-        && ledger.activityQuotaDelta() == 0
-        && Objects.equals(ledger.paymentAmountMinor(), order.totalPriceMinor())
-        && order.currency().equals(ledger.paymentCurrency())
-        && matches(reference, truth);
-  }
-
-  private static boolean matches(IntegrityAuditReference reference, PaymentAuditTruth truth) {
-    return reference
-            .auditReferenceId()
-            .equals(
-                EvaluationAuditReferenceIdentity.paymentCallback(
-                    truth.sandboxId(),
-                    truth.supportSessionId(),
-                    truth.traceId(),
-                    truth.operationId(),
-                    truth.callbackEventId(),
-                    truth.entityVersion()))
-        && reference.sandboxId().equals(truth.sandboxId())
-        && reference.supportSessionId().equals(truth.supportSessionId())
-        && reference.traceId().equals(truth.traceId())
-        && reference.operationId().equals(truth.operationId())
-        && reference.entityType().equals(EvaluationAuditEntityType.PAYMENT_CALLBACK.name())
-        && reference.entityId().equals(truth.callbackEventId())
-        && reference.entityVersion() == truth.entityVersion()
-        && "OBSERVED".equals(reference.outcome())
-        && reference.createdAt().equals(truth.createdAt())
-        && "BUSINESS_EVENT".equals(reference.createdAtAnchor());
   }
 
   private static String sha256(String value) {

@@ -84,6 +84,8 @@ expected=(
   "GRANT SELECT, INSERT, UPDATE ON commerce_db.faq_source TO 'commerce_app'@'%';"
   "GRANT SELECT, INSERT ON commerce_db.faq_draft_command TO 'commerce_app'@'%';"
   "GRANT SELECT, INSERT ON commerce_db.faq_publication_command TO 'commerce_app'@'%';"
+  "GRANT SELECT, INSERT, UPDATE (state, state_version, consumed_at) ON commerce_db.pending_action TO 'commerce_app'@'%';"
+  "GRANT SELECT, INSERT ON commerce_db.action_receipt TO 'commerce_app'@'%';"
 )
 mapfile -t actual < <(sed -e '/^[[:space:]]*$/d' -e '/^[[:space:]]*--/d' "$manifest")
 
@@ -168,6 +170,7 @@ evaluation_audit_watermark_grant="${actual[36]}"
 v013_migration_grants="$(printf '%s\n' "${actual[37]}" "${actual[38]}")"
 v013_migration_revokes="$(printf '%s\n' "${actual[39]}" "${actual[40]}")"
 faq_runtime_grants="$(printf '%s\n' "${actual[@]:41:3}")"
+action_runtime_grants="$(printf '%s\n' "${actual[@]:44:2}")"
 
 if [[ "$v013_force_revoke" == true ]]; then
   mysql "${mysql_args[@]}" --execute="
@@ -220,6 +223,8 @@ runtime_table_state="$(mysql "${mysql_args[@]}" --execute="
       'faq_source',
       'faq_draft_command',
       'faq_publication_command',
+      'pending_action',
+      'action_receipt',
       'crm_profile',
       'product',
       'catalog_metadata',
@@ -261,6 +266,7 @@ evaluation_audit_table_present=false
 evaluation_product_observation_table_present=false
 evaluation_audit_watermark_table_present=false
 faq_tables_present=false
+action_tables_present=false
 feedback_table_present=false
 retrieval_tables_present=false
 retrieval_decision_present=false
@@ -364,6 +370,28 @@ elif (( faq_table_count == 3 )); then
   normalized_runtime_table_state="$((runtime_table_count - 3)):$runtime_table_list"
   faq_tables_present=true
 fi
+action_table_count=0
+for action_table in \
+  commerce_db.action_receipt \
+  commerce_db.pending_action; do
+  runtime_table_list="${normalized_runtime_table_state#*:}"
+  if [[ ",$runtime_table_list," == *",$action_table,"* ]]; then
+    action_table_count=$((action_table_count + 1))
+  fi
+done
+if (( action_table_count != 0 && action_table_count != 2 )); then
+  echo "Grant job found a partial PendingAction schema." >&2
+  exit 1
+elif (( action_table_count == 2 )); then
+  runtime_table_count="${normalized_runtime_table_state%%:*}"
+  runtime_table_list="${normalized_runtime_table_state#*:}"
+  runtime_table_list="$(remove_runtime_table "$runtime_table_list" \
+    commerce_db.action_receipt)"
+  runtime_table_list="$(remove_runtime_table "$runtime_table_list" \
+    commerce_db.pending_action)"
+  normalized_runtime_table_state="$((runtime_table_count - 2)):$runtime_table_list"
+  action_tables_present=true
+fi
 if [[ "$evaluation_audit_watermark_table_present" == true ]]; then
   v013_phase="$(mysql "${mysql_args[@]}" --execute="
     SET ROLE 'bootstrap_grant_role';
@@ -465,6 +493,9 @@ if [[ "$evaluation_audit_watermark_table_present" == true ]]; then
 fi
 if [[ "$faq_tables_present" == true ]]; then
   optional_evaluation_grants="$(printf '%s\n' "$optional_evaluation_grants" "$faq_runtime_grants")"
+fi
+if [[ "$action_tables_present" == true ]]; then
+  optional_evaluation_grants="$(printf '%s\n' "$optional_evaluation_grants" "$action_runtime_grants")"
 fi
 if [[ "$normalized_runtime_table_state" == "$commerce_complete_runtime_table_state" ]]; then
   selected_runtime_sql="$(printf '%s\n' "${actual[@]:5:18}")"
