@@ -22,6 +22,7 @@ from .incremental import (
 from .rebuild import (
     MAX_JOURNAL_EVENTS,
     MAX_SNAPSHOT_BYTES,
+    JournalCheckpoint,
     KnowledgeRebuildError,
     KnowledgeSnapshot,
 )
@@ -171,8 +172,9 @@ class RocketMqAcceptedEventJournal:
     def commit(
         self,
         snapshot: KnowledgeSnapshot,
-        validated_markers: dict[str, dict[str, object]],
+        checkpoint: JournalCheckpoint,
     ) -> None:
+        validated_markers = checkpoint.markers
         states = snapshot.source_states
         owner_records = {record.source_id: record for record in snapshot.records}
         with self._condition:

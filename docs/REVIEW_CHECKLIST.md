@@ -97,6 +97,18 @@ request. A later semantic diff change requires the checklist to be executed and 
   durable checkpoint and converges with the redelivered suffix. A completion flag written after ACK
   is not a substitute because the acknowledged prefix is no longer reconstructable from Broker
   delivery alone.
+- Treat a durable receipt checkpoint as grow-only under every concurrent control-record transition.
+  Read and retain the storage engine's compare-and-set version, create with create-only semantics,
+  and update only against that exact version. After a conflict, reread the latest record and
+  re-evaluate the transition; never resubmit a stale full document. Pass one immutable canonical
+  checkpoint value—complete descriptor tuple plus its deterministically derived marker map—to both
+  receipt disposition and subsequent completion. Completion must verify every expected descriptor
+  by stable identity and exact content as an immutable subset of the latest record, preserve any
+  concurrent superset, and apply the same check on an already-completed idempotent path. Exercise a
+  deterministic interleaving where a stale completion pauses after reading, another coordinator
+  seals a new descriptor, the stale write loses the compare-and-set, and restart still reconstructs
+  the exact checkpoint and marker that authorized ACK. Audit all writes to the control record; one
+  remaining unconditional update invalidates the evidence.
 
 ### One total-order contract in all three places
 

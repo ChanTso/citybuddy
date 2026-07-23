@@ -23,12 +23,15 @@ from citybuddy_indexer.incremental import (
 )
 from citybuddy_indexer.rebuild import (
     ElasticsearchRebuildClient,
+    JournalCheckpoint,
+    JournalEventDescriptor,
     KnowledgeRebuildCoordinator,
     KnowledgeRebuildError,
     KnowledgeSnapshot,
     RebuildResult,
     _internal_instant,
     _now,
+    _VersionedRebuildRecord,
 )
 from citybuddy_indexer.rebuild_runtime import HttpOwnerSnapshotSource, RocketMqAcceptedEventJournal
 
@@ -152,6 +155,17 @@ def markers(*events: FaqKnowledgeEvent) -> dict[str, dict[str, object]]:
     }
 
 
+def journal_checkpoint(*events: FaqKnowledgeEvent) -> JournalCheckpoint:
+    return JournalCheckpoint(
+        tuple(
+            sorted(
+                (JournalEventDescriptor.from_event(event) for event in events),
+                key=lambda descriptor: descriptor.event_id,
+            )
+        )
+    )
+
+
 def test_snapshot_accepts_exact_closed_committed_owner_payload() -> None:
     parsed = snapshot()
 
@@ -257,6 +271,7 @@ class Journal:
     def __init__(self, events: tuple[FaqKnowledgeEvent, ...] = ()) -> None:
         self._events = events
         self.committed: list[str] = []
+        self.checkpoints: list[JournalCheckpoint] = []
 
     def events(self) -> tuple[FaqKnowledgeEvent, ...]:
         return self._events
@@ -267,19 +282,19 @@ class Journal:
     def commit(
         self,
         selected: KnowledgeSnapshot,
-        validated_markers: dict[str, dict[str, object]],
+        checkpoint: JournalCheckpoint,
     ) -> None:
-        del validated_markers
         self.committed.append(selected.watermark)
+        self.checkpoints.append(checkpoint)
 
 
 class FailingCommitJournal(Journal):
     def commit(
         self,
         selected: KnowledgeSnapshot,
-        validated_markers: dict[str, dict[str, object]],
+        checkpoint: JournalCheckpoint,
     ) -> None:
-        del selected, validated_markers
+        del selected, checkpoint
         raise KnowledgeRebuildError("catch_up_snapshot_mismatch")
 
 
@@ -288,11 +303,14 @@ class Elasticsearch:
         self,
         *,
         pending: RebuildResult | None = None,
+        existing: RebuildResult | None = None,
         on_switch: Callable[[], None] | None = None,
     ) -> None:
         self.calls: list[tuple[str, object]] = []
         self._pending = pending
+        self._existing = existing
         self._on_switch = on_switch
+        self.completed_checkpoints: list[JournalCheckpoint] = []
 
     def resolve_alias(self) -> str:
         self.calls.append(("resolve", "knowledge_docs_v1"))
@@ -300,7 +318,7 @@ class Elasticsearch:
 
     def existing_result(self, current: str, initial: KnowledgeSnapshot) -> RebuildResult | None:
         self.calls.append(("existing", current))
-        return None
+        return self._existing
 
     def pending_switch(self, current: str) -> RebuildResult | None:
         self.calls.append(("pending", current))
@@ -335,14 +353,16 @@ class Elasticsearch:
         self,
         candidate: str,
         accepted_events: tuple[FaqKnowledgeEvent, ...],
-    ) -> dict[str, dict[str, object]]:
+    ) -> JournalCheckpoint:
         del candidate
-        return {
-            f"__sync_event__:{event.event_id}": ElasticsearchKnowledgeProjection._marker_source(
-                event
+        return JournalCheckpoint(
+            tuple(
+                sorted(
+                    (JournalEventDescriptor.from_event(event) for event in accepted_events),
+                    key=lambda descriptor: descriptor.event_id,
+                )
             )
-            for event in accepted_events
-        }
+        )
 
     def prepare_switch(
         self,
@@ -358,7 +378,14 @@ class Elasticsearch:
         if self._on_switch is not None:
             self._on_switch()
 
-    def complete_switch(self, candidate: str, completion: KnowledgeSnapshot) -> None:
+    def complete_switch(
+        self,
+        candidate: str,
+        completion: KnowledgeSnapshot,
+        expected_checkpoint: JournalCheckpoint,
+    ) -> None:
+        del completion
+        self.completed_checkpoints.append(expected_checkpoint)
         self.calls.append(("complete", candidate))
 
 
@@ -376,6 +403,7 @@ class CheckpointElasticsearch(ElasticsearchRebuildClient):
         self.pending = pending
         self.completed: list[str] = []
         self.records = records or {"knowledge_docs_v2": building_rebuild_record()}
+        self.record_versions = {index: 1 for index in self.records}
         self.actual_markers = actual_markers or {}
         self.sealed_markers: dict[str, dict[str, object]] = {}
 
@@ -423,9 +451,10 @@ class CheckpointElasticsearch(ElasticsearchRebuildClient):
         self,
         candidate: str,
         accepted_events: tuple[FaqKnowledgeEvent, ...],
-    ) -> dict[str, dict[str, object]]:
-        self.sealed_markers = super().seal_journal_events(candidate, accepted_events)
-        return deepcopy(self.sealed_markers)
+    ) -> JournalCheckpoint:
+        checkpoint = super().seal_journal_events(candidate, accepted_events)
+        self.sealed_markers = checkpoint.markers
+        return checkpoint
 
     def validate_candidate(
         self,
@@ -451,13 +480,25 @@ class CheckpointElasticsearch(ElasticsearchRebuildClient):
         assert predecessor == "knowledge_docs_v1"
         self.current = candidate
 
-    def complete_switch(self, candidate: str, completion: KnowledgeSnapshot) -> None:
-        super().complete_switch(candidate, completion)
+    def complete_switch(
+        self,
+        candidate: str,
+        completion: KnowledgeSnapshot,
+        expected_checkpoint: JournalCheckpoint,
+    ) -> None:
+        super().complete_switch(candidate, completion, expected_checkpoint)
         self.pending = False
         self.completed.append(candidate)
 
-    def _read_rebuild_record(self, index: str) -> dict[str, object] | None:
-        return self.records.get(index)
+    def _read_rebuild_record(self, index: str) -> _VersionedRebuildRecord | None:
+        record = self.records.get(index)
+        if record is None:
+            return None
+        return _VersionedRebuildRecord(
+            deepcopy(record),
+            self.record_versions[index],
+            1,
+        )
 
     def _write_rebuild_record(
         self,
@@ -465,9 +506,19 @@ class CheckpointElasticsearch(ElasticsearchRebuildClient):
         record: dict[str, object],
         *,
         create: bool = False,
-    ) -> None:
-        del create
+        expected: _VersionedRebuildRecord | None = None,
+    ) -> bool:
+        if create:
+            if self.records.get(index) is not None:
+                return False
+            self.record_versions[index] = 1
+        elif expected is None or self.record_versions.get(index) != expected.seq_no:
+            return False
+        else:
+            self._require_grow_only_journal(expected.value, record)
+            self.record_versions[index] += 1
         self.records[index] = deepcopy(record)
+        return True
 
 
 def broker_journal(
@@ -546,6 +597,7 @@ def test_coordinator_confirms_handoff_before_durable_prepare() -> None:
     assert names.index("switch") < names.index("complete")
     assert names[-1] == "complete"
     assert journal.committed == [initial.watermark]
+    assert elasticsearch.completed_checkpoints[0] is journal.checkpoints[0]
 
 
 def test_broker_commit_failure_does_not_claim_switch_completion() -> None:
@@ -649,6 +701,36 @@ def test_prepared_alias_restart_reloads_owner_truth_before_completion() -> None:
     assert result.replayed is True
     assert result.document_count == 2
     assert journal.committed == [current.watermark]
+    assert elasticsearch.completed_checkpoints[0] is journal.checkpoints[0]
+
+
+def test_completed_replay_revalidates_checkpoint_before_idempotent_success() -> None:
+    current = snapshot()
+    existing = RebuildResult(
+        "knowledge_docs_v0",
+        "knowledge_docs_v1",
+        "a" * 64,
+        "2026-07-22T01:00:00Z",
+        2,
+        True,
+    )
+    elasticsearch = Elasticsearch(existing=existing)
+    journal = Journal()
+
+    result = KnowledgeRebuildCoordinator(elasticsearch, catch_up_wait_seconds=0.1).rebuild(
+        Source([current]), journal
+    )
+
+    assert result is existing
+    assert [name for name, _ in elasticsearch.calls] == [
+        "resolve",
+        "pending",
+        "existing",
+        "validate",
+        "complete",
+    ]
+    assert journal.committed == [current.watermark]
+    assert elasticsearch.completed_checkpoints[0] is journal.checkpoints[0]
 
 
 def test_snapshot_source_version_cannot_regress_or_change_at_equal_version() -> None:
@@ -748,10 +830,13 @@ def test_broker_journal_defers_ack_until_owner_snapshot_covers_event() -> None:
     assert journal._accept(message) is True
     assert consumer.acked == []
 
-    journal.commit(snapshot([first]), {})
+    journal.commit(snapshot([first]), journal_checkpoint())
     assert consumer.acked == []
 
-    journal.commit(snapshot([second]), markers(snapshot([second]).records[0].as_faq_event()))
+    journal.commit(
+        snapshot([second]),
+        journal_checkpoint(snapshot([second]).records[0].as_faq_event()),
+    )
     assert consumer.acked == [message]
 
 
@@ -773,7 +858,7 @@ def test_broker_commit_rechecks_equal_version_intent_before_ack() -> None:
     with pytest.raises(KnowledgeRebuildError, match="catch_up_snapshot_mismatch"):
         journal.commit(
             snapshot([owner]),
-            markers(snapshot([contradictory]).records[0].as_faq_event()),
+            journal_checkpoint(snapshot([contradictory]).records[0].as_faq_event()),
         )
     assert consumer.acked == []
 
@@ -793,7 +878,7 @@ def test_broker_commit_rejects_covered_event_not_in_validated_checkpoint() -> No
     assert journal._accept(message) is True
 
     with pytest.raises(KnowledgeRebuildError, match="journal_changed_after_validation"):
-        journal.commit(snapshot([owner]), markers())
+        journal.commit(snapshot([owner]), journal_checkpoint())
     assert consumer.acked == []
 
 
@@ -818,12 +903,102 @@ def test_partial_ack_keeps_validated_prefix_in_durable_checkpoint() -> None:
     for message in messages:
         assert journal._accept(message) is True
 
-    checkpoint = markers(first_event, second_event)
+    checkpoint = journal_checkpoint(first_event, second_event)
     with pytest.raises(KnowledgeRebuildError, match="broker_unavailable"):
         journal.commit(snapshot([second, first]), checkpoint)
 
     assert consumer.acked == [messages[0]]
     assert set(journal._pending_messages) == {"broker-message-second"}
+
+
+class SharedRebuildRecord:
+    def __init__(self, record: dict[str, object]) -> None:
+        self.record = deepcopy(record)
+        self.seq_no = 1
+        self.primary_term = 1
+
+
+class InterleavingRecordClient(ElasticsearchRebuildClient):
+    def __init__(self, store: SharedRebuildRecord) -> None:
+        super().__init__("http://elasticsearch:9200")
+        self.store = store
+        self.before_first_update: Callable[[], None] | None = None
+        self.conflicts = 0
+
+    def _read_rebuild_record(self, index: str) -> _VersionedRebuildRecord | None:
+        assert index == "knowledge_docs_v2"
+        return _VersionedRebuildRecord(
+            deepcopy(self.store.record),
+            self.store.seq_no,
+            self.store.primary_term,
+        )
+
+    def _write_rebuild_record(
+        self,
+        index: str,
+        record: dict[str, object],
+        *,
+        create: bool = False,
+        expected: _VersionedRebuildRecord | None = None,
+    ) -> bool:
+        assert index == "knowledge_docs_v2"
+        assert create is False
+        assert expected is not None
+        hook = self.before_first_update
+        self.before_first_update = None
+        if hook is not None:
+            hook()
+        if expected.seq_no != self.store.seq_no or expected.primary_term != self.store.primary_term:
+            self.conflicts += 1
+            return False
+        self._require_grow_only_journal(expected.value, record)
+        self.store.record = deepcopy(record)
+        self.store.seq_no += 1
+        return True
+
+
+def test_stale_complete_switch_rereads_and_preserves_ack_checkpoint() -> None:
+    retained_record = faq_record(version=1)
+    retained_event = snapshot([retained_record]).records[0].as_faq_event()
+    covered_record = faq_record(version=1)
+    covered_record["eventId"] = "00000000-0000-4000-8000-000000000000"
+    covered_record["sourceId"] = "faq-delivery"
+    covered_event = snapshot([covered_record]).records[0].as_faq_event()
+    completion = snapshot([covered_record])
+    store = SharedRebuildRecord(prepared_rebuild_record(retained_event))
+    coordinator_a = InterleavingRecordClient(store)
+    coordinator_b = InterleavingRecordClient(store)
+    checkpoint_b: list[JournalCheckpoint] = []
+
+    def coordinator_b_seals_during_a_stale_write() -> None:
+        checkpoint_b.append(
+            coordinator_b.seal_journal_events("knowledge_docs_v2", (covered_event,))
+        )
+
+    coordinator_a.before_first_update = coordinator_b_seals_during_a_stale_write
+    coordinator_a.complete_switch(
+        "knowledge_docs_v2",
+        completion,
+        journal_checkpoint(retained_event),
+    )
+
+    assert coordinator_a.conflicts == 1
+    assert len(checkpoint_b) == 1
+    assert store.record["state"] == "SWITCHED"
+    assert store.record["journalEvents"] == list(checkpoint_b[0].canonical_mappings())
+
+    message = FakeBrokerMessage("broker-message-covered", event_bytes(covered_record))
+    consumer = FakeBrokerConsumer()
+    journal = broker_journal(consumer, [message])
+    journal.commit(completion, checkpoint_b[0])
+    assert consumer.acked == [message]
+
+    coordinator_b.complete_switch("knowledge_docs_v2", completion, checkpoint_b[0])
+    restarted = InterleavingRecordClient(store)
+    reconstructed = restarted.seal_journal_events("knowledge_docs_v2", ())
+
+    assert reconstructed == checkpoint_b[0]
+    assert reconstructed.markers == markers(retained_event, covered_event)
 
 
 class RecordingClient(ElasticsearchRebuildClient):
@@ -832,6 +1007,7 @@ class RecordingClient(ElasticsearchRebuildClient):
         self.requests: list[tuple[str, str, dict[str, object] | None]] = []
         self.aliases = ["knowledge_docs_v1", "knowledge_docs_v2"]
         self.records: dict[str, dict[str, object] | None] = {}
+        self.record_versions: dict[str, int] = {}
         self.responses: dict[str, tuple[int, dict[str, object]]] = {}
 
     def resolve_alias(self) -> str:
@@ -849,8 +1025,15 @@ class RecordingClient(ElasticsearchRebuildClient):
         self.requests.append((method, path, payload))
         return self.responses.get(path, (200, {"acknowledged": True}))
 
-    def _read_rebuild_record(self, index: str) -> dict[str, object] | None:
-        return self.records.get(index)
+    def _read_rebuild_record(self, index: str) -> _VersionedRebuildRecord | None:
+        record = self.records.get(index)
+        if record is None:
+            return None
+        return _VersionedRebuildRecord(
+            deepcopy(record),
+            self.record_versions.get(index, 1),
+            1,
+        )
 
     def _write_rebuild_record(
         self,
@@ -858,9 +1041,19 @@ class RecordingClient(ElasticsearchRebuildClient):
         record: dict[str, object],
         *,
         create: bool = False,
-    ) -> None:
-        del create
+        expected: _VersionedRebuildRecord | None = None,
+    ) -> bool:
+        current_version = self.record_versions.get(index, 1)
+        if create:
+            if self.records.get(index) is not None:
+                return False
+        elif expected is None or current_version != expected.seq_no:
+            return False
+        else:
+            self._require_grow_only_journal(expected.value, record)
         self.records[index] = deepcopy(record)
+        self.record_versions[index] = current_version + 1
+        return True
 
 
 def building_rebuild_record() -> dict[str, object]:
@@ -879,6 +1072,81 @@ def building_rebuild_record() -> dict[str, object]:
         "switchedAt": None,
         "journalEvents": [],
     }
+
+
+def prepared_rebuild_record(
+    *events: FaqKnowledgeEvent,
+) -> dict[str, object]:
+    record = building_rebuild_record()
+    record.update(
+        {
+            "state": "PREPARED",
+            "handoffWatermark": "a" * 64,
+            "rollbackLeaseExpiresAt": "2026-07-22T01:00:00Z",
+            "journalEvents": list(journal_checkpoint(*events).canonical_mappings()),
+        }
+    )
+    return record
+
+
+def test_rebuild_record_wire_protocol_retains_version_and_requires_cas(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    client = ElasticsearchRebuildClient("http://elasticsearch:9200")
+    requests: list[tuple[str, str, dict[str, object] | None]] = []
+
+    def capture_write(
+        method: str,
+        path: str,
+        payload: dict[str, object] | None = None,
+        *,
+        expected: tuple[int, ...] = (200, 201),
+    ) -> tuple[int, dict[str, object]]:
+        del expected
+        requests.append((method, path, payload))
+        return 201, {}
+
+    monkeypatch.setattr(client, "_request", capture_write)
+    record = building_rebuild_record()
+    assert client._write_rebuild_record(  # noqa: SLF001
+        "knowledge_docs_v2", record, create=True
+    )
+    source = requests[-1][2]
+    assert source is not None
+    assert requests[-1][1].endswith("/__rebuild_switch__?op_type=create")
+
+    def return_versioned_record(
+        method: str,
+        path: str,
+        payload: dict[str, object] | None = None,
+        *,
+        expected: tuple[int, ...] = (200, 201),
+    ) -> tuple[int, dict[str, object]]:
+        del method, path, payload, expected
+        return 200, {"_source": source, "_seq_no": 7, "_primary_term": 3}
+
+    monkeypatch.setattr(client, "_request", return_versioned_record)
+    stored = client._read_rebuild_record("knowledge_docs_v2")  # noqa: SLF001
+    assert stored == _VersionedRebuildRecord(record, 7, 3)
+
+    monkeypatch.setattr(client, "_request", capture_write)
+    assert client._write_rebuild_record(  # noqa: SLF001
+        "knowledge_docs_v2",
+        record,
+        expected=stored,
+    )
+    assert requests[-1][1].endswith("/__rebuild_switch__?if_seq_no=7&if_primary_term=3")
+    with pytest.raises(KnowledgeRebuildError, match="inconsistent_rebuild_record"):
+        client._write_rebuild_record("knowledge_docs_v2", record)  # noqa: SLF001
+
+
+def test_journal_checkpoint_exposes_only_derived_marker_copies() -> None:
+    event = snapshot([faq_record()]).records[0].as_faq_event()
+    checkpoint = journal_checkpoint(event)
+    exposed = checkpoint.markers
+    exposed[f"__sync_event__:{event.event_id}"]["content"] = "damaged"
+
+    assert checkpoint.markers == markers(event)
 
 
 def test_atomic_switch_uses_one_exact_remove_add_action() -> None:
@@ -939,8 +1207,20 @@ def test_sealed_journal_checkpoint_preserves_partially_acked_prefix() -> None:
     initial = client.seal_journal_events("knowledge_docs_v2", (first, second))
     resumed = client.seal_journal_events("knowledge_docs_v2", (second,))
 
-    assert initial == markers(first, second)
+    assert initial.markers == markers(first, second)
     assert resumed == initial
+
+
+def test_seal_rejects_conflicting_duplicate_event_inside_one_delivery_set() -> None:
+    client = RecordingClient()
+    client.records["knowledge_docs_v2"] = building_rebuild_record()
+    first = snapshot([faq_record(version=1)]).records[0].as_faq_event()
+    contradictory_record = faq_record(version=1)
+    contradictory_record["content"] = "Contradictory same-event content."
+    contradictory = snapshot([contradictory_record]).records[0].as_faq_event()
+
+    with pytest.raises(KnowledgeRebuildError, match="conflicting_catch_up_event"):
+        client.seal_journal_events("knowledge_docs_v2", (first, contradictory))
 
 
 def test_candidate_validation_enumerates_all_documents_before_classification() -> None:

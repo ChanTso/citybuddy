@@ -20,9 +20,11 @@ from citybuddy_indexer.incremental import (
 )
 from citybuddy_indexer.rebuild import (
     ElasticsearchRebuildClient,
+    JournalCheckpoint,
     KnowledgeRebuildCoordinator,
     KnowledgeRebuildError,
     KnowledgeSnapshot,
+    _VersionedRebuildRecord,
 )
 from citybuddy_indexer.rebuild_runtime import (
     HttpOwnerSnapshotSource,
@@ -222,6 +224,43 @@ class RacingSwitchClient(ElasticsearchRebuildClient):
         super().atomic_switch(predecessor, candidate)
 
 
+class StaleCompleteSwitchClient(ElasticsearchRebuildClient):
+    def __init__(
+        self,
+        base_url: str,
+        stale_read_complete: threading.Event,
+        resume_stale_write: threading.Event,
+    ) -> None:
+        super().__init__(base_url)
+        self._stale_read_complete = stale_read_complete
+        self._resume_stale_write = resume_stale_write
+        self._paused = False
+        self.conflicts = 0
+
+    def _write_rebuild_record(
+        self,
+        index: str,
+        record: dict[str, object],
+        *,
+        create: bool = False,
+        expected: _VersionedRebuildRecord | None = None,
+    ) -> bool:
+        if record.get("state") == "SWITCHED" and not self._paused:
+            self._paused = True
+            self._stale_read_complete.set()
+            if not self._resume_stale_write.wait(timeout=20):
+                raise AssertionError("stale complete_switch write was not released")
+        written = super()._write_rebuild_record(
+            index,
+            record,
+            create=create,
+            expected=expected,
+        )
+        if not written:
+            self.conflicts += 1
+        return written
+
+
 class CommitWindowJournal:
     def __init__(
         self,
@@ -241,11 +280,11 @@ class CommitWindowJournal:
     def commit(
         self,
         snapshot: KnowledgeSnapshot,
-        validated_markers: dict[str, dict[str, object]],
+        checkpoint: JournalCheckpoint,
     ) -> None:
         send_event(self._producer, self._topic, self._late_covered_event)
         wait_for_event(self._delegate, self._late_covered_event.event_id)
-        self._delegate.commit(snapshot, validated_markers)
+        self._delegate.commit(snapshot, checkpoint)
 
 
 class PartialBulkClient(ElasticsearchRebuildClient):
@@ -280,9 +319,9 @@ class StaticJournal:
     def commit(
         self,
         snapshot: KnowledgeSnapshot,
-        validated_markers: dict[str, dict[str, object]],
+        checkpoint: JournalCheckpoint,
     ) -> None:
-        del snapshot, validated_markers
+        del snapshot, checkpoint
 
 
 def wait_for_event(
@@ -724,6 +763,68 @@ def main() -> None:
             args.endpoints, args.topic, args.commit_group, invisible_seconds=10
         ) as journal:
             wait_for_event(journal, late_covered_event.event_id)
+            coordinator_b = ElasticsearchRebuildClient(args.elasticsearch_url)
+            checkpoint_a = coordinator_b.seal_journal_events(current_alias, ())
+            stale_read_complete = threading.Event()
+            resume_stale_write = threading.Event()
+            coordinator_a = StaleCompleteSwitchClient(
+                args.elasticsearch_url,
+                stale_read_complete,
+                resume_stale_write,
+            )
+            completion_outcome: list[Exception | None] = []
+
+            def complete_from_stale_record() -> None:
+                try:
+                    coordinator_a.complete_switch(
+                        current_alias,
+                        commit_snapshot,
+                        checkpoint_a,
+                    )
+                    completion_outcome.append(None)
+                except Exception as error:  # noqa: BLE001 - retained as race evidence.
+                    completion_outcome.append(error)
+
+            stale_complete = threading.Thread(
+                target=complete_from_stale_record,
+                daemon=True,
+            )
+            stale_complete.start()
+            assert stale_read_complete.wait(timeout=20)
+            accepted = journal.events()
+            assert {event.event_id for event in accepted}.issuperset(
+                {commit_event.event_id, late_covered_event.event_id}
+            )
+            for event in accepted:
+                coordinator_b.apply_event(current_alias, event)
+            checkpoint_b = coordinator_b.seal_journal_events(current_alias, accepted)
+            resume_stale_write.set()
+            stale_complete.join(timeout=20)
+            assert not stale_complete.is_alive()
+            assert completion_outcome == [None]
+            assert coordinator_a.conflicts == 1
+
+            journal.commit(commit_snapshot, checkpoint_b)
+            coordinator_b.complete_switch(current_alias, commit_snapshot, checkpoint_b)
+            restarted = ElasticsearchRebuildClient(args.elasticsearch_url)
+            reconstructed = restarted.seal_journal_events(current_alias, ())
+            assert reconstructed == checkpoint_b
+            for marker_id, expected_marker in reconstructed.markers.items():
+                _, marker = request(
+                    args.elasticsearch_url,
+                    "GET",
+                    f"/{current_alias}/_doc/{quote(marker_id, safe='')}",
+                )
+                assert marker["_source"] == expected_marker
+            _, control = request(
+                args.elasticsearch_url,
+                "GET",
+                f"/{current_alias}/_doc/__rebuild_switch__",
+            )
+            control_source = cast(dict[str, object], control["_source"])
+            persisted_record = json.loads(cast(str, control_source["content"]))
+            assert persisted_record["state"] == "SWITCHED"
+            assert persisted_record["journalEvents"] == list(checkpoint_b.canonical_mappings())
     finally:
         producer.shutdown()
 
@@ -738,6 +839,7 @@ def main() -> None:
                 "publicationAndTombstonePerPhase": True,
                 "realBrokerRestartCrashWindows": restart_windows,
                 "singleTargetAliasAfterEveryCell": True,
+                "staleCompleteCasConflictPreservedAckCheckpoint": True,
             },
             separators=(",", ":"),
             sort_keys=True,

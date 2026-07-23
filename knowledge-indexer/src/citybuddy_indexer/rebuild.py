@@ -45,6 +45,7 @@ MAX_JOURNAL_EVENTS = 1_000
 MAX_CATCH_UP_PASSES = 8
 MAX_CANDIDATE_PROBES = 32
 MAX_CANDIDATE_DOCUMENTS = (2 * MAX_SNAPSHOT_RECORDS) + 1
+MAX_REBUILD_RECORD_UPDATE_ATTEMPTS = 8
 ROLLBACK_LEASE_SECONDS = 3_600
 REBUILD_RECORD_ID = "__rebuild_switch__"
 
@@ -434,22 +435,26 @@ def _unique_object(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
     return result
 
 
-def _journal_event_descriptor(event: FaqKnowledgeEvent) -> dict[str, object]:
-    return {
-        "eventId": event.event_id,
-        "sourceId": event.source_id,
-        "sourceVersion": event.source_version,
-        "commitment": event.commitment,
-        "occurredAt": event.occurred_time,
-    }
+@dataclass(frozen=True)
+class JournalEventDescriptor:
+    event_id: str
+    source_id: str
+    source_version: int
+    commitment: str
+    occurred_at: str
 
+    @classmethod
+    def from_event(cls, event: FaqKnowledgeEvent) -> JournalEventDescriptor:
+        return cls(
+            event_id=event.event_id,
+            source_id=event.source_id,
+            source_version=event.source_version,
+            commitment=event.commitment,
+            occurred_at=event.occurred_time,
+        )
 
-def _validated_journal_events(value: object) -> tuple[dict[str, object], ...]:
-    if not isinstance(value, list) or len(value) > MAX_JOURNAL_EVENTS:
-        raise KnowledgeRebuildError("inconsistent_rebuild_record")
-    result: list[dict[str, object]] = []
-    event_ids: set[str] = set()
-    for raw in value:
+    @classmethod
+    def from_mapping(cls, raw: object) -> JournalEventDescriptor:
         if not isinstance(raw, dict) or set(raw) != _JOURNAL_EVENT_FIELDS:
             raise KnowledgeRebuildError("inconsistent_rebuild_record")
         event_id = raw.get("eventId")
@@ -459,7 +464,6 @@ def _validated_journal_events(value: object) -> tuple[dict[str, object], ...]:
         occurred_at = raw.get("occurredAt")
         if (
             not isinstance(event_id, str)
-            or event_id in event_ids
             or not isinstance(source_id, str)
             or _SOURCE_ID.fullmatch(source_id) is None
             or type(source_version) is not int
@@ -474,31 +478,84 @@ def _validated_journal_events(value: object) -> tuple[dict[str, object], ...]:
             _instant(occurred_at)
         except KnowledgeRebuildError as error:
             raise KnowledgeRebuildError("inconsistent_rebuild_record") from error
-        event_ids.add(event_id)
-        result.append(cast(dict[str, object], raw))
-    if result != sorted(result, key=lambda item: cast(str, item["eventId"])):
+        return cls(
+            event_id=event_id,
+            source_id=source_id,
+            source_version=source_version,
+            commitment=commitment,
+            occurred_at=cast(str, occurred_at),
+        )
+
+    def canonical_mapping(self) -> dict[str, object]:
+        return {
+            "eventId": self.event_id,
+            "sourceId": self.source_id,
+            "sourceVersion": self.source_version,
+            "commitment": self.commitment,
+            "occurredAt": self.occurred_at,
+        }
+
+    def marker_source(self) -> dict[str, object]:
+        return {
+            "schema_version": KNOWLEDGE_SYNC_SCHEMA_VERSION,
+            "source_id": self.source_id,
+            "source_version": self.source_version,
+            "chunk_id": "__sync_event__",
+            "doc_type": "faq",
+            "published": False,
+            "deleted": True,
+            "title": "knowledge synchronization event",
+            "content": self.commitment,
+            "embedding": [1.0, *([0.0] * (EMBEDDING_DIMS - 1))],
+            "public_metadata": {"category": "sync", "language": "und"},
+            "sync_record_type": "SYNC_EVENT",
+            "sync_event_id": self.event_id,
+            "sync_event_commitment": self.commitment,
+            "sync_occurred_at": self.occurred_at,
+        }
+
+
+@dataclass(frozen=True)
+class JournalCheckpoint:
+    descriptors: tuple[JournalEventDescriptor, ...]
+
+    def __post_init__(self) -> None:
+        event_ids = tuple(descriptor.event_id for descriptor in self.descriptors)
+        if event_ids != tuple(sorted(event_ids)) or len(set(event_ids)) != len(event_ids):
+            raise KnowledgeRebuildError("inconsistent_rebuild_record")
+
+    @property
+    def markers(self) -> dict[str, dict[str, object]]:
+        return {
+            f"__sync_event__:{descriptor.event_id}": descriptor.marker_source()
+            for descriptor in self.descriptors
+        }
+
+    def canonical_mappings(self) -> tuple[dict[str, object], ...]:
+        return tuple(descriptor.canonical_mapping() for descriptor in self.descriptors)
+
+
+@dataclass(frozen=True)
+class _VersionedRebuildRecord:
+    value: dict[str, object]
+    seq_no: int
+    primary_term: int
+
+
+def _validated_journal_events(value: object) -> tuple[JournalEventDescriptor, ...]:
+    if not isinstance(value, list) or len(value) > MAX_JOURNAL_EVENTS:
+        raise KnowledgeRebuildError("inconsistent_rebuild_record")
+    result: list[JournalEventDescriptor] = []
+    event_ids: set[str] = set()
+    for raw in value:
+        descriptor = JournalEventDescriptor.from_mapping(raw)
+        if descriptor.event_id in event_ids:
+            raise KnowledgeRebuildError("inconsistent_rebuild_record")
+        event_ids.add(descriptor.event_id)
+        result.append(descriptor)
+    if result != sorted(result, key=lambda item: item.event_id):
         raise KnowledgeRebuildError("inconsistent_rebuild_record")
     return tuple(result)
-
-
-def _marker_from_journal_event(descriptor: dict[str, object]) -> dict[str, object]:
-    return {
-        "schema_version": KNOWLEDGE_SYNC_SCHEMA_VERSION,
-        "source_id": descriptor["sourceId"],
-        "source_version": descriptor["sourceVersion"],
-        "chunk_id": "__sync_event__",
-        "doc_type": "faq",
-        "published": False,
-        "deleted": True,
-        "title": "knowledge synchronization event",
-        "content": descriptor["commitment"],
-        "embedding": [1.0, *([0.0] * (EMBEDDING_DIMS - 1))],
-        "public_metadata": {"category": "sync", "language": "und"},
-        "sync_record_type": "SYNC_EVENT",
-        "sync_event_id": descriptor["eventId"],
-        "sync_event_commitment": descriptor["commitment"],
-        "sync_occurred_at": descriptor["occurredAt"],
-    }
 
 
 def _source_states(records: tuple[SnapshotRecord, ...]) -> dict[str, _SourceState]:
@@ -546,7 +603,7 @@ class AcceptedEventJournal(Protocol):
     def commit(
         self,
         snapshot: KnowledgeSnapshot,
-        validated_markers: dict[str, dict[str, object]],
+        checkpoint: JournalCheckpoint,
     ) -> None: ...
 
 
@@ -578,7 +635,7 @@ class RebuildIndex(Protocol):
         self,
         candidate: str,
         accepted_events: tuple[FaqKnowledgeEvent, ...],
-    ) -> dict[str, dict[str, object]]: ...
+    ) -> JournalCheckpoint: ...
 
     def prepare_switch(
         self,
@@ -589,7 +646,12 @@ class RebuildIndex(Protocol):
 
     def atomic_switch(self, predecessor: str, candidate: str) -> None: ...
 
-    def complete_switch(self, candidate: str, completion: KnowledgeSnapshot) -> None: ...
+    def complete_switch(
+        self,
+        candidate: str,
+        completion: KnowledgeSnapshot,
+        expected_checkpoint: JournalCheckpoint,
+    ) -> None: ...
 
 
 @dataclass(frozen=True)
@@ -645,10 +707,10 @@ class ElasticsearchRebuildClient:
             status, _ = self._request("GET", f"/{quote(candidate)}", expected=(200, 404))
             if status == 404:
                 return candidate
-            record = self._read_rebuild_record(candidate)
+            stored = self._read_rebuild_record(candidate)
             if (
-                record is not None
-                and record.get("predecessor") == predecessor
+                stored is not None
+                and (record := stored.value).get("predecessor") == predecessor
                 and record.get("initialSnapshotId") == initial.snapshot_id
                 and record.get("initialSnapshotCommitment") == initial.content_commitment
                 and record.get("state") in {"BUILDING", "PREPARED"}
@@ -658,8 +720,8 @@ class ElasticsearchRebuildClient:
         raise KnowledgeRebuildError("candidate_space_exhausted")
 
     def existing_result(self, current: str, initial: KnowledgeSnapshot) -> RebuildResult | None:
-        record = self._read_rebuild_record(current)
-        if record is None or record.get("state") != "SWITCHED":
+        stored = self._read_rebuild_record(current)
+        if stored is None or (record := stored.value).get("state") != "SWITCHED":
             return None
         self._require_record_identity(record, current)
         if (
@@ -682,8 +744,8 @@ class ElasticsearchRebuildClient:
         )
 
     def pending_switch(self, current: str) -> RebuildResult | None:
-        record = self._read_rebuild_record(current)
-        if record is None or record.get("state") != "PREPARED":
+        stored = self._read_rebuild_record(current)
+        if stored is None or (record := stored.value).get("state") != "PREPARED":
             return None
         self._require_record_identity(record, current)
         handoff = record.get("handoffWatermark")
@@ -722,13 +784,15 @@ class ElasticsearchRebuildClient:
                 "switchedAt": None,
                 "journalEvents": [],
             }
-            self._write_rebuild_record(candidate, initial_record, create=True)
+            if not self._write_rebuild_record(candidate, initial_record, create=True):
+                raise KnowledgeRebuildError("concurrent_rebuild")
             return
         self._validate_mapping(candidate)
         self._validate_settings(candidate)
-        record = self._read_rebuild_record(candidate)
-        if record is None:
+        stored = self._read_rebuild_record(candidate)
+        if stored is None:
             raise KnowledgeRebuildError("candidate_already_exists")
+        record = stored.value
         self._require_record_identity(record, candidate)
         if (
             record.get("initialSnapshotId") != initial.snapshot_id
@@ -814,27 +878,44 @@ class ElasticsearchRebuildClient:
         self,
         candidate: str,
         accepted_events: tuple[FaqKnowledgeEvent, ...],
-    ) -> dict[str, dict[str, object]]:
-        record = self._read_rebuild_record(candidate)
-        if record is None:
-            raise KnowledgeRebuildError("missing_rebuild_record")
-        self._require_record_identity(record, candidate)
-        descriptors = {
-            cast(str, descriptor["eventId"]): descriptor
-            for descriptor in _validated_journal_events(record.get("journalEvents"))
-        }
+    ) -> JournalCheckpoint:
+        requested: dict[str, JournalEventDescriptor] = {}
         for event in accepted_events:
-            descriptor = _journal_event_descriptor(event)
-            existing = descriptors.get(event.event_id)
+            descriptor = JournalEventDescriptor.from_event(event)
+            existing = requested.get(descriptor.event_id)
             if existing is not None and existing != descriptor:
                 raise KnowledgeRebuildError("conflicting_catch_up_event")
-            descriptors[event.event_id] = descriptor
-        if len(descriptors) > MAX_JOURNAL_EVENTS:
-            raise KnowledgeRebuildError("catch_up_event_limit_exceeded")
-        sealed = [descriptors[event_id] for event_id in sorted(descriptors)]
-        if record.get("journalEvents") != sealed:
-            self._write_rebuild_record(candidate, {**record, "journalEvents": sealed})
-        return self._markers_from_descriptors(tuple(sealed))
+            requested[descriptor.event_id] = descriptor
+        for _ in range(MAX_REBUILD_RECORD_UPDATE_ATTEMPTS):
+            stored = self._read_rebuild_record(candidate)
+            if stored is None:
+                raise KnowledgeRebuildError("missing_rebuild_record")
+            record = stored.value
+            self._require_record_identity(record, candidate)
+            descriptors = {
+                descriptor.event_id: descriptor
+                for descriptor in _validated_journal_events(record.get("journalEvents"))
+            }
+            for event_id, descriptor in requested.items():
+                existing = descriptors.get(event_id)
+                if existing is not None and existing != descriptor:
+                    raise KnowledgeRebuildError("conflicting_catch_up_event")
+                descriptors[event_id] = descriptor
+            if len(descriptors) > MAX_JOURNAL_EVENTS:
+                raise KnowledgeRebuildError("catch_up_event_limit_exceeded")
+            checkpoint = JournalCheckpoint(
+                tuple(descriptors[event_id] for event_id in sorted(descriptors))
+            )
+            sealed = list(checkpoint.canonical_mappings())
+            if record.get("journalEvents") == sealed:
+                return checkpoint
+            if self._write_rebuild_record(
+                candidate,
+                {**record, "journalEvents": sealed},
+                expected=stored,
+            ):
+                return checkpoint
+        raise KnowledgeRebuildError("concurrent_rebuild")
 
     def prepare_switch(
         self,
@@ -842,14 +923,20 @@ class ElasticsearchRebuildClient:
         initial: KnowledgeSnapshot,
         handoff: KnowledgeSnapshot,
     ) -> str:
-        record = self._read_rebuild_record(candidate)
-        if record is None:
-            raise KnowledgeRebuildError("missing_rebuild_record")
-        self._require_record_identity(record, candidate)
-        if record.get("initialSnapshotId") != initial.snapshot_id:
-            raise KnowledgeRebuildError("inconsistent_rebuild_record")
-        if record.get("state") == "PREPARED":
-            if record.get("handoffWatermark") != handoff.watermark:
+        for _ in range(MAX_REBUILD_RECORD_UPDATE_ATTEMPTS):
+            stored = self._read_rebuild_record(candidate)
+            if stored is None:
+                raise KnowledgeRebuildError("missing_rebuild_record")
+            record = stored.value
+            self._require_record_identity(record, candidate)
+            if record.get("initialSnapshotId") != initial.snapshot_id:
+                raise KnowledgeRebuildError("inconsistent_rebuild_record")
+            if record.get("state") == "PREPARED":
+                if record.get("handoffWatermark") == handoff.watermark:
+                    existing_lease = record.get("rollbackLeaseExpiresAt")
+                    if not isinstance(existing_lease, str):
+                        raise KnowledgeRebuildError("inconsistent_rebuild_record")
+                    return existing_lease
                 if self.resolve_alias() == candidate:
                     raise KnowledgeRebuildError("handoff_changed_after_switch")
                 predecessor = record.get("predecessor")
@@ -857,31 +944,25 @@ class ElasticsearchRebuildClient:
                     raise KnowledgeRebuildError("alias_changed_before_switch")
                 expires_at = self._now().astimezone(UTC) + timedelta(seconds=ROLLBACK_LEASE_SECONDS)
                 lease = expires_at.isoformat().replace("+00:00", "Z")
-                self._write_rebuild_record(
-                    candidate,
-                    {
-                        **record,
-                        "handoffWatermark": handoff.watermark,
-                        "rollbackLeaseExpiresAt": lease,
-                    },
-                )
-                return lease
-            existing_lease = record.get("rollbackLeaseExpiresAt")
-            if not isinstance(existing_lease, str):
+                updated = {
+                    **record,
+                    "handoffWatermark": handoff.watermark,
+                    "rollbackLeaseExpiresAt": lease,
+                }
+            elif record.get("state") == "BUILDING":
+                expires_at = self._now().astimezone(UTC) + timedelta(seconds=ROLLBACK_LEASE_SECONDS)
+                lease = expires_at.isoformat().replace("+00:00", "Z")
+                updated = {
+                    **record,
+                    "state": "PREPARED",
+                    "handoffWatermark": handoff.watermark,
+                    "rollbackLeaseExpiresAt": lease,
+                }
+            else:
                 raise KnowledgeRebuildError("inconsistent_rebuild_record")
-            return existing_lease
-        if record.get("state") != "BUILDING":
-            raise KnowledgeRebuildError("inconsistent_rebuild_record")
-        expires_at = self._now().astimezone(UTC) + timedelta(seconds=ROLLBACK_LEASE_SECONDS)
-        lease = expires_at.isoformat().replace("+00:00", "Z")
-        prepared = {
-            **record,
-            "state": "PREPARED",
-            "handoffWatermark": handoff.watermark,
-            "rollbackLeaseExpiresAt": lease,
-        }
-        self._write_rebuild_record(candidate, prepared)
-        return lease
+            if self._write_rebuild_record(candidate, updated, expected=stored):
+                return lease
+        raise KnowledgeRebuildError("concurrent_rebuild")
 
     def atomic_switch(self, predecessor: str, candidate: str) -> None:
         if self.resolve_alias() != predecessor:
@@ -905,32 +986,40 @@ class ElasticsearchRebuildClient:
         if response.get("acknowledged") is not True or self.resolve_alias() != candidate:
             raise KnowledgeRebuildError("alias_switch_unverified")
 
-    def complete_switch(self, candidate: str, completion: KnowledgeSnapshot) -> None:
-        record = self._read_rebuild_record(candidate)
-        if record is None:
-            raise KnowledgeRebuildError("missing_rebuild_record")
-        self._require_record_identity(record, candidate)
-        if record.get("state") == "SWITCHED":
-            if (
-                record.get("completionSnapshotId") != completion.snapshot_id
-                or record.get("completionSnapshotCommitment") != completion.content_commitment
-                or record.get("completionWatermark") != completion.watermark
-            ):
+    def complete_switch(
+        self,
+        candidate: str,
+        completion: KnowledgeSnapshot,
+        expected_checkpoint: JournalCheckpoint,
+    ) -> None:
+        for _ in range(MAX_REBUILD_RECORD_UPDATE_ATTEMPTS):
+            stored = self._read_rebuild_record(candidate)
+            if stored is None:
+                raise KnowledgeRebuildError("missing_rebuild_record")
+            record = stored.value
+            self._require_record_identity(record, candidate)
+            self._require_checkpoint_in_record(record, expected_checkpoint)
+            if record.get("state") == "SWITCHED":
+                if (
+                    record.get("completionSnapshotId") != completion.snapshot_id
+                    or record.get("completionSnapshotCommitment") != completion.content_commitment
+                    or record.get("completionWatermark") != completion.watermark
+                ):
+                    raise KnowledgeRebuildError("inconsistent_rebuild_record")
+                return
+            if record.get("state") != "PREPARED":
                 raise KnowledgeRebuildError("inconsistent_rebuild_record")
-            return
-        if record.get("state") != "PREPARED":
-            raise KnowledgeRebuildError("inconsistent_rebuild_record")
-        self._write_rebuild_record(
-            candidate,
-            {
+            switched = {
                 **record,
                 "state": "SWITCHED",
                 "completionSnapshotId": completion.snapshot_id,
                 "completionSnapshotCommitment": completion.content_commitment,
                 "completionWatermark": completion.watermark,
                 "switchedAt": _now(self._now),
-            },
-        )
+            }
+            if self._write_rebuild_record(candidate, switched, expected=stored):
+                return
+        raise KnowledgeRebuildError("concurrent_rebuild")
 
     def _validate_mapping(self, index: str) -> None:
         _, payload = self._request("GET", f"/{quote(index)}/_mapping")
@@ -1013,9 +1102,10 @@ class ElasticsearchRebuildClient:
                 raise KnowledgeRebuildError("candidate_public_boundary_violation")
         if control_records != 1:
             raise KnowledgeRebuildError("candidate_public_boundary_violation")
-        record = self._read_rebuild_record(index)
-        if record is None:
+        stored = self._read_rebuild_record(index)
+        if stored is None:
             raise KnowledgeRebuildError("candidate_public_boundary_violation")
+        record = stored.value
         if accepted_events is not None:
             expected_markers = self._expected_sync_markers(
                 _validated_journal_events(record.get("journalEvents")),
@@ -1027,7 +1117,7 @@ class ElasticsearchRebuildClient:
 
     @staticmethod
     def _expected_sync_markers(
-        sealed_events: tuple[dict[str, object], ...],
+        sealed_events: tuple[JournalEventDescriptor, ...],
         accepted_events: tuple[FaqKnowledgeEvent, ...],
     ) -> dict[str, dict[str, object]]:
         expected = ElasticsearchRebuildClient._markers_from_descriptors(sealed_events)
@@ -1042,10 +1132,10 @@ class ElasticsearchRebuildClient:
 
     @staticmethod
     def _markers_from_descriptors(
-        descriptors: tuple[dict[str, object], ...],
+        descriptors: tuple[JournalEventDescriptor, ...],
     ) -> dict[str, dict[str, object]]:
         return {
-            f"__sync_event__:{descriptor['eventId']}": _marker_from_journal_event(descriptor)
+            f"__sync_event__:{descriptor.event_id}": descriptor.marker_source()
             for descriptor in descriptors
         }
 
@@ -1126,7 +1216,7 @@ class ElasticsearchRebuildClient:
             result.append(document_id)
         return result
 
-    def _read_rebuild_record(self, index: str) -> dict[str, object] | None:
+    def _read_rebuild_record(self, index: str) -> _VersionedRebuildRecord | None:
         status, response = self._request(
             "GET",
             f"/{quote(index)}/_doc/{quote(REBUILD_RECORD_ID, safe='')}",
@@ -1135,7 +1225,16 @@ class ElasticsearchRebuildClient:
         if status == 404:
             return None
         source = response.get("_source")
+        seq_no = response.get("_seq_no")
+        primary_term = response.get("_primary_term")
         if not isinstance(source, dict) or set(source) != _PROJECTION_FIELDS:
+            raise KnowledgeRebuildError("inconsistent_rebuild_record")
+        if (
+            type(seq_no) is not int
+            or seq_no < 0
+            or type(primary_term) is not int
+            or primary_term < 1
+        ):
             raise KnowledgeRebuildError("inconsistent_rebuild_record")
         content = source.get("content")
         commitment = source.get("sync_event_commitment")
@@ -1174,7 +1273,11 @@ class ElasticsearchRebuildClient:
             _internal_instant(source.get("sync_occurred_at"))
         except KnowledgeRebuildError as error:
             raise KnowledgeRebuildError("inconsistent_rebuild_record") from error
-        return cast(dict[str, object], record)
+        return _VersionedRebuildRecord(
+            value=cast(dict[str, object], record),
+            seq_no=seq_no,
+            primary_term=primary_term,
+        )
 
     @staticmethod
     def _validate_rebuild_record(record: dict[str, object], index: str) -> None:
@@ -1256,10 +1359,19 @@ class ElasticsearchRebuildClient:
             raise KnowledgeRebuildError("inconsistent_rebuild_record") from error
 
     def _write_rebuild_record(
-        self, index: str, record: dict[str, object], *, create: bool = False
-    ) -> None:
+        self,
+        index: str,
+        record: dict[str, object],
+        *,
+        create: bool = False,
+        expected: _VersionedRebuildRecord | None = None,
+    ) -> bool:
         if set(record) != _REBUILD_RECORD_FIELDS:
             raise KnowledgeRebuildError("inconsistent_rebuild_record")
+        if (create and expected is not None) or (not create and expected is None):
+            raise KnowledgeRebuildError("inconsistent_rebuild_record")
+        if expected is not None:
+            self._require_grow_only_journal(expected.value, record)
         content = _canonical(record).decode("utf-8")
         source = {
             "schema_version": KNOWLEDGE_SYNC_SCHEMA_VERSION,
@@ -1278,15 +1390,56 @@ class ElasticsearchRebuildClient:
             "sync_event_commitment": _digest(record),
             "sync_occurred_at": _now(self._now),
         }
-        suffix = "?op_type=create" if create else ""
+        suffix = (
+            "?op_type=create"
+            if create
+            else (
+                f"?if_seq_no={expected.seq_no}&if_primary_term={expected.primary_term}"
+                if expected is not None
+                else ""
+            )
+        )
         status, _ = self._request(
             "PUT",
             f"/{quote(index)}/_doc/{quote(REBUILD_RECORD_ID, safe='')}{suffix}",
             source,
-            expected=(200, 201, 409) if create else (200, 201),
+            expected=(200, 201, 409),
         )
-        if status == 409:
-            raise KnowledgeRebuildError("concurrent_rebuild")
+        return status != 409
+
+    @staticmethod
+    def _require_grow_only_journal(
+        previous: dict[str, object],
+        updated: dict[str, object],
+    ) -> None:
+        previous_by_id = {
+            descriptor.event_id: descriptor
+            for descriptor in _validated_journal_events(previous.get("journalEvents"))
+        }
+        updated_by_id = {
+            descriptor.event_id: descriptor
+            for descriptor in _validated_journal_events(updated.get("journalEvents"))
+        }
+        if any(
+            updated_by_id.get(event_id) != descriptor
+            for event_id, descriptor in previous_by_id.items()
+        ):
+            raise KnowledgeRebuildError("inconsistent_rebuild_record")
+
+    @staticmethod
+    def _require_checkpoint_in_record(
+        record: dict[str, object],
+        checkpoint: JournalCheckpoint,
+    ) -> None:
+        persisted = {
+            descriptor.event_id: descriptor
+            for descriptor in _validated_journal_events(record.get("journalEvents"))
+        }
+        if any(
+            persisted.get(descriptor.event_id) != descriptor
+            for descriptor in checkpoint.descriptors
+        ):
+            raise KnowledgeRebuildError("journal_changed_after_validation")
 
     @staticmethod
     def _require_record_identity(record: dict[str, object], candidate: str) -> None:
@@ -1379,7 +1532,7 @@ class KnowledgeRebuildCoordinator:
                 predecessor, initial, source, journal
             )
             journal.commit(converged, checkpoint)
-            self._elasticsearch.complete_switch(predecessor, converged)
+            self._elasticsearch.complete_switch(predecessor, converged, checkpoint)
             return RebuildResult(
                 predecessor=pending.predecessor,
                 candidate=predecessor,
@@ -1393,6 +1546,7 @@ class KnowledgeRebuildCoordinator:
             accepted = self._catch_up(predecessor, initial, initial, journal)
             checkpoint = self._validate_and_seal(predecessor, initial, accepted)
             journal.commit(initial, checkpoint)
+            self._elasticsearch.complete_switch(predecessor, initial, checkpoint)
             return existing
         candidate = self._elasticsearch.candidate_for(predecessor, initial)
         self._elasticsearch.create_or_resume_candidate(predecessor, candidate, initial)
@@ -1434,7 +1588,7 @@ class KnowledgeRebuildCoordinator:
         self._elasticsearch.atomic_switch(predecessor, candidate)
         converged, checkpoint = self._post_switch_converge(candidate, handoff, source, journal)
         journal.commit(converged, checkpoint)
-        self._elasticsearch.complete_switch(candidate, converged)
+        self._elasticsearch.complete_switch(candidate, converged, checkpoint)
         return RebuildResult(
             predecessor=predecessor,
             candidate=candidate,
@@ -1450,7 +1604,7 @@ class KnowledgeRebuildCoordinator:
         handoff: KnowledgeSnapshot,
         source: SnapshotSource,
         journal: AcceptedEventJournal,
-    ) -> tuple[KnowledgeSnapshot, dict[str, dict[str, object]]]:
+    ) -> tuple[KnowledgeSnapshot, JournalCheckpoint]:
         current = handoff
         for _ in range(MAX_CATCH_UP_PASSES):
             latest = source.capture()
@@ -1472,7 +1626,7 @@ class KnowledgeRebuildCoordinator:
         candidate: str,
         snapshot: KnowledgeSnapshot,
         accepted_events: tuple[FaqKnowledgeEvent, ...],
-    ) -> dict[str, dict[str, object]]:
+    ) -> JournalCheckpoint:
         checkpoint = self._elasticsearch.seal_journal_events(candidate, accepted_events)
         self._elasticsearch.validate_candidate(candidate, snapshot, accepted_events)
         return checkpoint
