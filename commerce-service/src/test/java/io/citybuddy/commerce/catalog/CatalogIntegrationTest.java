@@ -10,6 +10,8 @@ import com.nimbusds.jose.JWSHeader;
 import com.nimbusds.jose.crypto.RSASSASigner;
 import com.nimbusds.jwt.JWTClaimsSet;
 import com.nimbusds.jwt.SignedJWT;
+import com.zaxxer.hikari.HikariConfig;
+import com.zaxxer.hikari.HikariDataSource;
 import io.citybuddy.commerce.order.OrderCategory;
 import io.citybuddy.commerce.order.OrderException;
 import io.citybuddy.commerce.order.OrderProperties;
@@ -490,24 +492,24 @@ class CatalogIntegrationTest {
     String orderId = UUID.randomUUID().toString();
     seedOrderProduct(productId, 5, true, "PUBLISHED", 1);
 
-    var targetDataSource =
-        new DriverManagerDataSource(
-            required("CATALOG_MYSQL_URL"), "commerce_app", required("MYSQL_COMMERCE_APP_PASSWORD"));
-    JdbcTemplate targetJdbc = new JdbcTemplate(targetDataSource);
-    IndeterminateObservationRepository probe =
-        new IndeterminateObservationRepository(targetJdbc, objectMapper);
-    OrderService oneAttemptService =
-        new OrderService(
-            probe,
-            new TransactionTemplate(new DataSourceTransactionManager(targetDataSource)),
-            new OrderProperties("order:create", 100, 1, 1));
     var executor = Executors.newSingleThreadExecutor();
-
-    try (Connection sibling =
-        DriverManager.getConnection(
-            required("CATALOG_MYSQL_URL"),
-            "commerce_app",
-            required("MYSQL_COMMERCE_APP_PASSWORD"))) {
+    try (HikariDataSource targetDataSource = singleConnectionOrderDataSource();
+        Connection sibling =
+            DriverManager.getConnection(
+                required("CATALOG_MYSQL_URL"),
+                "commerce_app",
+                required("MYSQL_COMMERCE_APP_PASSWORD"))) {
+      JdbcTemplate targetJdbc = new JdbcTemplate(targetDataSource);
+      Long originalLockWait =
+          targetJdbc.queryForObject("SELECT @@SESSION.innodb_lock_wait_timeout", Long.class);
+      assertThat(originalLockWait).isGreaterThan(1L);
+      IndeterminateObservationRepository probe =
+          new IndeterminateObservationRepository(targetJdbc, objectMapper);
+      OrderService oneAttemptService =
+          new OrderService(
+              probe,
+              new TransactionTemplate(new DataSourceTransactionManager(targetDataSource)),
+              new OrderProperties("order:create", 100, 1, 1));
       sibling.setAutoCommit(false);
       var siblingJdbc = new JdbcTemplate(new SingleConnectionDataSource(sibling, true));
       OrderRepository siblingRepository = new OrderRepository(siblingJdbc, objectMapper);
@@ -534,6 +536,9 @@ class CatalogIntegrationTest {
         assertThat(resolved.replayed()).isTrue();
         assertThat(resolved.orderId()).isEqualTo(orderId);
         assertThat(probe.indeterminateObservations()).isGreaterThanOrEqualTo(1);
+        assertThat(
+                targetJdbc.queryForObject("SELECT @@SESSION.innodb_lock_wait_timeout", Long.class))
+            .isEqualTo(originalLockWait);
       } finally {
         if (!target.isDone()) {
           target.cancel(true);
@@ -543,6 +548,18 @@ class CatalogIntegrationTest {
       executor.shutdownNow();
     }
     assertOrderCardinality(productId, 4, 1, 1, 1);
+  }
+
+  private static HikariDataSource singleConnectionOrderDataSource() {
+    HikariConfig config = new HikariConfig();
+    config.setPoolName("order-lock-boundary-" + UUID.randomUUID());
+    config.setJdbcUrl(required("CATALOG_MYSQL_URL"));
+    config.setUsername("commerce_app");
+    config.setPassword(required("MYSQL_COMMERCE_APP_PASSWORD"));
+    config.setMaximumPoolSize(1);
+    config.setMinimumIdle(1);
+    config.setConnectionTimeout(5000);
+    return new HikariDataSource(config);
   }
 
   private void proveConflictingSiblingAfterControlledExhaustion() throws Exception {

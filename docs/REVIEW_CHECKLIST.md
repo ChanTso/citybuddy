@@ -41,7 +41,11 @@ request. A later semantic diff change requires the checklist to be executed and 
   inherit it instead of relying on per-query opt-in. A framework transaction deadline is
   insufficient unless the real driver demonstrably interrupts row-lock waits. If a pooled session
   variable supplies the bound, capture and restore its prior value in `finally` so the recovery
-  policy cannot leak into later borrowers.
+  policy cannot leak into later borrowers. The restore operation must remain executable after the
+  controlled failure: do not make cleanup depend on an already expired transaction deadline or the
+  same failed resource state. Prove restoration with a real single-connection pool by borrowing the
+  physical session again after the failure and comparing the original value; a mocked `finally`
+  call or a disposable non-pooled connection is not cleanup evidence.
   Only a positively identified database resource or transaction-acquisition failure may use the
   unavailable response. Exercise found, confirmed-absent recovery, indeterminate-then-found,
   persistently indeterminate, conflicting intent, and real dependency unavailability independently.
