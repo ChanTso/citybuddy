@@ -114,6 +114,51 @@
         }
       }
     },
+    "/internal/tools/actions/prepare": {
+      "post": {
+        "operationId": "prepareSensitiveAction",
+        "security": [{"agentOboBearer": []}],
+        "parameters": [
+          {"name": "X-Support-Session-Id", "in": "header", "required": true, "schema": {"type": "string", "minLength": 1, "maxLength": 64}},
+          {"name": "X-Agent-Trace-Id", "in": "header", "required": true, "schema": {"type": "string", "minLength": 1, "maxLength": 64}},
+          {"name": "X-Agent-Turn-Id", "in": "header", "required": true, "schema": {"type": "string", "format": "uuid"}},
+          {"name": "X-Eval-Sandbox-Id", "in": "header", "required": false, "schema": {"type": "string", "minLength": 1, "maxLength": 64, "pattern": "^[A-Za-z0-9._:-]+$"}}
+        ],
+        "requestBody": {"required": true, "content": {"application/json": {"schema": {"$ref": "#/components/schemas/PrepareActionRequest"}}}},
+        "responses": {
+          "200": {"description": "Same canonical PendingAction replay", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/PendingAction"}}}},
+          "201": {"description": "One owner-, session-, turn-, and intent-bound PendingAction", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/PendingAction"}}}},
+          "400": {"description": "Closed-schema or bounded-value rejection"},
+          "403": {"description": "Invalid OBO identity, exact scope, session, or sandbox"},
+          "404": {"description": "Missing or non-owned refund target"},
+          "409": {"description": "Conflicting intent, stale target, or inconsistent durable truth"},
+          "429": {"description": "Bounded concurrency observation remains indeterminate"},
+          "503": {"description": "Authoritative identity, sandbox, or commerce truth unavailable"}
+        }
+      }
+    },
+    "/internal/tools/actions/{pendingActionId}/confirm": {
+      "post": {
+        "operationId": "confirmSensitiveAction",
+        "security": [{"agentOboBearer": []}],
+        "parameters": [
+          {"name": "pendingActionId", "in": "path", "required": true, "schema": {"type": "string", "format": "uuid"}},
+          {"name": "X-Support-Session-Id", "in": "header", "required": true, "schema": {"type": "string", "minLength": 1, "maxLength": 64}},
+          {"name": "X-Agent-Trace-Id", "in": "header", "required": true, "schema": {"type": "string", "minLength": 1, "maxLength": 64}},
+          {"name": "X-Agent-Turn-Id", "in": "header", "required": true, "schema": {"type": "string", "format": "uuid"}},
+          {"name": "X-Eval-Sandbox-Id", "in": "header", "required": false, "schema": {"type": "string", "minLength": 1, "maxLength": 64, "pattern": "^[A-Za-z0-9._:-]+$"}}
+        ],
+        "responses": {
+          "200": {"description": "One durable immutable ActionReceipt or same-intent replay", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/ActionReceipt"}}}},
+          "400": {"description": "Malformed identifier, headers, or non-empty confirmation body"},
+          "403": {"description": "Invalid OBO identity, exact scope, session, or sandbox"},
+          "404": {"description": "Missing or non-owned PendingAction"},
+          "409": {"description": "Expired, stale, conflicting, illegal, or inconsistent durable truth"},
+          "429": {"description": "Bounded receipt observation remains indeterminate"},
+          "503": {"description": "Authoritative identity, sandbox, or commerce truth unavailable"}
+        }
+      }
+    },
     "/api/eval/reset": {
       "post": {
         "operationId": "resetEvaluationSandbox",
@@ -346,6 +391,57 @@
       "mockPaymentSignature": {"type": "apiKey", "in": "header", "name": "X-Mock-Payment-Signature", "description": "HMAC-SHA256 over the timestamp, idempotency key, complete callback intent, and exact evaluation context when present."}
     },
     "schemas": {
+      "PrepareActionRequest": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["actionType", "arguments"],
+        "properties": {
+          "actionType": {"type": "string", "const": "REFUND_REQUEST"},
+          "arguments": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["orderId", "amountMinor", "currency"],
+            "properties": {
+              "orderId": {"type": "string", "format": "uuid"},
+              "amountMinor": {"type": "integer", "minimum": 1},
+              "currency": {"type": "string", "pattern": "^[A-Z]{3}$"}
+            }
+          }
+        }
+      },
+      "PendingAction": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["pendingActionId", "actionType", "orderId", "amountMinor", "currency", "state", "expiresAt", "replayed"],
+        "properties": {
+          "pendingActionId": {"type": "string", "format": "uuid"},
+          "actionType": {"type": "string", "const": "REFUND_REQUEST"},
+          "orderId": {"type": "string", "format": "uuid"},
+          "amountMinor": {"type": "integer", "minimum": 1},
+          "currency": {"type": "string", "pattern": "^[A-Z]{3}$"},
+          "state": {"type": "string", "enum": ["PREPARED", "CONSUMED"]},
+          "expiresAt": {"type": "string", "format": "date-time"},
+          "replayed": {"type": "boolean"}
+        }
+      },
+      "ActionReceipt": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["receiptId", "pendingActionId", "actionType", "status", "orderId", "refundId", "resourceVersion", "amountMinor", "currency", "committedAt", "replayed"],
+        "properties": {
+          "receiptId": {"type": "string", "format": "uuid"},
+          "pendingActionId": {"type": "string", "format": "uuid"},
+          "actionType": {"type": "string", "const": "REFUND_REQUEST"},
+          "status": {"type": "string", "const": "REQUESTED"},
+          "orderId": {"type": "string", "format": "uuid"},
+          "refundId": {"type": "string", "format": "uuid"},
+          "resourceVersion": {"type": "integer", "const": 1},
+          "amountMinor": {"type": "integer", "minimum": 1},
+          "currency": {"type": "string", "pattern": "^[A-Z]{3}$"},
+          "committedAt": {"type": "string", "format": "date-time"},
+          "replayed": {"type": "boolean"}
+        }
+      },
       "KnowledgeSnapshot": {
         "type": "object",
         "additionalProperties": false,

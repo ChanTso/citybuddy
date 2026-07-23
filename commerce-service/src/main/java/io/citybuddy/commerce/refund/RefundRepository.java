@@ -320,7 +320,8 @@ public class RefundRepository {
     return !rows.isEmpty();
   }
 
-  public void insertOutbox(RefundRecord refund, String eventType, long version) {
+  public OutboxIdentity insertOutbox(
+      RefundRecord refund, String eventType, long version, Instant occurredAt) {
     String eventId = UUID.randomUUID().toString();
     Map<String, Object> event =
         Map.of(
@@ -330,18 +331,22 @@ public class RefundRepository {
             "paymentAttemptId", refund.paymentAttemptId(),
             "amountMinor", refund.requestedAmountMinor(),
             "currency", refund.currency(),
-            "stateVersion", version);
+            "stateVersion", version,
+            "occurredAt", occurredAt.toString());
     jdbc.update(
         """
         INSERT INTO commerce_outbox
-          (event_id, aggregate_type, aggregate_id, aggregate_version, event_type, payload)
-        VALUES (?, 'REFUND', ?, ?, ?, CAST(? AS JSON))
+          (event_id, aggregate_type, aggregate_id, aggregate_version, event_type, payload,
+           created_at)
+        VALUES (?, 'REFUND', ?, ?, ?, CAST(? AS JSON), ?)
         """,
         eventId,
         refund.refundId(),
         version,
         eventType,
-        json(event));
+        json(event),
+        Timestamp.from(occurredAt));
+    return new OutboxIdentity(eventId, occurredAt);
   }
 
   private Optional<RefundRecord> queryRefund(String sql, Object... arguments) {
@@ -450,4 +455,6 @@ public class RefundRepository {
       long activityQuotaDelta,
       long amountMinor,
       String currency) {}
+
+  public record OutboxIdentity(String eventId, Instant createdAt) {}
 }

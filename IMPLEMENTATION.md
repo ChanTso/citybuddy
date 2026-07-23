@@ -123,7 +123,7 @@ The linked slice name is the canonical detailed specification. Target outcomes a
 | [CB-113 — Knowledge rebuild validation and atomic alias switch](docs/slices/CB-113.md) | P1 | `VERIFIED` | `CB-112` |
 | [CB-114 — Knowledge rollback catch-up and atomic restoration](docs/slices/CB-114.md) | P1 | `DEFERRED` | `CB-113` |
 | [CB-115 — Expired knowledge-index candidate and predecessor cleanup](docs/slices/CB-115.md) | P1 | `DEFERRED` | `CB-114` |
-| [CB-120 — Commerce PendingAction and atomic ActionReceipt transaction](docs/slices/CB-120.md) | P1 | `READY` | `CB-071`, `CB-082` |
+| [CB-120 — Commerce PendingAction and atomic ActionReceipt transaction](docs/slices/CB-120.md) | P1 | `IN_PROGRESS` | `CB-071`, `CB-082` |
 | [CB-121 — Agent confirmation, receipt projection, and turn commit](docs/slices/CB-121.md) | P1 | `PLANNED` | `CB-120`, `CB-082` |
 | [CB-130 — Memory watermarks, prompt/PII, and tiered output safety](docs/slices/CB-130.md) | P1 | `PLANNED` | `CB-113`, `CB-121` |
 | `CB-131 — Authoritative handoff tickets and agent projection` | P1 | `PLANNED` | `CB-130` |

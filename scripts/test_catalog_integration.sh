@@ -115,6 +115,7 @@ wait_http() {
 ENV_FILE="$env_file" ./scripts/init_local.sh
 auth_app_password="$(read_value MYSQL_AUTH_APP_PASSWORD)"
 commerce_app_password="$(read_value MYSQL_COMMERCE_APP_PASSWORD)"
+commerce_migration_password="$(read_value MYSQL_COMMERCE_MIGRATION_PASSWORD)"
 mysql_bootstrap_password="$(read_value MYSQL_BOOTSTRAP_PASSWORD)"
 agent_app_password="$(read_value MYSQL_AGENT_APP_PASSWORD)"
 redis_password="$(read_value REDIS_COMMERCE_PASSWORD)"
@@ -216,7 +217,7 @@ echo "Verified exact CB-070 seventeen-table grant state permits the CB-071 upgra
 make ENV_FILE="$env_file" COMPOSE_PROJECT_NAME="$project" migrate-commerce
 complete_grant_output="$(make ENV_FILE="$env_file" COMPOSE_PROJECT_NAME="$project" grant-access)"
 grep -q 'runtime-grants=applied' <<<"$complete_grant_output"
-echo "Verified CB-110 upgrade reaches the exact FAQ-extended runtime grant state."
+echo "Verified CB-120 upgrade reaches the exact FAQ and action runtime grant state."
 
 test "$(mysql_query commerce_app "$commerce_app_password" commerce_db 'SELECT COUNT(*) FROM crm_profile')" = 0
 test "$(mysql_query commerce_app "$commerce_app_password" commerce_db 'SELECT COUNT(*) FROM product')" = 0
@@ -240,6 +241,31 @@ for table in faq_source faq_draft_command faq_publication_command; do
   assert_mysql_fails "agent_app cannot read $table" '(SELECT command denied|Access denied)' \
     mysql_query agent_app "$agent_app_password" commerce_db "SELECT * FROM $table"
 done
+for table in pending_action action_receipt; do
+  test "$(mysql_query commerce_app "$commerce_app_password" commerce_db "SELECT COUNT(*) FROM $table")" = 0
+  assert_mysql_fails "auth_app cannot read $table" '(SELECT command denied|Access denied)' \
+    mysql_query auth_app "$auth_app_password" commerce_db "SELECT * FROM $table"
+  assert_mysql_fails "agent_app cannot read $table" '(SELECT command denied|Access denied)' \
+    mysql_query agent_app "$agent_app_password" commerce_db "SELECT * FROM $table"
+  assert_mysql_fails "commerce migration cannot read $table" '(SELECT command denied|Access denied)' \
+    mysql_query commerce_migration "$commerce_migration_password" commerce_db "SELECT * FROM $table"
+done
+assert_mysql_fails "commerce_app cannot delete PendingAction truth" \
+  '(DELETE command denied|Access denied)' \
+  mysql_query commerce_app "$commerce_app_password" commerce_db \
+  "DELETE FROM pending_action WHERE pending_action_id = 'none'"
+assert_mysql_fails "commerce_app cannot alter PendingAction commitments" \
+  '(UPDATE command denied|Access denied)' \
+  mysql_query commerce_app "$commerce_app_password" commerce_db \
+  "UPDATE pending_action SET argument_hash = REPEAT('0', 64) WHERE pending_action_id = 'none'"
+assert_mysql_fails "commerce_app cannot update immutable ActionReceipt truth" \
+  '(UPDATE command denied|Access denied)' \
+  mysql_query commerce_app "$commerce_app_password" commerce_db \
+  "UPDATE action_receipt SET result_hash = REPEAT('0', 64) WHERE receipt_id = 'none'"
+assert_mysql_fails "commerce_app cannot delete immutable ActionReceipt truth" \
+  '(DELETE command denied|Access denied)' \
+  mysql_query commerce_app "$commerce_app_password" commerce_db \
+  "DELETE FROM action_receipt WHERE receipt_id = 'none'"
 assert_mysql_fails "commerce_app cannot delete FAQ source truth" '(DELETE command denied|Access denied)' \
   mysql_query commerce_app "$commerce_app_password" commerce_db \
   "DELETE FROM faq_source WHERE faq_id = 'none'"

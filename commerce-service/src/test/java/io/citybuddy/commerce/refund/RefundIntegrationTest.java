@@ -10,6 +10,14 @@ import com.nimbusds.jose.JWSHeader;
 import com.nimbusds.jose.crypto.RSASSASigner;
 import com.nimbusds.jwt.JWTClaimsSet;
 import com.nimbusds.jwt.SignedJWT;
+import io.citybuddy.commerce.action.ActionException;
+import io.citybuddy.commerce.action.ActionProperties;
+import io.citybuddy.commerce.action.ActionReceiptView;
+import io.citybuddy.commerce.action.ActionRepository;
+import io.citybuddy.commerce.action.ActionRequestContext;
+import io.citybuddy.commerce.action.ActionService;
+import io.citybuddy.commerce.action.PendingActionView;
+import io.citybuddy.commerce.action.PrepareActionCommand;
 import io.citybuddy.commerce.payment.MockPaymentCallbackRequest;
 import io.citybuddy.commerce.payment.MockPaymentRepository;
 import io.citybuddy.commerce.payment.MockPaymentRequest;
@@ -40,6 +48,7 @@ import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.condition.EnabledIfEnvironmentVariable;
+import org.springframework.beans.factory.ObjectProvider;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.boot.test.web.client.TestRestTemplate;
@@ -50,6 +59,7 @@ import org.springframework.http.HttpMethod;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
 import org.springframework.jdbc.core.JdbcTemplate;
+import org.springframework.jdbc.datasource.DriverManagerDataSource;
 import org.springframework.test.context.DynamicPropertyRegistry;
 import org.springframework.test.context.DynamicPropertySource;
 import org.springframework.transaction.PlatformTransactionManager;
@@ -95,6 +105,16 @@ class RefundIntegrationTest {
     registry.add("citybuddy.mock-payment.callback-clock-skew", () -> "30s");
     registry.add("citybuddy.refund.enabled", () -> "true");
     registry.add("citybuddy.refund.required-permission", () -> "refund:create");
+    registry.add("citybuddy.obo.enabled", () -> "true");
+    registry.add("citybuddy.obo.issuer", () -> "https://identity.citybuddy.test");
+    registry.add("citybuddy.obo.jwks-url", () -> required("IDENTITY_JWKS_URL"));
+    registry.add("citybuddy.obo.clock-skew", () -> "30s");
+    registry.add("citybuddy.obo.jwks-cache-ttl", () -> "30s");
+    registry.add("citybuddy.actions.enabled", () -> "true");
+    registry.add("citybuddy.actions.required-scope", () -> "refund:create");
+    registry.add("citybuddy.actions.pending-ttl", () -> "15m");
+    registry.add("citybuddy.actions.maximum-concurrency-attempts", () -> "3");
+    registry.add("citybuddy.actions.lock-wait-timeout-seconds", () -> "1");
   }
 
   @Autowired private TestRestTemplate http;
@@ -102,7 +122,612 @@ class RefundIntegrationTest {
   @Autowired private ObjectMapper objectMapper;
   @Autowired private MockPaymentService payments;
   @Autowired private RefundService refunds;
+  @Autowired private ActionService actions;
+  @Autowired private ActionRepository actionRepository;
+
+  @Autowired
+  private ObjectProvider<io.citybuddy.commerce.evaluation.EvaluationSandboxAccess> sandboxAccess;
+
   @Autowired private PlatformTransactionManager transactionManager;
+
+  @Test
+  void pendingActionPrepareConfirmReplayAndClosedOboBoundaryStayAtomic() throws Exception {
+    PaidFixture paid = seedPaidStandard(1300, "action-main");
+    String turnId = UUID.randomUUID().toString();
+    String traceId = "action-trace-main";
+    String token = signedOboToken(USER, "action-session", "refund:create", null);
+
+    ResponseEntity<JsonNode> prepared =
+        prepareAction(
+            token,
+            "action-session",
+            traceId,
+            turnId,
+            null,
+            Map.of(
+                "actionType",
+                "REFUND_REQUEST",
+                "arguments",
+                Map.of("orderId", paid.orderId(), "amountMinor", 500, "currency", "AUD")));
+    assertThat(prepared.getStatusCode()).isEqualTo(HttpStatus.CREATED);
+    String pendingActionId = prepared.getBody().get("pendingActionId").asText();
+    assertThat(prepared.getBody().get("state").asText()).isEqualTo("PREPARED");
+    assertThat(prepared.getBody().get("replayed").asBoolean()).isFalse();
+
+    ResponseEntity<JsonNode> prepareReplay =
+        prepareAction(
+            token,
+            "action-session",
+            traceId,
+            turnId,
+            null,
+            Map.of(
+                "actionType",
+                "REFUND_REQUEST",
+                "arguments",
+                Map.of("orderId", paid.orderId(), "amountMinor", 500, "currency", "AUD")));
+    assertThat(prepareReplay.getStatusCode()).isEqualTo(HttpStatus.OK);
+    assertThat(prepareReplay.getBody().get("pendingActionId").asText()).isEqualTo(pendingActionId);
+    assertThat(prepareReplay.getBody().get("replayed").asBoolean()).isTrue();
+    assertThat(
+            prepareAction(
+                    token,
+                    "action-session",
+                    traceId,
+                    turnId,
+                    null,
+                    Map.of(
+                        "actionType",
+                        "REFUND_REQUEST",
+                        "arguments",
+                        Map.of("orderId", paid.orderId(), "amountMinor", 501, "currency", "AUD")))
+                .getStatusCode())
+        .isEqualTo(HttpStatus.CONFLICT);
+    assertThat(
+            prepareAction(
+                    token,
+                    "action-session",
+                    traceId,
+                    UUID.randomUUID().toString(),
+                    null,
+                    Map.of(
+                        "actionType",
+                        "REFUND_REQUEST",
+                        "arguments",
+                        Map.of(
+                            "orderId",
+                            paid.orderId(),
+                            "amountMinor",
+                            500,
+                            "currency",
+                            "AUD",
+                            "userSubject",
+                            OTHER_USER)))
+                .getStatusCode())
+        .isEqualTo(HttpStatus.BAD_REQUEST);
+    assertThat(
+            prepareAction(
+                    directToken(),
+                    "action-session",
+                    traceId,
+                    UUID.randomUUID().toString(),
+                    null,
+                    Map.of(
+                        "actionType",
+                        "REFUND_REQUEST",
+                        "arguments",
+                        Map.of("orderId", paid.orderId(), "amountMinor", 500, "currency", "AUD")))
+                .getStatusCode())
+        .isEqualTo(HttpStatus.FORBIDDEN);
+    assertThat(
+            prepareAction(
+                    signedOboToken(USER, "action-session", "catalog:read", null),
+                    "action-session",
+                    traceId,
+                    UUID.randomUUID().toString(),
+                    null,
+                    Map.of(
+                        "actionType",
+                        "REFUND_REQUEST",
+                        "arguments",
+                        Map.of("orderId", paid.orderId(), "amountMinor", 500, "currency", "AUD")))
+                .getStatusCode())
+        .isEqualTo(HttpStatus.FORBIDDEN);
+    assertThat(
+            prepareAction(
+                    signedOboToken(USER, "different-session", "refund:create", null),
+                    "action-session",
+                    traceId,
+                    UUID.randomUUID().toString(),
+                    null,
+                    Map.of(
+                        "actionType",
+                        "REFUND_REQUEST",
+                        "arguments",
+                        Map.of("orderId", paid.orderId(), "amountMinor", 500, "currency", "AUD")))
+                .getStatusCode())
+        .isEqualTo(HttpStatus.FORBIDDEN);
+    assertThat(
+            prepareAction(
+                    signedOboToken(OTHER_USER, "action-other-session", "refund:create", null),
+                    "action-other-session",
+                    traceId,
+                    UUID.randomUUID().toString(),
+                    null,
+                    Map.of(
+                        "actionType",
+                        "REFUND_REQUEST",
+                        "arguments",
+                        Map.of("orderId", paid.orderId(), "amountMinor", 500, "currency", "AUD")))
+                .getStatusCode())
+        .isEqualTo(HttpStatus.NOT_FOUND);
+    assertThat(
+            prepareAction(
+                    token,
+                    "action-session",
+                    traceId,
+                    UUID.randomUUID().toString(),
+                    UUID.randomUUID().toString(),
+                    Map.of(
+                        "actionType",
+                        "REFUND_REQUEST",
+                        "arguments",
+                        Map.of("orderId", paid.orderId(), "amountMinor", 500, "currency", "AUD")))
+                .getStatusCode())
+        .isEqualTo(HttpStatus.FORBIDDEN);
+    assertThat(
+            confirmAction(
+                    token,
+                    "action-session",
+                    traceId,
+                    UUID.randomUUID().toString(),
+                    null,
+                    pendingActionId,
+                    null)
+                .getStatusCode())
+        .isEqualTo(HttpStatus.CONFLICT);
+    String otherSessionToken = signedOboToken(USER, "action-other-session", "refund:create", null);
+    ResponseEntity<JsonNode> crossSession =
+        confirmAction(
+            otherSessionToken,
+            "action-other-session",
+            traceId,
+            turnId,
+            null,
+            pendingActionId,
+            null);
+    ResponseEntity<JsonNode> unknownInOtherSession =
+        confirmAction(
+            otherSessionToken,
+            "action-other-session",
+            traceId,
+            turnId,
+            null,
+            UUID.randomUUID().toString(),
+            null);
+    assertThat(crossSession.getStatusCode()).isEqualTo(HttpStatus.NOT_FOUND);
+    assertThat(unknownInOtherSession.getStatusCode()).isEqualTo(HttpStatus.NOT_FOUND);
+    assertThat(crossSession.getBody()).isEqualTo(unknownInOtherSession.getBody());
+    assertThat(refundCount(paid.orderId())).isZero();
+
+    ResponseEntity<JsonNode> confirmed =
+        confirmAction(token, "action-session", traceId, turnId, null, pendingActionId, null);
+    assertThat(confirmed.getStatusCode()).isEqualTo(HttpStatus.OK);
+    String receiptId = confirmed.getBody().get("receiptId").asText();
+    String refundId = confirmed.getBody().get("refundId").asText();
+    assertThat(confirmed.getBody().get("status").asText()).isEqualTo("REQUESTED");
+    assertThat(confirmed.getBody().get("replayed").asBoolean()).isFalse();
+    assertThat(refundCount(paid.orderId())).isOne();
+    assertThat(refundOutboxCount(refundId)).isOne();
+    assertThat(actionReceiptCount(pendingActionId)).isOne();
+
+    ResponseEntity<JsonNode> confirmReplay =
+        confirmAction(token, "action-session", traceId, turnId, null, pendingActionId, null);
+    assertThat(confirmReplay.getStatusCode()).isEqualTo(HttpStatus.OK);
+    assertThat(confirmReplay.getBody().get("receiptId").asText()).isEqualTo(receiptId);
+    assertThat(confirmReplay.getBody().get("refundId").asText()).isEqualTo(refundId);
+    assertThat(confirmReplay.getBody().get("replayed").asBoolean()).isTrue();
+    assertThat(refundCount(paid.orderId())).isOne();
+    assertThat(refundOutboxCount(refundId)).isOne();
+    assertThat(actionReceiptCount(pendingActionId)).isOne();
+
+    refunds.markProcessing(refundId);
+    refunds.succeed(refundId);
+    ResponseEntity<JsonNode> replayAfterRefundCompletion =
+        confirmAction(token, "action-session", traceId, turnId, null, pendingActionId, null);
+    assertThat(replayAfterRefundCompletion.getStatusCode()).isEqualTo(HttpStatus.OK);
+    assertThat(replayAfterRefundCompletion.getBody().get("receiptId").asText())
+        .isEqualTo(receiptId);
+    assertThat(replayAfterRefundCompletion.getBody().get("replayed").asBoolean()).isTrue();
+    assertThat(refundCount(paid.orderId())).isOne();
+    assertThat(refundOutboxCount(refundId)).isEqualTo(3);
+    assertThat(actionReceiptCount(pendingActionId)).isOne();
+  }
+
+  @Test
+  void actionTransactionRollsBackRefundOutboxConsumeAndReceiptAtFinalWriteBoundary() {
+    PaidFixture paid = seedPaidStandard(900, "action-rollback");
+    String turnId = UUID.randomUUID().toString();
+    ActionRequestContext context =
+        new ActionRequestContext(
+            USER,
+            "action-rollback-session",
+            "action-rollback-trace",
+            turnId,
+            null,
+            "refund:create");
+    PendingActionView pending =
+        actions.prepare(
+            context, new PrepareActionCommand("REFUND_REQUEST", paid.orderId(), 400L, "AUD"));
+    ActionRepository failReceipt =
+        new ActionRepository(jdbc, objectMapper) {
+          @Override
+          public void insertReceipt(ActionReceiptRecord receipt) {
+            throw new IllegalStateException("controlled failure before receipt insert");
+          }
+        };
+    ActionService failing =
+        new ActionService(
+            failReceipt,
+            refunds,
+            transactionTemplate(),
+            new ActionProperties("refund:create", java.time.Duration.ofMinutes(15), 3, 1),
+            Clock.systemUTC(),
+            sandboxAccess);
+
+    assertThatThrownBy(() -> failing.confirm(context, pending.pendingActionId()))
+        .isInstanceOf(IllegalStateException.class)
+        .hasMessage("controlled failure before receipt insert");
+    assertThat(pendingState(pending.pendingActionId())).containsExactly("PREPARED", "1", null);
+    assertThat(refundCount(paid.orderId())).isZero();
+    assertThat(actionReceiptCount(pending.pendingActionId())).isZero();
+
+    ActionReceiptView receipt = actions.confirm(context, pending.pendingActionId());
+    assertThat(receipt.status()).isEqualTo("REQUESTED");
+    assertThat(refundCount(paid.orderId())).isOne();
+    assertThat(refundOutboxCount(receipt.refundId())).isOne();
+    assertThat(pendingState(pending.pendingActionId()).subList(0, 2))
+        .containsExactly("CONSUMED", "2");
+    assertThat(actionReceiptCount(pending.pendingActionId())).isOne();
+    assertThatThrownBy(
+            () ->
+                jdbc.update(
+                    "UPDATE action_receipt SET result_hash = REPEAT('0', 64) WHERE receipt_id = ?",
+                    receipt.receiptId()))
+        .isInstanceOf(DataAccessException.class)
+        .rootCause()
+        .isInstanceOfSatisfying(
+            SQLException.class, exception -> assertThat(exception.getErrorCode()).isEqualTo(1142));
+  }
+
+  @Test
+  void concurrentIdenticalConfirmsConvergeOnOneReceiptAndOneRefund() throws Exception {
+    PaidFixture paid = seedPaidStandard(1000, "action-concurrent");
+    String turnId = UUID.randomUUID().toString();
+    ActionRequestContext context =
+        new ActionRequestContext(
+            USER,
+            "action-concurrent-session",
+            "action-concurrent-trace",
+            turnId,
+            null,
+            "refund:create");
+    PendingActionView pending =
+        actions.prepare(
+            context, new PrepareActionCommand("REFUND_REQUEST", paid.orderId(), 700L, "AUD"));
+    CountDownLatch ready = new CountDownLatch(2);
+    CountDownLatch release = new CountDownLatch(1);
+    CompletableFuture<ActionReceiptView> first =
+        CompletableFuture.supplyAsync(
+            () -> concurrentConfirm(ready, release, context, pending.pendingActionId()));
+    CompletableFuture<ActionReceiptView> second =
+        CompletableFuture.supplyAsync(
+            () -> concurrentConfirm(ready, release, context, pending.pendingActionId()));
+    assertThat(ready.await(10, TimeUnit.SECONDS)).isTrue();
+    release.countDown();
+    ActionReceiptView left = first.get(10, TimeUnit.SECONDS);
+    ActionReceiptView right = second.get(10, TimeUnit.SECONDS);
+    assertThat(left.receiptId()).isEqualTo(right.receiptId());
+    assertThat(left.refundId()).isEqualTo(right.refundId());
+    assertThat(refundCount(paid.orderId())).isOne();
+    assertThat(refundOutboxCount(left.refundId())).isOne();
+    assertThat(actionReceiptCount(pending.pendingActionId())).isOne();
+  }
+
+  @Test
+  void receiptReplayRejectsEveryMutableContentCarrierAndMissingOutbox() {
+    PaidFixture paid = seedPaidStandard(1100, "action-integrity");
+    String turnId = UUID.randomUUID().toString();
+    ActionRequestContext context =
+        new ActionRequestContext(
+            USER,
+            "action-integrity-session",
+            "action-integrity-trace",
+            turnId,
+            null,
+            "refund:create");
+    PendingActionView pending =
+        actions.prepare(
+            context, new PrepareActionCommand("REFUND_REQUEST", paid.orderId(), 600L, "AUD"));
+    ActionReceiptView receipt = actions.confirm(context, pending.pendingActionId());
+    JdbcTemplate corruption = rootJdbc();
+    Map<String, Object> original =
+        corruption.queryForMap(
+            """
+            SELECT receipt_id, receipt_idempotency_key, pending_action_id, action_type,
+                   argument_hash, result_hash, user_subject, support_session_id, trace_id,
+                   turn_id, sandbox_id, order_id, payment_attempt_id, refund_id,
+                   resulting_resource_version, result_state, amount_minor, currency,
+                   outbox_event_id, outbox_created_at, committed_at
+            FROM action_receipt WHERE receipt_id = ?
+            """,
+            receipt.receiptId());
+    List<ColumnCorruption> corruptions =
+        List.of(
+            new ColumnCorruption("receipt_id", UUID.randomUUID().toString()),
+            new ColumnCorruption("receipt_idempotency_key", "f".repeat(64)),
+            new ColumnCorruption("pending_action_id", UUID.randomUUID().toString()),
+            new ColumnCorruption("argument_hash", "e".repeat(64)),
+            new ColumnCorruption("result_hash", "d".repeat(64)),
+            new ColumnCorruption("user_subject", "other-user"),
+            new ColumnCorruption("support_session_id", "other-session"),
+            new ColumnCorruption("trace_id", "other-trace"),
+            new ColumnCorruption("turn_id", UUID.randomUUID().toString()),
+            new ColumnCorruption("sandbox_id", UUID.randomUUID().toString()),
+            new ColumnCorruption("order_id", UUID.randomUUID().toString()),
+            new ColumnCorruption("payment_attempt_id", UUID.randomUUID().toString()),
+            new ColumnCorruption("refund_id", UUID.randomUUID().toString()),
+            new ColumnCorruption("amount_minor", 601L),
+            new ColumnCorruption("currency", "CNY"),
+            new ColumnCorruption("outbox_event_id", UUID.randomUUID().toString()),
+            new ColumnCorruption(
+                "outbox_created_at",
+                java.sql.Timestamp.from(receipt.committedAt().plus(1, ChronoUnit.MICROS))),
+            new ColumnCorruption(
+                "committed_at",
+                java.sql.Timestamp.from(receipt.committedAt().plus(1, ChronoUnit.MICROS))));
+    String currentReceiptId = receipt.receiptId();
+    for (ColumnCorruption fault : corruptions) {
+      corruption.update(
+          "UPDATE action_receipt SET " + fault.column() + " = ? WHERE receipt_id = ?",
+          fault.value(),
+          currentReceiptId);
+      if ("receipt_id".equals(fault.column())) {
+        currentReceiptId = fault.value().toString();
+      }
+      assertThatThrownBy(() -> actions.confirm(context, pending.pendingActionId()))
+          .isInstanceOfAny(
+              ActionException.class,
+              ActionRepository.ActionIntegrityException.class,
+              RefundException.class);
+      corruption.update(
+          "UPDATE action_receipt SET " + fault.column() + " = ? WHERE receipt_id = ?",
+          original.get(fault.column()),
+          currentReceiptId);
+      currentReceiptId = receipt.receiptId();
+    }
+
+    Map<String, Object> outbox =
+        corruption.queryForMap(
+            "SELECT * FROM commerce_outbox WHERE event_id = ?",
+            receiptOutboxId(receipt.receiptId()));
+    List<ColumnCorruption> outboxCorruptions =
+        List.of(
+            new ColumnCorruption("event_id", UUID.randomUUID().toString()),
+            new ColumnCorruption("aggregate_type", "ORDER"),
+            new ColumnCorruption("aggregate_id", UUID.randomUUID().toString()),
+            new ColumnCorruption("aggregate_version", 2L),
+            new ColumnCorruption("event_type", "REFUND_FAILED"),
+            new ColumnCorruption("payload", "{}"),
+            new ColumnCorruption("publication_state", "PUBLISHED"),
+            new ColumnCorruption("publish_attempts", -1L),
+            new ColumnCorruption(
+                "created_at",
+                java.sql.Timestamp.from(receipt.committedAt().plus(1, ChronoUnit.MICROS))),
+            new ColumnCorruption(
+                "published_at",
+                java.sql.Timestamp.from(receipt.committedAt().plus(1, ChronoUnit.MICROS))));
+    String currentOutboxId = receiptOutboxId(receipt.receiptId());
+    for (ColumnCorruption fault : outboxCorruptions) {
+      if ("publish_attempts".equals(fault.column())) {
+        String constrainedOutboxId = currentOutboxId;
+        assertThatThrownBy(
+                () ->
+                    corruption.update(
+                        "UPDATE commerce_outbox SET publish_attempts = ? WHERE event_id = ?",
+                        fault.value(),
+                        constrainedOutboxId))
+            .isInstanceOf(DataAccessException.class);
+        continue;
+      }
+      corruption.update(
+          "UPDATE commerce_outbox SET " + fault.column() + " = ? WHERE event_id = ?",
+          fault.value(),
+          currentOutboxId);
+      if ("event_id".equals(fault.column())) {
+        currentOutboxId = fault.value().toString();
+      }
+      assertThatThrownBy(() -> actions.confirm(context, pending.pendingActionId()))
+          .isInstanceOfAny(
+              ActionException.class,
+              ActionRepository.ActionIntegrityException.class,
+              RefundException.class);
+      corruption.update(
+          "UPDATE commerce_outbox SET " + fault.column() + " = ? WHERE event_id = ?",
+          originalOutboxValue(outbox, fault.column()),
+          currentOutboxId);
+      currentOutboxId = receiptOutboxId(receipt.receiptId());
+    }
+    corruption.update(
+        "DELETE FROM commerce_outbox WHERE event_id = ?", receiptOutboxId(receipt.receiptId()));
+    assertThatThrownBy(() -> actions.confirm(context, pending.pendingActionId()))
+        .isInstanceOfAny(
+            ActionException.class,
+            ActionRepository.ActionIntegrityException.class,
+            RefundException.class);
+    restoreOutbox(corruption, outbox);
+    assertThat(actions.confirm(context, pending.pendingActionId()).receiptId())
+        .isEqualTo(receipt.receiptId());
+
+    corruption.update(
+        """
+        UPDATE commerce_outbox
+        SET publication_state = 'PUBLISHED', publish_attempts = 0, published_at = created_at
+        WHERE event_id = ?
+        """,
+        receiptOutboxId(receipt.receiptId()));
+    assertThatThrownBy(() -> actions.confirm(context, pending.pendingActionId()))
+        .isInstanceOf(ActionRepository.ActionIntegrityException.class);
+    corruption.update(
+        """
+        UPDATE commerce_outbox
+        SET publication_state = ?, publish_attempts = ?, published_at = ?
+        WHERE event_id = ?
+        """,
+        originalOutboxValue(outbox, "publication_state"),
+        originalOutboxValue(outbox, "publish_attempts"),
+        originalOutboxValue(outbox, "published_at"),
+        receiptOutboxId(receipt.receiptId()));
+    assertThat(actions.confirm(context, pending.pendingActionId()).receiptId())
+        .isEqualTo(receipt.receiptId());
+
+    String duplicateOutboxId = UUID.randomUUID().toString();
+    assertThatThrownBy(
+            () ->
+                corruption.update(
+                    """
+                    INSERT INTO commerce_outbox
+                      (event_id, aggregate_type, aggregate_id, aggregate_version, event_type,
+                       payload, publication_state, publish_attempts, created_at, published_at)
+                    SELECT ?, aggregate_type, aggregate_id, aggregate_version, event_type, payload,
+                           publication_state, publish_attempts, created_at, published_at
+                    FROM commerce_outbox WHERE event_id = ?
+                    """,
+                    duplicateOutboxId,
+                    receiptOutboxId(receipt.receiptId())))
+        .isInstanceOf(DataAccessException.class);
+    assertThat(actions.confirm(context, pending.pendingActionId()).receiptId())
+        .isEqualTo(receipt.receiptId());
+  }
+
+  @Test
+  void preparedActionRejectsPerColumnContradictionsBeforeAnyRefundMutation() {
+    PaidFixture paid = seedPaidStandard(1200, "action-pending-integrity");
+    String turnId = UUID.randomUUID().toString();
+    ActionRequestContext context =
+        new ActionRequestContext(
+            USER, "action-pending-session", "action-pending-trace", turnId, null, "refund:create");
+    PendingActionView pending =
+        actions.prepare(
+            context, new PrepareActionCommand("REFUND_REQUEST", paid.orderId(), 650L, "AUD"));
+    JdbcTemplate corruption = rootJdbc();
+    Map<String, Object> original =
+        corruption.queryForMap(
+            "SELECT * FROM pending_action WHERE pending_action_id = ?", pending.pendingActionId());
+    List<ColumnCorruption> corruptions =
+        List.of(
+            new ColumnCorruption("pending_action_id", UUID.randomUUID().toString()),
+            new ColumnCorruption("action_idempotency_key", "f".repeat(64)),
+            new ColumnCorruption("argument_hash", "e".repeat(64)),
+            new ColumnCorruption("user_subject", OTHER_USER),
+            new ColumnCorruption("support_session_id", "other-session"),
+            new ColumnCorruption("trace_id", "other-trace"),
+            new ColumnCorruption("turn_id", UUID.randomUUID().toString()),
+            new ColumnCorruption("required_scope", "catalog:read"),
+            new ColumnCorruption("sandbox_id", UUID.randomUUID().toString()),
+            new ColumnCorruption("order_id", UUID.randomUUID().toString()),
+            new ColumnCorruption("order_kind", "SECKILL"),
+            new ColumnCorruption("payment_attempt_id", UUID.randomUUID().toString()),
+            new ColumnCorruption("target_order_version", 3L),
+            new ColumnCorruption("amount_minor", 651L),
+            new ColumnCorruption("currency", "CNY"),
+            new ColumnCorruption(
+                "expires_at",
+                java.sql.Timestamp.from(pending.expiresAt().plus(1, ChronoUnit.MICROS))),
+            new ColumnCorruption(
+                "created_at",
+                java.sql.Timestamp.from(
+                    ((java.sql.Timestamp) original.get("created_at"))
+                        .toInstant()
+                        .plus(1, ChronoUnit.MICROS))));
+    String currentPendingId = pending.pendingActionId();
+    for (ColumnCorruption fault : corruptions) {
+      corruption.update(
+          "UPDATE pending_action SET " + fault.column() + " = ? WHERE pending_action_id = ?",
+          fault.value(),
+          currentPendingId);
+      if ("pending_action_id".equals(fault.column())) {
+        currentPendingId = fault.value().toString();
+      }
+      assertThatThrownBy(() -> actions.confirm(context, pending.pendingActionId()))
+          .isInstanceOfAny(
+              ActionException.class,
+              ActionRepository.ActionIntegrityException.class,
+              RefundException.class);
+      assertThat(refundCount(paid.orderId())).isZero();
+      corruption.update(
+          "UPDATE pending_action SET " + fault.column() + " = ? WHERE pending_action_id = ?",
+          original.get(fault.column()),
+          currentPendingId);
+      currentPendingId = pending.pendingActionId();
+    }
+
+    corruption.update(
+        """
+        UPDATE pending_action
+        SET state = 'CONSUMED', state_version = 2, consumed_at = CURRENT_TIMESTAMP(6)
+        WHERE pending_action_id = ?
+        """,
+        pending.pendingActionId());
+    assertThatThrownBy(() -> actions.confirm(context, pending.pendingActionId()))
+        .isInstanceOf(ActionException.class);
+    assertThat(refundCount(paid.orderId())).isZero();
+    corruption.update(
+        """
+        UPDATE pending_action
+        SET state = 'PREPARED', state_version = 1, consumed_at = NULL
+        WHERE pending_action_id = ?
+        """,
+        pending.pendingActionId());
+    assertThat(actions.confirm(context, pending.pendingActionId()).status()).isEqualTo("REQUESTED");
+  }
+
+  @Test
+  void expiredPendingActionRejectsWithoutAnyRefundMutation() {
+    PaidFixture paid = seedPaidStandard(800, "action-expiry");
+    ActionRequestContext context =
+        new ActionRequestContext(
+            USER,
+            "action-expiry-session",
+            "action-expiry-trace",
+            UUID.randomUUID().toString(),
+            null,
+            "refund:create");
+    PendingActionView pending =
+        actions.prepare(
+            context, new PrepareActionCommand("REFUND_REQUEST", paid.orderId(), 300L, "AUD"));
+    JdbcTemplate corruption = rootJdbc();
+    corruption.update(
+        """
+        UPDATE pending_action
+        SET created_at = created_at - INTERVAL 1 HOUR,
+            expires_at = expires_at - INTERVAL 1 HOUR
+        WHERE pending_action_id = ?
+        """,
+        pending.pendingActionId());
+
+    assertThatThrownBy(() -> actions.confirm(context, pending.pendingActionId()))
+        .isInstanceOfSatisfying(
+            ActionException.class,
+            exception -> {
+              assertThat(exception.status()).isEqualTo(409);
+              assertThat(exception.category()).isEqualTo("CONFLICT");
+            });
+    assertThat(refundCount(paid.orderId())).isZero();
+    assertThat(actionReceiptCount(pending.pendingActionId())).isZero();
+    assertThat(pendingState(pending.pendingActionId()).subList(0, 2))
+        .containsExactly("PREPARED", "1");
+  }
 
   @Test
   void directApiEnforcesIdentityIdempotencyEligibilityAndCumulativeAmount() throws Exception {
@@ -281,11 +906,12 @@ class RefundIntegrationTest {
     RefundRepository failAtOutbox =
         new RefundRepository(jdbc, objectMapper) {
           @Override
-          public void insertOutbox(RefundRecord refund, String eventType, long version) {
+          public OutboxIdentity insertOutbox(
+              RefundRecord refund, String eventType, long version, Instant occurredAt) {
             if ("REFUND_SUCCEEDED".equals(eventType)) {
               throw new IllegalStateException("controlled failure after refund ledger");
             }
-            super.insertOutbox(refund, eventType, version);
+            return super.insertOutbox(refund, eventType, version, occurredAt);
           }
         };
     RefundService failing = service(failAtOutbox);
@@ -306,11 +932,12 @@ class RefundIntegrationTest {
     RefundRepository failRequestOutbox =
         new RefundRepository(jdbc, objectMapper) {
           @Override
-          public void insertOutbox(RefundRecord refund, String eventType, long version) {
+          public OutboxIdentity insertOutbox(
+              RefundRecord refund, String eventType, long version, Instant occurredAt) {
             if ("REFUND_REQUESTED".equals(eventType)) {
               throw new IllegalStateException("controlled failure after refund insert");
             }
-            super.insertOutbox(refund, eventType, version);
+            return super.insertOutbox(refund, eventType, version, occurredAt);
           }
         };
     assertThatThrownBy(
@@ -426,12 +1053,14 @@ class RefundIntegrationTest {
     RefundRepository pausedSuccessRepository =
         new RefundRepository(jdbc, objectMapper) {
           @Override
-          public void insertOutbox(RefundRecord current, String eventType, long version) {
-            super.insertOutbox(current, eventType, version);
+          public OutboxIdentity insertOutbox(
+              RefundRecord current, String eventType, long version, Instant occurredAt) {
+            OutboxIdentity outbox = super.insertOutbox(current, eventType, version, occurredAt);
             if ("REFUND_SUCCEEDED".equals(eventType)) {
               successReadyToCommit.countDown();
               awaitLatch(releaseSuccessCommit, "Concurrent refund success was not released");
             }
+            return outbox;
           }
         };
 
@@ -767,6 +1396,69 @@ class RefundIntegrationTest {
     }
   }
 
+  private ActionReceiptView concurrentConfirm(
+      CountDownLatch ready,
+      CountDownLatch release,
+      ActionRequestContext context,
+      String pendingActionId) {
+    ready.countDown();
+    try {
+      if (!release.await(10, TimeUnit.SECONDS)) {
+        throw new IllegalStateException("Action confirmation race was not released");
+      }
+      return actions.confirm(context, pendingActionId);
+    } catch (InterruptedException exception) {
+      Thread.currentThread().interrupt();
+      throw new IllegalStateException("Action confirmation race was interrupted", exception);
+    }
+  }
+
+  private ResponseEntity<JsonNode> prepareAction(
+      String token,
+      String session,
+      String traceId,
+      String turnId,
+      String sandboxId,
+      Map<String, Object> body) {
+    HttpHeaders headers = actionHeaders(token, session, traceId, turnId, sandboxId);
+    return http.exchange(
+        "/internal/tools/actions/prepare",
+        HttpMethod.POST,
+        new HttpEntity<>(body, headers),
+        JsonNode.class);
+  }
+
+  private ResponseEntity<JsonNode> confirmAction(
+      String token,
+      String session,
+      String traceId,
+      String turnId,
+      String sandboxId,
+      String pendingActionId,
+      Map<String, Object> body) {
+    HttpHeaders headers = actionHeaders(token, session, traceId, turnId, sandboxId);
+    return http.exchange(
+        "/internal/tools/actions/" + pendingActionId + "/confirm",
+        HttpMethod.POST,
+        new HttpEntity<>(body, headers),
+        JsonNode.class);
+  }
+
+  private static HttpHeaders actionHeaders(
+      String token, String session, String traceId, String turnId, String sandboxId) {
+    HttpHeaders headers = new HttpHeaders();
+    if (token != null) {
+      headers.setBearerAuth(token);
+    }
+    headers.set("X-Support-Session-Id", session);
+    headers.set("X-Agent-Trace-Id", traceId);
+    headers.set("X-Agent-Turn-Id", turnId);
+    if (sandboxId != null) {
+      headers.set("X-Eval-Sandbox-Id", sandboxId);
+    }
+    return headers;
+  }
+
   private static void awaitLatch(CountDownLatch latch, String message) {
     try {
       if (!latch.await(10, TimeUnit.SECONDS)) {
@@ -875,6 +1567,68 @@ class RefundIntegrationTest {
     return count == null ? 0 : count;
   }
 
+  private long actionReceiptCount(String pendingActionId) {
+    Long count =
+        jdbc.queryForObject(
+            "SELECT COUNT(*) FROM action_receipt WHERE pending_action_id = ?",
+            Long.class,
+            pendingActionId);
+    return count == null ? 0 : count;
+  }
+
+  private String receiptOutboxId(String receiptId) {
+    return jdbc.queryForObject(
+        "SELECT outbox_event_id FROM action_receipt WHERE receipt_id = ?", String.class, receiptId);
+  }
+
+  private JdbcTemplate rootJdbc() {
+    return new JdbcTemplate(
+        new DriverManagerDataSource(
+            required("CATALOG_MYSQL_URL"), "root", required("MYSQL_BOOTSTRAP_PASSWORD")));
+  }
+
+  private static void restoreOutbox(JdbcTemplate target, Map<String, Object> row) {
+    target.update(
+        """
+        INSERT INTO commerce_outbox
+          (event_id, aggregate_type, aggregate_id, aggregate_version, event_type, payload,
+           publication_state, publish_attempts, created_at, published_at)
+        VALUES (?, ?, ?, ?, ?, CAST(? AS JSON), ?, ?, ?, ?)
+        """,
+        row.get("event_id"),
+        row.get("aggregate_type"),
+        row.get("aggregate_id"),
+        row.get("aggregate_version"),
+        row.get("event_type"),
+        row.get("payload").toString(),
+        row.get("publication_state"),
+        row.get("publish_attempts"),
+        row.get("created_at"),
+        row.get("published_at"));
+  }
+
+  private static Object originalOutboxValue(Map<String, Object> row, String column) {
+    Object value = row.get(column);
+    if ("payload".equals(column) && value != null) {
+      return value.toString();
+    }
+    return value;
+  }
+
+  private List<String> pendingState(String pendingActionId) {
+    return jdbc.queryForObject(
+        """
+        SELECT state, state_version, consumed_at
+        FROM pending_action WHERE pending_action_id = ?
+        """,
+        (row, index) ->
+            java.util.Arrays.asList(
+                row.getString("state"),
+                row.getString("state_version"),
+                row.getString("consumed_at")),
+        pendingActionId);
+  }
+
   private long movementCount(String orderId, String movementType) {
     Long count =
         jdbc.queryForObject(
@@ -941,6 +1695,34 @@ class RefundIntegrationTest {
     return jwt.serialize();
   }
 
+  private static String signedOboToken(String subject, String session, String scope, String sandbox)
+      throws Exception {
+    Instant now = Instant.now();
+    JWTClaimsSet.Builder claims =
+        new JWTClaimsSet.Builder()
+            .issuer("https://identity.citybuddy.test")
+            .audience("commerce-service")
+            .subject(subject)
+            .claim("user_id", subject)
+            .claim("token_type", "agent_obo")
+            .claim("session", session)
+            .claim("scope", scope)
+            .claim("act", Map.of("azp", "agent-service"))
+            .issueTime(Date.from(now))
+            .notBeforeTime(Date.from(now))
+            .expirationTime(Date.from(now.plusSeconds(300)))
+            .jwtID(UUID.randomUUID().toString());
+    if (sandbox != null) {
+      claims.claim("sandbox", sandbox);
+    }
+    SignedJWT jwt =
+        new SignedJWT(
+            new JWSHeader.Builder(JWSAlgorithm.RS256).keyID("catalog-current").build(),
+            claims.build());
+    jwt.sign(new RSASSASigner(testSigningPrivateKey()));
+    return jwt.serialize();
+  }
+
   private static RSAPrivateKey testSigningPrivateKey() throws Exception {
     String pem = Files.readString(Path.of(required("CATALOG_TEST_SIGNING_PRIVATE_KEY_PATH")));
     String encoded =
@@ -968,6 +1750,8 @@ class RefundIntegrationTest {
       MockPaymentCallbackRequest callback) {}
 
   private record RawRefund(String refundId, String attemptId) {}
+
+  private record ColumnCorruption(String column, Object value) {}
 
   private record SeckillFixture(
       String orderId, String productId, String activityId, SeckillTimeoutMessage timeout) {}
