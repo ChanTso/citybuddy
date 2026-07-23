@@ -734,9 +734,12 @@ def test_candidate_sync_markers_equal_committed_broker_journal_face() -> None:
         {"_id": f"__sync_event__:{event.event_id}", "_source": marker},
     ]
     client.responses["/knowledge_docs_v2/_search"] = response(exact_hits)
-    assert client._candidate_public_documents(  # noqa: SLF001
-        "knowledge_docs_v2", (event,)
-    ) == {}
+    assert (
+        client._candidate_public_documents(  # noqa: SLF001
+            "knowledge_docs_v2", (event,)
+        )
+        == {}
+    )
 
     with pytest.raises(KnowledgeRebuildError, match="candidate_commitment_mismatch"):
         client._candidate_public_documents("knowledge_docs_v2", ())  # noqa: SLF001
