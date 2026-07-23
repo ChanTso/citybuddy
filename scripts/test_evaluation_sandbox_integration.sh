@@ -2348,7 +2348,7 @@ assert_status 201 "active sandbox prepares one exact refund action" \
 payment_pending_confirm="$(uv run python scripts/read_json_field.py "$tmp_dir/http-response.json" pendingActionId)"
 action_refund_outbox_before="$(mysql_query commerce_app "$commerce_app_password" commerce_db \
   "SELECT COUNT(*) FROM commerce_outbox WHERE aggregate_type = 'REFUND'")"
-assert_action_sandbox_fault_has_no_effects() {
+assert_action_truth_fault_has_no_effects() {
   local label="$1"
   local actual
   actual="$(mysql_query commerce_app "$commerce_app_password" commerce_db \
@@ -2362,11 +2362,11 @@ assert_action_sandbox_fault_has_no_effects() {
           WHERE pending_action_id = '$payment_pending_confirm'), ':',
        (SELECT COUNT(*) FROM commerce_outbox WHERE aggregate_type = 'REFUND'))")"
   if [[ "$actual" != "PREPARED:0:0:0:$action_refund_outbox_before" ]]; then
-    echo "Action sandbox fault wrote durable effects for $label: $actual" >&2
+    echo "Action truth fault wrote durable effects for $label: $actual" >&2
     exit 1
   fi
 }
-assert_action_sandbox_fault_rejected() {
+assert_action_truth_fault_rejected() {
   local label="$1"
   assert_status 409 "$label rejects without action effects" \
     --request POST "http://127.0.0.1:$commerce_port/internal/tools/actions/$payment_pending_confirm/confirm" \
@@ -2375,28 +2375,48 @@ assert_action_sandbox_fault_rejected() {
     --header 'X-Agent-Trace-Id: payment-action-trace' \
     --header "X-Agent-Turn-Id: $action_turn_confirm" \
     --header 'X-Eval-Sandbox-Id: sandbox-payment'
-  assert_action_sandbox_fault_has_no_effects "$label"
+  assert_action_truth_fault_has_no_effects "$label"
 }
 mysql_query root "$root_password" commerce_db \
   "UPDATE standard_order SET sandbox_id = 'sandbox-main' WHERE order_id = '$payment_order_id'"
-assert_action_sandbox_fault_rejected "cross-sandbox order truth"
+assert_action_truth_fault_rejected "cross-sandbox order truth"
 mysql_query root "$root_password" commerce_db \
   "UPDATE standard_order SET sandbox_id = 'sandbox-payment' WHERE order_id = '$payment_order_id'"
 mysql_query root "$root_password" commerce_db \
   "UPDATE mock_payment_attempt SET sandbox_id = 'sandbox-main' WHERE attempt_id = '$payment_attempt_id'"
-assert_action_sandbox_fault_rejected "cross-sandbox payment attempt truth"
+assert_action_truth_fault_rejected "cross-sandbox payment attempt truth"
 mysql_query root "$root_password" commerce_db \
   "UPDATE mock_payment_attempt SET sandbox_id = 'sandbox-payment' WHERE attempt_id = '$payment_attempt_id'"
 mysql_query root "$root_password" commerce_db \
   "UPDATE mock_payment_callback SET sandbox_id = 'sandbox-main' WHERE attempt_id = '$payment_attempt_id'"
-assert_action_sandbox_fault_rejected "cross-sandbox callback truth"
+assert_action_truth_fault_rejected "cross-sandbox callback truth"
 mysql_query root "$root_password" commerce_db \
   "UPDATE mock_payment_callback SET sandbox_id = 'sandbox-payment' WHERE attempt_id = '$payment_attempt_id'"
 mysql_query root "$root_password" commerce_db \
   "UPDATE inventory_ledger SET sandbox_id = 'sandbox-main' WHERE business_event_key = 'mock-payment:$payment_attempt_id'"
-assert_action_sandbox_fault_rejected "cross-sandbox payment ledger truth"
+assert_action_truth_fault_rejected "cross-sandbox payment ledger truth"
 mysql_query root "$root_password" commerce_db \
   "UPDATE inventory_ledger SET sandbox_id = 'sandbox-payment' WHERE business_event_key = 'mock-payment:$payment_attempt_id'"
+mysql_query root "$root_password" commerce_db \
+  "UPDATE mock_payment_attempt SET intent_hash = REPEAT('f', 64) WHERE attempt_id = '$payment_attempt_id'"
+assert_action_truth_fault_rejected "corrupted payment attempt intent commitment"
+mysql_query root "$root_password" commerce_db \
+  "UPDATE mock_payment_attempt SET intent_hash = '$payment_attempt_intent_hash' WHERE attempt_id = '$payment_attempt_id'"
+mysql_query root "$root_password" commerce_db \
+  "UPDATE mock_payment_callback SET intent_hash = REPEAT('f', 64) WHERE attempt_id = '$payment_attempt_id'"
+assert_action_truth_fault_rejected "corrupted callback intent commitment"
+mysql_query root "$root_password" commerce_db \
+  "UPDATE mock_payment_callback SET intent_hash = '$payment_intent_hash' WHERE attempt_id = '$payment_attempt_id'"
+mysql_query root "$root_password" commerce_db \
+  "UPDATE mock_payment_attempt SET succeeded_at = DATE_ADD(succeeded_at, INTERVAL 1 SECOND) WHERE attempt_id = '$payment_attempt_id'"
+assert_action_truth_fault_rejected "payment attempt event time contradicts callback"
+mysql_query root "$root_password" commerce_db \
+  "UPDATE mock_payment_attempt SET succeeded_at = '$payment_audit_created_at' WHERE attempt_id = '$payment_attempt_id'"
+mysql_query root "$root_password" commerce_db \
+  "UPDATE mock_payment_callback SET created_at = DATE_ADD(created_at, INTERVAL 1 SECOND) WHERE attempt_id = '$payment_attempt_id'"
+assert_action_truth_fault_rejected "callback event time contradicts payment attempt"
+mysql_query root "$root_password" commerce_db \
+  "UPDATE mock_payment_callback SET created_at = '$payment_audit_created_at' WHERE attempt_id = '$payment_attempt_id'"
 assert_status 403 "sandbox claim and header substitution fail closed for actions" \
   --request POST "http://127.0.0.1:$commerce_port/internal/tools/actions/prepare" \
   --header "Authorization: Bearer $payment_action_token" \

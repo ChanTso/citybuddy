@@ -333,6 +333,7 @@ class RefundIntegrationTest {
 
     refunds.markProcessing(refundId);
     refunds.succeed(refundId);
+    assertThat(payments.callback(paid.callbackKey(), paid.callback()).replayed()).isTrue();
     ResponseEntity<JsonNode> replayAfterRefundCompletion =
         confirmAction(token, "action-session", traceId, turnId, null, pendingActionId, null);
     assertThat(replayAfterRefundCompletion.getStatusCode()).isEqualTo(HttpStatus.OK);
@@ -398,6 +399,70 @@ class RefundIntegrationTest {
         .rootCause()
         .isInstanceOfSatisfying(
             SQLException.class, exception -> assertThat(exception.getErrorCode()).isEqualTo(1142));
+  }
+
+  @Test
+  void actionCommitUsesOneClampedEventTimeWhenTheClockMovesBackward() {
+    PaidFixture paid = seedPaidStandard(950, "action-clock-rollback");
+    String turnId = UUID.randomUUID().toString();
+    ActionRequestContext context =
+        new ActionRequestContext(
+            USER,
+            "action-clock-rollback-session",
+            "action-clock-rollback-trace",
+            turnId,
+            null,
+            "refund:create");
+    Instant preparedAt = Instant.now().truncatedTo(ChronoUnit.MICROS);
+    Clock nonMonotonicClock =
+        new Clock() {
+          private final java.util.concurrent.atomic.AtomicInteger reads =
+              new java.util.concurrent.atomic.AtomicInteger();
+
+          @Override
+          public java.time.ZoneId getZone() {
+            return java.time.ZoneOffset.UTC;
+          }
+
+          @Override
+          public Clock withZone(java.time.ZoneId zone) {
+            return this;
+          }
+
+          @Override
+          public Instant instant() {
+            return reads.getAndIncrement() == 0 ? preparedAt : preparedAt.minusSeconds(30);
+          }
+        };
+    ActionService service =
+        new ActionService(
+            actionRepository,
+            refunds,
+            transactionTemplate(),
+            new ActionProperties("refund:create", java.time.Duration.ofMinutes(15), 3, 1),
+            nonMonotonicClock,
+            sandboxAccess);
+
+    PendingActionView pending =
+        service.prepare(
+            context, new PrepareActionCommand("REFUND_REQUEST", paid.orderId(), 450L, "AUD"));
+    ActionReceiptView receipt = service.confirm(context, pending.pendingActionId());
+    ActionReceiptView replay = service.confirm(context, pending.pendingActionId());
+    Instant outboxCreatedAt =
+        jdbc.queryForObject(
+                "SELECT created_at FROM commerce_outbox WHERE event_id = ?",
+                java.sql.Timestamp.class,
+                receiptOutboxId(receipt.receiptId()))
+            .toInstant();
+
+    assertThat(receipt.committedAt()).isEqualTo(preparedAt);
+    assertThat(outboxCreatedAt).isEqualTo(receipt.committedAt());
+    assertThat(replay.receiptId()).isEqualTo(receipt.receiptId());
+    assertThat(replay.committedAt()).isEqualTo(receipt.committedAt());
+    assertThat(replay.replayed()).isTrue();
+    assertThat(refundCount(paid.orderId())).isOne();
+    assertThat(refundOutboxCount(receipt.refundId())).isOne();
+    assertThat(actionReceiptCount(pending.pendingActionId())).isOne();
   }
 
   @Test

@@ -1,6 +1,7 @@
 package io.citybuddy.commerce.refund;
 
 import io.citybuddy.commerce.payment.MockPaymentRepository;
+import io.citybuddy.commerce.payment.MockPaymentTruthValidator;
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
 import java.time.Clock;
@@ -22,6 +23,7 @@ public final class RefundService {
 
   private final RefundRepository refunds;
   private final MockPaymentRepository payments;
+  private final MockPaymentTruthValidator paymentTruth;
   private final TransactionTemplate transactions;
   private final Clock clock;
 
@@ -32,6 +34,7 @@ public final class RefundService {
       Clock clock) {
     this.refunds = refunds;
     this.payments = payments;
+    this.paymentTruth = new MockPaymentTruthValidator(payments);
     this.transactions = transactions;
     this.clock = clock;
   }
@@ -67,7 +70,8 @@ public final class RefundService {
       String orderId,
       String idempotencyKey,
       RefundRequest request,
-      String expectedSandboxId) {
+      String expectedSandboxId,
+      java.time.Instant occurredAt) {
     requireText(userSubject, 128, "Validated refund owner is missing");
     requireUuid(orderId, "Refund order id is invalid");
     requireIdempotency(idempotencyKey);
@@ -75,7 +79,14 @@ public final class RefundService {
     String intentHash = hash(orderId + "\n" + valid.amountMinor() + "\n" + valid.currency());
     RefundMutation mutation =
         requestOnce(
-            userSubject, orderId, idempotencyKey, valid, intentHash, expectedSandboxId, true);
+            userSubject,
+            orderId,
+            idempotencyKey,
+            valid,
+            intentHash,
+            expectedSandboxId,
+            true,
+            java.util.Objects.requireNonNull(occurredAt, "Action occurrence time is missing"));
     return new ActionMutation(mutation.refund(), mutation.outbox());
   }
 
@@ -146,7 +157,15 @@ public final class RefundService {
       String idempotencyKey,
       RefundRequest request,
       String intentHash) {
-    return requestOnce(userSubject, orderId, idempotencyKey, request, intentHash, null, false);
+    return requestOnce(
+        userSubject,
+        orderId,
+        idempotencyKey,
+        request,
+        intentHash,
+        null,
+        false,
+        clock.instant().truncatedTo(java.time.temporal.ChronoUnit.MICROS));
   }
 
   private RefundMutation requestOnce(
@@ -156,7 +175,8 @@ public final class RefundService {
       RefundRequest request,
       String intentHash,
       String expectedSandboxId,
-      boolean enforceActionSandbox) {
+      boolean enforceActionSandbox,
+      java.time.Instant occurredAt) {
     ActionTarget target =
         resolveActionTarget(userSubject, orderId, request, expectedSandboxId, enforceActionSandbox);
     MockPaymentRepository.AttemptRecord attempt = target.attempt();
@@ -183,11 +203,7 @@ public final class RefundService {
             request.currency());
     refunds.insertRefund(created);
     RefundRepository.OutboxIdentity outbox =
-        refunds.insertOutbox(
-            created,
-            "REFUND_REQUESTED",
-            1,
-            clock.instant().truncatedTo(java.time.temporal.ChronoUnit.MICROS));
+        refunds.insertOutbox(created, "REFUND_REQUESTED", 1, occurredAt);
     return new RefundMutation(result(created, false), outbox);
   }
 
@@ -467,15 +483,11 @@ public final class RefundService {
         || !attempt.currency().equals(order.currency())) {
       throw new IllegalStateException("Payment conflicts with refund order truth");
     }
-    if (!"SUCCEEDED".equals(attempt.state())
-        || attempt.stateVersion() != 2
-        || !"PAID".equals(order.status())
-        || order.stateVersion() != 2
-        || !hasMatchingCallback(attempt)
-        || !matchesPaymentMovement(
-            refunds.findMovement("mock-payment:" + attempt.attemptId()).orElse(null),
-            attempt,
-            order)) {
+    try {
+      if (!paymentTruth.requireSucceededTruth(attempt).equals(order)) {
+        throw new IllegalStateException("Payment order truth changed during refund validation");
+      }
+    } catch (IllegalStateException exception) {
       throw conflict("Order has no eligible successful payment");
     }
   }

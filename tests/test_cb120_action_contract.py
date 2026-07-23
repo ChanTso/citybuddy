@@ -67,3 +67,28 @@ def test_openapi_exposes_only_closed_prepare_and_confirm_shapes() -> None:
     receipt = document["components"]["schemas"]["ActionReceipt"]
     assert receipt["additionalProperties"] is False
     assert receipt["properties"]["status"]["const"] == "REQUESTED"
+
+
+def test_action_refund_reuses_payment_truth_and_one_transaction_event_time() -> None:
+    payment = source(
+        "commerce-service/src/main/java/io/citybuddy/commerce/payment/MockPaymentService.java"
+    )
+    validator = source(
+        "commerce-service/src/main/java/io/citybuddy/commerce/payment/MockPaymentTruthValidator.java"
+    )
+    refund = source(
+        "commerce-service/src/main/java/io/citybuddy/commerce/refund/RefundService.java"
+    )
+    action = source(
+        "commerce-service/src/main/java/io/citybuddy/commerce/action/ActionService.java"
+    )
+    assert "new MockPaymentTruthValidator(repository)" in payment
+    assert "new MockPaymentTruthValidator(payments)" in refund
+    assert "truth.requireSucceededTruth(attempt)" in payment
+    assert "paymentTruth.requireSucceededTruth(attempt)" in refund
+    assert "requireZeroEvaluationRefundAccumulator" not in validator
+    assert "attempt.sandboxId() != null && attempt.refundedAmountMinor() != 0" in payment
+    assert "refundedAmountMinor()" not in validator
+    assert "requestActionInCurrentTransaction(" in action
+    assert "context.sandboxId(),\n                    committedAt" in action
+    assert action.count("Instant observedNow = clock.instant();") == 1

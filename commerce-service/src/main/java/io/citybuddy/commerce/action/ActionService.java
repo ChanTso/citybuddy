@@ -231,9 +231,14 @@ public final class ActionService {
     if (!pending.createdAt().plus(properties.pendingTtl()).equals(pending.expiresAt())) {
       throw integrityFailure("PendingAction expiry commitment is malformed");
     }
-    if (!clock.instant().isBefore(pending.expiresAt())) {
+    Instant observedNow = clock.instant();
+    if (!observedNow.isBefore(pending.expiresAt())) {
       throw conflict("PendingAction is expired");
     }
+    Instant committedAt =
+        latest(
+            observedNow.truncatedTo(ChronoUnit.MICROS),
+            pending.createdAt().truncatedTo(ChronoUnit.MICROS));
     requireActiveSandbox(context.sandboxId());
     RefundService.ActionTarget target =
         integrity(
@@ -254,7 +259,8 @@ public final class ActionService {
                     pending.orderId(),
                     refundKey,
                     new RefundRequest(pending.amountMinor(), pending.currency(), null),
-                    context.sandboxId()));
+                    context.sandboxId(),
+                    committedAt));
     RefundResult refund = mutation.refund();
     if (refund.replayed()) {
       throw integrityFailure("Prepared PendingAction points to an existing refund result");
@@ -265,7 +271,6 @@ public final class ActionService {
             .orElseThrow(() -> integrityFailure("Action refund Outbox truth is missing"));
     requireOutbox(outbox, refund);
 
-    Instant committedAt = clock.instant().truncatedTo(ChronoUnit.MICROS);
     actions.consume(pending, committedAt);
     String receiptId = UUID.randomUUID().toString();
     String receiptKey = ActionCanonical.hash("ACTION_RECEIPT", pending.actionIdempotencyKey());
@@ -710,6 +715,10 @@ public final class ActionService {
 
   private static String nullToEmpty(String value) {
     return value == null ? "" : value;
+  }
+
+  private static Instant latest(Instant left, Instant right) {
+    return left.isBefore(right) ? right : left;
   }
 
   private static ActionException validation(String message) {
