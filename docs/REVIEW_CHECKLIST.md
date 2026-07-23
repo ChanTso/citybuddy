@@ -59,6 +59,9 @@ request. A later semantic diff change requires the checklist to be executed and 
 - Exercise a class-based malformed-input battery, including raw and decoded non-ASCII, invalid
   encoding, missing structure, wrong primitive types, bounds, control bytes, and nulls where the
   protocol permits them to reach the parser.
+- For JSON from an untrusted dependency, reject duplicate object keys at the decoder boundary.
+  A later schema check cannot recover the overwritten first value once a permissive decoder has
+  accepted the duplicate. Apply the same duplicate-key hook to success and error responses.
 
 ### Bounds apply before materialization
 
@@ -69,6 +72,23 @@ request. A later semantic diff change requires the checklist to be executed and 
 - Exercise the production acquisition path with more underlying rows/items than the configured
   maximum. Confirm the fetch itself remains bounded, the response or state transition is rejected,
   and no prefix is misreported as a complete snapshot.
+- Elasticsearch search evidence must require an object-valued `hits.total` with
+  `relation == "eq"`. A `gte` relation is a lower bound, not an exact set/count commitment. For a
+  deliberately bounded top-k query the exact total may exceed returned hits; for a complete
+  candidate enumeration it must equal the materialized set under the explicit `maximum + 1` cap.
+
+### Projection marker and owner-journal set equality
+
+- Enumerate owner snapshot truth, accepted Broker journal events, and candidate control markers as
+  independent faces. First classify which journal events are covered by the captured owner
+  snapshot; then require the candidate `SYNC_EVENT` stable event-id set to equal that covered journal
+  set and compare every marker content field to the canonical event commitment. Marker shape
+  validity is only a local assertion and cannot establish membership.
+- Materialize every owner-covered accepted event before candidate validation, including stale
+  historical versions whose public document is already newer. Exercise real deletion of an expected
+  marker and insertion of a shape-valid orphan marker; both must fail validation. Future journal
+  events not yet visible in the owner snapshot remain unacknowledged and outside the committed set,
+  never silently promoted to owner truth.
 
 ### One total-order contract in all three places
 
@@ -399,6 +419,12 @@ At each slice or authorized non-slice closeout, append every newly evidenced rec
 class that is not already covered above. Do not weaken or delete an existing check merely because
 the current slice is unaffected. When the available evidence contains no new class, record that
 explicit conclusion in the pull request rather than adding a placeholder checklist entry.
+
+For a pure internal evaluation/audit/state surface, an owner-approved closeout boundary may be the
+Cartesian product of mechanically enumerable ground truths plus an explicit residual-risk record.
+That boundary must name every included axis and excluded unbounded dimension. It does not apply to
+transaction messages, inventory consistency, identity authorization, idempotent ordering, or other
+business-core paths, whose established strict evidence remains blocking.
 
 For any conditionally enabled test class used as acceptance or rejection evidence, inspect the
 runner report rather than trusting process exit zero. Record the executed and skipped counts, and

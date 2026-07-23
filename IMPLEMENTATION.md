@@ -78,6 +78,12 @@ Cross-slice target architecture, preflight conclusions, service/data ownership, 
 
 ## Complete route
 
+The owner-approved continuous P0/P1 route terminates at `CB-152`. `CB-900`, `CB-910`, and `CB-920`
+remain deferred outlines outside this Goal and must not be promoted, expanded, or used to create
+post-`CB-152` work. `CB-150` retains its minimal optional no-op trace-sink scope, and `CB-152` must
+close with real load, latency, and quality evidence measured and environment-labelled in the local
+Docker Compose topology.
+
 The linked slice name is the canonical detailed specification. Target outcomes are retained separately in the [route outcome catalog](docs/CONTRACTS.md#contracts-route-outcomes).
 
 | Slice | Priority | State | Depends on |

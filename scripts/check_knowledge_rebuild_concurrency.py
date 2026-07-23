@@ -13,7 +13,11 @@ from urllib.parse import quote
 from urllib.request import Request, urlopen
 from uuid import UUID, uuid4
 
-from citybuddy_indexer.incremental import EVENT_TAG, FaqKnowledgeEvent
+from citybuddy_indexer.incremental import (
+    EVENT_TAG,
+    ElasticsearchKnowledgeProjection,
+    FaqKnowledgeEvent,
+)
 from citybuddy_indexer.rebuild import (
     ElasticsearchRebuildClient,
     KnowledgeRebuildCoordinator,
@@ -172,8 +176,13 @@ class PhaseHookClient(ElasticsearchRebuildClient):
         if self._phase == "load":
             self._source.advance()
 
-    def validate_candidate(self, candidate: str, selected: KnowledgeSnapshot) -> None:
-        super().validate_candidate(candidate, selected)
+    def validate_candidate(
+        self,
+        candidate: str,
+        selected: KnowledgeSnapshot,
+        accepted_events: tuple[FaqKnowledgeEvent, ...],
+    ) -> None:
+        super().validate_candidate(candidate, selected, accepted_events)
         self._validation_calls += 1
         if self._phase == "validation" and self._validation_calls == 1:
             self._source.advance()
@@ -384,6 +393,45 @@ def main() -> None:
                     assert status == 200 and result.predecessor in predecessor
                     current = updated
                     cells += 1
+
+            committed_events = journal.events()
+            assert committed_events
+            current_alias = result.candidate
+            missing_event = committed_events[0]
+            missing_marker_id = f"__sync_event__:{missing_event.event_id}"
+            client._request(  # noqa: SLF001
+                "DELETE",
+                f"/{quote(current_alias)}/_doc/{quote(missing_marker_id, safe='')}?refresh=true",
+            )
+            try:
+                client.validate_candidate(current_alias, current, committed_events)
+            except KnowledgeRebuildError as error:
+                assert error.code == "candidate_commitment_mismatch"
+            else:
+                raise AssertionError("Missing Broker-journal marker was not rejected")
+            client.apply_event(current_alias, missing_event)
+
+            orphan_payload = accepted_event_payload(committed_events[-1])
+            orphan_payload["eventId"] = str(uuid4())
+            orphan = FaqKnowledgeEvent.from_bytes(canonical(orphan_payload))
+            orphan_marker_id = f"__sync_event__:{orphan.event_id}"
+            client._request(  # noqa: SLF001
+                "PUT",
+                f"/{quote(current_alias)}/_doc/{quote(orphan_marker_id, safe='')}?refresh=true",
+                ElasticsearchKnowledgeProjection._marker_source(orphan),  # noqa: SLF001
+            )
+            try:
+                client.validate_candidate(current_alias, current, committed_events)
+            except KnowledgeRebuildError as error:
+                assert error.code == "candidate_commitment_mismatch"
+            else:
+                raise AssertionError("Orphan Broker-journal marker was not rejected")
+            client._request(  # noqa: SLF001
+                "DELETE",
+                f"/{quote(current_alias)}/_doc/{quote(orphan_marker_id, safe='')}?refresh=true",
+            )
+            client.validate_candidate(current_alias, current, committed_events)
+            fail_closed_scenarios += 2
 
         for after_action in (False, True):
             current_alias = next(

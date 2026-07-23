@@ -12,6 +12,7 @@ import citybuddy_indexer.rebuild_runtime as rebuild_runtime_module
 import pytest
 from citybuddy_indexer.incremental import (
     RESERVED_SANDBOX_PROPERTY,
+    ElasticsearchKnowledgeProjection,
     FaqKnowledgeEvent,
     ProjectionOutcome,
 )
@@ -300,7 +301,13 @@ class Elasticsearch:
         self.calls.append(("event", (event.source_id, event.source_version)))
         return ProjectionOutcome.APPLIED
 
-    def validate_candidate(self, candidate: str, selected: KnowledgeSnapshot) -> None:
+    def validate_candidate(
+        self,
+        candidate: str,
+        selected: KnowledgeSnapshot,
+        accepted_events: tuple[FaqKnowledgeEvent, ...],
+    ) -> None:
+        del candidate, accepted_events
         self.calls.append(("validate", selected.watermark))
 
     def prepare_switch(
@@ -373,10 +380,12 @@ def test_coordinator_replays_every_contiguous_version_before_switch() -> None:
         source, Journal(events)
     )
 
-    assert [value for name, value in elasticsearch.calls if name == "event"] == [
+    replayed = [value for name, value in elasticsearch.calls if name == "event"]
+    assert list(dict.fromkeys(replayed)) == [
         ("faq-refund-policy", 2),
         ("faq-refund-policy", 3),
     ]
+    assert replayed.index(("faq-refund-policy", 2)) < replayed.index(("faq-refund-policy", 3))
 
 
 def test_event_accepted_in_alias_window_is_applied_before_success() -> None:
@@ -467,7 +476,7 @@ def test_equal_version_broker_event_must_match_owner_snapshot() -> None:
     event = snapshot([contradictory]).records[0].as_faq_event()
 
     with pytest.raises(KnowledgeRebuildError, match="catch_up_snapshot_mismatch"):
-        KnowledgeRebuildCoordinator._reject_uncommitted_events(owner, (event,))
+        KnowledgeRebuildCoordinator._committed_events(owner, (event,))
 
 
 def event_bytes(record: dict[str, object]) -> bytes:
@@ -654,7 +663,7 @@ def test_candidate_validation_enumerates_all_documents_before_classification() -
             "timed_out": False,
             "_shards": {"total": 1, "successful": 1, "failed": 0},
             "hits": {
-                "total": {"value": 1},
+                "total": {"value": 1, "relation": "eq"},
                 "hits": [{"_id": "hidden-record", "_source": public}],
             },
         },
@@ -697,3 +706,79 @@ def test_candidate_search_rejects_timeout_or_partial_shards(
 
     with pytest.raises(KnowledgeRebuildError, match=code):
         client._candidate_public_documents("knowledge_docs_v2")  # noqa: SLF001
+
+
+def test_candidate_sync_markers_equal_committed_broker_journal_face() -> None:
+    client = RecordingClient()
+    event = snapshot([faq_record()]).records[0].as_faq_event()
+    marker = ElasticsearchKnowledgeProjection._marker_source(event)  # noqa: SLF001
+    control = marker.copy()
+    control["sync_record_type"] = "REBUILD_SWITCH"
+    client.records["knowledge_docs_v2"] = {"state": "BUILDING"}
+
+    def response(hits: list[dict[str, object]]) -> tuple[int, dict[str, object]]:
+        return (
+            200,
+            {
+                "timed_out": False,
+                "_shards": {"total": 1, "successful": 1, "failed": 0},
+                "hits": {
+                    "total": {"value": len(hits), "relation": "eq"},
+                    "hits": hits,
+                },
+            },
+        )
+
+    exact_hits: list[dict[str, object]] = [
+        {"_id": "__rebuild_switch__", "_source": control},
+        {"_id": f"__sync_event__:{event.event_id}", "_source": marker},
+    ]
+    client.responses["/knowledge_docs_v2/_search"] = response(exact_hits)
+    assert client._candidate_public_documents(  # noqa: SLF001
+        "knowledge_docs_v2", (event,)
+    ) == {}
+
+    with pytest.raises(KnowledgeRebuildError, match="candidate_commitment_mismatch"):
+        client._candidate_public_documents("knowledge_docs_v2", ())  # noqa: SLF001
+
+    client.responses["/knowledge_docs_v2/_search"] = response(exact_hits[:1])
+    with pytest.raises(KnowledgeRebuildError, match="candidate_commitment_mismatch"):
+        client._candidate_public_documents("knowledge_docs_v2", (event,))  # noqa: SLF001
+
+
+def test_search_requires_exact_total_relation() -> None:
+    client = RecordingClient()
+    client.responses["/knowledge_docs_v2/_search"] = (
+        200,
+        {
+            "timed_out": False,
+            "_shards": {"total": 1, "successful": 1, "failed": 0},
+            "hits": {"total": {"value": 0, "relation": "gte"}, "hits": []},
+        },
+    )
+
+    with pytest.raises(KnowledgeRebuildError, match="malformed_elasticsearch_response"):
+        client._search_ids("knowledge_docs_v2", {"size": 8})  # noqa: SLF001
+
+
+def test_elasticsearch_json_response_rejects_duplicate_keys(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class Response:
+        status = 200
+
+        def __enter__(self) -> object:
+            return self
+
+        def __exit__(self, *_: object) -> None:
+            return None
+
+        def read(self, _maximum: int) -> bytes:
+            return b'{"acknowledged":true,"acknowledged":false}'
+
+    monkeypatch.setattr(rebuild_module, "urlopen", lambda *_args, **_kwargs: Response())
+
+    with pytest.raises(KnowledgeRebuildError, match="malformed_elasticsearch_response"):
+        ElasticsearchRebuildClient("http://elasticsearch:9200")._request(  # noqa: SLF001
+            "GET", "/knowledge_docs_v1"
+        )

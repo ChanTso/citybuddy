@@ -487,7 +487,12 @@ class RebuildIndex(Protocol):
 
     def apply_event(self, candidate: str, event: FaqKnowledgeEvent) -> ProjectionOutcome: ...
 
-    def validate_candidate(self, candidate: str, snapshot: KnowledgeSnapshot) -> None: ...
+    def validate_candidate(
+        self,
+        candidate: str,
+        snapshot: KnowledgeSnapshot,
+        accepted_events: tuple[FaqKnowledgeEvent, ...],
+    ) -> None: ...
 
     def prepare_switch(
         self,
@@ -577,7 +582,6 @@ class ElasticsearchRebuildClient:
             or record.get("completionWatermark") != initial.watermark
         ):
             return None
-        self.validate_candidate(current, initial)
         handoff = record.get("handoffWatermark")
         lease = record.get("rollbackLeaseExpiresAt")
         if not isinstance(handoff, str) or not isinstance(lease, str):
@@ -684,7 +688,12 @@ class ElasticsearchRebuildClient:
         except KnowledgeSyncError as error:
             raise KnowledgeRebuildError(error.code) from error
 
-    def validate_candidate(self, candidate: str, snapshot: KnowledgeSnapshot) -> None:
+    def validate_candidate(
+        self,
+        candidate: str,
+        snapshot: KnowledgeSnapshot,
+        accepted_events: tuple[FaqKnowledgeEvent, ...],
+    ) -> None:
         self._validate_mapping(candidate)
         self._validate_settings(candidate)
         self._refresh(candidate)
@@ -699,7 +708,7 @@ class ElasticsearchRebuildClient:
             or health.get("unassigned_shards") != 0
         ):
             raise KnowledgeRebuildError("candidate_health_incomplete")
-        actual = self._candidate_public_documents(candidate)
+        actual = self._candidate_public_documents(candidate, accepted_events)
         if actual != snapshot.documents:
             raise KnowledgeRebuildError("candidate_commitment_mismatch")
         if (
@@ -835,7 +844,11 @@ class ElasticsearchRebuildClient:
     def _public_document_count(self, index: str) -> int:
         return len(self._candidate_public_documents(index))
 
-    def _candidate_public_documents(self, index: str) -> dict[str, dict[str, object]]:
+    def _candidate_public_documents(
+        self,
+        index: str,
+        accepted_events: tuple[FaqKnowledgeEvent, ...] | None = None,
+    ) -> dict[str, dict[str, object]]:
         _, response = self._request(
             "POST",
             f"/{quote(index)}/_search",
@@ -850,14 +863,17 @@ class ElasticsearchRebuildClient:
         hits = hits_wrapper.get("hits") if isinstance(hits_wrapper, dict) else None
         total = hits_wrapper.get("total") if isinstance(hits_wrapper, dict) else None
         total_value = total.get("value") if isinstance(total, dict) else None
+        total_relation = total.get("relation") if isinstance(total, dict) else None
         if (
             not isinstance(hits, list)
             or type(total_value) is not int
+            or total_relation != "eq"
             or total_value != len(hits)
             or len(hits) > MAX_CANDIDATE_DOCUMENTS
         ):
             raise KnowledgeRebuildError("malformed_elasticsearch_response")
         documents: dict[str, dict[str, object]] = {}
+        sync_markers: dict[str, dict[str, object]] = {}
         control_records = 0
         for hit in hits:
             document_id = hit.get("_id") if isinstance(hit, dict) else None
@@ -875,6 +891,7 @@ class ElasticsearchRebuildClient:
                 documents[document_id] = cast(dict[str, object], source)
             elif record_type == "SYNC_EVENT":
                 self._validate_sync_marker(document_id, cast(dict[str, object], source))
+                sync_markers[document_id] = cast(dict[str, object], source)
             elif record_type == "REBUILD_SWITCH" and document_id == REBUILD_RECORD_ID:
                 control_records += 1
             else:
@@ -883,7 +900,25 @@ class ElasticsearchRebuildClient:
             raise KnowledgeRebuildError("candidate_public_boundary_violation")
         if self._read_rebuild_record(index) is None:
             raise KnowledgeRebuildError("candidate_public_boundary_violation")
+        if accepted_events is not None:
+            expected_markers = self._expected_sync_markers(accepted_events)
+            if sync_markers != expected_markers:
+                raise KnowledgeRebuildError("candidate_commitment_mismatch")
         return documents
+
+    @staticmethod
+    def _expected_sync_markers(
+        accepted_events: tuple[FaqKnowledgeEvent, ...],
+    ) -> dict[str, dict[str, object]]:
+        expected: dict[str, dict[str, object]] = {}
+        for event in accepted_events:
+            marker_id = f"__sync_event__:{event.event_id}"
+            marker = ElasticsearchKnowledgeProjection._marker_source(event)
+            existing = expected.get(marker_id)
+            if existing is not None and existing != marker:
+                raise KnowledgeRebuildError("conflicting_catch_up_event")
+            expected[marker_id] = marker
+        return expected
 
     @staticmethod
     def _validate_sync_marker(document_id: str, source: dict[str, object]) -> None:
@@ -942,7 +977,17 @@ class ElasticsearchRebuildClient:
         _require_complete_search(response)
         hits_wrapper = response.get("hits")
         hits = hits_wrapper.get("hits") if isinstance(hits_wrapper, dict) else None
-        if not isinstance(hits, list) or len(hits) > 8:
+        total = hits_wrapper.get("total") if isinstance(hits_wrapper, dict) else None
+        total_value = total.get("value") if isinstance(total, dict) else None
+        total_relation = total.get("relation") if isinstance(total, dict) else None
+        if (
+            not isinstance(hits, list)
+            or type(total_value) is not int
+            or total_value < 0
+            or total_relation != "eq"
+            or total_value < len(hits)
+            or len(hits) > 8
+        ):
             raise KnowledgeRebuildError("malformed_elasticsearch_response")
         result: list[str] = []
         for hit in hits:
@@ -1172,8 +1217,8 @@ class ElasticsearchRebuildClient:
         if not body:
             return status, {}
         try:
-            decoded = json.loads(body)
-        except (json.JSONDecodeError, UnicodeDecodeError, RecursionError) as error:
+            decoded = json.loads(body, object_pairs_hook=_unique_object)
+        except (ValueError, UnicodeDecodeError, RecursionError) as error:
             raise KnowledgeRebuildError("malformed_elasticsearch_response") from error
         if not isinstance(decoded, dict):
             raise KnowledgeRebuildError("malformed_elasticsearch_response")
@@ -1198,7 +1243,8 @@ class KnowledgeRebuildCoordinator:
         pending = self._elasticsearch.pending_switch(predecessor)
         if pending is not None:
             self._elasticsearch.load_snapshot(predecessor, initial)
-            self._elasticsearch.validate_candidate(predecessor, initial)
+            accepted = self._catch_up(predecessor, initial, initial, journal)
+            self._elasticsearch.validate_candidate(predecessor, initial, accepted)
             converged = self._post_switch_converge(predecessor, initial, source, journal)
             journal.commit(converged)
             self._elasticsearch.complete_switch(predecessor, converged)
@@ -1212,6 +1258,8 @@ class KnowledgeRebuildCoordinator:
             )
         existing = self._elasticsearch.existing_result(predecessor, initial)
         if existing is not None:
+            accepted = self._catch_up(predecessor, initial, initial, journal)
+            self._elasticsearch.validate_candidate(predecessor, initial, accepted)
             journal.commit(initial)
             return existing
         candidate = self._elasticsearch.candidate_for(predecessor, initial)
@@ -1222,22 +1270,22 @@ class KnowledgeRebuildCoordinator:
         for _ in range(MAX_CATCH_UP_PASSES):
             latest = source.capture()
             self._require_monotonic_capture(current, latest)
-            self._catch_up(candidate, current, latest, journal)
-            self._elasticsearch.validate_candidate(candidate, latest)
+            accepted = self._catch_up(candidate, current, latest, journal)
+            self._elasticsearch.validate_candidate(candidate, latest, accepted)
             confirm = source.capture()
             self._require_monotonic_capture(latest, confirm)
             if confirm.watermark != latest.watermark:
                 current = latest
                 continue
-            self._catch_up(candidate, latest, confirm, journal)
-            self._elasticsearch.validate_candidate(candidate, confirm)
+            accepted = self._catch_up(candidate, latest, confirm, journal)
+            self._elasticsearch.validate_candidate(candidate, confirm, accepted)
             final = source.capture()
             self._require_monotonic_capture(confirm, final)
             if final.watermark != confirm.watermark:
                 current = confirm
                 continue
-            self._catch_up(candidate, confirm, final, journal)
-            self._elasticsearch.validate_candidate(candidate, final)
+            accepted = self._catch_up(candidate, confirm, final, journal)
+            self._elasticsearch.validate_candidate(candidate, final, accepted)
             switch_check = source.capture()
             self._require_monotonic_capture(final, switch_check)
             if switch_check.watermark != final.watermark:
@@ -1249,7 +1297,8 @@ class KnowledgeRebuildCoordinator:
         if handoff is None:
             raise KnowledgeRebuildError("stale_catch_up")
         lease = self._elasticsearch.prepare_switch(candidate, initial, handoff)
-        self._elasticsearch.validate_candidate(candidate, handoff)
+        accepted = self._catch_up(candidate, handoff, handoff, journal)
+        self._elasticsearch.validate_candidate(candidate, handoff, accepted)
         self._elasticsearch.atomic_switch(predecessor, candidate)
         converged = self._post_switch_converge(candidate, handoff, source, journal)
         journal.commit(converged)
@@ -1274,15 +1323,15 @@ class KnowledgeRebuildCoordinator:
         for _ in range(MAX_CATCH_UP_PASSES):
             latest = source.capture()
             self._require_monotonic_capture(current, latest)
-            self._catch_up(candidate, current, latest, journal)
-            self._elasticsearch.validate_candidate(candidate, latest)
+            accepted = self._catch_up(candidate, current, latest, journal)
+            self._elasticsearch.validate_candidate(candidate, latest, accepted)
             confirm = source.capture()
             self._require_monotonic_capture(latest, confirm)
             if confirm.watermark != latest.watermark:
                 current = latest
                 continue
-            self._catch_up(candidate, latest, confirm, journal)
-            self._elasticsearch.validate_candidate(candidate, confirm)
+            accepted = self._catch_up(candidate, latest, confirm, journal)
+            self._elasticsearch.validate_candidate(candidate, confirm, accepted)
             return confirm
         raise KnowledgeRebuildError("stale_after_switch")
 
@@ -1308,10 +1357,11 @@ class KnowledgeRebuildCoordinator:
         previous: KnowledgeSnapshot,
         current: KnowledgeSnapshot,
         journal: AcceptedEventJournal,
-    ) -> None:
+    ) -> tuple[FaqKnowledgeEvent, ...]:
         if current.watermark == previous.watermark:
-            self._reject_uncommitted_events(current, journal.events())
-            return
+            committed = self._committed_events(current, journal.events())
+            self._materialize_committed_events(candidate, committed)
+            return committed
         previous_states = previous.source_states
         current_states = current.source_states
         changed = [
@@ -1329,22 +1379,34 @@ class KnowledgeRebuildCoordinator:
                 raise KnowledgeRebuildError("missing_catch_up_event")
             time.sleep(0.05)
         indexed = _index_events(events)
+        committed = self._committed_events(current, events)
+        self._materialize_committed_events(candidate, committed)
         for source_id in sorted(changed):
             old = previous_states.get(source_id)
             new = current_states[source_id]
             if new.doc_type != "faq":
                 raise KnowledgeRebuildError("unsupported_concurrent_source_change")
             start = 1 if old is None else old.source_version + 1
-            for version in range(start, new.source_version + 1):
-                event = indexed[(source_id, version)]
-                self._elasticsearch.apply_event(candidate, event)
+            if any(
+                (source_id, version) not in indexed
+                for version in range(start, new.source_version + 1)
+            ):
+                raise KnowledgeRebuildError("missing_catch_up_event")
             record = next(record for record in current.records if record.source_id == source_id)
             event = indexed[(source_id, new.source_version)]
             if record.as_projection_source() != ElasticsearchKnowledgeProjection._projection_source(
                 event
             ):
                 raise KnowledgeRebuildError("catch_up_snapshot_mismatch")
-        self._reject_uncommitted_events(current, events)
+        return committed
+
+    def _materialize_committed_events(
+        self,
+        candidate: str,
+        events: tuple[FaqKnowledgeEvent, ...],
+    ) -> None:
+        for event in events:
+            self._elasticsearch.apply_event(candidate, event)
 
     @staticmethod
     def _events_cover(
@@ -1371,11 +1433,13 @@ class KnowledgeRebuildCoordinator:
         return True
 
     @staticmethod
-    def _reject_uncommitted_events(
+    def _committed_events(
         snapshot: KnowledgeSnapshot, events: tuple[FaqKnowledgeEvent, ...]
-    ) -> None:
+    ) -> tuple[FaqKnowledgeEvent, ...]:
+        _index_events(events)
         captured = datetime.fromisoformat(snapshot.captured_at.replace("Z", "+00:00"))
         states = snapshot.source_states
+        committed: list[FaqKnowledgeEvent] = []
         for event in events:
             occurred = datetime.fromisoformat(event.occurred_time.replace("Z", "+00:00"))
             current = states.get(event.source_id)
@@ -1393,6 +1457,11 @@ class KnowledgeRebuildCoordinator:
                 current is None or event.source_version > current.source_version
             ):
                 raise KnowledgeRebuildError("snapshot_behind_accepted_event")
+            if current is not None and event.source_version <= current.source_version:
+                if current.doc_type != "faq":
+                    raise KnowledgeRebuildError("unsupported_concurrent_source_change")
+                committed.append(event)
+        return tuple(committed)
 
 
 def _index_events(
@@ -1435,6 +1504,7 @@ def _require_complete_search(payload: dict[str, Any]) -> None:
 def _bm25(query: str) -> dict[str, object]:
     return {
         "size": 8,
+        "track_total_hits": True,
         "sort": [{"_score": "desc"}, {"source_id": "asc"}, {"chunk_id": "asc"}],
         "query": {
             "bool": {
@@ -1461,6 +1531,7 @@ def _dense(dimension: int) -> dict[str, object]:
     vector[dimension] = 1.0
     return {
         "size": 8,
+        "track_total_hits": True,
         "sort": [{"_score": "desc"}, {"source_id": "asc"}, {"chunk_id": "asc"}],
         "knn": {
             "field": "embedding",
