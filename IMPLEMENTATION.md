@@ -1,8 +1,8 @@
 # CityBuddy implementation index
 
-**Document version:** v0.32\
+**Document version:** v0.33\
 **Verification date:** 2026-07-23\
-**Repository phase:** Knowledge rebuild validation and atomic alias switch verified
+**Repository phase:** Commerce PendingAction and ActionReceipt transaction ready
 
 ## How to use this index
 
@@ -83,7 +83,8 @@ The owner-approved continuous P0/P1 route terminates at `CB-152`. `CB-900`, `CB-
 remain deferred outlines outside this Goal and must not be promoted, expanded, or used to create
 post-`CB-152` work. `CB-150` retains its minimal optional no-op trace-sink scope, and `CB-152` must
 close with real load, latency, and quality evidence measured and environment-labelled in the local
-Docker Compose topology.
+Docker Compose topology. `CB-114` and `CB-115` are deferred vNext evolution and do not reactivate
+automatically after `CB-152`.
 
 The linked slice name is the canonical detailed specification. Target outcomes are retained separately in the [route outcome catalog](docs/CONTRACTS.md#contracts-route-outcomes).
 
@@ -120,11 +121,11 @@ The linked slice name is the canonical detailed specification. Target outcomes a
 | [CB-111 — Incremental knowledge synchronization and version/tombstone convergence](docs/slices/CB-111.md) | P1 | `VERIFIED` | `CB-110` |
 | [CB-112 — Versioned two-level FAQ cache](docs/slices/CB-112.md) | P1 | `VERIFIED` | `CB-111` |
 | [CB-113 — Knowledge rebuild validation and atomic alias switch](docs/slices/CB-113.md) | P1 | `VERIFIED` | `CB-112` |
-| [CB-114 — Knowledge rollback catch-up and atomic restoration](docs/slices/CB-114.md) | P1 | `READY` | `CB-113` |
-| [CB-115 — Expired knowledge-index candidate and predecessor cleanup](docs/slices/CB-115.md) | P1 | `PLANNED` | `CB-114` |
-| [CB-120 — Commerce PendingAction and atomic ActionReceipt transaction](docs/slices/CB-120.md) | P1 | `PLANNED` | `CB-071`, `CB-082` |
-| `CB-121 — Agent confirmation, receipt projection, and turn commit` | P1 | `PLANNED` | `CB-120`, `CB-082` |
-| `CB-130 — Memory watermarks, prompt/PII, and tiered output safety` | P1 | `PLANNED` | `CB-115`, `CB-121` |
+| [CB-114 — Knowledge rollback catch-up and atomic restoration](docs/slices/CB-114.md) | P1 | `DEFERRED` | `CB-113` |
+| [CB-115 — Expired knowledge-index candidate and predecessor cleanup](docs/slices/CB-115.md) | P1 | `DEFERRED` | `CB-114` |
+| [CB-120 — Commerce PendingAction and atomic ActionReceipt transaction](docs/slices/CB-120.md) | P1 | `READY` | `CB-071`, `CB-082` |
+| [CB-121 — Agent confirmation, receipt projection, and turn commit](docs/slices/CB-121.md) | P1 | `PLANNED` | `CB-120`, `CB-082` |
+| [CB-130 — Memory watermarks, prompt/PII, and tiered output safety](docs/slices/CB-130.md) | P1 | `PLANNED` | `CB-113`, `CB-121` |
 | `CB-131 — Authoritative handoff tickets and agent projection` | P1 | `PLANNED` | `CB-130` |
 | `CB-132 — Reviewed failure-candidate capture and authenticated export` | P1 | `PLANNED` | `CB-131` |
 | `CB-140 — Minimal web demonstration` | P1 | `PLANNED` | `CB-020`, `CB-030`, `CB-061`, `CB-082`, `CB-091`, `CB-121` |
