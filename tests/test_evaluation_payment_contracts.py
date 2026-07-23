@@ -59,14 +59,47 @@ def test_payment_schema_and_code_keep_production_and_evaluation_truth_separate()
         ROOT
         / "commerce-service/src/main/java/io/citybuddy/commerce/payment/MockPaymentRepository.java"
     ).read_text(encoding="utf-8")
+    committed_faces = (
+        ROOT
+        / "commerce-service/src/main/java/io/citybuddy/commerce/payment"
+        / "EvaluationPaymentCommittedFaces.java"
+    ).read_text(encoding="utf-8")
+    evaluation_view = (
+        ROOT
+        / "commerce-service/src/main/java/io/citybuddy/commerce/evaluation"
+        / "EvaluationViewRepository.java"
+    ).read_text(encoding="utf-8")
 
     assert "chk_standard_order_eval_binding" in migration
     assert "chk_mock_payment_callback_eval_context" in migration
     assert "PAYMENT_CALLBACK" in migration
-    assert "fenceSandbox(request.sandboxId());" in service
-    assert service.index("fenceSandbox(request.sandboxId());") < service.index(
-        "findAttemptByCorrelationForUpdate"
+    callback_once = service[
+        service.index("private MockPaymentCallbackResult callbackOnce") : service.index(
+            "private MockPaymentCallbackResult resolveCommittedStandardCallback"
+        )
+    ]
+    assert callback_once.index("findEvaluationAttemptByCorrelationForUpdate") < callback_once.index(
+        "resolveCommittedEvaluationCallback"
     )
+    assert callback_once.index("resolveCommittedEvaluationCallback") < callback_once.index(
+        "fenceSandbox(request.sandboxId());"
+    )
+    committed_replay = service[
+        service.index(
+            "private MockPaymentCallbackResult resolveCommittedEvaluationCallback"
+        ) : service.index("private static void requireSameCallbackFace")
+    ]
+    for committed_face in (
+        "findCallbackByCorrelation",
+        "findCallbackByAttempt",
+        "findEvaluationOrderForUpdate",
+        "evaluationPaymentMovementFaceCardinality",
+        "evaluationPaymentAuditFaceCardinality",
+    ):
+        assert committed_face in committed_replay
+    assert "peer.sequence_id < audit.sequence_id" in repository
+    assert "peer.sequence_id > audit.sequence_id" in repository
+    assert "Committed payment truth is inconsistent" in service
     assert "monotonicEvaluationAuditCreatedAt" in service
     assert service.index("fenceSandbox(request.sandboxId());") < service.index(
         "monotonicEvaluationAuditCreatedAt"
@@ -76,14 +109,97 @@ def test_payment_schema_and_code_keep_production_and_evaluation_truth_separate()
     assert "insertPaymentAuditReference" in repository
     assert "sandbox_id <=> ?" in repository
     assert "findEvaluationOrderForUpdate" in repository
-    assert "WHERE order_id = ? AND sandbox_id = ?" in repository
+    assert "EvaluationPaymentCommittedFaces.standardOrderByIdSql" in repository
+    assert "EvaluationPaymentCommittedFaces.seckillOrderByIdSql" in repository
+    assert "filter(row -> sandboxId.equals(row.sandboxId()))" in repository
     assert "findEvaluationAttemptByCorrelationForUpdate" in repository
-    assert "AND sandbox_id = ? FOR UPDATE" in repository
-    assert "l.product_id = o.product_id" in (
-        ROOT
-        / "commerce-service/src/main/java/io/citybuddy/commerce/evaluation"
-        / "EvaluationViewRepository.java"
-    ).read_text(encoding="utf-8")
+    assert "+ attemptTable()" in repository
+    assert "WHERE callback_correlation_id = ? FOR UPDATE" in repository
+    assert "filter(attempt -> sandboxId.equals(attempt.sandboxId()))" in repository
+    audit_cardinality = repository[
+        repository.index("public int evaluationPaymentAuditFaceCardinality") : repository.index(
+            "private Optional<AttemptRecord> queryAttempt"
+        )
+    ]
+    assert "WHERE entity_id = ?" in audit_cardinality
+    assert "OR (sandbox_id = ?" in audit_cardinality
+    assert "support_session_id = ? " in audit_cardinality
+    assert "AND trace_id = ? AND operation_id = ?" in audit_cardinality
+    assert "support_session_id = ? OR" not in audit_cardinality
+    assert "l.product_id = o.product_id" in evaluation_view
+
+    for face in ("CALLBACK", "ATTEMPT", "ORDER", "LEDGER", "AUDIT"):
+        assert f"public static final FaceDefinition {face}" in committed_faces
+    assert 'table(\n              "standard_order"' in committed_faces
+    assert 'table(\n              "seckill_order"' in committed_faces
+    assert "orderFaceUnionSql()" in committed_faces
+    assert "standardOrderByIdSql(String lockClause)" in committed_faces
+    assert "seckillOrderByIdSql(String lockClause)" in committed_faces
+    assert "EvaluationPaymentCommittedFaces.orderFaceUnionSql()" in evaluation_view
+    assert "EvaluationPaymentCommittedFaces.evaluationOrderKeysBySandboxSql()" in evaluation_view
+    for attempt_projection in (
+        "a.intent_hash AS attempt_intent_hash",
+        "a.refunded_amount_minor AS attempt_refunded_amount_minor",
+        "a.succeeded_at AS attempt_succeeded_at",
+    ):
+        assert attempt_projection in evaluation_view
+    for exact_attempt_assertion in (
+        "attemptIntentHash()",
+        "attemptRefundedAmountMinor() == 0",
+        "Objects.equals(callback.attemptSucceededAt(), callback.createdAt())",
+    ):
+        assert exact_attempt_assertion in evaluation_view
+    assert "EvaluationPaymentCommittedFaces.attemptIntentHash" in service
+    assert 'sandboxId == null ? "" : sandboxId' in committed_faces
+    for residual_column in (
+        "request_idempotency_key",
+        "evaluation_owner_handle",
+        "movement_id",
+    ):
+        assert f'"{residual_column}",' in committed_faces
+    assert "residualColumnDispositions" in committed_faces
+    assert "participatingColumns()" in committed_faces
+    callback_order_closure = repository[
+        repository.index("private Optional<OrderTruth> findOrder") : repository.index(
+            "public Optional<AttemptRecord> findAttemptByRequestForUpdate"
+        )
+    ]
+    view_order_closure = (
+        evaluation_view[
+            evaluation_view.index("private static String paymentViewSql") : evaluation_view.index(
+                "public List<AuditReference> audit"
+            )
+        ]
+        + evaluation_view[
+            evaluation_view.index(
+                "private boolean paymentFaceCardinalitiesConsistent"
+            ) : evaluation_view.index("private int duplicateGroupCount")
+        ]
+        + evaluation_view[
+            evaluation_view.index(
+                "private List<PaidOrderTruth> paidOrderTruths"
+            ) : evaluation_view.index("private List<PaymentLedgerTruth> paymentLedgerTruths")
+        ]
+    )
+    for closure in (callback_order_closure, view_order_closure):
+        assert "FROM standard_order" not in closure
+        assert "FROM seckill_order" not in closure
+
+    integration = (ROOT / "scripts/test_evaluation_sandbox_integration.sh").read_text(
+        encoding="utf-8"
+    )
+    for independent_fault in (
+        "audit-sequence",
+        "audit-anchor",
+        "callback-created-at",
+        "attempt-intent",
+        "attempt-refunded-amount",
+        "attempt-state-version",
+        "attempt-succeeded-at",
+        "order-state-version",
+    ):
+        assert independent_fault in integration
+    assert "assert_equal 49" in integration
 
 
 def test_auth_provision_response_remains_minimally_disclosing() -> None:

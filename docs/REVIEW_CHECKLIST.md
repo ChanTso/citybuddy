@@ -229,6 +229,59 @@ request. A later semantic diff change requires the checklist to be executed and 
   cached dependencies, force cache expiry before the failure; include timing pressure and retain the
   reason code, response, authoritative state, and reached fault boundary so a status coincidence
   cannot pass as attribution.
+- Resolve an already committed idempotent result from its complete durable truth before consulting
+  mutable admission or liveness state. Exact replay returns that result without mutation even after
+  admission closes; conflicting intent or damaged committed truth remains a deterministic conflict.
+  Only an operation with no committed result may enter the current liveness and locking path.
+- **Evaluation mock-payment owner-approved closure boundary:** enumerate the complete committed result
+  as callback, payment attempt, order, payment ledger, and evaluation audit, anchored first by callback
+  correlation and retained through signed order/event/context locators when one face is missing. Lock
+  and reconcile that five-face set in the mutation transaction before sandbox liveness. Treat each
+  face's cardinality as the closed partition `0`, `1`, or `>=2`: zero is missing, one must match every
+  committed content column exactly, and two or more is inconsistent even when one row is otherwise
+  valid. Use sandbox ownership only to derive the stable-key set under review; enumerate every row for
+  those keys before asserting sandbox/type/status content, so a damaged sibling cannot leave scope. Real
+  evidence covers the five faces across all three cardinalities, every persisted content
+  column, face pairs, and replay waiting across concurrent commit plus completion; it must observe the
+  signed callback boundary and reject inconsistency with 409 rather than 403 or 500. A further proposed
+  damage dimension must be named explicitly and classified by the owner: a mechanically bounded axis
+  is added to the closure, while an unbounded value partition follows the recorded CB-112 residual-risk
+  process instead of reopening an unbounded matrix.
+- Define each committed face once as executable metadata: its physical tables, stable keys, and
+  participating columns. Both the signed callback resolver and evaluation state/audit reconciler must
+  derive their enumeration from that same definition; for the order face, `order_id` spans both
+  `standard_order` and `seckill_order`. Every injected closure cell must drive the signed callback,
+  `/api/eval/state`, and `/api/eval/audit` together and require the same `409` classification. Audit
+  cardinality uses the callback entity id or the complete exact sandbox/session/trace/operation tuple,
+  never an `OR` over individual context columns; prove that two legitimate operations in one support
+  session coexist without a false duplicate. This structural closure is the owner-approved final
+  completeness boundary for the internal evaluation view: later internal-only completeness proposals
+  are recorded as residual risk, while any finding affecting production payment/refund, transaction
+  consistency, identity authorization, or another business-core path remains blocking.
+- For the owner-capped internal evaluation callback only, verify that every column named
+  participating by the shared face metadata is independently read and asserted by both callback and
+  state/audit reconciliation, and has a single-column three-path fault cell; a compound mutation may
+  not stand in for its constituent columns. Any excluded column needs an executable per-column
+  disposition and an explicit residual-risk rationale. The currently accepted no-second-anchor
+  residuals are start `request_idempotency_key`, fixture `evaluation_owner_handle`, and generated
+  ledger `movement_id`; do not generalize this exception to production idempotency, refund, inventory,
+  transaction, or authorization truth.
+- Review exception-to-HTTP mappings against the full subtype hierarchy. Do not map a broad database
+  superclass such as `DataAccessException` to unavailable when it also contains lock-contention and
+  constraint-conflict subtypes. Prove connection/resource failure, lock timeout/deadlock, duplicate
+  constraint, same-intent replay, and conflicting-intent replay independently; transient contention
+  must converge inside the service to committed truth or conflict rather than escape into a 503
+  boundary handler.
+- Integrity and uniqueness failures discovered while resolving already committed truth are deterministic
+  conflicts, not unexpected server errors. Use a dedicated internal integrity signal and translate it at
+  the owning operation boundary; do not allow a repository `IllegalStateException` or multi-row helper
+  failure to escape as 500.
+- Before adding an internal-surface invariant to a validator shared with production, enumerate every
+  caller and every later legal lifecycle state of the same durable row. A historical committed result
+  remains replayable after a later valid transition unless the business contract explicitly revokes
+  it; for payment, a legitimate partial or full refund changes the accumulator but must not invalidate
+  the immutable original callback result. Add a cross-lifecycle regression that executes the later
+  transition and then replays the earlier result, including a no-duplicate durable-side-effect check.
 
 ### Faults never become terminal business decisions
 
@@ -314,6 +367,17 @@ request. A later semantic diff change requires the checklist to be executed and 
   no containers, networks, or host-port registry artifacts. A resource-stop failure must always emit
   an unambiguous diagnostic even when the primary test already failed; preserve the primary exit code
   without making the secondary cleanup failure invisible.
+
+### Application-level readiness after dependency recovery
+
+- Treat container health and application readiness as separate facts. After restarting or restoring
+  a dependency, gate follow-up assertions on an application endpoint that actually exercises the
+  recovered client or connection pool and returns its expected success status; a healthy database,
+  search, cache, or broker container does not prove the surviving application has reconnected.
+- Keep the controlled outage faithful to the runtime topology. If a dependency restart can receive a
+  new runtime-owned host port, either refresh every dependent endpoint first or inject the outage in
+  place without changing the published endpoint. A readiness timeout must retain application logs
+  and fail the test; it must not reinterpret a correct unavailable response as a product defect.
 
 ## Closeout maintenance
 

@@ -9,10 +9,11 @@ import java.util.Map;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
-import org.springframework.dao.DataAccessException;
+import org.springframework.dao.DataAccessResourceFailureException;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
 import org.springframework.http.converter.HttpMessageNotReadableException;
+import org.springframework.transaction.CannotCreateTransactionException;
 import org.springframework.web.bind.annotation.ExceptionHandler;
 import org.springframework.web.bind.annotation.PathVariable;
 import org.springframework.web.bind.annotation.PostMapping;
@@ -122,8 +123,11 @@ final class MockPaymentExceptionHandler {
         .body(Map.of("category", "AUTHORIZATION", "message", "Evaluation payment is unavailable"));
   }
 
-  @ExceptionHandler(DataAccessException.class)
-  ResponseEntity<Map<String, String>> handleUnavailable() {
+  @ExceptionHandler({
+    DataAccessResourceFailureException.class,
+    CannotCreateTransactionException.class
+  })
+  ResponseEntity<Map<String, String>> handleUnavailable(RuntimeException exception) {
     return ResponseEntity.status(503)
         .body(Map.of("category", "UNAVAILABLE", "message", "Payment service is unavailable"));
   }

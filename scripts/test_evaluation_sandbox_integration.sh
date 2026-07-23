@@ -276,8 +276,21 @@ wait_http() {
   local url="$1"
   local pid="$2"
   local log="$3"
+  local expected_status="${4:-}"
+  local actual_status
+  if (( $# >= 4 )); then
+    shift 4
+  else
+    shift 3
+  fi
   for _ in {1..90}; do
-    if [[ "$(curl --silent --output /dev/null --write-out '%{http_code}' "$url" 2>/dev/null)" != 000 ]]; then
+    actual_status="$(
+      curl --silent --output /dev/null --write-out '%{http_code}' "$@" "$url" 2>/dev/null || true
+    )"
+    if [[ -n "$expected_status" && "$actual_status" == "$expected_status" ]]; then
+      return
+    fi
+    if [[ -z "$expected_status" && "$actual_status" != 000 ]]; then
       return
     fi
     if ! kill -0 "$pid" >/dev/null 2>&1; then
@@ -353,6 +366,7 @@ start_commerce() {
     --server.port=0 \
     --spring.datasource.url="jdbc:mysql://127.0.0.1:$MYSQL_PORT/commerce_db?useSSL=false&allowPublicKeyRetrieval=true" \
     --spring.datasource.username=commerce_app \
+    --spring.datasource.hikari.connection-timeout=2000 \
     --citybuddy.obo.enabled=true \
     --citybuddy.obo.issuer=https://identity.citybuddy.test \
     --citybuddy.obo.jwks-url="http://127.0.0.1:$auth_port/auth/jwks" \
@@ -439,8 +453,9 @@ payment_reset_body() {
   local sandbox="$1"
   local case_id="$2"
   local order_id="$3"
-  printf '{"sandboxId":"%s","caseCorrelation":"%s","ttlSeconds":300,"testUserLabel":"user-%s","products":[{"productId":"payment-product","name":"Payment fixture","description":"sandbox payment fixture","priceMinor":900,"currency":"CNY","stockQuantity":3,"available":true}],"paymentOrder":{"orderId":"%s","productId":"payment-product","quantity":2}}' \
-    "$sandbox" "$case_id" "$sandbox" "$order_id"
+  local ttl_seconds="${4:-300}"
+  printf '{"sandboxId":"%s","caseCorrelation":"%s","ttlSeconds":%s,"testUserLabel":"user-%s","products":[{"productId":"payment-product","name":"Payment fixture","description":"sandbox payment fixture","priceMinor":900,"currency":"CNY","stockQuantity":3,"available":true}],"paymentOrder":{"orderId":"%s","productId":"payment-product","quantity":2}}' \
+    "$sandbox" "$case_id" "$ttl_seconds" "$sandbox" "$order_id"
 }
 
 reset_payment_sandbox() {
@@ -448,12 +463,13 @@ reset_payment_sandbox() {
   local case_id="$2"
   local key="$3"
   local order_id="$4"
+  local ttl_seconds="${5:-300}"
   assert_status 200 "reset payment sandbox $sandbox" \
     --request POST "http://127.0.0.1:$commerce_port/api/eval/reset" \
     --user "evaluation-manager:$management_password" \
     --header "Idempotency-Key: $key" \
     --header 'Content-Type: application/json' \
-    --data "$(payment_reset_body "$sandbox" "$case_id" "$order_id")"
+    --data "$(payment_reset_body "$sandbox" "$case_id" "$order_id" "$ttl_seconds")"
 }
 
 sign_payment_callback() {
@@ -1251,7 +1267,7 @@ uv run python scripts/check_evaluation_token.py \
 direct_subject="$(uv run python scripts/read_json_field.py "$tmp_dir/direct.json" subject)"
 
 payment_order_id='00000000-0000-0000-0000-000000000105'
-reset_payment_sandbox sandbox-payment case-payment reset-payment "$payment_order_id"
+reset_payment_sandbox sandbox-payment case-payment reset-payment "$payment_order_id" 1200
 payment_handle="$(uv run python scripts/read_json_field.py "$tmp_dir/http-response.json" testUserHandle)"
 assert_status 200 "issue payment sandbox direct token" \
   --request POST "http://127.0.0.1:$auth_port/auth/eval/test-token" \
@@ -1265,7 +1281,7 @@ uv run python scripts/check_evaluation_token.py \
   --token-file "$tmp_dir/payment-direct.jwt" --jwks-file "$tmp_dir/jwks.json" \
   --issuer https://identity.citybuddy.test --audience citybuddy-web \
   --token-type eval_direct_user --sandbox sandbox-payment \
-  --maximum-expiry "$(date -u -v+301S +%s 2>/dev/null || date -u -d '+301 seconds' +%s)" \
+  --maximum-expiry "$(date -u -v+1201S +%s 2>/dev/null || date -u -d '+1201 seconds' +%s)" \
   --output "$tmp_dir/payment-direct.json"
 payment_subject="$(uv run python scripts/read_json_field.py "$tmp_dir/payment-direct.json" subject)"
 assert_status 401 "evaluation token requires its exact sandbox header for payment" \
@@ -1434,9 +1450,8 @@ for payment_invalid_body in \
     --header 'Content-Type: application/json' \
     --data "$payment_invalid_body"
 done
-mysql_query root "$root_password" commerce_db \
-  "REVOKE SELECT ON commerce_db.eval_sandbox FROM 'commerce_app'@'%'"
-assert_status 503 "sandbox truth outage is indeterminate and never authorizes payment" \
+mysql_query root "$root_password" '' "SET GLOBAL offline_mode = ON"
+assert_status 503 "database disconnection is unavailable and never authorizes payment" \
   --request POST "http://127.0.0.1:$commerce_port/internal/mock-payments/callback" \
   --header "X-Mock-Payment-Key-Id: $mock_payment_key" \
   --header "X-Mock-Payment-Timestamp: $payment_timestamp" \
@@ -1444,8 +1459,14 @@ assert_status 503 "sandbox truth outage is indeterminate and never authorizes pa
   --header "Idempotency-Key: $payment_callback_key" \
   --header 'Content-Type: application/json' \
   --data "$payment_callback_body"
-mysql_query root "$root_password" '' \
-  "GRANT SELECT ON commerce_db.eval_sandbox TO 'commerce_app'@'%'"
+mysql_query root "$root_password" '' "SET GLOBAL offline_mode = OFF"
+wait_http \
+  "http://127.0.0.1:$commerce_port/api/eval/state" \
+  "$commerce_pid" \
+  "$tmp_dir/commerce.log" \
+  200 \
+  --user "evaluation-manager:$management_password" \
+  --header 'X-Eval-Sandbox-Id: sandbox-payment'
 test "$(mysql_query commerce_app "$commerce_app_password" commerce_db \
   "SELECT CONCAT(status, ':', state_version) FROM standard_order WHERE order_id = '$payment_order_id'")" = 'UNPAID:1'
 test "$(mysql_query commerce_app "$commerce_app_password" commerce_db \
@@ -1487,9 +1508,12 @@ assert_conflicting_payment_replay() {
     --data "$body"
 }
 
-assert_conflicting_payment_replay "replay rejects a different callback key" \
-  callback-evaluation-new-key "$payment_event_id" "$payment_order_id" 1800 CNY SUCCEEDED \
-  "$payment_session" "$payment_trace" "$payment_operation"
+for repetition in {1..5}; do
+  assert_conflicting_payment_replay \
+    "replay rejects a different callback key (repetition $repetition)" \
+    callback-evaluation-new-key "$payment_event_id" "$payment_order_id" 1800 CNY SUCCEEDED \
+    "$payment_session" "$payment_trace" "$payment_operation"
+done
 assert_conflicting_payment_replay "replay rejects a different callback event" \
   "$payment_callback_key" 00000000-0000-0000-0000-000000000197 "$payment_order_id" \
   1800 CNY SUCCEEDED "$payment_session" "$payment_trace" "$payment_operation"
@@ -1529,10 +1553,61 @@ jq -e --arg event "$payment_event_id" \
   '.entries | length == 1 and .[0].entityType == "PAYMENT_CALLBACK" and .[0].entityId == $event' \
   "$tmp_dir/http-response.json" >/dev/null
 
+refresh_payment_callback_signature() {
+  payment_timestamp="$(date +%s)"
+  payment_signature="$(sign_payment_callback "$payment_timestamp" "$payment_callback_key" \
+    "$payment_event_id" "$payment_correlation_id" "$payment_order_id" sandbox-payment \
+    "$payment_session" "$payment_trace" "$payment_operation")"
+}
+
 assert_payment_truth_fails_closed() {
   local description="$1"
-  local replay_status="${2:-409}"
-  assert_status "$replay_status" "$description rejects durable callback replay" \
+  local callback_status state_status audit_status commerce_log_start=0
+  refresh_payment_callback_signature
+  if [[ -f "$tmp_dir/commerce.log" ]]; then
+    commerce_log_start="$(wc -l <"$tmp_dir/commerce.log")"
+  fi
+  callback_status="$(request_status "$tmp_dir/payment-callback-classification.json" \
+    --request POST "http://127.0.0.1:$commerce_port/internal/mock-payments/callback" \
+    --header "X-Mock-Payment-Key-Id: $mock_payment_key" \
+    --header "X-Mock-Payment-Timestamp: $payment_timestamp" \
+    --header "X-Mock-Payment-Signature: $payment_signature" \
+    --header "Idempotency-Key: $payment_callback_key" \
+    --header 'Content-Type: application/json' \
+    --data "$payment_callback_body")"
+  state_status="$(request_status "$tmp_dir/payment-state-classification.json" \
+    --request GET "http://127.0.0.1:$commerce_port/api/eval/state" \
+    --user "evaluation-manager:$management_password" \
+    --header 'X-Eval-Sandbox-Id: sandbox-payment')"
+  audit_status="$(request_status "$tmp_dir/payment-audit-classification.json" \
+    --request GET "http://127.0.0.1:$commerce_port/api/eval/audit/$payment_session" \
+    --user "evaluation-manager:$management_password" \
+    --header 'X-Eval-Sandbox-Id: sandbox-payment')"
+  if [[ "$callback_status:$state_status:$audit_status" != '409:409:409' ]]; then
+    echo "Cross-path classification mismatch for $description: callback=$callback_status state=$state_status audit=$audit_status" >&2
+    for response in payment-callback-classification payment-state-classification payment-audit-classification; do
+      echo "$response-response" >&2
+      cat "$tmp_dir/$response.json" >&2
+    done
+    if [[ -f "$tmp_dir/commerce.log" ]]; then
+      echo 'request-rejection-reasons' >&2
+      tail -n "+$((commerce_log_start + 1))" "$tmp_dir/commerce.log" \
+        | grep 'evaluation_request_rejected reason_code=' >&2 || true
+    fi
+    exit 1
+  fi
+  echo "Verified cross-path classification 409:409:409: $description"
+}
+
+assert_payment_audit_reconciliation_fails_closed() {
+  local description="$1"
+  assert_payment_truth_fails_closed "$description"
+}
+
+assert_unrelated_payment_audit_reconciliation_fails_closed() {
+  local description="$1"
+  refresh_payment_callback_signature
+  assert_status 200 "$description does not contaminate exact committed callback replay" \
     --request POST "http://127.0.0.1:$commerce_port/internal/mock-payments/callback" \
     --header "X-Mock-Payment-Key-Id: $mock_payment_key" \
     --header "X-Mock-Payment-Timestamp: $payment_timestamp" \
@@ -1548,11 +1623,6 @@ assert_payment_truth_fails_closed() {
     --request GET "http://127.0.0.1:$commerce_port/api/eval/audit/$payment_session" \
     --user "evaluation-manager:$management_password" \
     --header 'X-Eval-Sandbox-Id: sandbox-payment'
-}
-
-assert_payment_audit_reconciliation_fails_closed() {
-  local description="$1"
-  assert_audit_totality_fails_closed sandbox-payment "$payment_session" "$description"
 }
 
 assert_audit_totality_fails_closed() {
@@ -1579,6 +1649,50 @@ payment_movement_id="$(mysql_query root "$root_password" commerce_db \
   "SELECT movement_id FROM inventory_ledger WHERE business_event_key = 'mock-payment:$payment_attempt_id'")"
 payment_product_id="$(mysql_query commerce_app "$commerce_app_password" commerce_db \
   "SELECT product_id FROM standard_order WHERE order_id = '$payment_order_id'")"
+payment_product_version="$(mysql_query commerce_app "$commerce_app_password" commerce_db \
+  "SELECT product_version FROM standard_order WHERE order_id = '$payment_order_id'")"
+
+payment_second_trace='payment-trace-second-operation'
+payment_second_operation="$(openssl rand -hex 32)"
+payment_second_reference_id="$(evaluation_product_reference \
+  sandbox-payment "$payment_session" "$payment_second_trace" "$payment_second_operation" \
+  PRODUCT_FIXTURE "$payment_product_id" "$payment_product_version" OBSERVED)"
+payment_second_created_at="$(mysql_query root "$root_password" commerce_db \
+  "SELECT DATE_FORMAT(TIMESTAMPADD(MICROSECOND, 1, MAX(created_at)), '%Y-%m-%d %H:%i:%s.%f') FROM eval_commerce_audit_reference WHERE sandbox_id = 'sandbox-payment'")"
+mysql_query root "$root_password" commerce_db "
+INSERT INTO eval_commerce_product_observation
+  (observation_id, sandbox_id, support_session_id, trace_id, operation_id, product_id,
+   product_version, outcome, created_at)
+VALUES ('$payment_second_reference_id', 'sandbox-payment', '$payment_session',
+  '$payment_second_trace', '$payment_second_operation', '$payment_product_id',
+  $payment_product_version, 'OBSERVED', '$payment_second_created_at');
+INSERT INTO eval_commerce_audit_reference
+  (audit_reference_id, sandbox_id, support_session_id, trace_id, operation_id, entity_type,
+   entity_id, entity_version, outcome, created_at, created_at_anchor)
+VALUES ('$payment_second_reference_id', 'sandbox-payment', '$payment_session',
+  '$payment_second_trace', '$payment_second_operation', 'PRODUCT_FIXTURE',
+  '$payment_product_id', $payment_product_version, 'OBSERVED', '$payment_second_created_at',
+  'BUSINESS_EVENT');
+"
+assert_equal 2 "$(mysql_query commerce_app "$commerce_app_password" commerce_db \
+  "SELECT COUNT(DISTINCT operation_id) FROM eval_commerce_audit_reference WHERE sandbox_id = 'sandbox-payment' AND support_session_id = '$payment_session'")" \
+  "one support session carries multiple exact operations"
+assert_status 200 "same-session second operation does not corrupt committed callback cardinality" \
+  --request POST "http://127.0.0.1:$commerce_port/internal/mock-payments/callback" \
+  --header "X-Mock-Payment-Key-Id: $mock_payment_key" \
+  --header "X-Mock-Payment-Timestamp: $payment_timestamp" \
+  --header "X-Mock-Payment-Signature: $payment_signature" \
+  --header "Idempotency-Key: $payment_callback_key" \
+  --header 'Content-Type: application/json' \
+  --data "$payment_callback_body"
+assert_status 200 "same-session second operation preserves evaluation state" \
+  --request GET "http://127.0.0.1:$commerce_port/api/eval/state" \
+  --user "evaluation-manager:$management_password" \
+  --header 'X-Eval-Sandbox-Id: sandbox-payment'
+assert_status 200 "same-session second operation preserves evaluation audit" \
+  --request GET "http://127.0.0.1:$commerce_port/api/eval/audit/$payment_session" \
+  --user "evaluation-manager:$management_password" \
+  --header 'X-Eval-Sandbox-Id: sandbox-payment'
 
 mysql_query root "$root_password" commerce_db \
   "DELETE FROM eval_commerce_audit_reference WHERE audit_reference_id = '$payment_audit_reference_id'"
@@ -1642,9 +1756,10 @@ mysql_query root "$root_password" commerce_db \
 assert_payment_audit_reconciliation_fails_closed "duplicate payment audit reference"
 mysql_query root "$root_password" commerce_db \
   "DELETE FROM eval_commerce_audit_reference WHERE audit_reference_id = REPEAT('d', 64)"
+# Keep the sequence/time invariant valid so this cell isolates only the orphan-face fault.
 mysql_query root "$root_password" commerce_db \
-  "INSERT INTO eval_commerce_audit_reference (audit_reference_id, sandbox_id, support_session_id, trace_id, operation_id, entity_type, entity_id, entity_version, outcome, created_at, created_at_anchor) VALUES (REPEAT('c', 64), 'sandbox-payment', '$payment_session', '$payment_trace', REPEAT('a', 64), 'PAYMENT_CALLBACK', '00000000-0000-0000-0000-000000000197', 2, 'OBSERVED', CURRENT_TIMESTAMP(6), 'BUSINESS_EVENT')"
-assert_payment_audit_reconciliation_fails_closed "orphan payment audit reference"
+  "INSERT INTO eval_commerce_audit_reference (audit_reference_id, sandbox_id, support_session_id, trace_id, operation_id, entity_type, entity_id, entity_version, outcome, created_at, created_at_anchor) SELECT REPEAT('c', 64), 'sandbox-payment', '$payment_session', '$payment_trace', REPEAT('a', 64), 'PAYMENT_CALLBACK', '00000000-0000-0000-0000-000000000197', 2, 'OBSERVED', TIMESTAMPADD(MICROSECOND, 1, MAX(created_at)), 'BUSINESS_EVENT' FROM eval_commerce_audit_reference WHERE sandbox_id = 'sandbox-payment'"
+assert_unrelated_payment_audit_reconciliation_fails_closed "orphan payment audit reference"
 mysql_query root "$root_password" commerce_db \
   "DELETE FROM eval_commerce_audit_reference WHERE audit_reference_id = REPEAT('c', 64)"
 mysql_query root "$root_password" commerce_db \
@@ -1727,6 +1842,10 @@ mysql_query root "$root_password" commerce_db \
 
 payment_attempt_succeeded_at="$(mysql_query root "$root_password" commerce_db \
   "SELECT DATE_FORMAT(succeeded_at, '%Y-%m-%d %H:%i:%s.%f') FROM mock_payment_attempt WHERE attempt_id = '$payment_attempt_id'")"
+payment_attempt_intent_hash="$(mysql_query root "$root_password" commerce_db \
+  "SELECT intent_hash FROM mock_payment_attempt WHERE attempt_id = '$payment_attempt_id'")"
+payment_audit_tampered_sequence_id="$(mysql_query root "$root_password" commerce_db \
+  "SELECT MAX(sequence_id) + 1 FROM eval_commerce_audit_reference WHERE sandbox_id = 'sandbox-payment'")"
 tampered_callback_event_id='00000000-0000-0000-0000-000000000181'
 tampered_callback_attempt_id='00000000-0000-0000-0000-000000000182'
 tampered_attempt_id='00000000-0000-0000-0000-000000000183'
@@ -1744,7 +1863,8 @@ UPDATE standard_order SET user_subject = '$payment_subject', product_id = '$paym
   sandbox_id = 'sandbox-payment' WHERE order_id = '$payment_order_id';
 UPDATE mock_payment_attempt SET callback_correlation_id = '$payment_correlation_id',
   user_subject = '$payment_subject', order_id = '$payment_order_id', order_kind = 'STANDARD',
-  sandbox_id = 'sandbox-payment', amount_minor = 1800, currency = 'CNY',
+  sandbox_id = 'sandbox-payment', intent_hash = '$payment_attempt_intent_hash',
+  amount_minor = 1800, refunded_amount_minor = 0, currency = 'CNY',
   state = 'SUCCEEDED', state_version = 2, succeeded_at = '$payment_attempt_succeeded_at'
   WHERE attempt_id = '$payment_attempt_id';
 DELETE FROM mock_payment_callback
@@ -1775,6 +1895,7 @@ VALUES ($payment_audit_sequence_id, '$payment_audit_reference_id', 'sandbox-paym
   '$payment_session', '$payment_trace', '$payment_operation', 'PAYMENT_CALLBACK',
   '$payment_event_id', 2, 'OBSERVED', '$payment_audit_created_at', 'BUSINESS_EVENT')
 ON DUPLICATE KEY UPDATE sandbox_id = VALUES(sandbox_id),
+  sequence_id = VALUES(sequence_id),
   support_session_id = VALUES(support_session_id), trace_id = VALUES(trace_id),
   operation_id = VALUES(operation_id), entity_type = VALUES(entity_type),
   entity_id = VALUES(entity_id), entity_version = VALUES(entity_version),
@@ -1783,25 +1904,145 @@ ON DUPLICATE KEY UPDATE sandbox_id = VALUES(sandbox_id),
 "
 }
 
+assert_status 200 "one-row committed faces replay the existing payment result" \
+  --request POST "http://127.0.0.1:$commerce_port/internal/mock-payments/callback" \
+  --header "X-Mock-Payment-Key-Id: $mock_payment_key" \
+  --header "X-Mock-Payment-Timestamp: $payment_timestamp" \
+  --header "X-Mock-Payment-Signature: $payment_signature" \
+  --header "Idempotency-Key: $payment_callback_key" \
+  --header 'Content-Type: application/json' \
+  --data "$payment_callback_body"
+
+duplicate_callback_event_id='00000000-0000-0000-0000-000000000201'
+duplicate_callback_attempt_id='00000000-0000-0000-0000-000000000202'
+mysql_query root "$root_password" commerce_db "
+INSERT INTO mock_payment_callback (callback_event_id, callback_idempotency_key, attempt_id,
+  callback_correlation_id, sandbox_id, support_session_id, trace_id, operation_id, intent_hash,
+  requested_outcome, result_state, created_at)
+SELECT '$duplicate_callback_event_id', 'duplicate-cardinality-callback',
+  '$duplicate_callback_attempt_id', callback_correlation_id, 'sandbox-main', support_session_id,
+  trace_id, operation_id, intent_hash, requested_outcome, result_state, created_at
+FROM mock_payment_callback WHERE callback_event_id = '$payment_event_id'
+"
+assert_payment_truth_fails_closed "duplicate callback correlation cardinality"
+mysql_query root "$root_password" commerce_db \
+  "DELETE FROM mock_payment_callback WHERE callback_event_id = '$duplicate_callback_event_id'"
+
+duplicate_attempt_id='00000000-0000-0000-0000-000000000203'
+duplicate_attempt_order_id='00000000-0000-0000-0000-000000000204'
+mysql_query root "$root_password" commerce_db \
+  "ALTER TABLE mock_payment_attempt DROP INDEX uq_mock_payment_callback_correlation"
+mysql_query root "$root_password" commerce_db "
+INSERT INTO mock_payment_attempt (attempt_id, callback_correlation_id, user_subject, order_id,
+  order_kind, sandbox_id, request_idempotency_key, intent_hash, amount_minor, refunded_amount_minor,
+  currency, state, state_version, succeeded_at, created_at)
+SELECT '$duplicate_attempt_id', callback_correlation_id, user_subject,
+  '$duplicate_attempt_order_id', order_kind, 'sandbox-main', 'duplicate-cardinality-attempt',
+  intent_hash, amount_minor, refunded_amount_minor, currency, state, state_version, succeeded_at,
+  created_at FROM mock_payment_attempt WHERE attempt_id = '$payment_attempt_id'
+"
+assert_payment_truth_fails_closed "duplicate attempt correlation cardinality"
+mysql_query root "$root_password" commerce_db \
+  "DELETE FROM mock_payment_attempt WHERE attempt_id = '$duplicate_attempt_id'"
+mysql_query root "$root_password" commerce_db \
+  "ALTER TABLE mock_payment_attempt ADD CONSTRAINT uq_mock_payment_callback_correlation UNIQUE (callback_correlation_id)"
+
+mysql_query root "$root_password" commerce_db \
+  "ALTER TABLE standard_order DROP PRIMARY KEY"
+mysql_query root "$root_password" commerce_db "
+INSERT INTO standard_order (order_id, user_subject, sandbox_id, evaluation_owner_handle,
+  product_id, product_name, unit_price_minor, currency, quantity, total_price_minor,
+  product_version, status, state_version, created_at)
+SELECT order_id, user_subject, 'sandbox-main', evaluation_owner_handle, product_id,
+  CONCAT(product_name, ' duplicate-cardinality'), unit_price_minor, currency, quantity,
+  total_price_minor, product_version, status, state_version, created_at
+FROM standard_order WHERE order_id = '$payment_order_id' LIMIT 1
+"
+assert_payment_truth_fails_closed "duplicate order stable-key cardinality"
+mysql_query root "$root_password" commerce_db \
+  "DELETE FROM standard_order WHERE order_id = '$payment_order_id' AND product_name LIKE '% duplicate-cardinality'"
+mysql_query root "$root_password" commerce_db \
+  "ALTER TABLE standard_order ADD PRIMARY KEY (order_id)"
+
+cross_type_reservation_id='00000000-0000-0000-0000-000000000211'
+cross_type_transaction_id='00000000-0000-0000-0000-000000000212'
+cross_type_timeout_id='00000000-0000-0000-0000-000000000213'
+mysql_query root "$root_password" commerce_db "
+INSERT INTO seckill_order
+  (order_id, reservation_id, transaction_event_id, timeout_event_id, user_subject, activity_id,
+   product_id, product_name, unit_price_minor, currency, quantity, total_price_minor, status,
+   state_version, unpaid_deadline, created_at)
+SELECT order_id, '$cross_type_reservation_id', '$cross_type_transaction_id',
+  '$cross_type_timeout_id', user_subject, 'cross-type-order-cardinality', product_id,
+  CONCAT(product_name, ' cross-type-cardinality'), unit_price_minor, currency, quantity,
+  total_price_minor, 'PAID', 2, TIMESTAMPADD(MINUTE, 5, created_at), created_at
+FROM standard_order WHERE order_id = '$payment_order_id'
+"
+assert_payment_truth_fails_closed "cross-type order stable-key cardinality"
+mysql_query root "$root_password" commerce_db \
+  "DELETE FROM seckill_order WHERE order_id = '$payment_order_id'"
+
+duplicate_ledger_movement_id='00000000-0000-0000-0000-000000000205'
+mysql_query root "$root_password" commerce_db \
+  "ALTER TABLE inventory_ledger DROP INDEX uq_inventory_ledger_single_movement"
+mysql_query root "$root_password" commerce_db "
+INSERT INTO inventory_ledger (movement_id, business_event_key, movement_type, order_id,
+  reservation_id, activity_id, product_id, sandbox_id, inventory_delta, activity_quota_delta,
+  payment_amount_minor, payment_currency, created_at)
+SELECT '$duplicate_ledger_movement_id', 'duplicate-cardinality-ledger', movement_type, order_id,
+  reservation_id, activity_id, product_id, 'sandbox-main', inventory_delta, activity_quota_delta,
+  payment_amount_minor, payment_currency, created_at
+FROM inventory_ledger WHERE movement_id = '$payment_movement_id'
+"
+assert_payment_truth_fails_closed "duplicate ledger stable-key cardinality"
+mysql_query root "$root_password" commerce_db \
+  "DELETE FROM inventory_ledger WHERE movement_id = '$duplicate_ledger_movement_id'"
+mysql_query root "$root_password" commerce_db \
+  "ALTER TABLE inventory_ledger ADD CONSTRAINT uq_inventory_ledger_single_movement UNIQUE (order_id, single_movement_type)"
+
+duplicate_audit_reference_id="$(printf '5%.0s' {1..64})"
+duplicate_audit_operation_id="$(printf '4%.0s' {1..64})"
+mysql_query root "$root_password" commerce_db "
+INSERT INTO eval_commerce_audit_reference (audit_reference_id, sandbox_id, support_session_id,
+  trace_id, operation_id, entity_type, entity_id, entity_version, outcome, created_at,
+  created_at_anchor)
+SELECT '$duplicate_audit_reference_id', 'sandbox-main', support_session_id, trace_id,
+  '$duplicate_audit_operation_id', entity_type, entity_id, entity_version, outcome, created_at,
+  created_at_anchor FROM eval_commerce_audit_reference
+WHERE audit_reference_id = '$payment_audit_reference_id'
+"
+assert_payment_truth_fails_closed "duplicate audit stable-identity cardinality"
+mysql_query root "$root_password" commerce_db \
+  "DELETE FROM eval_commerce_audit_reference WHERE audit_reference_id = '$duplicate_audit_reference_id'"
+
 mysql_query root "$root_password" commerce_db \
   "ALTER TABLE inventory_ledger DROP CHECK chk_inventory_ledger_movement"
+mysql_query root "$root_password" commerce_db \
+  "ALTER TABLE mock_payment_attempt DROP CHECK chk_mock_payment_attempt_state"
+mysql_query root "$root_password" commerce_db \
+  "ALTER TABLE standard_order DROP CHECK chk_standard_order_payment_state"
 
 payment_callback_fault_locator="callback_event_id IN ('$payment_event_id', '$tampered_callback_event_id') OR callback_idempotency_key IN ('$payment_callback_key', 'tampered-callback-key') OR attempt_id IN ('$payment_attempt_id', '$tampered_callback_attempt_id')"
 payment_attempt_fault_locator="request_idempotency_key = 'payment-evaluation'"
 payment_order_fault_locator="order_id IN ('$payment_order_id', '$tampered_order_id')"
 
 payment_predicate_labels=(
-  audit-row callback-row ledger-row
+  audit-row audit-sequence audit-anchor callback-row ledger-row
   callback-event callback-idempotency-key callback-attempt callback-correlation callback-sandbox
   callback-session callback-trace callback-operation callback-intent callback-outcome callback-result
+  callback-created-at
   attempt-id attempt-correlation attempt-owner attempt-order attempt-order-kind attempt-sandbox
-  attempt-amount attempt-currency attempt-state
-  order-id order-sandbox order-owner order-product order-amount order-currency order-state
+  attempt-intent attempt-amount attempt-refunded-amount attempt-currency attempt-state
+  attempt-state-version attempt-succeeded-at
+  order-id order-sandbox order-owner order-product order-amount order-currency order-status
+  order-state-version
   ledger-key ledger-sandbox ledger-movement ledger-order ledger-product ledger-reservation
   ledger-activity ledger-inventory-delta ledger-activity-delta ledger-amount ledger-currency
 )
 payment_predicate_mutations=(
   "DELETE FROM eval_commerce_audit_reference WHERE audit_reference_id = '$payment_audit_reference_id'"
+  "UPDATE eval_commerce_audit_reference SET sequence_id = $payment_audit_tampered_sequence_id WHERE audit_reference_id = '$payment_audit_reference_id'"
+  "SET SESSION sql_mode = 'NO_ENGINE_SUBSTITUTION'; UPDATE eval_commerce_audit_reference SET created_at_anchor = 'CORRUPTED' WHERE audit_reference_id = '$payment_audit_reference_id'"
   "DELETE FROM mock_payment_callback WHERE $payment_callback_fault_locator"
   "DELETE FROM inventory_ledger WHERE movement_id = '$payment_movement_id'"
   "UPDATE mock_payment_callback SET callback_event_id = '$tampered_callback_event_id' WHERE $payment_callback_fault_locator"
@@ -1815,22 +2056,28 @@ payment_predicate_mutations=(
   "UPDATE mock_payment_callback SET intent_hash = REPEAT('f', 64) WHERE $payment_callback_fault_locator"
   "SET SESSION sql_mode = 'NO_ENGINE_SUBSTITUTION'; UPDATE mock_payment_callback SET requested_outcome = 'CORRUPTED' WHERE $payment_callback_fault_locator"
   "SET SESSION sql_mode = 'NO_ENGINE_SUBSTITUTION'; UPDATE mock_payment_callback SET result_state = 'CORRUPTED' WHERE $payment_callback_fault_locator"
+  "UPDATE mock_payment_callback SET created_at = TIMESTAMPADD(MICROSECOND, 1, created_at) WHERE $payment_callback_fault_locator"
   "UPDATE mock_payment_attempt SET attempt_id = '$tampered_attempt_id' WHERE $payment_attempt_fault_locator"
   "UPDATE mock_payment_attempt SET callback_correlation_id = '00000000-0000-0000-0000-000000000194' WHERE $payment_attempt_fault_locator"
   "UPDATE mock_payment_attempt SET user_subject = 'tampered-attempt-owner' WHERE $payment_attempt_fault_locator"
   "UPDATE mock_payment_attempt SET order_id = '$tampered_attempt_order_id' WHERE $payment_attempt_fault_locator"
   "UPDATE mock_payment_attempt SET order_kind = 'SECKILL' WHERE $payment_attempt_fault_locator"
   "UPDATE mock_payment_attempt SET sandbox_id = 'sandbox-main' WHERE $payment_attempt_fault_locator"
+  "UPDATE mock_payment_attempt SET intent_hash = REPEAT('f', 64) WHERE $payment_attempt_fault_locator"
   "UPDATE mock_payment_attempt SET amount_minor = 1801 WHERE $payment_attempt_fault_locator"
+  "UPDATE mock_payment_attempt SET refunded_amount_minor = 1 WHERE $payment_attempt_fault_locator"
   "UPDATE mock_payment_attempt SET currency = 'AUD' WHERE $payment_attempt_fault_locator"
-  "UPDATE mock_payment_attempt SET state = 'FAILED', state_version = 2, succeeded_at = NULL WHERE $payment_attempt_fault_locator"
+  "UPDATE mock_payment_attempt SET state = 'FAILED' WHERE $payment_attempt_fault_locator"
+  "UPDATE mock_payment_attempt SET state_version = 3 WHERE $payment_attempt_fault_locator"
+  "UPDATE mock_payment_attempt SET succeeded_at = TIMESTAMPADD(MICROSECOND, 1, succeeded_at) WHERE $payment_attempt_fault_locator"
   "UPDATE standard_order SET order_id = '$tampered_order_id' WHERE $payment_order_fault_locator"
   "UPDATE standard_order SET sandbox_id = 'sandbox-main' WHERE $payment_order_fault_locator"
   "UPDATE standard_order SET user_subject = 'tampered-order-user' WHERE $payment_order_fault_locator"
   "UPDATE standard_order SET product_id = 'tampered-order-product' WHERE $payment_order_fault_locator"
   "UPDATE standard_order SET total_price_minor = 1801 WHERE $payment_order_fault_locator"
   "UPDATE standard_order SET currency = 'AUD' WHERE $payment_order_fault_locator"
-  "UPDATE standard_order SET status = 'UNPAID', state_version = 1 WHERE $payment_order_fault_locator"
+  "UPDATE standard_order SET status = 'UNPAID' WHERE $payment_order_fault_locator"
+  "UPDATE standard_order SET state_version = 1 WHERE $payment_order_fault_locator"
   "UPDATE inventory_ledger SET business_event_key = 'tampered-payment-event-key' WHERE movement_id = '$payment_movement_id'"
   "UPDATE inventory_ledger SET sandbox_id = 'sandbox-main' WHERE movement_id = '$payment_movement_id'"
   "UPDATE inventory_ledger SET movement_type = 'STANDARD_REFUND' WHERE movement_id = '$payment_movement_id'"
@@ -1844,18 +2091,23 @@ payment_predicate_mutations=(
   "UPDATE inventory_ledger SET payment_currency = 'AUD' WHERE movement_id = '$payment_movement_id'"
 )
 
-assert_equal 41 "${#payment_predicate_labels[@]}" \
+assert_equal 49 "${#payment_predicate_labels[@]}" \
   "complete physical JOIN/WHERE corruption label matrix"
 assert_equal "${#payment_predicate_labels[@]}" "${#payment_predicate_mutations[@]}" \
   "physical JOIN/WHERE corruption labels and mutations stay aligned"
+
+is_committed_payment_face_index() {
+  local index="$1"
+  [[ "$index" == 0 || "$index" == 3 || "$index" == 4 || "$index" == 17 || "$index" == 29 ]]
+}
 
 for ((predicate_index = 0; predicate_index < ${#payment_predicate_mutations[@]}; predicate_index++)); do
   mutation_count="$(mysql_query root "$root_password" commerce_db \
     "${payment_predicate_mutations[$predicate_index]}; SELECT ROW_COUNT()")"
   assert_equal 1 "$mutation_count" \
     "single consistency fault injection changed exactly one row: ${payment_predicate_labels[$predicate_index]}"
-  assert_payment_audit_reconciliation_fails_closed \
-    "single enumerator predicate corruption ${payment_predicate_labels[$predicate_index]}"
+  assert_payment_truth_fails_closed \
+    "single committed-face content corruption ${payment_predicate_labels[$predicate_index]}"
   restore_complete_payment_truth
 done
 
@@ -1863,7 +2115,9 @@ for ((left_index = 0; left_index < ${#payment_predicate_mutations[@]}; left_inde
   for ((right_index = left_index + 1; right_index < ${#payment_predicate_mutations[@]}; right_index++)); do
     left_mutation="${payment_predicate_mutations[$left_index]}"
     right_mutation="${payment_predicate_mutations[$right_index]}"
-    if [[ "${payment_predicate_labels[$left_index]}" == callback-row \
+    if [[ "${payment_predicate_labels[$left_index]}" == audit-row \
+        && "${payment_predicate_labels[$right_index]}" == audit-* ]] \
+      || [[ "${payment_predicate_labels[$left_index]}" == callback-row \
         && "${payment_predicate_labels[$right_index]}" == callback-* ]] \
       || [[ "${payment_predicate_labels[$left_index]}" == ledger-row \
         && "${payment_predicate_labels[$right_index]}" == ledger-* ]]; then
@@ -1877,13 +2131,33 @@ for ((left_index = 0; left_index < ${#payment_predicate_mutations[@]}; left_inde
       "$first_mutation; SELECT ROW_COUNT(); $second_mutation; SELECT ROW_COUNT()")"
     assert_equal $'1\n1' "$mutation_counts" \
       "paired consistency fault injection changed one row per fault: ${payment_predicate_labels[$left_index]} + ${payment_predicate_labels[$right_index]}"
-    assert_payment_audit_reconciliation_fails_closed \
-      "paired enumerator predicate corruption ${payment_predicate_labels[$left_index]} + ${payment_predicate_labels[$right_index]}"
+    if is_committed_payment_face_index "$left_index" \
+      && is_committed_payment_face_index "$right_index"; then
+      assert_payment_truth_fails_closed \
+        "paired committed-face corruption ${payment_predicate_labels[$left_index]} + ${payment_predicate_labels[$right_index]}"
+    else
+      assert_payment_audit_reconciliation_fails_closed \
+        "paired enumerator predicate corruption ${payment_predicate_labels[$left_index]} + ${payment_predicate_labels[$right_index]}"
+    fi
     restore_complete_payment_truth
   done
 done
 
 mysql_query root "$root_password" commerce_db "
+ALTER TABLE standard_order ADD CONSTRAINT chk_standard_order_payment_state CHECK (
+  (status = 'UNPAID' AND state_version = 1)
+  OR (status = 'PAID' AND state_version = 2)
+);
+ALTER TABLE mock_payment_attempt ADD CONSTRAINT chk_mock_payment_attempt_state CHECK (
+  refunded_amount_minor <= amount_minor
+  AND (
+    (state = 'PENDING' AND state_version = 1 AND succeeded_at IS NULL
+      AND refunded_amount_minor = 0)
+    OR (state = 'SUCCEEDED' AND state_version = 2 AND succeeded_at IS NOT NULL)
+    OR (state = 'FAILED' AND state_version = 2 AND succeeded_at IS NULL
+      AND refunded_amount_minor = 0)
+  )
+);
 ALTER TABLE inventory_ledger ADD CONSTRAINT chk_inventory_ledger_movement CHECK (
   (movement_type = 'SECKILL_ORDER_CREATE'
     AND reservation_id IS NOT NULL AND activity_id IS NOT NULL
@@ -1911,7 +2185,7 @@ ALTER TABLE inventory_ledger ADD CONSTRAINT chk_inventory_ledger_movement CHECK 
 
 mysql_query root "$root_password" commerce_db \
   "UPDATE mock_payment_attempt SET callback_correlation_id = '00000000-0000-0000-0000-000000000194' WHERE attempt_id = '$payment_attempt_id'"
-assert_payment_truth_fails_closed "corrupted attempt correlation" 404
+assert_payment_truth_fails_closed "corrupted attempt correlation"
 mysql_query root "$root_password" commerce_db \
   "UPDATE mock_payment_attempt SET callback_correlation_id = '$payment_correlation_id' WHERE attempt_id = '$payment_attempt_id'"
 mysql_query root "$root_password" commerce_db \
@@ -1921,7 +2195,7 @@ mysql_query root "$root_password" commerce_db \
   "UPDATE mock_payment_attempt SET user_subject = '$payment_subject' WHERE attempt_id = '$payment_attempt_id'"
 mysql_query root "$root_password" commerce_db \
   "UPDATE mock_payment_attempt SET sandbox_id = 'sandbox-main' WHERE attempt_id = '$payment_attempt_id'"
-assert_payment_truth_fails_closed "corrupted attempt sandbox" 404
+assert_payment_truth_fails_closed "corrupted attempt sandbox"
 mysql_query root "$root_password" commerce_db \
   "UPDATE mock_payment_attempt SET sandbox_id = 'sandbox-payment' WHERE attempt_id = '$payment_attempt_id'"
 mysql_query root "$root_password" commerce_db \
@@ -2041,7 +2315,7 @@ payment_dead_timestamp="$(date +%s)"
 payment_dead_signature="$(sign_payment_callback "$payment_dead_timestamp" \
   "$payment_callback_key" "$payment_event_id" "$payment_correlation_id" "$payment_order_id" \
   sandbox-payment "$payment_session" "$payment_trace" "$payment_operation")"
-assert_status 403 "dead sandbox rejects even an authenticated durable callback replay" \
+assert_status 200 "dead sandbox returns the authenticated durable callback result without mutation" \
   --request POST "http://127.0.0.1:$commerce_port/internal/mock-payments/callback" \
   --header "X-Mock-Payment-Key-Id: $mock_payment_key" \
   --header "X-Mock-Payment-Timestamp: $payment_dead_timestamp" \

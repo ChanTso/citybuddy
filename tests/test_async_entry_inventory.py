@@ -33,19 +33,18 @@ INTEGRITY_ENUMERATOR_PREDICATE_HEURISTICS = {
         "sandbox_id": "stable sandbox scope",
     },
     (EVALUATION_VIEW_REPOSITORY, "paidOrderTruths"): {
-        "sandbox_id": "stable sandbox scope",
+        "order_id": "stable order key from the shared evaluation-order key source",
         "status": "terminal truth-face classifier",
     },
     (EVALUATION_VIEW_REPOSITORY, "paymentLedgerTruths"): {
-        "movement_type": "terminal truth-face classifier",
-        "sandbox_id": "stable sandbox scope",
+        "order_id": "stable ledger/order correlation key",
     },
     (EVALUATION_VIEW_REPOSITORY, "succeededCallbackTruths"): {
         "a.attempt_id": "stable callback/attempt correlation key",
         "c.attempt_id": "stable callback/attempt correlation key",
-        "c.requested_outcome": "terminal truth-face classifier",
-        "c.result_state": "terminal truth-face classifier",
-        "c.sandbox_id": "stable sandbox scope",
+        "c.callback_correlation_id": "stable callback/attempt correlation key",
+        "c.callback_event_id": "stable callback/audit correlation key",
+        "sandbox_id": "stable sandbox key source for attempt and audit faces",
     },
     (LEGACY_COMMITMENT_STORE, "load"): {
         "created_at_anchor": "fixed committed legacy-set classifier",

@@ -35,6 +35,7 @@ import org.springframework.boot.test.web.client.TestRestTemplate;
 import org.springframework.dao.CannotAcquireLockException;
 import org.springframework.dao.DataAccessResourceFailureException;
 import org.springframework.dao.DuplicateKeyException;
+import org.springframework.dao.QueryTimeoutException;
 import org.springframework.http.HttpEntity;
 import org.springframework.http.HttpHeaders;
 import org.springframework.http.HttpMethod;
@@ -211,6 +212,36 @@ class MockPaymentIntegrationTest {
     assertThat(reorderedResult.getBody()).isNotNull();
     assertThat(reorderedResult.getBody().replayed()).isTrue();
     assertPaidTruth(orderId, attempt.attemptId(), "STANDARD_PAYMENT", 1500);
+  }
+
+  @Test
+  void productionStartMapsCrossTypeOrderCardinalityDamageToConflict() {
+    String standardOrderId = seedStandardOrder(USER, 1600);
+    SeckillFixture sibling =
+        seedSeckillOrder("ambiguous-" + UUID.randomUUID().toString().substring(0, 8), 1600);
+    assertThat(
+            jdbc.update(
+                "UPDATE seckill_order SET order_id = ? WHERE order_id = ?",
+                standardOrderId,
+                sibling.orderId()))
+        .isOne();
+    long attemptsBefore = count("mock_payment_attempt");
+
+    try {
+      ResponseEntity<String> response =
+          startRaw(directToken(), standardOrderId, "payment-ambiguous-order", body(1600));
+
+      assertThat(response.getStatusCode()).isEqualTo(HttpStatus.CONFLICT);
+      assertThat(response.getBody()).contains("\"category\":\"CONFLICT\"");
+      assertThat(count("mock_payment_attempt")).isEqualTo(attemptsBefore);
+    } finally {
+      assertThat(
+              jdbc.update(
+                  "UPDATE seckill_order SET order_id = ? WHERE order_id = ?",
+                  sibling.orderId(),
+                  standardOrderId))
+          .isOne();
+    }
   }
 
   @Test
@@ -669,6 +700,188 @@ class MockPaymentIntegrationTest {
   }
 
   @Test
+  void committedEvaluationCallbackReplayUsesDurableTruthAfterSandboxDeath() {
+    EvaluationPaymentFixture fixture = seedEvaluationPayment("committed-replay-dead");
+    MockPaymentService evaluation = evaluationPayments(new MockPaymentRepository(jdbc));
+    MockPaymentResult attempt =
+        evaluation.start(
+            fixture.userSubject(),
+            fixture.sandboxId(),
+            fixture.orderId(),
+            "payment-committed-replay-dead",
+            new MockPaymentRequest(1800L, "CNY", null));
+    MockPaymentCallbackRequest callback =
+        evaluationCallback(attempt, fixture.sandboxId(), "committed-replay-dead");
+    String callbackKey = "callback-committed-replay-dead";
+
+    assertThat(evaluation.callback(callbackKey, callback).replayed()).isFalse();
+    completeEvaluationSandbox(fixture, "complete-committed-replay-dead");
+
+    assertThat(evaluation.callback(callbackKey, callback).replayed()).isTrue();
+    assertPaidTruth(fixture.orderId(), attempt.attemptId(), "STANDARD_PAYMENT", 1800, "CNY");
+    assertThat(paymentAuditCount(fixture.sandboxId())).isOne();
+  }
+
+  @Test
+  void committedEvaluationCallbackIntegrityFailurePrecedesInactiveClassification() {
+    EvaluationPaymentFixture fixture = seedEvaluationPayment("committed-replay-corrupt");
+    MockPaymentService evaluation = evaluationPayments(new MockPaymentRepository(jdbc));
+    MockPaymentResult attempt =
+        evaluation.start(
+            fixture.userSubject(),
+            fixture.sandboxId(),
+            fixture.orderId(),
+            "payment-committed-replay-corrupt",
+            new MockPaymentRequest(1800L, "CNY", null));
+    MockPaymentCallbackRequest callback =
+        evaluationCallback(attempt, fixture.sandboxId(), "committed-replay-corrupt");
+    String callbackKey = "callback-committed-replay-corrupt";
+    evaluation.callback(callbackKey, callback);
+    jdbc.update(
+        "UPDATE mock_payment_attempt SET callback_correlation_id = ? WHERE attempt_id = ?",
+        UUID.randomUUID().toString(),
+        attempt.attemptId());
+    completeEvaluationSandbox(fixture, "complete-committed-replay-corrupt");
+
+    assertThatThrownBy(() -> evaluation.callback(callbackKey, callback))
+        .isInstanceOfSatisfying(
+            MockPaymentException.class, exception -> assertThat(exception.status()).isEqualTo(409));
+  }
+
+  @Test
+  void committedEvaluationCallbackDuplicateCorrelationIsAnIntegrityConflict() {
+    EvaluationPaymentFixture fixture = seedEvaluationPayment("committed-replay-duplicate");
+    MockPaymentService evaluation = evaluationPayments(new MockPaymentRepository(jdbc));
+    MockPaymentResult attempt =
+        evaluation.start(
+            fixture.userSubject(),
+            fixture.sandboxId(),
+            fixture.orderId(),
+            "payment-committed-replay-duplicate",
+            new MockPaymentRequest(1800L, "CNY", null));
+    MockPaymentCallbackRequest callback =
+        evaluationCallback(attempt, fixture.sandboxId(), "committed-replay-duplicate");
+    String callbackKey = "callback-committed-replay-duplicate";
+    evaluation.callback(callbackKey, callback);
+    assertThat(
+            jdbc.update(
+                """
+                INSERT INTO mock_payment_callback
+                  (callback_event_id, callback_idempotency_key, attempt_id,
+                   callback_correlation_id, sandbox_id, support_session_id, trace_id,
+                   operation_id, intent_hash, requested_outcome, result_state, created_at)
+                SELECT ?, ?, ?, callback_correlation_id, sandbox_id, support_session_id, trace_id,
+                       operation_id, intent_hash, requested_outcome, result_state, created_at
+                FROM mock_payment_callback WHERE attempt_id = ?
+                """,
+                UUID.randomUUID().toString(),
+                "duplicate-correlation-key",
+                UUID.randomUUID().toString(),
+                attempt.attemptId()))
+        .isOne();
+
+    assertThatThrownBy(() -> evaluation.callback(callbackKey, callback))
+        .isInstanceOfSatisfying(
+            MockPaymentException.class, exception -> assertThat(exception.status()).isEqualTo(409));
+  }
+
+  @Test
+  void committedEvaluationCallbackReplayDoesNotDependOnLivenessRead() {
+    EvaluationPaymentFixture fixture = seedEvaluationPayment("committed-replay-unavailable");
+    MockPaymentService healthy = evaluationPayments(new MockPaymentRepository(jdbc));
+    MockPaymentResult attempt =
+        healthy.start(
+            fixture.userSubject(),
+            fixture.sandboxId(),
+            fixture.orderId(),
+            "payment-committed-replay-unavailable",
+            new MockPaymentRequest(1800L, "CNY", null));
+    MockPaymentCallbackRequest callback =
+        evaluationCallback(attempt, fixture.sandboxId(), "committed-replay-unavailable");
+    String callbackKey = "callback-committed-replay-unavailable";
+    healthy.callback(callbackKey, callback);
+    AtomicInteger livenessReads = new AtomicInteger();
+    EvaluationSandboxRepository unavailable =
+        new EvaluationSandboxRepository(jdbc) {
+          @Override
+          public Sandbox lockForPayment(String sandboxId) {
+            livenessReads.incrementAndGet();
+            throw new QueryTimeoutException("controlled liveness timeout");
+          }
+        };
+    MockPaymentService replay = evaluationPayments(new MockPaymentRepository(jdbc), unavailable);
+
+    assertThat(replay.callback(callbackKey, callback).replayed()).isTrue();
+    assertThat(livenessReads).hasValue(0);
+  }
+
+  @Test
+  void committedEvaluationCallbackReplayRechecksTruthAfterWaitingForConcurrentCommit()
+      throws Exception {
+    EvaluationPaymentFixture fixture = seedEvaluationPayment("committed-toctou");
+    MockPaymentResult attempt =
+        evaluationPayments(new MockPaymentRepository(jdbc))
+            .start(
+                fixture.userSubject(),
+                fixture.sandboxId(),
+                fixture.orderId(),
+                "payment-committed-toctou",
+                new MockPaymentRequest(1800L, "CNY", null));
+    MockPaymentCallbackRequest callback =
+        evaluationCallback(attempt, fixture.sandboxId(), "committed-toctou");
+    String callbackKey = "callback-committed-toctou";
+    CountDownLatch writerHasPersistedTruth = new CountDownLatch(1);
+    CountDownLatch releaseWriterCommit = new CountDownLatch(1);
+    CountDownLatch replayHasLockedCommittedAttempt = new CountDownLatch(1);
+    CountDownLatch releaseReplay = new CountDownLatch(1);
+    MockPaymentRepository pausedWriter =
+        new MockPaymentRepository(jdbc) {
+          @Override
+          public void insertPaymentAuditReference(
+              String auditReferenceId,
+              CallbackRecord callback,
+              long entityVersion,
+              Instant createdAt) {
+            super.insertPaymentAuditReference(auditReferenceId, callback, entityVersion, createdAt);
+            writerHasPersistedTruth.countDown();
+            awaitSignal(releaseWriterCommit, "writer commit release");
+          }
+        };
+    MockPaymentRepository waitingReplay =
+        new MockPaymentRepository(jdbc) {
+          @Override
+          public java.util.Optional<AttemptRecord> findEvaluationAttemptByCorrelationForUpdate(
+              String correlationId, String sandboxId) {
+            java.util.Optional<AttemptRecord> committed =
+                super.findEvaluationAttemptByCorrelationForUpdate(correlationId, sandboxId);
+            replayHasLockedCommittedAttempt.countDown();
+            awaitSignal(releaseReplay, "replay release");
+            return committed;
+          }
+        };
+    MockPaymentService writer = evaluationPayments(pausedWriter);
+    MockPaymentService replay = evaluationPayments(waitingReplay);
+
+    CompletableFuture<MockPaymentCallbackResult> writerFuture =
+        CompletableFuture.supplyAsync(() -> writer.callback(callbackKey, callback));
+    assertThat(writerHasPersistedTruth.await(10, TimeUnit.SECONDS)).isTrue();
+    CompletableFuture<MockPaymentCallbackResult> replayFuture =
+        CompletableFuture.supplyAsync(() -> replay.callback(callbackKey, callback));
+    assertThat(replayFuture).isNotDone();
+
+    releaseWriterCommit.countDown();
+    assertThat(writerFuture.get(10, TimeUnit.SECONDS).replayed()).isFalse();
+    assertThat(replayHasLockedCommittedAttempt.await(10, TimeUnit.SECONDS)).isTrue();
+    assertThat(completeEvaluationSandbox(fixture, "complete-committed-toctou").lifecycleState())
+        .isEqualTo("DEAD");
+    releaseReplay.countDown();
+
+    assertThat(replayFuture.get(10, TimeUnit.SECONDS).replayed()).isTrue();
+    assertPaidTruth(fixture.orderId(), attempt.attemptId(), "STANDARD_PAYMENT", 1800, "CNY");
+    assertThat(paymentAuditCount(fixture.sandboxId())).isOne();
+  }
+
+  @Test
   void evaluationCallbackWinsAControlledCompletionRace() throws Exception {
     EvaluationPaymentFixture fixture = seedEvaluationPayment("callback-wins");
     MockPaymentService healthy = evaluationPayments(new MockPaymentRepository(jdbc));
@@ -684,17 +897,18 @@ class MockPaymentIntegrationTest {
     CountDownLatch callbackHasSandboxLock = new CountDownLatch(1);
     CountDownLatch releaseCallback = new CountDownLatch(1);
     CountDownLatch completionEntered = new CountDownLatch(1);
-    MockPaymentRepository pausedPayments =
-        new MockPaymentRepository(jdbc) {
+    EvaluationSandboxRepository pausedSandbox =
+        new EvaluationSandboxRepository(jdbc) {
           @Override
-          public java.util.Optional<AttemptRecord> findEvaluationAttemptByCorrelationForUpdate(
-              String correlationId, String sandboxId) {
+          public Sandbox lockForPayment(String sandboxId) {
+            Sandbox locked = super.lockForPayment(sandboxId);
             callbackHasSandboxLock.countDown();
             awaitSignal(releaseCallback, "callback release");
-            return super.findEvaluationAttemptByCorrelationForUpdate(correlationId, sandboxId);
+            return locked;
           }
         };
-    MockPaymentService callbackService = evaluationPayments(pausedPayments);
+    MockPaymentService callbackService =
+        evaluationPayments(new MockPaymentRepository(jdbc), pausedSandbox);
     EvaluationSandboxRepository completionRepository =
         new EvaluationSandboxRepository(jdbc) {
           @Override
@@ -927,7 +1141,7 @@ class MockPaymentIntegrationTest {
   }
 
   @Test
-  void exactMysqlDeadlockRetriesOnceAndOtherLockFailuresRemainVisible() {
+  void callbackLockAndConstraintCompetitionResolveFromCommittedTruth() {
     String orderId = seedStandardOrder(USER, 3500);
     MockPaymentResult attempt =
         payments.start(
@@ -936,8 +1150,25 @@ class MockPaymentIntegrationTest {
     payments.callback("callback-deadlock", callback);
 
     AtomicInteger deadlockCalls = new AtomicInteger();
+    AtomicInteger deadlockObservations = new AtomicInteger();
     MockPaymentRepository oneDeadlock =
         new MockPaymentRepository(jdbc) {
+          @Override
+          public java.util.Optional<CallbackRecord> findCallbackByKey(String idempotencyKey) {
+            if (deadlockObservations.incrementAndGet() <= 2) {
+              return java.util.Optional.empty();
+            }
+            return super.findCallbackByKey(idempotencyKey);
+          }
+
+          @Override
+          public java.util.Optional<CallbackRecord> findCallbackByEvent(String eventId) {
+            if (deadlockObservations.incrementAndGet() <= 2) {
+              return java.util.Optional.empty();
+            }
+            return super.findCallbackByEvent(eventId);
+          }
+
           @Override
           public java.util.Optional<AttemptRecord> findAttemptByCorrelationForUpdate(
               String correlationId) {
@@ -957,8 +1188,25 @@ class MockPaymentIntegrationTest {
     assertThat(paymentMovementCount(attempt.attemptId())).isOne();
 
     AtomicInteger timeoutCalls = new AtomicInteger();
+    AtomicInteger timeoutObservations = new AtomicInteger();
     MockPaymentRepository lockTimeout =
         new MockPaymentRepository(jdbc) {
+          @Override
+          public java.util.Optional<CallbackRecord> findCallbackByKey(String idempotencyKey) {
+            if (timeoutObservations.incrementAndGet() <= 2) {
+              return java.util.Optional.empty();
+            }
+            return super.findCallbackByKey(idempotencyKey);
+          }
+
+          @Override
+          public java.util.Optional<CallbackRecord> findCallbackByEvent(String eventId) {
+            if (timeoutObservations.incrementAndGet() <= 2) {
+              return java.util.Optional.empty();
+            }
+            return super.findCallbackByEvent(eventId);
+          }
+
           @Override
           public java.util.Optional<AttemptRecord> findAttemptByCorrelationForUpdate(
               String correlationId) {
@@ -969,14 +1217,32 @@ class MockPaymentIntegrationTest {
     MockPaymentService nonRetrying =
         new MockPaymentService(lockTimeout, transactionTemplate(), Clock.systemUTC());
 
-    assertThatThrownBy(() -> nonRetrying.callback("callback-deadlock", callback))
-        .isInstanceOf(CannotAcquireLockException.class);
-    assertThat(timeoutCalls).hasValue(1);
+    MockPaymentCallbackResult timeoutConverged =
+        nonRetrying.callback("callback-deadlock", callback);
+    assertThat(timeoutConverged.replayed()).isTrue();
+    assertThat(timeoutCalls).hasValue(2);
     assertThat(paymentMovementCount(attempt.attemptId())).isOne();
 
     AtomicInteger duplicateCalls = new AtomicInteger();
+    AtomicInteger duplicateObservations = new AtomicInteger();
     MockPaymentRepository duplicateConflict =
         new MockPaymentRepository(jdbc) {
+          @Override
+          public java.util.Optional<CallbackRecord> findCallbackByKey(String idempotencyKey) {
+            if (duplicateObservations.incrementAndGet() <= 2) {
+              return java.util.Optional.empty();
+            }
+            return super.findCallbackByKey(idempotencyKey);
+          }
+
+          @Override
+          public java.util.Optional<CallbackRecord> findCallbackByEvent(String eventId) {
+            if (duplicateObservations.incrementAndGet() <= 2) {
+              return java.util.Optional.empty();
+            }
+            return super.findCallbackByEvent(eventId);
+          }
+
           @Override
           public java.util.Optional<AttemptRecord> findAttemptByCorrelationForUpdate(
               String correlationId) {
@@ -987,15 +1253,46 @@ class MockPaymentIntegrationTest {
     MockPaymentService duplicateRejecting =
         new MockPaymentService(duplicateConflict, transactionTemplate(), Clock.systemUTC());
 
-    assertThatThrownBy(() -> duplicateRejecting.callback("callback-deadlock", callback))
+    MockPaymentCallbackResult duplicateConverged =
+        duplicateRejecting.callback("callback-deadlock", callback);
+    assertThat(duplicateConverged.replayed()).isTrue();
+    assertThat(duplicateCalls).hasValue(1);
+    assertThat(paymentMovementCount(attempt.attemptId())).isOne();
+
+    String uncommittedOrderId = seedStandardOrder(USER, 3600);
+    MockPaymentResult uncommittedAttempt =
+        payments.start(
+            USER,
+            uncommittedOrderId,
+            "payment-lock-timeout-uncommitted",
+            new MockPaymentRequest(3600L, "AUD", null));
+    MockPaymentCallbackRequest uncommittedCallback =
+        callback(uncommittedAttempt, UUID.randomUUID().toString());
+    AtomicInteger uncommittedTimeoutCalls = new AtomicInteger();
+    MockPaymentRepository uncommittedTimeout =
+        new MockPaymentRepository(jdbc) {
+          @Override
+          public java.util.Optional<AttemptRecord> findAttemptByCorrelationForUpdate(
+              String correlationId) {
+            uncommittedTimeoutCalls.incrementAndGet();
+            throw lockFailure(1205);
+          }
+        };
+    MockPaymentService uncommittedRejecting =
+        new MockPaymentService(uncommittedTimeout, transactionTemplate(), Clock.systemUTC());
+
+    assertThatThrownBy(
+            () ->
+                uncommittedRejecting.callback(
+                    "callback-lock-timeout-uncommitted", uncommittedCallback))
         .isInstanceOfSatisfying(
             MockPaymentException.class,
             exception -> {
               assertThat(exception.status()).isEqualTo(409);
               assertThat(exception.category()).isEqualTo("CONFLICT");
             });
-    assertThat(duplicateCalls).hasValue(1);
-    assertThat(paymentMovementCount(attempt.attemptId())).isOne();
+    assertThat(uncommittedTimeoutCalls).hasValue(2);
+    assertThat(paymentMovementCount(uncommittedAttempt.attemptId())).isZero();
   }
 
   @Test
@@ -1565,6 +1862,19 @@ class MockPaymentIntegrationTest {
             Long.class,
             sandboxId);
     return count == null ? 0 : count;
+  }
+
+  private EvaluationSandboxRepository.Sandbox completeEvaluationSandbox(
+      EvaluationPaymentFixture fixture, String idempotencyKey) {
+    return transactionTemplate()
+        .execute(
+            status ->
+                new EvaluationSandboxRepository(jdbc)
+                    .beginCompletion(
+                        fixture.sandboxId(),
+                        fixture.caseCorrelation(),
+                        idempotencyKey,
+                        Instant.now()));
   }
 
   private long movementCount(String orderId, String movementType) {

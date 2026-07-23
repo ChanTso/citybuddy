@@ -1,5 +1,6 @@
 package io.citybuddy.commerce.evaluation;
 
+import io.citybuddy.commerce.payment.EvaluationPaymentCommittedFaces;
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
 import java.sql.ResultSet;
@@ -138,7 +139,25 @@ public final class EvaluationViewRepository {
 
   public List<PaymentView> payments(String sandboxId) {
     return jdbc.query(
-        """
+        paymentViewSql(),
+        (result, row) ->
+            new PaymentView(
+                result.getString("attempt_id"),
+                result.getString("callback_correlation_id"),
+                result.getString("order_id"),
+                result.getLong("amount_minor"),
+                result.getString("currency"),
+                result.getString("state"),
+                result.getLong("state_version"),
+                result.getString("callback_event_id"),
+                result.getString("order_status"),
+                result.getLong("order_state_version"),
+                result.getInt("movement_count")),
+        sandboxId);
+  }
+
+  private static String paymentViewSql() {
+    return """
         SELECT a.attempt_id, a.callback_correlation_id, a.order_id, a.amount_minor, a.currency,
                a.state, a.state_version,
                CASE
@@ -170,9 +189,9 @@ public final class EvaluationViewRepository {
                  ELSE 0
                END AS order_state_version,
                CASE
-                 WHEN (SELECT COUNT(*) FROM inventory_ledger l
+                 WHEN (SELECT COUNT(*) FROM %s l
                        WHERE l.business_event_key = CONCAT('mock-payment:', a.attempt_id))
-                    = (SELECT COUNT(*) FROM inventory_ledger l
+                    = (SELECT COUNT(*) FROM %s l
                        WHERE l.business_event_key = CONCAT('mock-payment:', a.attempt_id)
                          AND l.movement_type = 'STANDARD_PAYMENT' AND l.order_id = a.order_id
                          AND l.reservation_id IS NULL AND l.activity_id IS NULL
@@ -180,32 +199,25 @@ public final class EvaluationViewRepository {
                          AND l.inventory_delta = 0 AND l.activity_quota_delta = 0
                          AND l.payment_amount_minor = a.amount_minor
                          AND l.payment_currency = a.currency)
-                   THEN (SELECT COUNT(*) FROM inventory_ledger l
+                   THEN (SELECT COUNT(*) FROM %s l
                          WHERE l.business_event_key = CONCAT('mock-payment:', a.attempt_id))
                  ELSE -1
                END AS movement_count
-        FROM mock_payment_attempt a
-        LEFT JOIN standard_order o ON o.order_id = a.order_id
-        LEFT JOIN mock_payment_callback c
+        FROM %s a
+        LEFT JOIN (%s) o ON o.order_id = a.order_id
+        LEFT JOIN %s c
           ON c.attempt_id = a.attempt_id
         WHERE a.sandbox_id = ?
         ORDER BY a.created_at, a.attempt_id
         LIMIT 8
-        """,
-        (result, row) ->
-            new PaymentView(
-                result.getString("attempt_id"),
-                result.getString("callback_correlation_id"),
-                result.getString("order_id"),
-                result.getLong("amount_minor"),
-                result.getString("currency"),
-                result.getString("state"),
-                result.getLong("state_version"),
-                result.getString("callback_event_id"),
-                result.getString("order_status"),
-                result.getLong("order_state_version"),
-                result.getInt("movement_count")),
-        sandboxId);
+        """
+        .formatted(
+            EvaluationPaymentCommittedFaces.onlyTable(EvaluationPaymentCommittedFaces.LEDGER),
+            EvaluationPaymentCommittedFaces.onlyTable(EvaluationPaymentCommittedFaces.LEDGER),
+            EvaluationPaymentCommittedFaces.onlyTable(EvaluationPaymentCommittedFaces.LEDGER),
+            EvaluationPaymentCommittedFaces.onlyTable(EvaluationPaymentCommittedFaces.ATTEMPT),
+            EvaluationPaymentCommittedFaces.orderFaceUnionSql(),
+            EvaluationPaymentCommittedFaces.onlyTable(EvaluationPaymentCommittedFaces.CALLBACK));
   }
 
   public List<AuditReference> audit(
@@ -230,6 +242,7 @@ public final class EvaluationViewRepository {
     List<ProductObservationTruth> productTruths = productObservationTruths(sandboxId);
     if (!EvaluationLegacyAuditCommitmentStore.load(jdbc).isConsistent()
         || !sequenceOrderConsistent(references)
+        || !paymentFaceCardinalitiesConsistent(sandboxId)
         || !paymentTruthsConsistent(
             references,
             paidOrderTruths(sandboxId),
@@ -272,6 +285,84 @@ public final class EvaluationViewRepository {
       }
     }
     return true;
+  }
+
+  private boolean paymentFaceCardinalitiesConsistent(String sandboxId) {
+    String callbackTable =
+        EvaluationPaymentCommittedFaces.onlyTable(EvaluationPaymentCommittedFaces.CALLBACK);
+    String callbackKey = EvaluationPaymentCommittedFaces.CALLBACK.stableKeys().getFirst();
+    String attemptTable =
+        EvaluationPaymentCommittedFaces.onlyTable(EvaluationPaymentCommittedFaces.ATTEMPT);
+    String attemptKey = EvaluationPaymentCommittedFaces.ATTEMPT.stableKeys().getFirst();
+    String ledgerTable =
+        EvaluationPaymentCommittedFaces.onlyTable(EvaluationPaymentCommittedFaces.LEDGER);
+    String auditTable =
+        EvaluationPaymentCommittedFaces.onlyTable(EvaluationPaymentCommittedFaces.AUDIT);
+    return duplicateGroupCount(
+                "SELECT "
+                    + callbackKey
+                    + " FROM "
+                    + callbackTable
+                    + " WHERE "
+                    + callbackKey
+                    + " IN (SELECT "
+                    + callbackKey
+                    + " FROM "
+                    + callbackTable
+                    + " WHERE sandbox_id = ?) GROUP BY "
+                    + callbackKey
+                    + " HAVING COUNT(*) > 1",
+                sandboxId)
+            == 0
+        && duplicateGroupCount(
+                "SELECT "
+                    + attemptKey
+                    + " FROM "
+                    + attemptTable
+                    + " WHERE "
+                    + attemptKey
+                    + " IN (SELECT "
+                    + attemptKey
+                    + " FROM "
+                    + attemptTable
+                    + " WHERE sandbox_id = ?) GROUP BY "
+                    + attemptKey
+                    + " HAVING COUNT(*) > 1",
+                sandboxId)
+            == 0
+        && duplicateGroupCount(
+                "SELECT order_id FROM ("
+                    + EvaluationPaymentCommittedFaces.orderFaceUnionSql()
+                    + ") committed_order WHERE order_id IN ("
+                    + EvaluationPaymentCommittedFaces.evaluationOrderKeysBySandboxSql()
+                    + ") GROUP BY order_id HAVING COUNT(*) > 1",
+                sandboxId)
+            == 0
+        && duplicateGroupCount(
+                "SELECT order_id FROM "
+                    + ledgerTable
+                    + " WHERE order_id IN ("
+                    + EvaluationPaymentCommittedFaces.evaluationOrderKeysBySandboxSql()
+                    + ") GROUP BY order_id HAVING COUNT(*) > 1",
+                sandboxId)
+            == 0
+        && duplicateGroupCount(
+                "SELECT entity_id FROM "
+                    + auditTable
+                    + " WHERE entity_id IN (SELECT callback_event_id FROM "
+                    + callbackTable
+                    + " WHERE sandbox_id = ?) GROUP BY entity_id HAVING COUNT(*) > 1",
+                sandboxId)
+            == 0;
+  }
+
+  private int duplicateGroupCount(String groupedQuery, String sandboxId) {
+    Integer count =
+        jdbc.queryForObject(
+            "SELECT COUNT(*) FROM (" + groupedQuery + ") duplicate_groups",
+            Integer.class,
+            sandboxId);
+    return count == null ? 0 : count;
   }
 
   public static Set<EvaluationAuditEntityType> reconciledAuditTypes() {
@@ -318,14 +409,18 @@ public final class EvaluationViewRepository {
   private List<PaidOrderTruth> paidOrderTruths(String sandboxId) {
     return jdbc.query(
         """
-        SELECT order_id, sandbox_id, user_subject, product_id, total_price_minor,
+        SELECT order_kind, order_id, sandbox_id, user_subject, product_id, total_price_minor,
                currency, status, state_version
-        FROM standard_order
-        WHERE sandbox_id = ? AND status = 'PAID'
+        FROM (%s) committed_order
+        WHERE order_id IN (%s) AND status = 'PAID'
         ORDER BY order_id
-        """,
+        """
+            .formatted(
+                EvaluationPaymentCommittedFaces.orderFaceUnionSql(),
+                EvaluationPaymentCommittedFaces.evaluationOrderKeysBySandboxSql()),
         (result, row) ->
             new PaidOrderTruth(
+                result.getString("order_kind"),
                 result.getString("order_id"),
                 result.getString("sandbox_id"),
                 result.getString("user_subject"),
@@ -343,10 +438,13 @@ public final class EvaluationViewRepository {
         SELECT movement_id, business_event_key, movement_type, order_id, reservation_id,
                activity_id, product_id, sandbox_id, inventory_delta, activity_quota_delta,
                payment_amount_minor, payment_currency
-        FROM inventory_ledger
-        WHERE sandbox_id = ? AND movement_type = 'STANDARD_PAYMENT'
+        FROM %s
+        WHERE order_id IN (%s)
         ORDER BY order_id, movement_id
-        """,
+        """
+            .formatted(
+                EvaluationPaymentCommittedFaces.onlyTable(EvaluationPaymentCommittedFaces.LEDGER),
+                EvaluationPaymentCommittedFaces.evaluationOrderKeysBySandboxSql()),
         (result, row) ->
             new PaymentLedgerTruth(
                 result.getString("movement_id"),
@@ -373,14 +471,26 @@ public final class EvaluationViewRepository {
                a.callback_correlation_id AS attempt_correlation_id,
                a.user_subject AS attempt_user_subject, a.order_id AS attempt_order_id,
                a.order_kind AS attempt_order_kind, a.sandbox_id AS attempt_sandbox_id,
+               a.intent_hash AS attempt_intent_hash,
                a.amount_minor AS attempt_amount_minor, a.currency AS attempt_currency,
-               a.state AS attempt_state, a.state_version AS attempt_state_version
-        FROM mock_payment_callback c
-        JOIN mock_payment_attempt a ON a.attempt_id = c.attempt_id
-        WHERE c.sandbox_id = ?
-          AND c.requested_outcome = 'SUCCEEDED' AND c.result_state = 'APPLIED'
+               a.refunded_amount_minor AS attempt_refunded_amount_minor,
+               a.state AS attempt_state, a.state_version AS attempt_state_version,
+               a.succeeded_at AS attempt_succeeded_at
+        FROM %s c
+        LEFT JOIN %s a ON a.attempt_id = c.attempt_id
+        WHERE c.callback_correlation_id IN (
+                SELECT callback_correlation_id FROM %s WHERE sandbox_id = ?
+              )
+           OR c.callback_event_id IN (
+                SELECT entity_id FROM %s WHERE sandbox_id = ?
+              )
         ORDER BY a.order_id, c.callback_event_id
-        """,
+        """
+            .formatted(
+                EvaluationPaymentCommittedFaces.onlyTable(EvaluationPaymentCommittedFaces.CALLBACK),
+                EvaluationPaymentCommittedFaces.onlyTable(EvaluationPaymentCommittedFaces.ATTEMPT),
+                EvaluationPaymentCommittedFaces.onlyTable(EvaluationPaymentCommittedFaces.ATTEMPT),
+                EvaluationPaymentCommittedFaces.onlyTable(EvaluationPaymentCommittedFaces.AUDIT)),
         (result, row) ->
             new SucceededCallbackTruth(
                 result.getString("callback_event_id"),
@@ -400,10 +510,16 @@ public final class EvaluationViewRepository {
                 result.getString("attempt_order_id"),
                 result.getString("attempt_order_kind"),
                 result.getString("attempt_sandbox_id"),
+                result.getString("attempt_intent_hash"),
                 result.getLong("attempt_amount_minor"),
                 result.getString("attempt_currency"),
+                result.getLong("attempt_refunded_amount_minor"),
                 result.getString("attempt_state"),
-                result.getLong("attempt_state_version")),
+                result.getLong("attempt_state_version"),
+                result.getTimestamp("attempt_succeeded_at") == null
+                    ? null
+                    : result.getTimestamp("attempt_succeeded_at").toInstant()),
+        sandboxId,
         sandboxId);
   }
 
@@ -510,6 +626,7 @@ public final class EvaluationViewRepository {
                     callbacks.stream()
                         .filter(callback -> callback.callbackEventId().equals(reference.entityId()))
                         .map(SucceededCallbackTruth::attemptOrderId)
+                        .filter(Objects::nonNull)
                         .findFirst()
                         .orElse(null))
             .filter(Objects::nonNull)
@@ -580,7 +697,8 @@ public final class EvaluationViewRepository {
             callback.callbackEventId(),
             callback.attemptStateVersion(),
             callback.createdAt());
-    return "PAID".equals(order.status())
+    return "STANDARD".equals(order.orderKind())
+        && "PAID".equals(order.status())
         && order.stateVersion() == 2
         && "STANDARD".equals(callback.attemptOrderKind())
         && "SUCCEEDED".equals(callback.attemptState())
@@ -595,6 +713,16 @@ public final class EvaluationViewRepository {
         && callback.attemptOrderId().equals(order.orderId())
         && callback.attemptAmountMinor() == order.totalPriceMinor()
         && callback.attemptCurrency().equals(order.currency())
+        && callback
+            .attemptIntentHash()
+            .equals(
+                EvaluationPaymentCommittedFaces.attemptIntentHash(
+                    callback.attemptOrderId(),
+                    callback.attemptAmountMinor(),
+                    callback.attemptCurrency(),
+                    callback.attemptSandboxId()))
+        && callback.attemptRefundedAmountMinor() == 0
+        && Objects.equals(callback.attemptSucceededAt(), callback.createdAt())
         && ledger.businessEventKey().equals("mock-payment:" + callback.attemptId())
         && "STANDARD_PAYMENT".equals(ledger.movementType())
         && ledger.orderId().equals(order.orderId())
@@ -706,6 +834,7 @@ public final class EvaluationViewRepository {
       Instant createdAt) {}
 
   private record PaidOrderTruth(
+      String orderKind,
       String orderId,
       String sandboxId,
       String userSubject,
@@ -747,10 +876,13 @@ public final class EvaluationViewRepository {
       String attemptOrderId,
       String attemptOrderKind,
       String attemptSandboxId,
+      String attemptIntentHash,
       long attemptAmountMinor,
       String attemptCurrency,
+      long attemptRefundedAmountMinor,
       String attemptState,
-      long attemptStateVersion) {}
+      long attemptStateVersion,
+      Instant attemptSucceededAt) {}
 
   private record PaymentAuditTruth(
       String sandboxId,
