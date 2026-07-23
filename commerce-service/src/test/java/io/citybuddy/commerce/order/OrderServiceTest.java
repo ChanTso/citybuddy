@@ -155,6 +155,7 @@ class OrderServiceTest {
         .thenThrow(new CannotAcquireLockException("controlled lock conflict"))
         .thenThrow(new CannotAcquireLockException("controlled lock conflict"))
         .thenThrow(new CannotAcquireLockException("controlled lock conflict"))
+        .thenThrow(new CannotAcquireLockException("committed truth is still locked"))
         .thenReturn(
             Optional.of(
                 new OrderRepository.IdempotencyRecord(intentHash("product-1", 1, 7), "order-1")));
@@ -163,32 +164,72 @@ class OrderServiceTest {
     OrderResult resolved = service.create("user-1", "key-1", request("product-1", 1, 7), "corr");
 
     assertThat(resolved.replayed()).isTrue();
-    verify(repository, times(4)).findIdempotencyForUpdate("user-1", "key-1");
+    verify(repository, times(5)).findIdempotencyForUpdate("user-1", "key-1");
     verify(repository, never())
         .reserveIdempotency(anyString(), anyString(), anyString(), anyString());
-    verify(transactionManager, times(3)).rollback(any());
+    verify(transactionManager, times(4)).rollback(any());
     verify(transactionManager).commit(any());
   }
 
   @Test
-  void recognizedConcurrencyExhaustionWithoutCommittedTruthIsAStableConflict() {
+  void confirmedAbsenceAllowsOneFinalMutationAttempt() {
     when(repository.findIdempotencyForUpdate("user-1", "key-1"))
         .thenThrow(new CannotAcquireLockException("controlled lock conflict"))
         .thenThrow(new CannotAcquireLockException("controlled lock conflict"))
         .thenThrow(new CannotAcquireLockException("controlled lock conflict"))
+        .thenReturn(Optional.empty())
+        .thenReturn(Optional.empty());
+    OrderRepository.ProductSnapshot product = product(2, 7);
+    when(repository.findProduct("product-1")).thenReturn(Optional.of(product));
+    when(repository.decrementStock(product, 1)).thenReturn(true);
+    when(repository.findOwnedOrder(eq("user-1"), anyString(), eq("corr")))
+        .thenReturn(result("corr", false));
+
+    OrderResult recovered = service.create("user-1", "key-1", request("product-1", 1, 7), "corr");
+
+    assertThat(recovered.replayed()).isFalse();
+    verify(repository, times(5)).findIdempotencyForUpdate("user-1", "key-1");
+    verify(repository).decrementStock(product, 1);
+    verify(repository).insertOutbox(anyString(), eq(product), eq(1));
+  }
+
+  @Test
+  void confirmedAbsenceThenAnotherRaceIsRetryableRatherThanConflictOrUnavailable() {
+    when(repository.findIdempotencyForUpdate("user-1", "key-1"))
+        .thenThrow(new CannotAcquireLockException("controlled lock conflict"))
+        .thenThrow(new CannotAcquireLockException("controlled lock conflict"))
+        .thenThrow(new CannotAcquireLockException("controlled lock conflict"))
+        .thenReturn(Optional.empty())
+        .thenThrow(new CannotAcquireLockException("final mutation raced"))
         .thenReturn(Optional.empty());
 
     assertThatThrownBy(() -> service.create("user-1", "key-1", request("product-1", 1, 7), "corr"))
         .isInstanceOfSatisfying(
             OrderException.class,
             exception -> {
-              assertThat(exception.status()).isEqualTo(409);
+              assertThat(exception.status()).isEqualTo(429);
               assertThat(exception.category()).isEqualTo(OrderCategory.CONCURRENCY_EXHAUSTED);
             });
 
-    verify(repository, times(4)).findIdempotencyForUpdate("user-1", "key-1");
-    verify(transactionManager, times(3)).rollback(any());
-    verify(transactionManager).commit(any());
+    verify(repository, times(6)).findIdempotencyForUpdate("user-1", "key-1");
+  }
+
+  @Test
+  void observationThatNeverSucceedsRemainsIndeterminateAndRetryable() {
+    when(repository.findIdempotencyForUpdate("user-1", "key-1"))
+        .thenThrow(new CannotAcquireLockException("controlled lock conflict"));
+
+    assertThatThrownBy(() -> service.create("user-1", "key-1", request("product-1", 1, 7), "corr"))
+        .isInstanceOfSatisfying(
+            OrderException.class,
+            exception -> {
+              assertThat(exception.status()).isEqualTo(429);
+              assertThat(exception.category()).isEqualTo(OrderCategory.CONCURRENCY_EXHAUSTED);
+            });
+
+    verify(repository, times(6)).findIdempotencyForUpdate("user-1", "key-1");
+    verify(repository, never())
+        .reserveIdempotency(anyString(), anyString(), anyString(), anyString());
   }
 
   @Test
@@ -197,6 +238,7 @@ class OrderServiceTest {
         .thenThrow(new CannotAcquireLockException("controlled lock conflict"))
         .thenThrow(new CannotAcquireLockException("controlled lock conflict"))
         .thenThrow(new CannotAcquireLockException("controlled lock conflict"))
+        .thenThrow(new CannotAcquireLockException("committed truth is still locked"))
         .thenReturn(Optional.of(new OrderRepository.IdempotencyRecord("different", "order-1")));
 
     assertThatThrownBy(() -> service.create("user-1", "key-1", request("product-1", 1, 7), "corr"))
@@ -207,7 +249,7 @@ class OrderServiceTest {
               assertThat(exception.category()).isEqualTo(OrderCategory.IDEMPOTENCY_CONFLICT);
             });
 
-    verify(repository, times(4)).findIdempotencyForUpdate("user-1", "key-1");
+    verify(repository, times(5)).findIdempotencyForUpdate("user-1", "key-1");
     verify(repository, never()).findOwnedOrder(anyString(), anyString(), anyString());
   }
 

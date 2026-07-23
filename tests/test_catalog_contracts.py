@@ -89,6 +89,7 @@ def test_order_contract_is_direct_user_idempotent_and_rejects_client_authority()
         "403",
         "409",
         "422",
+        "429",
         "503",
     }
     request = contract["components"]["schemas"]["CreateOrderRequest"]

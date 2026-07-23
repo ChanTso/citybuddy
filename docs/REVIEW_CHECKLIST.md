@@ -27,12 +27,16 @@ request. A later semantic diff change requires the checklist to be executed and 
   or normalized differently between write and replay paths.
 - Prove same-intent convergence and one-field-at-a-time conflicting reuse against durable truth;
   use a locking current read where a concurrent winner must be observed.
-- When bounded mutation retries exhaust, perform one final read-only, locking resolution of the
-  committed idempotency truth before classifying the request. A same-intent sibling commit returns
-  the existing result without another mutation; a conflicting intent remains a deterministic
-  conflict; absence after the final resolution is a stable concurrency rejection, not dependency
-  unavailability. Only a positively identified database resource or transaction-acquisition failure
-  may use the unavailable response. Exercise all three outcomes independently.
+- When bounded mutation retries exhaust, resolve committed idempotency truth with an explicit
+  three-state observation: `FOUND`, `CONFIRMED_ABSENT`, or `INDETERMINATE`. A same-intent sibling
+  commit returns the existing result without another mutation; a conflicting intent remains a
+  deterministic conflict; only a successfully completed locking read may establish absence and
+  permit one bounded final mutation attempt. A lock timeout, observation failure, or interrupted
+  read is `INDETERMINATE`, never evidence of absence and never a terminal conflict or unavailable
+  conclusion; use bounded re-observation and, if truth remains indeterminate, a retryable response.
+  Only a positively identified database resource or transaction-acquisition failure may use the
+  unavailable response. Exercise found, confirmed-absent recovery, indeterminate-then-found,
+  persistently indeterminate, conflicting intent, and real dependency unavailability independently.
 
 ### Total parsing exception boundary
 
