@@ -444,6 +444,22 @@ public class MockPaymentRepository {
         orderId);
   }
 
+  List<AttemptRecord> enumerateAttemptByOrderClosure(String orderId, String lockClause) {
+    List<String> keys = EvaluationPaymentCommittedFaces.ATTEMPT.enumerationKeys();
+    requireEnumerationKeys(keys, "attempt_id", "callback_correlation_id", "order_id");
+    return jdbc.query(
+        "SELECT "
+            + attemptColumns()
+            + " FROM "
+            + attemptTable()
+            + " WHERE "
+            + keys.get(2)
+            + " = ?"
+            + lockClause,
+        MockPaymentRepository::mapAttempt,
+        orderId);
+  }
+
   List<CallbackRecord> discoverCallbackClosure(AttemptRecord target, String lockClause) {
     List<String> relations = EvaluationPaymentCommittedFaces.CALLBACK.relationKeys();
     if (!relations.equals(List.of("attempt_id"))) {

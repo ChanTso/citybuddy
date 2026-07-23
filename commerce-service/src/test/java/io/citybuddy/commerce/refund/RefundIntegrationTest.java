@@ -908,6 +908,48 @@ class RefundIntegrationTest {
   }
 
   @Test
+  void directRefundMapsCrossTypeOrderCardinalityDamageToConflict() {
+    PaidFixture paid = seedPaidStandard(905, "direct-ambiguous-order");
+    SeckillFixture sibling =
+        seedPaidSeckill("direct-ambiguous-" + UUID.randomUUID().toString().substring(0, 8), 906);
+    long outboxBefore = jdbc.queryForObject("SELECT COUNT(*) FROM commerce_outbox", Long.class);
+    assertThat(
+            jdbc.update(
+                "UPDATE seckill_order SET order_id = ? WHERE order_id = ?",
+                paid.orderId(),
+                sibling.orderId()))
+        .isOne();
+
+    try {
+      assertThat(
+              request(
+                      otherToken(),
+                      paid.orderId(),
+                      "refund-direct-ambiguous-other-owner",
+                      body(100))
+                  .getStatusCode())
+          .isEqualTo(HttpStatus.NOT_FOUND);
+      ResponseEntity<JsonNode> response =
+          request(directToken(), paid.orderId(), "refund-direct-ambiguous-order", body(100));
+
+      assertThat(response.getStatusCode()).isEqualTo(HttpStatus.CONFLICT);
+      assertThat(response.getBody()).isNotNull();
+      assertThat(response.getBody().get("category").asText()).isEqualTo("CONFLICT");
+      assertThat(refundCount(paid.orderId())).isZero();
+      assertThat(refundMovementCount(paid.orderId())).isZero();
+      assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM commerce_outbox", Long.class))
+          .isEqualTo(outboxBefore);
+    } finally {
+      assertThat(
+              jdbc.update(
+                  "UPDATE seckill_order SET order_id = ? WHERE order_id = ?",
+                  sibling.orderId(),
+                  paid.orderId()))
+          .isOne();
+    }
+  }
+
+  @Test
   void legalDuplicateReorderedAndFailedTransitionsKeepOneDurableResult() {
     PaidFixture successPaid = seedPaidStandard(900, "transition-success");
     RefundResult success =

@@ -219,23 +219,29 @@ public final class RefundService {
       RefundRequest request,
       String expectedSandboxId,
       boolean enforceActionSandbox) {
-    MockPaymentRepository.OrderTruth identified =
-        refunds
-            .findOrder(orderId)
-            .orElseThrow(() -> notFound("Refund order is missing or not owned"));
-    if (!userSubject.equals(identified.userSubject())) {
-      throw notFound("Refund order is missing or not owned");
+    CommittedPaymentTruthResolver.CommittedPaymentTruth committed;
+    try {
+      committed = paymentTruth.resolveByOrderLocked(orderId, userSubject).orElse(null);
+    } catch (CommittedPaymentIntegrityException exception) {
+      throw conflict("Order has no eligible successful payment");
     }
-    MockPaymentRepository.AttemptRecord attempt =
-        payments
-            .findAttemptByOrderForUpdate(identified.orderKind(), orderId)
-            .orElseThrow(() -> conflict("Order has no eligible successful payment"));
-    MockPaymentRepository.OrderTruth order = requireLockedOrder(attempt);
+    if (committed == null) {
+      MockPaymentRepository.OrderTruth identified;
+      try {
+        identified = paymentTruth.resolveOrderIdentityLocked(orderId, userSubject).orElse(null);
+      } catch (CommittedPaymentIntegrityException exception) {
+        throw conflict("Order has no eligible successful payment");
+      }
+      if (identified == null || !userSubject.equals(identified.userSubject())) {
+        throw notFound("Refund order is missing or not owned");
+      }
+      throw conflict("Order has no eligible successful payment");
+    }
+    MockPaymentRepository.AttemptRecord attempt = committed.attempt();
+    MockPaymentRepository.OrderTruth order = committed.order();
     if (!userSubject.equals(order.userSubject())) {
       throw notFound("Refund order is missing or not owned");
     }
-    CommittedPaymentTruthResolver.CommittedPaymentTruth committed =
-        requireEligiblePayment(attempt, order);
     if (enforceActionSandbox) {
       requireActionSandbox(expectedSandboxId, committed);
     }

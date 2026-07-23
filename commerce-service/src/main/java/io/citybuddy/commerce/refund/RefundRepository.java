@@ -20,60 +20,6 @@ public class RefundRepository {
     this.objectMapper = objectMapper;
   }
 
-  public Optional<MockPaymentRepository.OrderTruth> findOrder(String orderId) {
-    List<MockPaymentRepository.OrderTruth> standard =
-        jdbc.query(
-            """
-            SELECT order_id, user_subject, sandbox_id, evaluation_owner_handle, product_id,
-                   total_price_minor, currency, status, state_version
-            FROM standard_order
-            WHERE order_id = ?
-            """,
-            (result, row) ->
-                new MockPaymentRepository.OrderTruth(
-                    "STANDARD",
-                    result.getString("order_id"),
-                    result.getString("user_subject"),
-                    result.getString("sandbox_id"),
-                    result.getString("evaluation_owner_handle"),
-                    result.getString("product_id"),
-                    null,
-                    null,
-                    result.getLong("total_price_minor"),
-                    result.getString("currency"),
-                    result.getString("status"),
-                    result.getLong("state_version")),
-            orderId);
-    List<MockPaymentRepository.OrderTruth> seckill =
-        jdbc.query(
-            """
-            SELECT order_id, user_subject, NULL AS sandbox_id, NULL AS evaluation_owner_handle,
-                   product_id, reservation_id, activity_id, total_price_minor, currency, status,
-                   state_version
-            FROM seckill_order
-            WHERE order_id = ?
-            """,
-            (result, row) ->
-                new MockPaymentRepository.OrderTruth(
-                    "SECKILL",
-                    result.getString("order_id"),
-                    result.getString("user_subject"),
-                    result.getString("sandbox_id"),
-                    result.getString("evaluation_owner_handle"),
-                    result.getString("product_id"),
-                    result.getString("reservation_id"),
-                    result.getString("activity_id"),
-                    result.getLong("total_price_minor"),
-                    result.getString("currency"),
-                    result.getString("status"),
-                    result.getLong("state_version")),
-            orderId);
-    if (standard.size() + seckill.size() > 1) {
-      throw new IllegalStateException("Refund order identifier is ambiguous");
-    }
-    return standard.isEmpty() ? seckill.stream().findFirst() : standard.stream().findFirst();
-  }
-
   public Optional<RefundRecord> findByRequestForUpdate(String user, String orderId, String key) {
     return queryRefund(
         "SELECT "

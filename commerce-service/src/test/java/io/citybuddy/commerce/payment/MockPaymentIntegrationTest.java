@@ -215,6 +215,54 @@ class MockPaymentIntegrationTest {
   }
 
   @Test
+  void committedReplayRejectsCallbackIdentityOwnedByAnotherPayment() {
+    String firstOrderId = seedStandardOrder(USER, 1510);
+    String secondOrderId = seedStandardOrder(USER, 1520);
+    MockPaymentResult first =
+        start(directToken(), firstOrderId, "payment-callback-owner-a", body(1510)).getBody();
+    MockPaymentResult second =
+        start(directToken(), secondOrderId, "payment-callback-owner-b", body(1520)).getBody();
+    assertThat(first).isNotNull();
+    assertThat(second).isNotNull();
+
+    String firstEventId = UUID.randomUUID().toString();
+    String secondEventId = UUID.randomUUID().toString();
+    String firstCallbackKey = "callback-owner-a";
+    String secondCallbackKey = "callback-owner-b";
+    assertThat(
+            callback(
+                    callback(first, firstEventId), firstCallbackKey, Instant.now(), CALLBACK_SECRET)
+                .getStatusCode())
+        .isEqualTo(HttpStatus.OK);
+    assertThat(
+            callback(
+                    callback(second, secondEventId),
+                    secondCallbackKey,
+                    Instant.now(),
+                    CALLBACK_SECRET)
+                .getStatusCode())
+        .isEqualTo(HttpStatus.OK);
+    long callbacksBefore = count("mock_payment_callback");
+    long movementsBefore = count("inventory_ledger");
+
+    MockPaymentCallbackRequest foreignKeyReplay = callback(first, UUID.randomUUID().toString());
+    assertThat(
+            callback(foreignKeyReplay, secondCallbackKey, Instant.now(), CALLBACK_SECRET)
+                .getStatusCode())
+        .isEqualTo(HttpStatus.CONFLICT);
+
+    MockPaymentCallbackRequest foreignEventReplay = callback(first, secondEventId);
+    assertThat(
+            callback(foreignEventReplay, "callback-owner-a-new-key", Instant.now(), CALLBACK_SECRET)
+                .getStatusCode())
+        .isEqualTo(HttpStatus.CONFLICT);
+    assertThat(count("mock_payment_callback")).isEqualTo(callbacksBefore);
+    assertThat(count("inventory_ledger")).isEqualTo(movementsBefore);
+    assertPaidTruth(firstOrderId, first.attemptId(), "STANDARD_PAYMENT", 1510);
+    assertPaidTruth(secondOrderId, second.attemptId(), "STANDARD_PAYMENT", 1520);
+  }
+
+  @Test
   void productionStartMapsCrossTypeOrderCardinalityDamageToConflict() {
     String standardOrderId = seedStandardOrder(USER, 1600);
     SeckillFixture sibling =

@@ -95,6 +95,8 @@ def test_action_refund_reuses_payment_truth_and_one_transaction_event_time() -> 
     assert "new CommittedPaymentTruthResolver(payments)" in refund
     assert "truth.resolveLocked(attempt)" in payment
     assert "paymentTruth.resolveLocked(attempt)" in refund
+    assert "paymentTruth.resolveByOrderLocked(orderId, userSubject)" in refund
+    assert "refunds.findOrder(" not in refund
     assert "paymentTruth.resolveSnapshot(attempt)" in evaluation
     assert "catch (CommittedPaymentIntegrityException exception)" in payment
     assert "catch (CommittedPaymentIntegrityException exception)" in refund

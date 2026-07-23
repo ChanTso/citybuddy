@@ -95,6 +95,11 @@ def test_payment_schema_and_code_keep_production_and_evaluation_truth_separate()
         ) : service.index("private MockPaymentRepository.AttemptRecord requireSucceededTruth")
     ]
     assert "truth.resolveReplayLocked(attempt, idempotencyKey, request)" in committed_replay
+    assert (
+        'requireSingleEqual(\n        callbacks, canonical.callback(), '
+        '"Callback replay key closure is inconsistent")'
+        in committed_resolver
+    )
     for forbidden_private_face in (
         "findCallbackByCorrelation",
         "findCallbackByAttempt",

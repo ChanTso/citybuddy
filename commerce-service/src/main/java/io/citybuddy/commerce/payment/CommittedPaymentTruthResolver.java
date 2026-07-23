@@ -50,6 +50,31 @@ public final class CommittedPaymentTruthResolver {
     return resolve(target, "");
   }
 
+  public Optional<CommittedPaymentTruth> resolveByOrderLocked(String orderId, String userSubject) {
+    List<MockPaymentRepository.AttemptRecord> attempts =
+        repository.enumerateAttemptByOrderClosure(orderId, LOCK);
+    if (attempts.isEmpty()) {
+      return Optional.empty();
+    }
+    List<MockPaymentRepository.OrderTruth> orders = repository.enumerateOrderClosure(orderId, LOCK);
+    if (attempts.stream().noneMatch(attempt -> userSubject.equals(attempt.userSubject()))
+        && orders.stream().noneMatch(order -> userSubject.equals(order.userSubject()))) {
+      return Optional.empty();
+    }
+    requireCardinality(attempts, "Payment attempt closure is inconsistent");
+    return Optional.of(resolve(attempts.getFirst(), LOCK));
+  }
+
+  public Optional<MockPaymentRepository.OrderTruth> resolveOrderIdentityLocked(
+      String orderId, String userSubject) {
+    List<MockPaymentRepository.OrderTruth> orders = repository.enumerateOrderClosure(orderId, LOCK);
+    if (orders.stream().noneMatch(order -> userSubject.equals(order.userSubject()))) {
+      return Optional.empty();
+    }
+    requireCardinality(orders, "Payment order closure is inconsistent");
+    return Optional.of(orders.getFirst());
+  }
+
   /**
    * Resolves a callback replay without letting a caller maintain a narrower committed-face
    * inventory. An empty result means every enumerated face still has the legitimate pre-payment
@@ -104,7 +129,11 @@ public final class CommittedPaymentTruthResolver {
     if (target == null) {
       throw inconsistent("Committed payment has no canonical attempt");
     }
-    return Optional.of(resolve(target, LOCK));
+    CommittedPaymentTruth canonical = resolve(target, LOCK);
+    requireSingleEqual(orders, canonical.order(), "Callback request order closure is inconsistent");
+    requireSingleEqual(
+        callbacks, canonical.callback(), "Callback replay key closure is inconsistent");
+    return Optional.of(canonical);
   }
 
   private CommittedPaymentTruth resolve(
