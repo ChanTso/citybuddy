@@ -71,7 +71,7 @@ docker build --file infra/knowledge-indexer/Dockerfile --tag "$indexer_image" .
 ./mvnw -q -pl commerce-service -am -DskipTests package
 make ENV_FILE="$env_file" COMPOSE_PROJECT_NAME="$project" rocketmq-store-init
 "${compose[@]}" up --build --detach --wait --wait-timeout 90 \
-  mysql elasticsearch rocketmq-namesrv rocketmq-broker-proxy
+  mysql redis-support elasticsearch rocketmq-namesrv rocketmq-broker-proxy
 make ENV_FILE="$env_file" COMPOSE_PROJECT_NAME="$project" \
   grant-access migrate-auth migrate-commerce
 make ENV_FILE="$env_file" COMPOSE_PROJECT_NAME="$project" grant-access
@@ -208,10 +208,48 @@ if rg -n 'pymysql|mysql|commerce_db|cs_db' \
   echo "Knowledge indexer production boundary contains forbidden direct database access." >&2
   exit 1
 fi
+indexer_mysql_accounts="$(
+  "${compose[@]}" exec -T -e MYSQL_PWD="$(read_value MYSQL_BOOTSTRAP_PASSWORD)" mysql \
+    mysql --protocol=tcp --host=127.0.0.1 --user=root --database=mysql \
+    --batch --skip-column-names \
+    --execute="SELECT COUNT(*) FROM mysql.user WHERE user = 'knowledge_indexer'"
+)"
+if [[ "$indexer_mysql_accounts" != 0 ]]; then
+  echo "Knowledge indexer unexpectedly has a MySQL runtime account." >&2
+  exit 1
+fi
 if "${compose[@]}" exec -T mysql sh -c \
   'MYSQL_PWD=not-configured mysql --protocol=tcp --host=127.0.0.1 --user=knowledge_indexer --database=commerce_db --execute="SELECT 1"'; then
   echo "Knowledge indexer unexpectedly authenticated to commerce_db." >&2
   exit 1
 fi
+if "${compose[@]}" exec -T mysql sh -c \
+  'MYSQL_PWD=not-configured mysql --protocol=tcp --host=127.0.0.1 --user=knowledge_indexer --database=cs_db --execute="SELECT 1"'; then
+  echo "Knowledge indexer unexpectedly authenticated to cs_db." >&2
+  exit 1
+fi
+redis_denial="$("${compose[@]}" exec -T redis-support redis-cli PING 2>&1)"
+if ! grep -Fq 'NOAUTH Authentication required' <<<"$redis_denial"; then
+  echo "Support Redis did not deny the credential-free knowledge-indexer boundary." >&2
+  exit 1
+fi
+indexer_truth_denial="$(
+  "${compose[@]}" exec -T redis-support redis-cli --no-auth-warning \
+    --user knowledge_indexer --pass "$(read_value REDIS_INDEXER_CACHE_PASSWORD)" \
+    HGETALL cb:faq:v1:query:unrelated 2>&1
+)"
+if ! grep -Fq 'NOPERM' <<<"$indexer_truth_denial"; then
+  echo "Knowledge indexer unexpectedly read the agent query-mapping truth prefix." >&2
+  exit 1
+fi
+indexer_admin_denial="$(
+  "${compose[@]}" exec -T redis-support redis-cli --no-auth-warning \
+    --user knowledge_indexer --pass "$(read_value REDIS_INDEXER_CACHE_PASSWORD)" \
+    CONFIG GET maxmemory 2>&1
+)"
+if ! grep -Fq 'NOPERM' <<<"$indexer_admin_denial"; then
+  echo "Knowledge indexer unexpectedly exercised Support Redis administration." >&2
+  exit 1
+fi
 
-echo "CB-113 complete knowledge rebuild and atomic alias switch integration checks passed."
+echo "CB-113 complete rebuild, atomic alias switch, and exact runtime denial checks passed."

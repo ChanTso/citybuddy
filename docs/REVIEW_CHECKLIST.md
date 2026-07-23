@@ -89,6 +89,14 @@ request. A later semantic diff change requires the checklist to be executed and 
   marker and insertion of a shape-valid orphan marker; both must fail validation. Future journal
   events not yet visible in the owner snapshot remain unacknowledged and outside the committed set,
   never silently promoted to owner truth.
+- When Broker receipt disposition is non-atomic, durably seal the exact validated marker set before
+  the first ACK. Recheck every currently pending receipt against that sealed set before acknowledging
+  any of them; an owner-covered event that arrives after validation must remain unacknowledged and
+  force revalidation. Exercise a controlled multi-message partial ACK where the first disposition
+  succeeds and a later one fails, then prove restart reconstructs the already-ACKed prefix from the
+  durable checkpoint and converges with the redelivered suffix. A completion flag written after ACK
+  is not a substitute because the acknowledged prefix is no longer reconstructable from Broker
+  delivery alone.
 
 ### One total-order contract in all three places
 

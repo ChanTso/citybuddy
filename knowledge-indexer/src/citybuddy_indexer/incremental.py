@@ -454,8 +454,8 @@ class ElasticsearchKnowledgeProjection:
         if not body:
             return status, {}
         try:
-            decoded = json.loads(body)
-        except (json.JSONDecodeError, UnicodeDecodeError) as error:
+            decoded = json.loads(body, object_pairs_hook=_unique_object)
+        except (ValueError, UnicodeDecodeError, RecursionError) as error:
             raise KnowledgeSyncError("malformed_elasticsearch_response") from error
         if not isinstance(decoded, dict):
             raise KnowledgeSyncError("malformed_elasticsearch_response")

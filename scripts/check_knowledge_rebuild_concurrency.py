@@ -228,20 +228,24 @@ class CommitWindowJournal:
         delegate: RocketMqAcceptedEventJournal,
         producer: Any,
         topic: str,
-        contradictory: FaqKnowledgeEvent,
+        late_covered_event: FaqKnowledgeEvent,
     ) -> None:
         self._delegate = delegate
         self._producer = producer
         self._topic = topic
-        self._contradictory = contradictory
+        self._late_covered_event = late_covered_event
 
     def events(self) -> tuple[FaqKnowledgeEvent, ...]:
         return self._delegate.events()
 
-    def commit(self, snapshot: KnowledgeSnapshot) -> None:
-        send_event(self._producer, self._topic, self._contradictory)
-        wait_for_event(self._delegate, self._contradictory.event_id)
-        self._delegate.commit(snapshot)
+    def commit(
+        self,
+        snapshot: KnowledgeSnapshot,
+        validated_markers: dict[str, dict[str, object]],
+    ) -> None:
+        send_event(self._producer, self._topic, self._late_covered_event)
+        wait_for_event(self._delegate, self._late_covered_event.event_id)
+        self._delegate.commit(snapshot, validated_markers)
 
 
 class PartialBulkClient(ElasticsearchRebuildClient):
@@ -273,8 +277,12 @@ class StaticJournal:
     def events(self) -> tuple[FaqKnowledgeEvent, ...]:
         return ()
 
-    def commit(self, snapshot: KnowledgeSnapshot) -> None:
-        del snapshot
+    def commit(
+        self,
+        snapshot: KnowledgeSnapshot,
+        validated_markers: dict[str, dict[str, object]],
+    ) -> None:
+        del snapshot, validated_markers
 
 
 def wait_for_event(
@@ -659,38 +667,19 @@ def main() -> None:
             for record in commit_snapshot.records
             if record.source_id == TARGET_SOURCE
         )
-        contradictory_record = next(
+        late_covered_record = next(
             record.canonical_mapping()
-            for record in commit_snapshot.records
+            for record in current.records
             if record.source_id == TARGET_SOURCE
         )
-        contradictory_record["eventId"] = str(uuid4())
-        contradictory_record["content"] = "Contradictory same-version Broker content."
-        contradictory = snapshot(
-            [
-                contradictory_record
-                if record.source_id == TARGET_SOURCE
-                else record.canonical_mapping()
-                for record in commit_snapshot.records
-            ],
-            commit_snapshot.captured_at,
-        ).source_states[TARGET_SOURCE]
-        contradictory_event = FaqKnowledgeEvent.from_bytes(
-            canonical(
-                {
-                    "eventId": contradictory.event_id,
-                    "sourceId": contradictory.source_id,
-                    "sourceType": "faq",
-                    "sourceVersion": contradictory.source_version,
-                    "publicationState": "PUBLISHED",
-                    "tombstone": contradictory.tombstone,
-                    "occurredTime": contradictory.occurred_time,
-                    "content": {
-                        "question": contradictory_record["title"],
-                        "answer": contradictory_record["content"],
-                    },
-                }
+        late_covered_record["eventId"] = str(uuid4())
+        late_covered_event = (
+            snapshot(
+                [late_covered_record],
+                commit_snapshot.captured_at,
             )
+            .records[0]
+            .as_faq_event()
         )
         commit_source = ControlledSource(
             commit_snapshot,
@@ -709,7 +698,7 @@ def main() -> None:
                 journal,
                 producer,
                 args.topic,
-                contradictory_event,
+                late_covered_event,
             )
             try:
                 KnowledgeRebuildCoordinator(
@@ -717,9 +706,9 @@ def main() -> None:
                     catch_up_wait_seconds=10,
                 ).rebuild(commit_source, commit_journal)
             except KnowledgeRebuildError as error:
-                assert error.code == "catch_up_snapshot_mismatch"
+                assert error.code == "journal_changed_after_validation"
             else:
-                raise AssertionError("Commit-window intent conflict was terminally acknowledged")
+                raise AssertionError("Late covered Broker event was terminally acknowledged")
             current_alias = next(
                 iter(request(args.elasticsearch_url, "GET", "/_alias/knowledge_docs_read")[1])
             )
@@ -734,7 +723,7 @@ def main() -> None:
         with RocketMqAcceptedEventJournal(
             args.endpoints, args.topic, args.commit_group, invisible_seconds=10
         ) as journal:
-            wait_for_event(journal, contradictory_event.event_id)
+            wait_for_event(journal, late_covered_event.event_id)
     finally:
         producer.shutdown()
 
@@ -742,7 +731,7 @@ def main() -> None:
         json.dumps(
             {
                 "brokerDrivenCells": cells,
-                "commitWindowConflictRemainedUnacked": True,
+                "commitWindowLateCoveredEventRemainedUnacked": True,
                 "concurrentAliasRaceSingleWinner": alias_race_proven,
                 "failClosedRuntimeScenarios": fail_closed_scenarios,
                 "handoffPhases": len(PHASES),

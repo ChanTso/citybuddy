@@ -15,6 +15,7 @@ from urllib.request import Request, urlopen
 from .incremental import (
     EVENT_TAG,
     RESERVED_SANDBOX_PROPERTY,
+    ElasticsearchKnowledgeProjection,
     FaqKnowledgeEvent,
     KnowledgeEventError,
 )
@@ -167,7 +168,11 @@ class RocketMqAcceptedEventJournal:
                 )
             )
 
-    def commit(self, snapshot: KnowledgeSnapshot) -> None:
+    def commit(
+        self,
+        snapshot: KnowledgeSnapshot,
+        validated_markers: dict[str, dict[str, object]],
+    ) -> None:
         states = snapshot.source_states
         owner_records = {record.source_id: record for record in snapshot.records}
         with self._condition:
@@ -195,6 +200,14 @@ class RocketMqAcceptedEventJournal:
                         self._failure = failure
                         self._condition.notify_all()
                         raise failure
+                marker_id = f"__sync_event__:{event.event_id}"
+                if validated_markers.get(
+                    marker_id
+                ) != ElasticsearchKnowledgeProjection._marker_source(event):
+                    failure = KnowledgeRebuildError("journal_changed_after_validation")
+                    self._failure = failure
+                    self._condition.notify_all()
+                    raise failure
                 covered.append((message_id, message))
         for message_id, message in covered:
             try:

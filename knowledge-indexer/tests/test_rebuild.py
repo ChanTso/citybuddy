@@ -7,6 +7,7 @@ from datetime import UTC, datetime
 from http.client import HTTPException
 from uuid import UUID
 
+import citybuddy_indexer.incremental as incremental_module
 import citybuddy_indexer.rebuild as rebuild_module
 import citybuddy_indexer.rebuild_runtime as rebuild_runtime_module
 import pytest
@@ -140,6 +141,13 @@ def snapshot(
     )
 
 
+def markers(*events: FaqKnowledgeEvent) -> dict[str, dict[str, object]]:
+    return {
+        f"__sync_event__:{event.event_id}": ElasticsearchKnowledgeProjection._marker_source(event)
+        for event in events
+    }
+
+
 def test_snapshot_accepts_exact_closed_committed_owner_payload() -> None:
     parsed = snapshot()
 
@@ -252,13 +260,22 @@ class Journal:
     def replace(self, events: tuple[FaqKnowledgeEvent, ...]) -> None:
         self._events = events
 
-    def commit(self, selected: KnowledgeSnapshot) -> None:
+    def commit(
+        self,
+        selected: KnowledgeSnapshot,
+        validated_markers: dict[str, dict[str, object]],
+    ) -> None:
+        del validated_markers
         self.committed.append(selected.watermark)
 
 
 class FailingCommitJournal(Journal):
-    def commit(self, selected: KnowledgeSnapshot) -> None:
-        del selected
+    def commit(
+        self,
+        selected: KnowledgeSnapshot,
+        validated_markers: dict[str, dict[str, object]],
+    ) -> None:
+        del selected, validated_markers
         raise KnowledgeRebuildError("catch_up_snapshot_mismatch")
 
 
@@ -309,6 +326,19 @@ class Elasticsearch:
     ) -> None:
         del candidate, accepted_events
         self.calls.append(("validate", selected.watermark))
+
+    def seal_journal_events(
+        self,
+        candidate: str,
+        accepted_events: tuple[FaqKnowledgeEvent, ...],
+    ) -> dict[str, dict[str, object]]:
+        del candidate
+        return {
+            f"__sync_event__:{event.event_id}": ElasticsearchKnowledgeProjection._marker_source(
+                event
+            )
+            for event in accepted_events
+        }
 
     def prepare_switch(
         self,
@@ -502,6 +532,13 @@ class FakeBrokerConsumer:
         self.acked.append(message)
 
 
+class FailSecondAckConsumer(FakeBrokerConsumer):
+    def ack(self, message: object) -> None:
+        if self.acked:
+            raise RuntimeError("controlled second ACK failure")
+        super().ack(message)
+
+
 class FakeBrokerMessage:
     def __init__(
         self,
@@ -540,10 +577,10 @@ def test_broker_journal_defers_ack_until_owner_snapshot_covers_event() -> None:
     assert journal._accept(message) is True
     assert consumer.acked == []
 
-    journal.commit(snapshot([first]))
+    journal.commit(snapshot([first]), {})
     assert consumer.acked == []
 
-    journal.commit(snapshot([second]))
+    journal.commit(snapshot([second]), markers(snapshot([second]).records[0].as_faq_event()))
     assert consumer.acked == [message]
 
 
@@ -563,8 +600,59 @@ def test_broker_commit_rechecks_equal_version_intent_before_ack() -> None:
     assert journal._accept(message) is True
 
     with pytest.raises(KnowledgeRebuildError, match="catch_up_snapshot_mismatch"):
-        journal.commit(snapshot([owner]))
+        journal.commit(
+            snapshot([owner]),
+            markers(snapshot([contradictory]).records[0].as_faq_event()),
+        )
     assert consumer.acked == []
+
+
+def test_broker_commit_rejects_covered_event_not_in_validated_checkpoint() -> None:
+    owner = faq_record(version=2)
+    older = faq_record(version=1)
+    message = FakeBrokerMessage("broker-message-late-v1", event_bytes(older))
+    consumer = FakeBrokerConsumer()
+    journal = RocketMqAcceptedEventJournal.__new__(RocketMqAcceptedEventJournal)
+    journal._consumer = consumer
+    journal._events = {}
+    journal._pending_messages = {}
+    journal._condition = threading.Condition()
+    journal._failure = None
+
+    assert journal._accept(message) is True
+
+    with pytest.raises(KnowledgeRebuildError, match="journal_changed_after_validation"):
+        journal.commit(snapshot([owner]), markers())
+    assert consumer.acked == []
+
+
+def test_partial_ack_keeps_validated_prefix_in_durable_checkpoint() -> None:
+    first = faq_record(version=1)
+    second = faq_record(version=1)
+    second["eventId"] = "22222222-2222-4222-8222-222222222222"
+    second["sourceId"] = "faq-delivery"
+    first_event = snapshot([first]).records[0].as_faq_event()
+    second_event = snapshot([second]).records[0].as_faq_event()
+    messages = [
+        FakeBrokerMessage("broker-message-first", event_bytes(first)),
+        FakeBrokerMessage("broker-message-second", event_bytes(second)),
+    ]
+    consumer = FailSecondAckConsumer()
+    journal = RocketMqAcceptedEventJournal.__new__(RocketMqAcceptedEventJournal)
+    journal._consumer = consumer
+    journal._events = {}
+    journal._pending_messages = {}
+    journal._condition = threading.Condition()
+    journal._failure = None
+    for message in messages:
+        assert journal._accept(message) is True
+
+    checkpoint = markers(first_event, second_event)
+    with pytest.raises(KnowledgeRebuildError, match="broker_unavailable"):
+        journal.commit(snapshot([second, first]), checkpoint)
+
+    assert consumer.acked == [messages[0]]
+    assert set(journal._pending_messages) == {"broker-message-second"}
 
 
 class RecordingClient(ElasticsearchRebuildClient):
@@ -592,6 +680,34 @@ class RecordingClient(ElasticsearchRebuildClient):
 
     def _read_rebuild_record(self, index: str) -> dict[str, object] | None:
         return self.records.get(index)
+
+    def _write_rebuild_record(
+        self,
+        index: str,
+        record: dict[str, object],
+        *,
+        create: bool = False,
+    ) -> None:
+        del create
+        self.records[index] = deepcopy(record)
+
+
+def building_rebuild_record() -> dict[str, object]:
+    return {
+        "schemaVersion": "cb113-v2",
+        "initialSnapshotId": "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+        "initialSnapshotCommitment": "b" * 64,
+        "predecessor": "knowledge_docs_v1",
+        "candidate": "knowledge_docs_v2",
+        "state": "BUILDING",
+        "handoffWatermark": None,
+        "rollbackLeaseExpiresAt": None,
+        "completionSnapshotId": None,
+        "completionSnapshotCommitment": None,
+        "completionWatermark": None,
+        "switchedAt": None,
+        "journalEvents": [],
+    }
 
 
 def test_atomic_switch_uses_one_exact_remove_add_action() -> None:
@@ -631,26 +747,29 @@ def test_candidate_selection_skips_other_snapshot_without_wildcard_enumeration()
         "/knowledge_docs_v2": (200, {}),
         "/knowledge_docs_v3": (404, {}),
     }
-    client.records["knowledge_docs_v2"] = {
-        "schemaVersion": "cb113-v1",
-        "initialSnapshotId": "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
-        "initialSnapshotCommitment": "b" * 64,
-        "predecessor": "knowledge_docs_v1",
-        "candidate": "knowledge_docs_v2",
-        "state": "BUILDING",
-        "handoffWatermark": None,
-        "rollbackLeaseExpiresAt": None,
-        "completionSnapshotId": None,
-        "completionSnapshotCommitment": None,
-        "completionWatermark": None,
-        "switchedAt": None,
-    }
+    client.records["knowledge_docs_v2"] = building_rebuild_record()
 
     assert client.candidate_for("knowledge_docs_v1", current) == "knowledge_docs_v3"
     assert [path for _, path, _ in client.requests] == [
         "/knowledge_docs_v2",
         "/knowledge_docs_v3",
     ]
+
+
+def test_sealed_journal_checkpoint_preserves_partially_acked_prefix() -> None:
+    client = RecordingClient()
+    client.records["knowledge_docs_v2"] = building_rebuild_record()
+    first = snapshot([faq_record(version=1)]).records[0].as_faq_event()
+    second_record = faq_record(version=1)
+    second_record["eventId"] = "22222222-2222-4222-8222-222222222222"
+    second_record["sourceId"] = "faq-delivery"
+    second = snapshot([second_record]).records[0].as_faq_event()
+
+    initial = client.seal_journal_events("knowledge_docs_v2", (first, second))
+    resumed = client.seal_journal_events("knowledge_docs_v2", (second,))
+
+    assert initial == markers(first, second)
+    assert resumed == initial
 
 
 def test_candidate_validation_enumerates_all_documents_before_classification() -> None:
@@ -714,7 +833,7 @@ def test_candidate_sync_markers_equal_committed_broker_journal_face() -> None:
     marker = ElasticsearchKnowledgeProjection._marker_source(event)  # noqa: SLF001
     control = marker.copy()
     control["sync_record_type"] = "REBUILD_SWITCH"
-    client.records["knowledge_docs_v2"] = {"state": "BUILDING"}
+    client.records["knowledge_docs_v2"] = {"state": "BUILDING", "journalEvents": []}
 
     def response(hits: list[dict[str, object]]) -> tuple[int, dict[str, object]]:
         return (
@@ -784,4 +903,28 @@ def test_elasticsearch_json_response_rejects_duplicate_keys(
     with pytest.raises(KnowledgeRebuildError, match="malformed_elasticsearch_response"):
         ElasticsearchRebuildClient("http://elasticsearch:9200")._request(  # noqa: SLF001
             "GET", "/knowledge_docs_v1"
+        )
+
+
+def test_incremental_catch_up_response_rejects_duplicate_keys(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class Response:
+        status = 200
+
+        def __enter__(self) -> object:
+            return self
+
+        def __exit__(self, *_: object) -> None:
+            return None
+
+        def read(self) -> bytes:
+            return b'{"found":true,"found":false}'
+
+    monkeypatch.setattr(incremental_module, "urlopen", lambda *_args, **_kwargs: Response())
+
+    with pytest.raises(KnowledgeRebuildError, match="malformed_elasticsearch_response"):
+        ElasticsearchRebuildClient("http://elasticsearch:9200").apply_event(
+            "knowledge_docs_v2",
+            snapshot([faq_record()]).records[0].as_faq_event(),
         )

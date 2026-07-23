@@ -298,3 +298,11 @@ This file records only factual pitfalls supported by merged pull-request, commit
 - 根因：路线终点与验收强度属于跨切片治理事实；把它们留在会话上下文会让后续执行者重新推断，甚至把安全关闭的单节点本地 Elasticsearch 操作正确性误写成运行时授权拒绝证据。
 - 解决：路线明确终止于 CB-152，CB-150 保持最小 optional no-op trace sink，CB-152 必须记录环境标注的本地 Docker Compose load/latency/quality 实测；纯内部 evaluation audit/state 允许“机械地面真值闭包 + 残余风险”，业务核心仍严格；CB-113/114/115 的 Elasticsearch runtime least-privilege denial 归 deployment/hardening 残余，MySQL 与 Support Redis 拒绝证据不变。
 - 结论：跨 session 的范围、终点和残余风险必须进入冻结治理文档。运行时安全关闭的依赖只能证明操作目标正确，不能伪造最小权限拒绝；内部表面的构造性终止预算也不能外推到事务、库存、身份或幂等落单等业务核心。
+
+## CB-113 — Snapshot rebuild validation and atomic alias switch
+
+- 现象：候选索引最初已要求 owner snapshot、Broker journal 与 `SYNC_EVENT` marker 集合相等，但 catch-up 写路径仍使用允许重复 JSON object key 的 Elasticsearch decoder。独立复核又在最后一次 marker 校验与 Broker ACK 之间注入一个已被 owner 新版本覆盖的合法旧事件；commit 只比较 owner 版本，因而会 ACK 一个从未进入已验证 marker 集合的事件。多消息 ACK 若首条成功、后条失败，重启后 Broker 只重投后缀，已经 ACK 的前缀又会被候选 marker 对账误判为孤儿。
+- 证据链接：[slice PR #49](https://github.com/ChanTso/citybuddy/pull/49)
+- 根因：重复键拒绝只落在 rebuild client，遗漏了复用 incremental projection 的 catch-up client；marker 对账承诺停留在进程内 validation 参数，没有在第一个不可逆 ACK 前持久化。Broker 的逐条 ACK 不是事务，失败后的 Broker 可见集合不能重建已经成功 disposition 的前缀。
+- 解决：所有 Elasticsearch JSON 响应边界共用重复键拒绝 decoder。rebuild 控制记录在任何 ACK 前持久封存按 event id 排序的精确 journal descriptor 集合；候选验证以该检查点与当前 owner-covered delivery 的并集重建完整 marker 集合。commit 在 ACK 前一次性预检全部当前 pending：每条 owner-covered event 必须与已封存 marker 全列一致，验证后到达的旧事件固定失败并保持未确认。部分 ACK 后重启从持久检查点恢复已确认前缀，再与 Broker 重投后缀合并验证。真实运行时权限证据同时证明 `knowledge_indexer` MySQL 账户不存在、commerce/cs 两库拒绝，以及 Support Redis 无凭据、跨前缀读取和管理命令拒绝。
+- 结论：非原子外部 receipt disposition 必须在首个 ACK 前持久承诺完整已验证集合；否则 validation-to-ACK 新到达事件和部分 ACK 前缀都会逃出集合对账。可恢复性不能只依赖仍可重投的后缀，已经成功 ACK 的成员也必须由本地持久检查点重建。共享调用链上的解析边界必须逐个核对，修复一个 client 不等于所有 Elasticsearch 响应都拒绝重复键。
