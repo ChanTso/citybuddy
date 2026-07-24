@@ -5,6 +5,7 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
@@ -13,6 +14,7 @@ import io.citybuddy.commerce.evaluation.EvaluationSandboxAccess;
 import io.citybuddy.commerce.refund.RefundService;
 import java.time.Clock;
 import java.time.Duration;
+import java.util.Optional;
 import java.util.function.Supplier;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -80,6 +82,23 @@ class ActionServiceTest {
 
     verify(repository).findPendingByIdForUpdate(ACTION_ID);
     verify(repository).withLockWaitTimeout(eq(1), any());
+  }
+
+  @Test
+  void missingCanonicalActionIdentityIsConcealedWithoutBroaderOwnerLookup() {
+    when(repository.findPendingByIdForUpdate(ACTION_ID)).thenReturn(Optional.empty());
+
+    assertThatThrownBy(() -> service.confirm(context(), ACTION_ID))
+        .isInstanceOfSatisfying(
+            ActionException.class,
+            exception -> {
+              assertThat(exception.status()).isEqualTo(404);
+              assertThat(exception.category()).isEqualTo("NOT_FOUND");
+              assertThat(exception.getMessage()).isEqualTo("PendingAction is missing or not owned");
+            });
+
+    verify(repository).findPendingByIdForUpdate(ACTION_ID);
+    verify(repository, never()).findPendingByTurnForUpdate(any(), any(), any());
   }
 
   private static ActionRequestContext context() {

@@ -213,6 +213,14 @@ public final class EvaluationPaymentCommittedFaces {
         + lockClause;
   }
 
+  public static String standardOwnedOrderByIdSql(String lockClause) {
+    return standardOrderByIdSql("") + " AND user_subject = ?" + lockClause;
+  }
+
+  public static String seckillOwnedOrderByIdSql(String lockClause) {
+    return seckillOrderByIdSql("") + " AND user_subject = ?" + lockClause;
+  }
+
   public static String orderFaceUnionSql() {
     return "SELECT 'STANDARD' AS order_kind, "
         + orderProjection(0)

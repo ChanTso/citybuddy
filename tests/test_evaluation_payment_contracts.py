@@ -74,6 +74,11 @@ def test_payment_schema_and_code_keep_production_and_evaluation_truth_separate()
         / "commerce-service/src/main/java/io/citybuddy/commerce/evaluation"
         / "EvaluationViewRepository.java"
     ).read_text(encoding="utf-8")
+    evaluation_service = (
+        ROOT
+        / "commerce-service/src/main/java/io/citybuddy/commerce/evaluation"
+        / "EvaluationViewService.java"
+    ).read_text(encoding="utf-8")
 
     assert "chk_standard_order_eval_binding" in migration
     assert "chk_mock_payment_callback_eval_context" in migration
@@ -92,9 +97,11 @@ def test_payment_schema_and_code_keep_production_and_evaluation_truth_separate()
     committed_replay = service[
         service.index(
             "private MockPaymentCallbackResult resolveCommittedEvaluationCallback"
-        ) : service.index("private MockPaymentRepository.AttemptRecord requireSucceededTruth")
+        ) : service.index("private void requireCallbackReplay")
     ]
-    assert "truth.resolveReplayLocked(attempt, idempotencyKey, request)" in committed_replay
+    assert ".resolveReplayLocked(" in committed_replay
+    assert "EVALUATION_CALLBACK_REPLAY" in committed_replay
+    assert "PRODUCTION_CALLBACK_REPLAY" in committed_replay
     assert (
         "requireSingleEqual(\n        callbacks, canonical.callback(), "
         '"Callback replay key closure is inconsistent")' in committed_resolver
@@ -161,7 +168,9 @@ def test_payment_schema_and_code_keep_production_and_evaluation_truth_separate()
         "a.succeeded_at AS attempt_succeeded_at",
     ):
         assert attempt_projection in evaluation_view
-    assert "paymentTruth.resolveSnapshot(attempt)" in evaluation_view
+    assert "paymentTruth.resolveSnapshot(" in evaluation_view
+    assert "EVALUATION_STATE" in evaluation_service
+    assert "EVALUATION_AUDIT" in evaluation_service
     for exact_attempt_assertion in (
         "attempt.succeededAt().equals(callback.createdAt())",
         "callback.intentHash().equals(callbackIntentHash(attempt, callback))",
@@ -216,6 +225,138 @@ def test_payment_schema_and_code_keep_production_and_evaluation_truth_separate()
     ):
         assert independent_fault in integration
     assert "assert_equal 49" in integration
+
+
+def test_terminal_payment_callers_use_the_shared_complete_closure() -> None:
+    service = (
+        ROOT
+        / "commerce-service/src/main/java/io/citybuddy/commerce/payment/MockPaymentService.java"
+    ).read_text(encoding="utf-8")
+    resolver = (
+        ROOT
+        / "commerce-service/src/main/java/io/citybuddy/commerce/payment"
+        / "CommittedPaymentTruthResolver.java"
+    ).read_text(encoding="utf-8")
+    repository = (
+        ROOT
+        / "commerce-service/src/main/java/io/citybuddy/commerce/payment"
+        / "MockPaymentRepository.java"
+    ).read_text(encoding="utf-8")
+    refund = (
+        ROOT / "commerce-service/src/main/java/io/citybuddy/commerce/refund/RefundService.java"
+    ).read_text(encoding="utf-8")
+    evaluation_repository = (
+        ROOT
+        / "commerce-service/src/main/java/io/citybuddy/commerce/evaluation"
+        / "EvaluationViewRepository.java"
+    ).read_text(encoding="utf-8")
+    evaluation_service = (
+        ROOT
+        / "commerce-service/src/main/java/io/citybuddy/commerce/evaluation"
+        / "EvaluationViewService.java"
+    ).read_text(encoding="utf-8")
+    integration = (ROOT / "scripts/test_evaluation_sandbox_integration.sh").read_text(
+        encoding="utf-8"
+    )
+
+    expected_callers = {
+        "PAYMENT_START_REPLAY",
+        "PRODUCTION_CALLBACK_REPLAY",
+        "EVALUATION_CALLBACK_REPLAY",
+        "DIRECT_REFUND_ELIGIBILITY",
+        "ACTION_PREPARE_CONFIRM_AND_RECEIPT_REPLAY",
+        "REFUND_LIFECYCLE",
+        "REFUND_RECONCILIATION",
+        "EVALUATION_STATE",
+        "EVALUATION_AUDIT",
+    }
+    for caller in expected_callers:
+        assert f"    {caller}(" in resolver
+
+    start_once = service[
+        service.index("private MockPaymentResult startOnce") : service.index(
+            "private MockPaymentResult resolveExistingStart"
+        )
+    ]
+    existing_replay = service[
+        service.index("private MockPaymentResult resolveExistingStart") : service.index(
+            "private MockPaymentCallbackResult callbackOnce"
+        )
+    ]
+    assert start_once.index("findAttemptByRequestForUpdate") < start_once.index(
+        "resolveExistingStart"
+    )
+    assert start_once.index("resolveExistingStart") < start_once.index("fenceSandbox(sandboxId);")
+    assert existing_replay.index("resolveStartReplayLocked") < existing_replay.index(
+        "fenceSandbox(sandboxId);"
+    )
+    assert "committedStartResult(committed)" in existing_replay
+    assert "pendingStartResult(pending, true)" in existing_replay
+    assert "PendingPaymentTruth" in resolver
+    assert "implements PaymentStartReplayResolution" in resolver
+    assert "private static MockPaymentResult result(" not in service
+    assert "private static MockPaymentCallbackResult callbackResult(" not in service
+    assert "committedCallbackResult(committed, false)" in service
+    assert "committedCallbackResult(committed, true)" in service
+
+    for caller in (
+        "DIRECT_REFUND_ELIGIBILITY",
+        "ACTION_PREPARE_CONFIRM_AND_RECEIPT_REPLAY",
+        "REFUND_LIFECYCLE",
+        "REFUND_RECONCILIATION",
+    ):
+        assert caller in refund
+    assert "CommittedPaymentCaller caller" in evaluation_repository
+    assert "paymentTruth.resolveSnapshot(caller, attempt)" in evaluation_repository
+    assert "EVALUATION_STATE" in evaluation_service
+    assert "EVALUATION_AUDIT" in evaluation_service
+    assert "resolveOrderIdentityLocked" not in resolver
+    visibility = resolver[
+        resolver.index(
+            "public Optional<CommittedPaymentTruth> resolveByOrderLocked"
+        ) : resolver.index("public PaymentStartReplayResolution resolveStartReplayLocked")
+    ]
+    assert "enumerateOwnedAttemptByOrderVisibility(orderId, userSubject, LOCK)" in visibility
+    assert "enumerateOwnedOrderVisibility(orderId, userSubject, LOCK)" in visibility
+    assert visibility.index("visibleAttempts.isEmpty() && visibleOrders.isEmpty()") < (
+        visibility.index("enumerateAttemptByOrderClosure(orderId, LOCK)")
+    )
+    assert "enumerateOrderClosure(orderId, LOCK)" not in visibility
+    assert (
+        'WHERE "\n            + keys.get(2)\n            + " = ? AND user_subject = ?"'
+        in repository
+    )
+    assert "standardOwnedOrderByIdSql" in repository
+    assert "seckillOwnedOrderByIdSql" in repository
+    for inventory_field in (
+        "TrustBoundary",
+        "canonicalRequestLocators",
+        "ownershipVisibilityLocators",
+        "concealedResponseFamily",
+        "refundAccumulatorPolicy",
+        "committedBeforeLiveness",
+    ):
+        assert inventory_field in resolver
+    assert "RefundAccumulatorPolicy.RECONCILIATION_DERIVED" in resolver
+    for observer in (
+        "payment-start-classification",
+        "payment-callback-classification",
+        "payment-refund-classification",
+        "payment-state-classification",
+        "payment-audit-classification",
+    ):
+        assert observer in integration
+    for visibility_evidence in (
+        "payment_caller_visibility_sql",
+        "CONCEALED_BY_AUTHORIZATION",
+        "payment-start-unknown.json",
+        "payment-start-other-owner.json",
+        "payment-refund-unknown.json",
+        "payment-refund-other-owner.json",
+        "refresh_payment_observer_credentials",
+        "payment_observer_credentials_issued_at",
+    ):
+        assert visibility_evidence in integration
 
 
 def test_auth_provision_response_remains_minimally_disclosing() -> None:

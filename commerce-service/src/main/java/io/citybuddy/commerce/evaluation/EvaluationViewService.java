@@ -26,7 +26,10 @@ public class EvaluationViewService {
     List<EvaluationViewRepository.ProductView> products = repository.products(sandboxId);
     List<EvaluationViewRepository.EffectView> effects = repository.effects(sandboxId);
     List<EvaluationViewRepository.PaymentView> payments = repository.payments(sandboxId);
-    if (!repository.auditReferencesConsistent(sandboxId)) {
+    if (!repository.auditReferencesConsistent(
+        sandboxId,
+        io.citybuddy.commerce.payment.CommittedPaymentTruthResolver.CommittedPaymentCaller
+            .EVALUATION_STATE)) {
       throw new EvaluationSandboxException(409, "Evaluation payment truth is inconsistent");
     }
     if ("ACTIVE".equals(sandbox.lifecycleState()) && products.size() != sandbox.fixtureCount()) {
@@ -60,7 +63,10 @@ public class EvaluationViewService {
       String supportSessionId,
       EvaluationViewRequestParser.AuditPageRequest page) {
     observableSandbox(sandboxId);
-    if (!repository.auditReferencesConsistent(sandboxId)) {
+    if (!repository.auditReferencesConsistent(
+        sandboxId,
+        io.citybuddy.commerce.payment.CommittedPaymentTruthResolver.CommittedPaymentCaller
+            .EVALUATION_AUDIT)) {
       throw new EvaluationSandboxException(409, "Evaluation audit truth is inconsistent");
     }
     List<EvaluationViewRepository.AuditReference> fetched =

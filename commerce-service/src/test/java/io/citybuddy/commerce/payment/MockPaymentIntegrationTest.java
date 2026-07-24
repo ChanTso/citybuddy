@@ -43,6 +43,7 @@ import org.springframework.http.HttpStatus;
 import org.springframework.http.MediaType;
 import org.springframework.http.ResponseEntity;
 import org.springframework.jdbc.core.JdbcTemplate;
+import org.springframework.jdbc.datasource.DriverManagerDataSource;
 import org.springframework.test.context.DynamicPropertyRegistry;
 import org.springframework.test.context.DynamicPropertySource;
 import org.springframework.transaction.PlatformTransactionManager;
@@ -768,6 +769,231 @@ class MockPaymentIntegrationTest {
     assertThat(evaluation.callback(callbackKey, callback).replayed()).isTrue();
     assertPaidTruth(fixture.orderId(), attempt.attemptId(), "STANDARD_PAYMENT", 1800, "CNY");
     assertThat(paymentAuditCount(fixture.sandboxId())).isOne();
+  }
+
+  @Test
+  void productionPaymentStartReplayRejectsDamagedCommittedClosureWithoutSideEffects() {
+    String orderId = seedStandardOrder(USER, 1810);
+    String startKey = "payment-start-replay-production";
+    MockPaymentResult attempt = start(directToken(), orderId, startKey, body(1810)).getBody();
+    assertThat(attempt).isNotNull();
+    MockPaymentCallbackRequest callback = callback(attempt, UUID.randomUUID().toString());
+    assertThat(
+            callback(callback, "callback-start-replay-production", Instant.now(), CALLBACK_SECRET)
+                .getStatusCode())
+        .isEqualTo(HttpStatus.OK);
+    long attemptsBefore = count("mock_payment_attempt");
+    long movementsBefore = count("inventory_ledger");
+    assertThat(
+            rootJdbc()
+                .update(
+                    "DELETE FROM mock_payment_callback WHERE attempt_id = ?", attempt.attemptId()))
+        .isOne();
+
+    assertThat(startRaw(directToken(), orderId, startKey, body(1810)).getStatusCode())
+        .isEqualTo(HttpStatus.CONFLICT);
+
+    assertThat(count("mock_payment_attempt")).isEqualTo(attemptsBefore);
+    assertThat(count("inventory_ledger")).isEqualTo(movementsBefore);
+    assertThat(callbackCount(attempt.attemptId())).isZero();
+    assertThat(orderState(orderId)).containsExactly("PAID", "2");
+    assertThat(attemptState(attempt.attemptId())).containsExactly("SUCCEEDED", "2");
+  }
+
+  @Test
+  void evaluationPaymentStartReplayResolvesCommittedTruthBeforeCurrentLiveness() {
+    EvaluationPaymentFixture complete = seedEvaluationPayment("start-replay-dead");
+    MockPaymentService evaluation = evaluationPayments(new MockPaymentRepository(jdbc));
+    String completeKey = "payment-start-replay-dead";
+    MockPaymentResult attempt =
+        evaluation.start(
+            complete.userSubject(),
+            complete.sandboxId(),
+            complete.orderId(),
+            completeKey,
+            new MockPaymentRequest(1800L, "CNY", null));
+    evaluation.callback(
+        "callback-start-replay-dead",
+        evaluationCallback(attempt, complete.sandboxId(), "start-replay-dead"));
+    completeEvaluationSandbox(complete, "complete-start-replay-dead");
+
+    MockPaymentResult replay =
+        evaluation.start(
+            complete.userSubject(),
+            complete.sandboxId(),
+            complete.orderId(),
+            completeKey,
+            new MockPaymentRequest(1800L, "CNY", null));
+    assertThat(replay.state()).isEqualTo("SUCCEEDED");
+    assertThat(replay.replayed()).isTrue();
+    assertThatThrownBy(
+            () ->
+                evaluation.start(
+                    complete.userSubject(),
+                    complete.sandboxId(),
+                    complete.orderId(),
+                    completeKey,
+                    new MockPaymentRequest(1801L, "CNY", null)))
+        .isInstanceOfSatisfying(
+            MockPaymentException.class, exception -> assertThat(exception.status()).isEqualTo(409));
+    assertThat(callbackCount(attempt.attemptId())).isOne();
+    assertThat(paymentMovementCount(attempt.attemptId())).isOne();
+    assertThat(paymentAuditCount(complete.sandboxId())).isOne();
+  }
+
+  @Test
+  void evaluationPaymentStartReplayReportsDamagedClosureBeforeInactiveSandbox() {
+    EvaluationPaymentFixture fixture = seedEvaluationPayment("start-replay-corrupt-dead");
+    MockPaymentService evaluation = evaluationPayments(new MockPaymentRepository(jdbc));
+    String startKey = "payment-start-replay-corrupt-dead";
+    MockPaymentResult attempt =
+        evaluation.start(
+            fixture.userSubject(),
+            fixture.sandboxId(),
+            fixture.orderId(),
+            startKey,
+            new MockPaymentRequest(1800L, "CNY", null));
+    evaluation.callback(
+        "callback-start-replay-corrupt-dead",
+        evaluationCallback(attempt, fixture.sandboxId(), "start-replay-corrupt-dead"));
+    assertThat(
+            rootJdbc()
+                .update(
+                    "DELETE FROM mock_payment_callback WHERE attempt_id = ?", attempt.attemptId()))
+        .isOne();
+    completeEvaluationSandbox(fixture, "complete-start-replay-corrupt-dead");
+
+    assertThatThrownBy(
+            () ->
+                evaluation.start(
+                    fixture.userSubject(),
+                    fixture.sandboxId(),
+                    fixture.orderId(),
+                    startKey,
+                    new MockPaymentRequest(1800L, "CNY", null)))
+        .isInstanceOfSatisfying(
+            MockPaymentException.class, exception -> assertThat(exception.status()).isEqualTo(409));
+    assertThat(callbackCount(attempt.attemptId())).isZero();
+    assertThat(paymentMovementCount(attempt.attemptId())).isOne();
+    assertThat(paymentAuditCount(fixture.sandboxId())).isOne();
+  }
+
+  @Test
+  void pendingEvaluationPaymentStartReplayStillRequiresCurrentLiveness() {
+    EvaluationPaymentFixture fixture = seedEvaluationPayment("pending-start-replay-dead");
+    MockPaymentService evaluation = evaluationPayments(new MockPaymentRepository(jdbc));
+    String startKey = "payment-pending-start-replay-dead";
+    MockPaymentResult attempt =
+        evaluation.start(
+            fixture.userSubject(),
+            fixture.sandboxId(),
+            fixture.orderId(),
+            startKey,
+            new MockPaymentRequest(1800L, "CNY", null));
+    completeEvaluationSandbox(fixture, "complete-pending-start-replay-dead");
+
+    assertThatThrownBy(
+            () ->
+                evaluation.start(
+                    fixture.userSubject(),
+                    fixture.sandboxId(),
+                    fixture.orderId(),
+                    startKey,
+                    new MockPaymentRequest(1800L, "CNY", null)))
+        .isInstanceOfSatisfying(
+            EvaluationSandboxException.class,
+            exception -> assertThat(exception.status()).isEqualTo(403));
+    assertThat(attemptState(attempt.attemptId())).containsExactly("PENDING", "1");
+    assertThat(callbackCount(attempt.attemptId())).isZero();
+    assertThat(paymentMovementCount(attempt.attemptId())).isZero();
+  }
+
+  @Test
+  void concurrentIdenticalPaymentStartsConvergeToOnePendingTruth() throws Exception {
+    String orderId = seedStandardOrder(USER, 1820);
+    CountDownLatch ready = new CountDownLatch(2);
+    CountDownLatch release = new CountDownLatch(1);
+
+    CompletableFuture<MockPaymentResult> first =
+        CompletableFuture.supplyAsync(
+            () -> {
+              awaitRace(ready, release);
+              return payments.start(
+                  USER,
+                  orderId,
+                  "payment-concurrent-start",
+                  new MockPaymentRequest(1820L, "AUD", null));
+            });
+    CompletableFuture<MockPaymentResult> second =
+        CompletableFuture.supplyAsync(
+            () -> {
+              awaitRace(ready, release);
+              return payments.start(
+                  USER,
+                  orderId,
+                  "payment-concurrent-start",
+                  new MockPaymentRequest(1820L, "AUD", null));
+            });
+    assertThat(ready.await(10, TimeUnit.SECONDS)).isTrue();
+    release.countDown();
+
+    MockPaymentResult firstResult = first.get(10, TimeUnit.SECONDS);
+    MockPaymentResult secondResult = second.get(10, TimeUnit.SECONDS);
+    assertThat(firstResult.attemptId()).isEqualTo(secondResult.attemptId());
+    assertThat(firstResult.state()).isEqualTo("PENDING");
+    assertThat(secondResult.state()).isEqualTo("PENDING");
+    assertThat(firstResult.replayed()).isNotEqualTo(secondResult.replayed());
+    assertThat(
+            jdbc.queryForObject(
+                "SELECT COUNT(*) FROM mock_payment_attempt WHERE order_id = ?",
+                Long.class,
+                orderId))
+        .isOne();
+  }
+
+  @Test
+  void startReplayAndSuccessfulCallbackObserveOnlyLockedPendingOrCommittedTruth() throws Exception {
+    String orderId = seedStandardOrder(USER, 1830);
+    String startKey = "payment-start-callback-interleave";
+    MockPaymentResult attempt =
+        payments.start(USER, orderId, startKey, new MockPaymentRequest(1830L, "AUD", null));
+    MockPaymentCallbackRequest callback = callback(attempt, UUID.randomUUID().toString());
+    CountDownLatch replayHasAttemptLock = new CountDownLatch(1);
+    CountDownLatch releaseReplay = new CountDownLatch(1);
+    MockPaymentRepository pausedReplayRepository =
+        new MockPaymentRepository(jdbc) {
+          @Override
+          List<AttemptRecord> enumerateAttemptClosure(AttemptRecord target, String lockClause) {
+            List<AttemptRecord> attempts = super.enumerateAttemptClosure(target, lockClause);
+            replayHasAttemptLock.countDown();
+            awaitSignal(releaseReplay, "payment start replay release");
+            return attempts;
+          }
+        };
+    MockPaymentService pausedReplay =
+        new MockPaymentService(pausedReplayRepository, transactionTemplate(), Clock.systemUTC());
+
+    CompletableFuture<MockPaymentResult> replayFuture =
+        CompletableFuture.supplyAsync(
+            () ->
+                pausedReplay.start(
+                    USER, orderId, startKey, new MockPaymentRequest(1830L, "AUD", null)));
+    assertThat(replayHasAttemptLock.await(10, TimeUnit.SECONDS)).isTrue();
+    CompletableFuture<MockPaymentCallbackResult> callbackFuture =
+        CompletableFuture.supplyAsync(
+            () -> payments.callback("callback-start-interleave", callback));
+    assertThat(callbackFuture).isNotDone();
+    releaseReplay.countDown();
+
+    MockPaymentResult pendingReplay = replayFuture.get(10, TimeUnit.SECONDS);
+    assertThat(pendingReplay.state()).isEqualTo("PENDING");
+    assertThat(pendingReplay.replayed()).isTrue();
+    assertThat(callbackFuture.get(10, TimeUnit.SECONDS).state()).isEqualTo("SUCCEEDED");
+    MockPaymentResult committedReplay =
+        payments.start(USER, orderId, startKey, new MockPaymentRequest(1830L, "AUD", null));
+    assertThat(committedReplay.state()).isEqualTo("SUCCEEDED");
+    assertThat(committedReplay.replayed()).isTrue();
+    assertPaidTruth(orderId, attempt.attemptId(), "STANDARD_PAYMENT", 1830);
   }
 
   @Test
@@ -1611,7 +1837,7 @@ class MockPaymentIntegrationTest {
         VALUES (?, ?, 'SECKILL_ORDER_CREATE', ?, ?, ?, ?, -1, -1)
         """,
         UUID.randomUUID().toString(),
-        "payment-order-create:" + transactionId,
+        "seckill-order-create:" + transactionId,
         orderId,
         reservationId,
         activityId,
@@ -1948,6 +2174,12 @@ class MockPaymentIntegrationTest {
     }
     Long count = jdbc.queryForObject("SELECT COUNT(*) FROM " + table, Long.class);
     return count == null ? 0 : count;
+  }
+
+  private JdbcTemplate rootJdbc() {
+    return new JdbcTemplate(
+        new DriverManagerDataSource(
+            required("CATALOG_MYSQL_URL"), "root", required("MYSQL_BOOTSTRAP_PASSWORD")));
   }
 
   private static Map<String, Object> body(long amountMinor) {

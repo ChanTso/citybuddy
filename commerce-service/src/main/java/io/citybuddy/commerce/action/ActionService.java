@@ -192,10 +192,7 @@ public final class ActionService {
     PendingActionRecord pending =
         actions
             .findPendingByIdForUpdate(pendingActionId)
-            .orElseGet(
-                () ->
-                    missingPendingOrConflict(
-                        context.userSubject(), context.supportSessionId(), context.turnId()));
+            .orElseThrow(() -> notFound("PendingAction is missing or not owned"));
     requireConfirmBinding(pending, context);
     ValidatedCommand command =
         new ValidatedCommand(pending.orderId(), pending.amountMinor(), pending.currency());
@@ -475,16 +472,6 @@ public final class ActionService {
             && (pending.stateVersion() != 2 || pending.consumedAt() == null))) {
       throw conflict("PendingAction idempotency intent conflicts");
     }
-  }
-
-  private PendingActionRecord missingPendingOrConflict(
-      String userSubject, String supportSessionId, String turnId) {
-    PendingActionRecord correlated =
-        actions.findPendingByTurnForUpdate(userSubject, supportSessionId, turnId).orElse(null);
-    if (correlated != null) {
-      throw integrityFailure("PendingAction identity conflicts with its turn truth");
-    }
-    throw notFound("PendingAction is missing or not owned");
   }
 
   private static void requireTarget(

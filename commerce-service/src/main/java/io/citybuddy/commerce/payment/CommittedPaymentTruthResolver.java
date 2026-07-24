@@ -42,37 +42,92 @@ public final class CommittedPaymentTruthResolver {
     return hash(request.sandboxId() == null ? base : base + "\n" + idempotencyKey);
   }
 
-  public CommittedPaymentTruth resolveLocked(MockPaymentRepository.AttemptRecord target) {
-    return resolve(target, LOCK);
+  public CommittedPaymentTruth resolveLocked(
+      CommittedPaymentCaller caller, MockPaymentRepository.AttemptRecord target) {
+    requireCaller(
+        caller,
+        CommittedPaymentCaller.PRODUCTION_CALLBACK_REPLAY,
+        CommittedPaymentCaller.EVALUATION_CALLBACK_REPLAY,
+        CommittedPaymentCaller.REFUND_LIFECYCLE,
+        CommittedPaymentCaller.REFUND_RECONCILIATION);
+    return resolve(caller, target, LOCK);
   }
 
-  public CommittedPaymentTruth resolveSnapshot(MockPaymentRepository.AttemptRecord target) {
-    return resolve(target, "");
+  public CommittedPaymentTruth resolveSnapshot(
+      CommittedPaymentCaller caller, MockPaymentRepository.AttemptRecord target) {
+    requireCaller(
+        caller, CommittedPaymentCaller.EVALUATION_STATE, CommittedPaymentCaller.EVALUATION_AUDIT);
+    return resolve(caller, target, "");
   }
 
-  public Optional<CommittedPaymentTruth> resolveByOrderLocked(String orderId, String userSubject) {
+  /**
+   * Applies the public owner boundary before durable-integrity classification.
+   *
+   * <p>The two declared visibility locators are always observed with the same bounded query shape.
+   * An empty result means neither locator proves the target belongs to the principal and callers
+   * must use their existing concealment response. Once either locator proves visibility, every
+   * incomplete or contradictory committed face is an integrity failure. Data-access failures are
+   * deliberately not translated here, so an indeterminate observation cannot become concealment or
+   * conflict.
+   */
+  public Optional<CommittedPaymentTruth> resolveByOrderLocked(
+      CommittedPaymentCaller caller, String orderId, String userSubject) {
+    requireCaller(
+        caller,
+        CommittedPaymentCaller.DIRECT_REFUND_ELIGIBILITY,
+        CommittedPaymentCaller.ACTION_PREPARE_CONFIRM_AND_RECEIPT_REPLAY);
+    List<MockPaymentRepository.AttemptRecord> visibleAttempts =
+        repository.enumerateOwnedAttemptByOrderVisibility(orderId, userSubject, LOCK);
+    List<MockPaymentRepository.OrderTruth> visibleOrders =
+        repository.enumerateOwnedOrderVisibility(orderId, userSubject, LOCK);
+    if (visibleAttempts.isEmpty() && visibleOrders.isEmpty()) {
+      return Optional.empty();
+    }
     List<MockPaymentRepository.AttemptRecord> attempts =
         repository.enumerateAttemptByOrderClosure(orderId, LOCK);
-    if (attempts.isEmpty()) {
-      return Optional.empty();
-    }
-    List<MockPaymentRepository.OrderTruth> orders = repository.enumerateOrderClosure(orderId, LOCK);
-    if (attempts.stream().noneMatch(attempt -> userSubject.equals(attempt.userSubject()))
-        && orders.stream().noneMatch(order -> userSubject.equals(order.userSubject()))) {
-      return Optional.empty();
-    }
     requireCardinality(attempts, "Payment attempt closure is inconsistent");
-    return Optional.of(resolve(attempts.getFirst(), LOCK));
+    return Optional.of(resolve(caller, attempts.getFirst(), LOCK));
   }
 
-  public Optional<MockPaymentRepository.OrderTruth> resolveOrderIdentityLocked(
-      String orderId, String userSubject) {
-    List<MockPaymentRepository.OrderTruth> orders = repository.enumerateOrderClosure(orderId, LOCK);
-    if (orders.stream().noneMatch(order -> userSubject.equals(order.userSubject()))) {
-      return Optional.empty();
+  /**
+   * Resolves an existing payment-start command without allowing the caller to infer success from
+   * the attempt row alone. A pending result proves the complete legal pre-payment shape; any
+   * indication of a committed payment must satisfy the complete committed closure.
+   */
+  public PaymentStartReplayResolution resolveStartReplayLocked(
+      CommittedPaymentCaller caller, MockPaymentRepository.AttemptRecord target) {
+    requireCaller(caller, CommittedPaymentCaller.PAYMENT_START_REPLAY);
+    List<MockPaymentRepository.AttemptRecord> attempts =
+        repository.enumerateAttemptClosure(target, LOCK);
+    requireSingleEqual(attempts, target, "Payment start attempt closure is inconsistent");
+    MockPaymentRepository.AttemptRecord attempt = attempts.getFirst();
+
+    List<MockPaymentRepository.OrderTruth> orders =
+        repository.enumerateOrderClosure(attempt.orderId(), LOCK);
+    requireCardinality(orders, "Payment start order closure is inconsistent");
+    MockPaymentRepository.OrderTruth order = orders.getFirst();
+
+    List<MockPaymentRepository.CallbackRecord> callbacks =
+        repository.discoverCallbackClosure(attempt, "");
+    List<MockPaymentRepository.PaymentLedgerRecord> ledger =
+        repository.enumerateLedgerClosure(attempt, order, "");
+
+    boolean committed =
+        isCommittedAttempt(attempt)
+            || isCommittedOrder(order)
+            || !callbacks.isEmpty()
+            || ledger.stream()
+                .anyMatch(movement -> !"SECKILL_ORDER_CREATE".equals(movement.movementType()));
+    if (committed) {
+      return resolve(caller, attempt, LOCK);
     }
-    requireCardinality(orders, "Payment order closure is inconsistent");
-    return Optional.of(orders.getFirst());
+
+    requirePendingPaymentRows(attempt, order);
+    if (!callbacks.isEmpty()) {
+      throw inconsistent("Pending payment has callback truth");
+    }
+    requirePendingLedgerClosure(ledger, order);
+    return new PendingPaymentTruth(order, attempt);
   }
 
   /**
@@ -81,9 +136,14 @@ public final class CommittedPaymentTruthResolver {
    * shape; any durable indication of a completed payment requires the complete closure to resolve.
    */
   public Optional<CommittedPaymentTruth> resolveReplayLocked(
+      CommittedPaymentCaller caller,
       MockPaymentRepository.AttemptRecord target,
       String callbackIdempotencyKey,
       MockPaymentCallbackRequest request) {
+    requireCaller(
+        caller,
+        CommittedPaymentCaller.PRODUCTION_CALLBACK_REPLAY,
+        CommittedPaymentCaller.EVALUATION_CALLBACK_REPLAY);
     List<MockPaymentRepository.AttemptRecord> attempts =
         target == null
             ? repository.enumerateAttemptReplayClosure(
@@ -129,7 +189,7 @@ public final class CommittedPaymentTruthResolver {
     if (target == null) {
       throw inconsistent("Committed payment has no canonical attempt");
     }
-    CommittedPaymentTruth canonical = resolve(target, LOCK);
+    CommittedPaymentTruth canonical = resolve(caller, target, LOCK);
     requireSingleEqual(orders, canonical.order(), "Callback request order closure is inconsistent");
     requireSingleEqual(
         callbacks, canonical.callback(), "Callback replay key closure is inconsistent");
@@ -137,7 +197,9 @@ public final class CommittedPaymentTruthResolver {
   }
 
   private CommittedPaymentTruth resolve(
-      MockPaymentRepository.AttemptRecord target, String lockClause) {
+      CommittedPaymentCaller caller,
+      MockPaymentRepository.AttemptRecord target,
+      String lockClause) {
     List<MockPaymentRepository.AttemptRecord> attempts =
         repository.enumerateAttemptClosure(target, lockClause);
     requireSingleEqual(attempts, target, "Payment attempt closure is inconsistent");
@@ -161,7 +223,8 @@ public final class CommittedPaymentTruthResolver {
     List<MockPaymentRepository.PaymentLedgerRecord> ledgerRows =
         repository.enumerateLedgerClosure(attempt, order, "");
     MockPaymentRepository.PaymentLedgerRecord paymentMovement =
-        requireLedgerClosure(ledgerRows, attempt, order, lockClause);
+        requireLedgerClosure(
+            ledgerRows, attempt, order, lockClause, caller.refundAccumulatorPolicy());
 
     List<MockPaymentRepository.PaymentAuditRecord> auditRows =
         repository.enumerateAuditClosure(callback, attempt.stateVersion(), "");
@@ -207,12 +270,60 @@ public final class CommittedPaymentTruthResolver {
     }
   }
 
+  private static void requirePendingPaymentRows(
+      MockPaymentRepository.AttemptRecord attempt, MockPaymentRepository.OrderTruth order) {
+    if (!"PENDING".equals(attempt.state())
+        || attempt.stateVersion() != 1
+        || attempt.refundedAmountMinor() != 0
+        || attempt.succeededAt() != null
+        || !attempt.orderKind().equals(order.orderKind())
+        || !attempt.orderId().equals(order.orderId())
+        || !Objects.equals(attempt.sandboxId(), order.sandboxId())
+        || !attempt.userSubject().equals(order.userSubject())
+        || attempt.amountMinor() != order.amountMinor()
+        || !attempt.currency().equals(order.currency())
+        || !attempt
+            .intentHash()
+            .equals(
+                EvaluationPaymentCommittedFaces.attemptIntentHash(
+                    attempt.orderId(),
+                    attempt.amountMinor(),
+                    attempt.currency(),
+                    attempt.sandboxId()))
+        || !"UNPAID".equals(order.status())
+        || order.stateVersion() != 1) {
+      throw inconsistent("Pending payment content is inconsistent");
+    }
+  }
+
+  private static void requirePendingLedgerClosure(
+      List<MockPaymentRepository.PaymentLedgerRecord> rows,
+      MockPaymentRepository.OrderTruth order) {
+    if ("STANDARD".equals(order.orderKind())) {
+      if (!rows.isEmpty()) {
+        throw inconsistent("Pending standard payment has lifecycle movements");
+      }
+      return;
+    }
+    if (!"SECKILL".equals(order.orderKind()) || rows.size() != 1) {
+      throw inconsistent("Pending seckill payment ledger closure is inconsistent");
+    }
+    MockPaymentRepository.PaymentLedgerRecord creation = rows.getFirst();
+    if (!"SECKILL_ORDER_CREATE".equals(creation.movementType())
+        || !creation.businessEventKey().startsWith("seckill-order-create:")) {
+      throw inconsistent("Pending seckill payment ledger closure is inconsistent");
+    }
+    requireSeckillCreationMovement(creation, order);
+  }
+
   private MockPaymentRepository.PaymentLedgerRecord requireLedgerClosure(
       List<MockPaymentRepository.PaymentLedgerRecord> rows,
       MockPaymentRepository.AttemptRecord attempt,
       MockPaymentRepository.OrderTruth order,
-      String lockClause) {
+      String lockClause,
+      RefundAccumulatorPolicy refundAccumulatorPolicy) {
     MockPaymentRepository.PaymentLedgerRecord payment = null;
+    long refundedAmount = 0;
     for (MockPaymentRepository.PaymentLedgerRecord row : rows) {
       switch (row.movementType()) {
         case "STANDARD_PAYMENT", "SECKILL_PAYMENT" -> {
@@ -221,8 +332,14 @@ public final class CommittedPaymentTruthResolver {
           }
           payment = row;
         }
-        case "STANDARD_REFUND", "SECKILL_REFUND" ->
-            requireRefundMovement(row, attempt, order, lockClause);
+        case "STANDARD_REFUND", "SECKILL_REFUND" -> {
+          long movementAmount = requireRefundMovement(row, attempt, order, lockClause);
+          try {
+            refundedAmount = Math.addExact(refundedAmount, movementAmount);
+          } catch (ArithmeticException exception) {
+            throw inconsistent("Refund movement total is inconsistent");
+          }
+        }
         case "SECKILL_ORDER_CREATE" -> requireSeckillCreationMovement(row, order);
         case "SECKILL_UNPAID_CANCEL" ->
             throw inconsistent("A paid order cannot retain a cancellation movement");
@@ -232,10 +349,14 @@ public final class CommittedPaymentTruthResolver {
     if (payment == null) {
       throw inconsistent("Payment movement is missing");
     }
+    if (refundAccumulatorPolicy == RefundAccumulatorPolicy.EXACT_LEDGER_SUM
+        && refundedAmount != attempt.refundedAmountMinor()) {
+      throw inconsistent("Payment refund accumulator is inconsistent");
+    }
     return payment;
   }
 
-  private void requireRefundMovement(
+  private long requireRefundMovement(
       MockPaymentRepository.PaymentLedgerRecord movement,
       MockPaymentRepository.AttemptRecord attempt,
       MockPaymentRepository.OrderTruth order,
@@ -261,6 +382,7 @@ public final class CommittedPaymentTruthResolver {
         || !Objects.equals(movement.paymentCurrency(), refund.currency())) {
       throw inconsistent("Refund movement contradicts its durable lifecycle");
     }
+    return refund.refundedAmountMinor();
   }
 
   private static void requireSeckillCreationMovement(
@@ -379,6 +501,16 @@ public final class CommittedPaymentTruthResolver {
     }
   }
 
+  private static void requireCaller(
+      CommittedPaymentCaller actual, CommittedPaymentCaller... allowed) {
+    for (CommittedPaymentCaller candidate : allowed) {
+      if (actual == candidate) {
+        return;
+      }
+    }
+    throw new IllegalArgumentException("Committed payment caller is not valid for this resolver");
+  }
+
   private static CommittedPaymentIntegrityException inconsistent(String message) {
     return new CommittedPaymentIntegrityException(message);
   }
@@ -396,12 +528,198 @@ public final class CommittedPaymentTruthResolver {
     }
   }
 
+  public sealed interface PaymentStartReplayResolution
+      permits PendingPaymentTruth, CommittedPaymentTruth {}
+
+  public enum CommittedPaymentCaller {
+    PAYMENT_START_REPLAY(
+        "POST /api/orders/{orderId}/mock-payment replay",
+        TrustBoundary.OWNER_CONCEALING_PUBLIC,
+        List.of("orderId", "userSubject", "requestIdempotencyKey", "evaluationSandbox"),
+        List.of("attempt.userSubject+requestIdempotencyKey", "order.orderId+userSubject+sandboxId"),
+        "mock-payment unknown/other-owner",
+        "resolveStartReplayLocked",
+        "PaymentStartReplayResolution",
+        RefundAccumulatorPolicy.EXACT_LEDGER_SUM,
+        true),
+    PRODUCTION_CALLBACK_REPLAY(
+        "production callback replay",
+        TrustBoundary.AUTHENTICATED_CALLBACK,
+        List.of("callbackIdempotencyKey", "callbackEventId", "callbackCorrelationId", "orderId"),
+        List.of("verified callback signature"),
+        "signed callback unknown correlation",
+        "resolveReplayLocked",
+        "CommittedPaymentTruth",
+        RefundAccumulatorPolicy.EXACT_LEDGER_SUM,
+        true),
+    EVALUATION_CALLBACK_REPLAY(
+        "evaluation callback replay",
+        TrustBoundary.AUTHENTICATED_CALLBACK,
+        List.of(
+            "callbackIdempotencyKey",
+            "callbackEventId",
+            "callbackCorrelationId",
+            "orderId",
+            "sandboxId"),
+        List.of("verified callback signature+sandbox context"),
+        "signed callback foreign/unknown evaluation correlation",
+        "resolveReplayLocked",
+        "CommittedPaymentTruth",
+        RefundAccumulatorPolicy.EXACT_LEDGER_SUM,
+        true),
+    DIRECT_REFUND_ELIGIBILITY(
+        "direct refund eligibility and replay",
+        TrustBoundary.OWNER_CONCEALING_PUBLIC,
+        List.of("orderId", "userSubject", "refundIdempotencyKey"),
+        List.of("attempt.orderId+userSubject", "order.orderId+userSubject"),
+        "refund unknown/other-owner",
+        "resolveByOrderLocked",
+        "CommittedPaymentTruth",
+        RefundAccumulatorPolicy.EXACT_LEDGER_SUM,
+        false),
+    ACTION_PREPARE_CONFIRM_AND_RECEIPT_REPLAY(
+        "Action prepare, confirm, and receipt replay",
+        TrustBoundary.OWNER_CONCEALING_OBO,
+        List.of("orderId", "userSubject", "supportSessionId", "traceId", "turnId", "sandboxId"),
+        List.of("OBO owner+session", "attempt/order owner", "sandbox binding"),
+        "Action target unknown/other-owner",
+        "resolveByOrderLocked",
+        "CommittedPaymentTruth",
+        RefundAccumulatorPolicy.EXACT_LEDGER_SUM,
+        true),
+    REFUND_LIFECYCLE(
+        "refund lifecycle mutation",
+        TrustBoundary.INTERNAL_DURABLE_IDENTITY,
+        List.of("refundId", "paymentAttemptId"),
+        List.of("locked refund.paymentAttemptId"),
+        "internal refund identity missing",
+        "resolveLocked",
+        "CommittedPaymentTruth",
+        RefundAccumulatorPolicy.EXACT_LEDGER_SUM,
+        false),
+    REFUND_RECONCILIATION(
+        "refund reconciliation",
+        TrustBoundary.INTERNAL_DURABLE_IDENTITY,
+        List.of("refundId", "paymentAttemptId"),
+        List.of("locked refund.paymentAttemptId"),
+        "internal refund identity missing",
+        "resolveLocked",
+        "CommittedPaymentTruth",
+        RefundAccumulatorPolicy.RECONCILIATION_DERIVED,
+        false),
+    EVALUATION_STATE(
+        "/api/eval/state",
+        TrustBoundary.SANDBOX_WIDE_INTERNAL_EVALUATOR,
+        List.of("sandboxId"),
+        List.of("management credential+sandbox scope"),
+        "evaluation sandbox unknown",
+        "resolveSnapshot",
+        "CommittedPaymentTruth",
+        RefundAccumulatorPolicy.EXACT_LEDGER_SUM,
+        false),
+    EVALUATION_AUDIT(
+        "/api/eval/audit",
+        TrustBoundary.SANDBOX_WIDE_INTERNAL_EVALUATOR,
+        List.of("sandboxId", "supportSessionId"),
+        List.of("management credential+sandbox scope"),
+        "evaluation sandbox/audit unknown",
+        "resolveSnapshot",
+        "CommittedPaymentTruth",
+        RefundAccumulatorPolicy.EXACT_LEDGER_SUM,
+        false);
+
+    private final String surface;
+    private final TrustBoundary trustBoundary;
+    private final List<String> canonicalRequestLocators;
+    private final List<String> ownershipVisibilityLocators;
+    private final String concealedResponseFamily;
+    private final String resolverMethod;
+    private final String successInputType;
+    private final RefundAccumulatorPolicy refundAccumulatorPolicy;
+    private final boolean committedBeforeLiveness;
+
+    CommittedPaymentCaller(
+        String surface,
+        TrustBoundary trustBoundary,
+        List<String> canonicalRequestLocators,
+        List<String> ownershipVisibilityLocators,
+        String concealedResponseFamily,
+        String resolverMethod,
+        String successInputType,
+        RefundAccumulatorPolicy refundAccumulatorPolicy,
+        boolean committedBeforeLiveness) {
+      this.surface = surface;
+      this.trustBoundary = trustBoundary;
+      this.canonicalRequestLocators = List.copyOf(canonicalRequestLocators);
+      this.ownershipVisibilityLocators = List.copyOf(ownershipVisibilityLocators);
+      this.concealedResponseFamily = concealedResponseFamily;
+      this.resolverMethod = resolverMethod;
+      this.successInputType = successInputType;
+      this.refundAccumulatorPolicy = refundAccumulatorPolicy;
+      this.committedBeforeLiveness = committedBeforeLiveness;
+    }
+
+    public String surface() {
+      return surface;
+    }
+
+    public String resolverMethod() {
+      return resolverMethod;
+    }
+
+    public TrustBoundary trustBoundary() {
+      return trustBoundary;
+    }
+
+    public List<String> canonicalRequestLocators() {
+      return canonicalRequestLocators;
+    }
+
+    public List<String> ownershipVisibilityLocators() {
+      return ownershipVisibilityLocators;
+    }
+
+    public String concealedResponseFamily() {
+      return concealedResponseFamily;
+    }
+
+    public String successInputType() {
+      return successInputType;
+    }
+
+    public RefundAccumulatorPolicy refundAccumulatorPolicy() {
+      return refundAccumulatorPolicy;
+    }
+
+    public boolean committedBeforeLiveness() {
+      return committedBeforeLiveness;
+    }
+  }
+
+  public enum RefundAccumulatorPolicy {
+    EXACT_LEDGER_SUM,
+    RECONCILIATION_DERIVED
+  }
+
+  public enum TrustBoundary {
+    OWNER_CONCEALING_PUBLIC,
+    OWNER_CONCEALING_OBO,
+    AUTHENTICATED_CALLBACK,
+    INTERNAL_DURABLE_IDENTITY,
+    SANDBOX_WIDE_INTERNAL_EVALUATOR
+  }
+
+  public record PendingPaymentTruth(
+      MockPaymentRepository.OrderTruth order, MockPaymentRepository.AttemptRecord attempt)
+      implements PaymentStartReplayResolution {}
+
   public record CommittedPaymentTruth(
       MockPaymentRepository.OrderTruth order,
       MockPaymentRepository.AttemptRecord attempt,
       MockPaymentRepository.CallbackRecord callback,
       MockPaymentRepository.PaymentLedgerRecord paymentMovement,
-      Optional<MockPaymentRepository.PaymentAuditRecord> evaluationAudit) {
+      Optional<MockPaymentRepository.PaymentAuditRecord> evaluationAudit)
+      implements PaymentStartReplayResolution {
     public CommittedPaymentTruth {
       evaluationAudit = Optional.ofNullable(evaluationAudit.orElse(null));
     }

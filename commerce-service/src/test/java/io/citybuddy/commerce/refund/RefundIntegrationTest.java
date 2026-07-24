@@ -308,6 +308,28 @@ class RefundIntegrationTest {
     assertThat(crossSession.getStatusCode()).isEqualTo(HttpStatus.NOT_FOUND);
     assertThat(unknownInOtherSession.getStatusCode()).isEqualTo(HttpStatus.NOT_FOUND);
     assertThat(crossSession.getBody()).isEqualTo(unknownInOtherSession.getBody());
+
+    String damagedPendingId = UUID.randomUUID().toString();
+    rootJdbc()
+        .update(
+            "UPDATE pending_action SET pending_action_id = ? WHERE pending_action_id = ?",
+            damagedPendingId,
+            pendingActionId);
+    ResponseEntity<JsonNode> concealedDamagedIdentity =
+        confirmAction(token, "action-session", traceId, turnId, null, pendingActionId, null);
+    ResponseEntity<JsonNode> unknownInSameContext =
+        confirmAction(
+            token, "action-session", traceId, turnId, null, UUID.randomUUID().toString(), null);
+    assertThat(concealedDamagedIdentity.getStatusCode()).isEqualTo(HttpStatus.NOT_FOUND);
+    assertThat(concealedDamagedIdentity.getBody()).isEqualTo(unknownInSameContext.getBody());
+    assertThat(concealedDamagedIdentity.getBody()).isEqualTo(crossSession.getBody());
+    assertThat(refundCount(paid.orderId())).isZero();
+    assertThat(actionReceiptCount(damagedPendingId)).isZero();
+    rootJdbc()
+        .update(
+            "UPDATE pending_action SET pending_action_id = ? WHERE pending_action_id = ?",
+            pendingActionId,
+            damagedPendingId);
     assertThat(refundCount(paid.orderId())).isZero();
 
     ResponseEntity<JsonNode> confirmed =
@@ -724,11 +746,21 @@ class RefundIntegrationTest {
       if ("pending_action_id".equals(fault.column())) {
         currentPendingId = fault.value().toString();
       }
-      assertThatThrownBy(() -> actions.confirm(context, pending.pendingActionId()))
-          .isInstanceOfAny(
-              ActionException.class,
-              ActionRepository.ActionIntegrityException.class,
-              RefundException.class);
+      if ("pending_action_id".equals(fault.column())) {
+        assertThatThrownBy(() -> actions.confirm(context, pending.pendingActionId()))
+            .isInstanceOfSatisfying(
+                ActionException.class,
+                exception -> {
+                  assertThat(exception.status()).isEqualTo(404);
+                  assertThat(exception.category()).isEqualTo("NOT_FOUND");
+                });
+      } else {
+        assertThatThrownBy(() -> actions.confirm(context, pending.pendingActionId()))
+            .isInstanceOfAny(
+                ActionException.class,
+                ActionRepository.ActionIntegrityException.class,
+                RefundException.class);
+      }
       assertThat(refundCount(paid.orderId())).isZero();
       corruption.update(
           "UPDATE pending_action SET " + fault.column() + " = ? WHERE pending_action_id = ?",
@@ -1377,7 +1409,7 @@ class RefundIntegrationTest {
         VALUES (?, ?, 'SECKILL_ORDER_CREATE', ?, ?, ?, ?, -1, -1)
         """,
         UUID.randomUUID().toString(),
-        "refund-order-create:" + transactionId,
+        "seckill-order-create:" + transactionId,
         orderId,
         reservationId,
         activityId,

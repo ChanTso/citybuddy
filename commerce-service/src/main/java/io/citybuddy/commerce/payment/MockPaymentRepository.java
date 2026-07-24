@@ -45,6 +45,25 @@ public class MockPaymentRepository {
     return List.copyOf(rows);
   }
 
+  List<OrderTruth> enumerateOwnedOrderVisibility(
+      String orderId, String userSubject, String lockClause) {
+    requireEnumerationKeys(EvaluationPaymentCommittedFaces.ORDER.enumerationKeys(), "order_id");
+    List<OrderTruth> rows = new java.util.ArrayList<>();
+    rows.addAll(
+        jdbc.query(
+            EvaluationPaymentCommittedFaces.standardOwnedOrderByIdSql(lockClause),
+            (result, row) -> mapOrder(result, "STANDARD"),
+            orderId,
+            userSubject));
+    rows.addAll(
+        jdbc.query(
+            EvaluationPaymentCommittedFaces.seckillOwnedOrderByIdSql(lockClause),
+            (result, row) -> mapOrder(result, "SECKILL"),
+            orderId,
+            userSubject));
+    return List.copyOf(rows);
+  }
+
   public Optional<OrderTruth> findEvaluationOrderForUpdate(String orderId, String sandboxId) {
     return findEvaluationOrder(orderId, sandboxId, " FOR UPDATE");
   }
@@ -62,6 +81,18 @@ public class MockPaymentRepository {
             + attemptTable()
             + " WHERE user_subject = ? "
             + "AND request_idempotency_key = ? FOR UPDATE",
+        user,
+        key);
+  }
+
+  public Optional<AttemptRecord> findAttemptByRequest(String user, String key) {
+    return queryAttempt(
+        "SELECT "
+            + attemptColumns()
+            + " FROM "
+            + attemptTable()
+            + " WHERE user_subject = ? "
+            + "AND request_idempotency_key = ?",
         user,
         key);
   }
@@ -458,6 +489,24 @@ public class MockPaymentRepository {
             + lockClause,
         MockPaymentRepository::mapAttempt,
         orderId);
+  }
+
+  List<AttemptRecord> enumerateOwnedAttemptByOrderVisibility(
+      String orderId, String userSubject, String lockClause) {
+    List<String> keys = EvaluationPaymentCommittedFaces.ATTEMPT.enumerationKeys();
+    requireEnumerationKeys(keys, "attempt_id", "callback_correlation_id", "order_id");
+    return jdbc.query(
+        "SELECT "
+            + attemptColumns()
+            + " FROM "
+            + attemptTable()
+            + " WHERE "
+            + keys.get(2)
+            + " = ? AND user_subject = ?"
+            + lockClause,
+        MockPaymentRepository::mapAttempt,
+        orderId,
+        userSubject);
   }
 
   List<CallbackRecord> discoverCallbackClosure(AttemptRecord target, String lockClause) {

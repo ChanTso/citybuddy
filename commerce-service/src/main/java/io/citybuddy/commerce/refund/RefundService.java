@@ -219,23 +219,19 @@ public final class RefundService {
       RefundRequest request,
       String expectedSandboxId,
       boolean enforceActionSandbox) {
+    CommittedPaymentTruthResolver.CommittedPaymentCaller caller =
+        enforceActionSandbox
+            ? CommittedPaymentTruthResolver.CommittedPaymentCaller
+                .ACTION_PREPARE_CONFIRM_AND_RECEIPT_REPLAY
+            : CommittedPaymentTruthResolver.CommittedPaymentCaller.DIRECT_REFUND_ELIGIBILITY;
     CommittedPaymentTruthResolver.CommittedPaymentTruth committed;
     try {
-      committed = paymentTruth.resolveByOrderLocked(orderId, userSubject).orElse(null);
+      committed = paymentTruth.resolveByOrderLocked(caller, orderId, userSubject).orElse(null);
     } catch (CommittedPaymentIntegrityException exception) {
       throw conflict("Order has no eligible successful payment");
     }
     if (committed == null) {
-      MockPaymentRepository.OrderTruth identified;
-      try {
-        identified = paymentTruth.resolveOrderIdentityLocked(orderId, userSubject).orElse(null);
-      } catch (CommittedPaymentIntegrityException exception) {
-        throw conflict("Order has no eligible successful payment");
-      }
-      if (identified == null || !userSubject.equals(identified.userSubject())) {
-        throw notFound("Refund order is missing or not owned");
-      }
-      throw conflict("Order has no eligible successful payment");
+      throw notFound("Refund order is missing or not owned");
     }
     MockPaymentRepository.AttemptRecord attempt = committed.attempt();
     MockPaymentRepository.OrderTruth order = committed.order();
@@ -353,7 +349,8 @@ public final class RefundService {
 
     try {
       CommittedPaymentTruthResolver.CommittedPaymentTruth committed =
-          paymentTruth.resolveLocked(attempt);
+          paymentTruth.resolveLocked(
+              CommittedPaymentTruthResolver.CommittedPaymentCaller.REFUND_RECONCILIATION, attempt);
       if (!committed.order().equals(order)) {
         contradictions.add("PAYMENT_ORDER_MISMATCH");
       }
@@ -502,7 +499,9 @@ public final class RefundService {
     }
     CommittedPaymentTruthResolver.CommittedPaymentTruth committed;
     try {
-      committed = paymentTruth.resolveLocked(attempt);
+      committed =
+          paymentTruth.resolveLocked(
+              CommittedPaymentTruthResolver.CommittedPaymentCaller.REFUND_LIFECYCLE, attempt);
     } catch (CommittedPaymentIntegrityException exception) {
       throw conflict("Order has no eligible successful payment");
     }

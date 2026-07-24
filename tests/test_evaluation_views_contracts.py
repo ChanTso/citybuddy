@@ -198,7 +198,7 @@ def test_evaluation_audit_is_append_only_scoped_and_not_agent_evidence() -> None
         "l.business_event_key =",
     ):
         assert filtered_validity_predicate not in callback_enumerator
-    assert "paymentTruth.resolveSnapshot(attempt)" in repository
+    assert "paymentTruth.resolveSnapshot(caller, attempt)" in repository
     assert "callback.intentHash().equals(callbackIntentHash(attempt, callback))" in payment_resolver
     assert "callback.callbackCorrelationId().equals(attempt.callbackCorrelationId())" in (
         payment_resolver

@@ -244,12 +244,14 @@ public final class EvaluationViewRepository {
         fetchLimit);
   }
 
-  public boolean auditReferencesConsistent(String sandboxId) {
+  public boolean auditReferencesConsistent(
+      String sandboxId, CommittedPaymentTruthResolver.CommittedPaymentCaller caller) {
     List<IntegrityAuditReference> references = allAuditReferences(sandboxId);
     List<ProductObservationTruth> productTruths = productObservationTruths(sandboxId);
     if (!EvaluationLegacyAuditCommitmentStore.load(jdbc).isConsistent()
         || !sequenceOrderConsistent(references)
         || !paymentTruthsConsistent(
+            caller,
             references,
             paidOrderTruths(sandboxId),
             paymentLedgerTruths(sandboxId),
@@ -529,6 +531,7 @@ public final class EvaluationViewRepository {
   }
 
   private boolean paymentTruthsConsistent(
+      CommittedPaymentTruthResolver.CommittedPaymentCaller caller,
       List<IntegrityAuditReference> references,
       List<PaidOrderTruth> orders,
       List<PaymentLedgerTruth> ledgers,
@@ -595,7 +598,7 @@ public final class EvaluationViewRepository {
           return false;
         }
         CommittedPaymentTruthResolver.CommittedPaymentTruth committed =
-            paymentTruth.resolveSnapshot(attempt);
+            paymentTruth.resolveSnapshot(caller, attempt);
         if (!committed.order().orderId().equals(order.orderId())
             || !committed.paymentMovement().businessEventKey().equals(ledger.businessEventKey())
             || !committed.callback().callbackEventId().equals(callback.callbackEventId())

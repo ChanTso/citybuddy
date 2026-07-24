@@ -93,19 +93,24 @@ def test_action_refund_reuses_payment_truth_and_one_transaction_event_time() -> 
     )
     assert "new CommittedPaymentTruthResolver(repository)" in payment
     assert "new CommittedPaymentTruthResolver(payments)" in refund
-    assert "truth.resolveLocked(attempt)" in payment
-    assert "paymentTruth.resolveLocked(attempt)" in refund
-    assert "paymentTruth.resolveByOrderLocked(orderId, userSubject)" in refund
+    assert "truth.resolveLocked(" in payment
+    assert "paymentTruth.resolveLocked(" in refund
+    assert "paymentTruth.resolveByOrderLocked(caller, orderId, userSubject)" in refund
     assert "refunds.findOrder(" not in refund
-    assert "paymentTruth.resolveSnapshot(attempt)" in evaluation
+    assert "paymentTruth.resolveSnapshot(" in evaluation
     assert "catch (CommittedPaymentIntegrityException exception)" in payment
     assert "catch (CommittedPaymentIntegrityException exception)" in refund
     assert "catch (CommittedPaymentIntegrityException exception)" in evaluation
     assert "attempt.refundedAmountMinor() < 0" in resolver
     assert "attempt.refundedAmountMinor() > attempt.amountMinor()" in resolver
     assert "requireZeroEvaluationRefundAccumulator" not in resolver
-    assert "attempt.sandboxId() != null && attempt.refundedAmountMinor() != 0" in payment
-    assert "attempt.refundedAmountMinor() != 0" not in resolver
+    assert "committed.attempt().refundedAmountMinor() != 0" in payment
+    committed_row_checks = resolver[
+        resolver.index("private static void requireImmutablePaymentRows") : resolver.index(
+            "private static void requirePendingPaymentRows"
+        )
+    ]
+    assert "attempt.refundedAmountMinor() != 0" not in committed_row_checks
     assert "relationKeys" in faces
     assert "enumerationKeys()" in faces
     for face in ("CALLBACK", "ATTEMPT", "ORDER", "LEDGER", "AUDIT"):
