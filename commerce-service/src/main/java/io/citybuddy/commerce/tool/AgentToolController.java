@@ -115,7 +115,18 @@ public final class AgentToolController {
             EvaluationRejectionReason.TOOL_EVALUATION_COMPONENT_UNAVAILABLE,
             "Evaluation sandbox is unavailable");
       }
-      access.requireActive(sandboxId);
+      try {
+        access.requireActive(sandboxId);
+      } catch (EvaluationSandboxException exception) {
+        if (exception.status() == 403
+            && exception.reason() == EvaluationRejectionReason.ACCESS_SANDBOX_NOT_ACTIVE) {
+          throw new EvaluationSandboxException(
+              403,
+              EvaluationRejectionReason.TOOL_SANDBOX_NOT_ACTIVE,
+              "Evaluation sandbox is inactive");
+        }
+        throw exception;
+      }
       EvaluationCommerceAuditService.ProductObservation product =
           audit.observeProduct(sandboxId, supportSession, traceId, operationId, productId);
       return java.util.List.of(productMap(product));
@@ -160,24 +171,34 @@ public final class AgentToolController {
 
   @ExceptionHandler(OboAuthorizationException.class)
   ResponseEntity<Map<String, String>> denied(OboAuthorizationException exception) {
-    LOG.warn("evaluation_request_rejected reason_code=TOOL_OBO_AUTHORIZATION_REJECTED");
+    LOG.warn(
+        "evaluation_request_rejected producer_boundary=OBO_AUTHORIZER"
+            + " original_status=403 reason_code=TOOL_OBO_AUTHORIZATION_REJECTED");
     return ResponseEntity.status(403).body(Map.of("error", "Forbidden"));
   }
 
   @ExceptionHandler(IdentityVerificationUnavailableException.class)
   ResponseEntity<Map<String, String>> identityUnavailable(
       IdentityVerificationUnavailableException exception) {
-    LOG.warn("evaluation_request_rejected reason_code=TOOL_OBO_JWKS_UNAVAILABLE");
+    LOG.warn(
+        "evaluation_request_rejected producer_boundary=OBO_JWKS"
+            + " original_status=503 reason_code=TOOL_OBO_JWKS_UNAVAILABLE");
     return ResponseEntity.status(503).body(Map.of("error", "Service unavailable"));
   }
 
   @ExceptionHandler(EvaluationSandboxException.class)
   ResponseEntity<Map<String, String>> inactive(EvaluationSandboxException exception) {
-    LOG.warn("evaluation_request_rejected reason_code={}", exception.reason());
-    if (exception.status() == 503) {
-      return ResponseEntity.status(503).body(Map.of("error", "Service unavailable"));
+    if (exception.reason() == EvaluationRejectionReason.NOT_APPLICABLE
+        && Set.of(403, 404, 409, 503).contains(exception.status())) {
+      throw new IllegalStateException("Evaluation tool rejection requires attribution");
     }
-    return ResponseEntity.status(403).body(Map.of("error", "Forbidden"));
+    LOG.warn(
+        "evaluation_request_rejected producer_boundary=EVALUATION_SANDBOX_EXCEPTION"
+            + " original_status={} reason_code={}",
+        exception.status(),
+        exception.reason());
+    return ResponseEntity.status(exception.status())
+        .body(Map.of("error", publicEvaluationError(exception.status())));
   }
 
   @ExceptionHandler(AgentToolException.class)
@@ -186,8 +207,22 @@ public final class AgentToolController {
   }
 
   @ExceptionHandler(DataAccessException.class)
-  ResponseEntity<Map<String, String>> unavailable() {
+  ResponseEntity<Map<String, String>> unavailable(DataAccessException exception) {
+    LOG.warn(
+        "evaluation_request_rejected producer_boundary=TOOL_DATA_ACCESS"
+            + " original_status=503 reason_code=TOOL_EVALUATION_COMPONENT_UNAVAILABLE");
     return ResponseEntity.status(503).body(Map.of("error", "Service unavailable"));
+  }
+
+  private static String publicEvaluationError(int status) {
+    return switch (status) {
+      case 400 -> "Bad request";
+      case 403 -> "Forbidden";
+      case 404 -> "Not found";
+      case 409 -> "Conflict";
+      case 503 -> "Service unavailable";
+      default -> throw new IllegalStateException("Unsupported evaluation tool status");
+    };
   }
 
   private static final class AgentToolException extends RuntimeException {

@@ -6,11 +6,16 @@ import java.sql.Timestamp;
 import java.time.Clock;
 import java.time.Instant;
 import java.util.List;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+import org.springframework.dao.DataAccessException;
 import org.springframework.dao.DuplicateKeyException;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.transaction.annotation.Transactional;
 
 public class EvaluationCommerceAuditService {
+  private static final Logger LOG = LoggerFactory.getLogger(EvaluationCommerceAuditService.class);
+
   private final JdbcTemplate jdbc;
   private final Clock clock;
 
@@ -44,9 +49,7 @@ public class EvaluationCommerceAuditService {
             java.sql.Timestamp.from(clock.instant()));
     if (active.size() != 1) {
       throw new EvaluationSandboxException(
-          403,
-          EvaluationRejectionReason.AUDIT_SANDBOX_NOT_ACTIVE,
-          "Evaluation sandbox is inactive");
+          403, EvaluationRejectionReason.TOOL_SANDBOX_NOT_ACTIVE, "Evaluation sandbox is inactive");
     }
 
     List<ProductObservation> products =
@@ -60,7 +63,8 @@ public class EvaluationCommerceAuditService {
             sandboxId,
             productId);
     if (products.size() != 1) {
-      throw new EvaluationSandboxException(404, "Product not found");
+      throw new EvaluationSandboxException(
+          404, EvaluationRejectionReason.TOOL_PRODUCT_NOT_FOUND, "Product not found");
     }
     ProductObservation product = products.getFirst();
     String referenceId =
@@ -126,6 +130,16 @@ public class EvaluationCommerceAuditService {
           product.productId(),
           product.publicationVersion(),
           observedAt);
+    } catch (DataAccessException exception) {
+      LOG.warn(
+          "evaluation_audit_failure producer_boundary=AUDIT_REFERENCE_INSERT"
+              + " reason_code=TOOL_AUDIT_PERSISTENCE_UNAVAILABLE"
+              + " product_fixture_read=true product_observation_insert=true"
+              + " audit_reference_insert=true transaction_rollback_required=true");
+      throw new EvaluationSandboxException(
+          503,
+          EvaluationRejectionReason.TOOL_AUDIT_PERSISTENCE_UNAVAILABLE,
+          "Evaluation audit persistence is unavailable");
     }
     return product;
   }
@@ -189,7 +203,7 @@ public class EvaluationCommerceAuditService {
             "OBSERVED",
             existing.isEmpty() ? observedAt : existing.getFirst().createdAt());
     if (existing.size() != 1 || !expected.equals(existing.getFirst())) {
-      throw new EvaluationSandboxException(409, "Conflicting evaluation operation");
+      throw operationConflict();
     }
     return existing.getFirst().createdAt();
   }
@@ -216,7 +230,7 @@ public class EvaluationCommerceAuditService {
             version,
             createdAt,
             "BUSINESS_EVENT")) {
-      throw new EvaluationSandboxException(409, "Conflicting evaluation operation");
+      throw operationConflict();
     }
   }
 
@@ -248,7 +262,7 @@ public class EvaluationCommerceAuditService {
             sandboxId,
             operationId);
     if (existing.size() > 1) {
-      throw new EvaluationSandboxException(409, "Conflicting evaluation operation");
+      throw operationConflict();
     }
     return existing.isEmpty() ? null : existing.getFirst();
   }
@@ -276,9 +290,16 @@ public class EvaluationCommerceAuditService {
             version,
             existing.createdAt(),
             "LEGACY_CUTOFF")) {
-      throw new EvaluationSandboxException(409, "Conflicting evaluation operation");
+      throw operationConflict();
     }
     return existing.createdAt();
+  }
+
+  private static EvaluationSandboxException operationConflict() {
+    return new EvaluationSandboxException(
+        409,
+        EvaluationRejectionReason.TOOL_AUDIT_OPERATION_CONFLICT,
+        "Conflicting evaluation operation");
   }
 
   private static boolean matchesProductReference(

@@ -24,6 +24,7 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
 import org.springframework.boot.test.system.CapturedOutput;
 import org.springframework.boot.test.system.OutputCaptureExtension;
+import org.springframework.dao.DataAccessResourceFailureException;
 import org.springframework.http.MediaType;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.jdbc.core.RowMapper;
@@ -126,13 +127,15 @@ class AgentToolControllerTest {
     var response =
         controller.inactive(
             new EvaluationSandboxException(
-                403, EvaluationRejectionReason.AUDIT_SANDBOX_NOT_ACTIVE, "private sandbox detail"));
+                403, EvaluationRejectionReason.TOOL_SANDBOX_NOT_ACTIVE, "private sandbox detail"));
 
     org.assertj.core.api.Assertions.assertThat(response.getStatusCode().value()).isEqualTo(403);
     org.assertj.core.api.Assertions.assertThat(response.getBody())
         .containsExactlyEntriesOf(Map.of("error", "Forbidden"));
     org.assertj.core.api.Assertions.assertThat(output)
-        .contains("reason_code=AUDIT_SANDBOX_NOT_ACTIVE")
+        .contains(
+            "producer_boundary=EVALUATION_SANDBOX_EXCEPTION original_status=403"
+                + " reason_code=TOOL_SANDBOX_NOT_ACTIVE")
         .doesNotContain("private sandbox detail");
   }
 
@@ -175,5 +178,75 @@ class AgentToolControllerTest {
     org.assertj.core.api.Assertions.assertThat(output)
         .contains("reason_code=TOOL_EVALUATION_COMPONENT_UNAVAILABLE")
         .doesNotContain("private component detail");
+  }
+
+  @Test
+  void preservesAttributedEvaluationToolStatusFamilies(CapturedOutput output) {
+    AgentToolController controller = new AgentToolController(authorizer, jdbc);
+
+    var missing =
+        controller.inactive(
+            new EvaluationSandboxException(
+                404, EvaluationRejectionReason.TOOL_PRODUCT_NOT_FOUND, "private product detail"));
+    var conflict =
+        controller.inactive(
+            new EvaluationSandboxException(
+                409,
+                EvaluationRejectionReason.TOOL_AUDIT_OPERATION_CONFLICT,
+                "private operation detail"));
+    var unavailable =
+        controller.inactive(
+            new EvaluationSandboxException(
+                503,
+                EvaluationRejectionReason.TOOL_AUDIT_PERSISTENCE_UNAVAILABLE,
+                "private persistence detail"));
+
+    org.assertj.core.api.Assertions.assertThat(missing.getStatusCode().value()).isEqualTo(404);
+    org.assertj.core.api.Assertions.assertThat(missing.getBody())
+        .containsExactlyEntriesOf(Map.of("error", "Not found"));
+    org.assertj.core.api.Assertions.assertThat(conflict.getStatusCode().value()).isEqualTo(409);
+    org.assertj.core.api.Assertions.assertThat(conflict.getBody())
+        .containsExactlyEntriesOf(Map.of("error", "Conflict"));
+    org.assertj.core.api.Assertions.assertThat(unavailable.getStatusCode().value()).isEqualTo(503);
+    org.assertj.core.api.Assertions.assertThat(unavailable.getBody())
+        .containsExactlyEntriesOf(Map.of("error", "Service unavailable"));
+    org.assertj.core.api.Assertions.assertThat(output)
+        .contains("original_status=404 reason_code=TOOL_PRODUCT_NOT_FOUND")
+        .contains("original_status=409 reason_code=TOOL_AUDIT_OPERATION_CONFLICT")
+        .contains("original_status=503 reason_code=TOOL_AUDIT_PERSISTENCE_UNAVAILABLE")
+        .doesNotContain("private product detail")
+        .doesNotContain("private operation detail")
+        .doesNotContain("private persistence detail");
+  }
+
+  @Test
+  void refusesUnattributedEvaluationToolBusinessStatuses() {
+    AgentToolController controller = new AgentToolController(authorizer, jdbc);
+
+    for (int status : List.of(404, 409, 503)) {
+      EvaluationSandboxException unattributed =
+          new EvaluationSandboxException(status, "private unattributed detail");
+      org.assertj.core.api.Assertions.assertThatThrownBy(() -> controller.inactive(unattributed))
+          .isInstanceOf(IllegalStateException.class)
+          .hasMessage("Evaluation tool rejection requires attribution");
+    }
+  }
+
+  @Test
+  void attributesOtherToolDataAccessFailuresAsComponentUnavailable(CapturedOutput output) {
+    AgentToolController controller = new AgentToolController(authorizer, jdbc);
+
+    var response =
+        controller.unavailable(
+            new DataAccessResourceFailureException("private database resource detail"));
+
+    org.assertj.core.api.Assertions.assertThat(response.getStatusCode().value()).isEqualTo(503);
+    org.assertj.core.api.Assertions.assertThat(response.getBody())
+        .containsExactlyEntriesOf(Map.of("error", "Service unavailable"));
+    org.assertj.core.api.Assertions.assertThat(output)
+        .contains(
+            "producer_boundary=TOOL_DATA_ACCESS original_status=503"
+                + " reason_code=TOOL_EVALUATION_COMPONENT_UNAVAILABLE")
+        .doesNotContain("private database resource detail");
   }
 }

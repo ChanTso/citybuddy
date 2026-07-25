@@ -11,6 +11,7 @@ def test_evaluation_sandbox_openapi_is_profile_bound_bounded_and_redacted() -> N
     reset = contract["paths"]["/api/eval/reset"]["post"]
     complete = contract["paths"]["/api/eval/sandboxes/{sandboxId}/complete"]["post"]
     liveness = contract["paths"]["/internal/eval/sandboxes/{sandboxId}/liveness"]["post"]
+    product_tool = contract["paths"]["/internal/tools/catalog.product.get"]["post"]
 
     assert reset["x-citybuddy-profile"] == "evaluation"
     assert complete["x-citybuddy-profile"] == "evaluation"
@@ -19,6 +20,7 @@ def test_evaluation_sandbox_openapi_is_profile_bound_bounded_and_redacted() -> N
     assert complete["security"] == [{"evaluationManagementBasic": []}]
     assert liveness["security"] == [{"directUserBearer": []}]
     assert set(reset["responses"]) == {"200", "400", "401", "409", "502", "503"}
+    assert set(product_tool["responses"]) == {"200", "400", "403", "404", "409", "503"}
 
     schemas = contract["components"]["schemas"]
     request = schemas["EvaluationResetRequest"]

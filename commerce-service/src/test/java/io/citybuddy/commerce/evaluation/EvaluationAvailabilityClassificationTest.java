@@ -67,7 +67,7 @@ class EvaluationAvailabilityClassificationTest {
             exception -> {
               assertThat(exception.status()).isEqualTo(403);
               assertThat(exception.reason())
-                  .isEqualTo(EvaluationRejectionReason.AUDIT_SANDBOX_NOT_ACTIVE);
+                  .isEqualTo(EvaluationRejectionReason.TOOL_SANDBOX_NOT_ACTIVE);
             });
   }
 

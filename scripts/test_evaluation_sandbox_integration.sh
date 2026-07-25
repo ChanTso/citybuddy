@@ -204,7 +204,7 @@ assert_status() {
     if [[ -f "$tmp_dir/commerce.log" ]]; then
       echo "request-rejection-reasons" >&2
       tail -n "+$((commerce_log_start + 1))" "$tmp_dir/commerce.log" \
-        | grep 'evaluation_request_rejected reason_code=' >&2 || true
+        | grep -E 'evaluation_request_rejected .*reason_code=' >&2 || true
     fi
     for log in auth commerce agent model drop-proxy; do
       if [[ -f "$tmp_dir/$log.log" ]]; then
@@ -215,6 +215,40 @@ assert_status() {
     exit 1
   fi
   echo "Verified HTTP $expected: $label"
+}
+
+assert_status_reason() {
+  local expected="$1"
+  local reason="$2"
+  local public_error="$3"
+  local label="$4"
+  shift 4
+  local status
+  local commerce_log_start
+  local request_logs
+  local reason_count
+  commerce_log_start="$(wc -l <"$tmp_dir/commerce.log")"
+  status="$(request_status "$tmp_dir/http-response.json" "$@")"
+  request_logs="$(
+    tail -n "+$((commerce_log_start + 1))" "$tmp_dir/commerce.log" \
+      | grep 'evaluation_request_rejected' || true
+  )"
+  if [[ "$status" != "$expected" ]]; then
+    echo "Unexpected HTTP status for $label: $status" >&2
+    cat "$tmp_dir/http-response.json" >&2
+    printf '%s\n' "$request_logs" >&2
+    exit 1
+  fi
+  assert_equal "$public_error" \
+    "$(uv run python scripts/read_json_field.py "$tmp_dir/http-response.json" error)" \
+    "$label exposes only its fixed public response"
+  reason_count="$(printf '%s\n' "$request_logs" | grep -c "reason_code=$reason" || true)"
+  assert_equal 1 "$reason_count" "$label has one exact server-only attribution"
+  if grep -Fq "$reason" "$tmp_dir/http-response.json"; then
+    echo "$label leaked its server-only attribution." >&2
+    exit 1
+  fi
+  echo "Verified HTTP $expected with reason $reason: $label"
 }
 
 report_audit_unavailability_misclassification() {
@@ -1116,7 +1150,8 @@ assert_status 200 "migrated legacy replay is idempotent" \
   --header "X-Agent-Operation-Id: $legacy_operation" \
   --header 'Content-Type: application/json' \
   --data "{\"productId\":\"$legacy_product_id\"}"
-assert_status 403 "migrated legacy operation rejects conflicting replay intent" \
+assert_status_reason 409 TOOL_AUDIT_OPERATION_CONFLICT Conflict \
+  "migrated legacy operation rejects conflicting replay intent" \
   --request POST "http://127.0.0.1:$commerce_port/internal/tools/catalog.product.get" \
   --header "Authorization: Bearer $legacy_obo_token" \
   --header "X-Support-Session-Id: $legacy_session" \
@@ -1592,7 +1627,7 @@ assert_payment_truth_fails_closed() {
     if [[ -f "$tmp_dir/commerce.log" ]]; then
       echo 'request-rejection-reasons' >&2
       tail -n "+$((commerce_log_start + 1))" "$tmp_dir/commerce.log" \
-        | grep 'evaluation_request_rejected reason_code=' >&2 || true
+        | grep -E 'evaluation_request_rejected .*reason_code=' >&2 || true
     fi
     exit 1
   fi
@@ -2398,6 +2433,17 @@ assert_status 200 "JIT exchange preserves the exact sandbox" \
   --header 'Content-Type: application/json' \
   --data "{\"sessionId\":\"$session_id\",\"userSubject\":\"$direct_subject\",\"scope\":\"catalog:read\"}"
 obo_token="$(uv run python scripts/read_json_field.py "$tmp_dir/http-response.json" accessToken)"
+invalid_obo_operation="$(openssl rand -hex 32)"
+assert_status_reason 403 TOOL_OBO_AUTHORIZATION_REJECTED Forbidden \
+  "direct token cannot replace OBO authorization" \
+  --request POST "http://127.0.0.1:$commerce_port/internal/tools/catalog.product.get" \
+  --header "Authorization: Bearer $direct_token" \
+  --header "X-Support-Session-Id: $session_id" \
+  --header 'X-Eval-Sandbox-Id: sandbox-main' \
+  --header 'X-Agent-Trace-Id: invalid-obo-trace' \
+  --header "X-Agent-Operation-Id: $invalid_obo_operation" \
+  --header 'Content-Type: application/json' \
+  --data '{"productId":"product-1"}'
 sleep 1.1
 jwks_fault_log_start="$(wc -l <"$tmp_dir/commerce.log")"
 stop_process auth_pid "$auth_pid"
@@ -2417,7 +2463,7 @@ jwks_tool_status="$(request_status "$tmp_dir/jwks-tool-unavailable.json" \
   --data '{"productId":"product-1"}')"
 echo 'jwks-unavailability-rejection-reasons'
 jwks_rejection_reasons="$(tail -n "+$((jwks_fault_log_start + 1))" "$tmp_dir/commerce.log" \
-  | sed -n 's/.*evaluation_request_rejected reason_code=\([^ ]*\).*/\1/p' \
+  | sed -n 's/.*evaluation_request_rejected .*reason_code=\([^ ]*\).*/\1/p' \
   | sort)"
 echo "$jwks_rejection_reasons"
 start_auth evaluation
@@ -2439,11 +2485,28 @@ assert_equal 'Service unavailable' \
 direct_trace="direct-trace-$(openssl rand -hex 8)"
 direct_operation="$(openssl rand -hex 32)"
 failed_operation="$(openssl rand -hex 32)"
+assert_equal 'ACTIVE:1' \
+  "$(mysql_query root "$root_password" commerce_db \
+    "SELECT CONCAT(lifecycle_state, ':', expires_at > CURRENT_TIMESTAMP(6)) FROM eval_sandbox WHERE sandbox_id = 'sandbox-main'")" \
+  "audit-persistence probe begins with an active unexpired sandbox"
+assert_equal 1 \
+  "$(mysql_query root "$root_password" commerce_db \
+    "SELECT COUNT(*) FROM eval_sandbox_product_fixture WHERE sandbox_id = 'sandbox-main' AND product_id = 'product-1'")" \
+  "audit-persistence probe begins with one visible product fixture"
+assert_equal "$direct_subject:sandbox-main" \
+  "$(mysql_query root "$root_password" cs_db \
+    "SELECT CONCAT(user_subject, ':', sandbox_id) FROM support_session WHERE session_id = '$session_id'")" \
+  "audit-persistence probe preserves support-session sandbox binding"
+assert_equal '0:0' \
+  "$(mysql_query root "$root_password" commerce_db \
+    "SELECT CONCAT((SELECT COUNT(*) FROM eval_commerce_product_observation WHERE operation_id = '$failed_operation'), ':', (SELECT COUNT(*) FROM eval_commerce_audit_reference WHERE operation_id = '$failed_operation'))")" \
+  "audit-persistence probe uses a fresh operation"
 audit_denials_before="$(mysql_query root "$root_password" performance_schema \
   "SELECT COALESCE(SUM(sum_error_raised), 0) FROM events_errors_summary_by_account_by_error WHERE user = 'commerce_app' AND error_number = 1142")"
 mysql_query root "$root_password" '' \
   "REVOKE INSERT ON commerce_db.eval_commerce_audit_reference FROM 'commerce_app'@'%'"
-assert_status 503 "tool read cannot report success when audit persistence fails" \
+commerce_log_start="$(wc -l <"$tmp_dir/commerce.log")"
+failed_status="$(request_status "$tmp_dir/audit-unavailable-single.json" \
   --request POST "http://127.0.0.1:$commerce_port/internal/tools/catalog.product.get" \
   --header "Authorization: Bearer $obo_token" \
   --header "X-Support-Session-Id: $session_id" \
@@ -2451,11 +2514,43 @@ assert_status 503 "tool read cannot report success when audit persistence fails"
   --header "X-Agent-Trace-Id: $direct_trace" \
   --header "X-Agent-Operation-Id: $failed_operation" \
   --header 'Content-Type: application/json' \
-  --data '{"productId":"product-1"}'
-test "$(mysql_query root "$root_password" commerce_db \
-  "SELECT COUNT(*) FROM eval_commerce_audit_reference WHERE operation_id = '$failed_operation'")" = 0
-test "$(mysql_query root "$root_password" commerce_db \
-  "SELECT COUNT(*) FROM eval_commerce_product_observation WHERE operation_id = '$failed_operation'")" = 0
+  --data '{"productId":"product-1"}')"
+failed_request_logs="$(
+  tail -n "+$((commerce_log_start + 1))" "$tmp_dir/commerce.log" \
+    | grep -E 'evaluation_(audit_failure|request_rejected)' || true
+)"
+audit_denials_after_single="$(mysql_query root "$root_password" performance_schema \
+  "SELECT COALESCE(SUM(sum_error_raised), 0) FROM events_errors_summary_by_account_by_error WHERE user = 'commerce_app' AND error_number = 1142")"
+single_observation_residue="$(mysql_query root "$root_password" commerce_db \
+  "SELECT COUNT(*) FROM eval_commerce_product_observation WHERE operation_id = '$failed_operation'")"
+single_audit_residue="$(mysql_query root "$root_password" commerce_db \
+  "SELECT COUNT(*) FROM eval_commerce_audit_reference WHERE operation_id = '$failed_operation'")"
+echo "audit-persistence-probe status=$failed_status account_1142_delta=$((audit_denials_after_single - audit_denials_before)) observation_residue=$single_observation_residue audit_residue=$single_audit_residue"
+printf '%s\n' "$failed_request_logs"
+if [[ "$failed_status" != 503 ]]; then
+  printf '%s' "$failed_status" >"$tmp_dir/audit-unavailable-single.status"
+  report_audit_unavailability_misclassification \
+    "single audit persistence request" \
+    "$tmp_dir/audit-unavailable-single.status" \
+    "$tmp_dir/audit-unavailable-single.json"
+fi
+assert_equal 'Service unavailable' \
+  "$(uv run python scripts/read_json_field.py "$tmp_dir/audit-unavailable-single.json" error)" \
+  "audit-persistence failure exposes only the fixed unavailable response"
+assert_equal 1 "$((audit_denials_after_single - audit_denials_before))" \
+  "single unavailable tool request reaches the revoked audit INSERT boundary"
+assert_equal 0 "$single_observation_residue" \
+  "single unavailable tool request rolls back product observation"
+assert_equal 0 "$single_audit_residue" \
+  "single unavailable tool request leaves no audit reference"
+assert_equal 1 \
+  "$(printf '%s\n' "$failed_request_logs" | grep -c \
+    'producer_boundary=AUDIT_REFERENCE_INSERT reason_code=TOOL_AUDIT_PERSISTENCE_UNAVAILABLE product_fixture_read=true product_observation_insert=true audit_reference_insert=true transaction_rollback_required=true')" \
+  "audit-persistence failure records its exact producer and reached phases"
+assert_equal 1 \
+  "$(printf '%s\n' "$failed_request_logs" | grep -c \
+    'producer_boundary=EVALUATION_SANDBOX_EXCEPTION original_status=503 reason_code=TOOL_AUDIT_PERSISTENCE_UNAVAILABLE')" \
+  "audit-persistence failure records its original status and attribution"
 
 audit_fault_pids=()
 audit_fault_operations=()
@@ -2530,6 +2625,17 @@ assert_equal 17 "$((audit_denials_after - audit_denials_before))" \
 echo 'Verified 16 concurrent audit-persistence failures remained 503 while 16 liveness reads remained 204.'
 mysql_query root "$root_password" '' \
   "GRANT INSERT ON commerce_db.eval_commerce_audit_reference TO 'commerce_app'@'%'"
+missing_product_operation="$(openssl rand -hex 32)"
+assert_status_reason 404 TOOL_PRODUCT_NOT_FOUND 'Not found' \
+  "missing evaluation product keeps its not-found family" \
+  --request POST "http://127.0.0.1:$commerce_port/internal/tools/catalog.product.get" \
+  --header "Authorization: Bearer $obo_token" \
+  --header "X-Support-Session-Id: $session_id" \
+  --header 'X-Eval-Sandbox-Id: sandbox-main' \
+  --header 'X-Agent-Trace-Id: missing-product-trace' \
+  --header "X-Agent-Operation-Id: $missing_product_operation" \
+  --header 'Content-Type: application/json' \
+  --data '{"productId":"missing-product"}'
 assert_status 200 "OBO tool reads only the exact sandbox fixture" \
   --request POST "http://127.0.0.1:$commerce_port/internal/tools/catalog.product.get" \
   --header "Authorization: Bearer $obo_token" \
@@ -2553,7 +2659,8 @@ test "$(mysql_query commerce_app "$commerce_app_password" commerce_db \
   "SELECT COUNT(*) FROM eval_commerce_audit_reference WHERE operation_id = '$direct_operation'")" = 1
 test "$(mysql_query commerce_app "$commerce_app_password" commerce_db \
   "SELECT COUNT(*) FROM eval_commerce_product_observation WHERE operation_id = '$direct_operation'")" = 1
-assert_status 403 "same operation rejects conflicting trace reuse" \
+assert_status_reason 409 TOOL_AUDIT_OPERATION_CONFLICT Conflict \
+  "same operation rejects conflicting trace reuse" \
   --request POST "http://127.0.0.1:$commerce_port/internal/tools/catalog.product.get" \
   --header "Authorization: Bearer $obo_token" \
   --header "X-Support-Session-Id: $session_id" \
@@ -3049,6 +3156,21 @@ assert_status 403 "completion immediately blocks commerce liveness" \
   --request POST "http://127.0.0.1:$commerce_port/internal/eval/sandboxes/sandbox-main/liveness" \
   --header "Authorization: Bearer $direct_token" \
   --header 'X-Eval-Sandbox-Id: sandbox-main'
+inactive_tool_operation="$(openssl rand -hex 32)"
+assert_status_reason 403 TOOL_SANDBOX_NOT_ACTIVE Forbidden \
+  "completion immediately blocks the evaluation product tool" \
+  --request POST "http://127.0.0.1:$commerce_port/internal/tools/catalog.product.get" \
+  --header "Authorization: Bearer $obo_token" \
+  --header "X-Support-Session-Id: $session_id" \
+  --header 'X-Eval-Sandbox-Id: sandbox-main' \
+  --header 'X-Agent-Trace-Id: inactive-tool-trace' \
+  --header "X-Agent-Operation-Id: $inactive_tool_operation" \
+  --header 'Content-Type: application/json' \
+  --data '{"productId":"product-1"}'
+assert_equal '0:0' \
+  "$(mysql_query root "$root_password" commerce_db \
+    "SELECT CONCAT((SELECT COUNT(*) FROM eval_commerce_product_observation WHERE operation_id = '$inactive_tool_operation'), ':', (SELECT COUNT(*) FROM eval_commerce_audit_reference WHERE operation_id = '$inactive_tool_operation'))")" \
+  "inactive evaluation product tool leaves no durable residue"
 assert_status 403 "completion immediately blocks new agent work" \
   --request POST "http://127.0.0.1:$agent_port/api/chat" \
   --header "Authorization: Bearer $direct_token" \
