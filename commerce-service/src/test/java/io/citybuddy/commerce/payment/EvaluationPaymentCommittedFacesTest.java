@@ -2,6 +2,8 @@ package io.citybuddy.commerce.payment;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
+import io.citybuddy.commerce.payment.CommittedPaymentTruthResolver.CommittedPaymentCaller;
+import io.citybuddy.commerce.payment.EvaluationPaymentCommittedFaces.CallerColumnRole;
 import io.citybuddy.commerce.payment.EvaluationPaymentCommittedFaces.CardinalityMode;
 import org.junit.jupiter.api.Test;
 
@@ -45,5 +47,31 @@ class EvaluationPaymentCommittedFacesTest {
             "order:order_id",
             "ledger:order_id",
             "audit:entity_id");
+  }
+
+  @Test
+  void evaluationOwnerHandleHasACallerSpecificVisibilityDisposition() {
+    assertThat(
+            EvaluationPaymentCommittedFaces.ORDER
+                .callerColumnDispositions()
+                .get(CommittedPaymentCaller.PAYMENT_START_REPLAY))
+        .containsExactlyInAnyOrderEntriesOf(
+            java.util.Map.of(
+                "order_id", CallerColumnRole.VISIBILITY_INPUT,
+                "sandbox_id", CallerColumnRole.VISIBILITY_INPUT,
+                "user_subject", CallerColumnRole.VISIBILITY_INPUT,
+                "evaluation_owner_handle", CallerColumnRole.BINDING_PROVENANCE));
+    assertThat(EvaluationPaymentCommittedFaces.ORDER.residualColumnDispositions())
+        .containsKey("evaluation_owner_handle");
+    assertThat(
+            EvaluationPaymentCommittedFaces.ORDER.callerColumnDispositions().keySet().stream()
+                .map(Enum::name))
+        .containsExactly("PAYMENT_START_REPLAY");
+    assertThat(
+            EvaluationPaymentCommittedFaces.ORDER
+                .callerColumnDispositions()
+                .get(CommittedPaymentCaller.PAYMENT_START_REPLAY)
+                .keySet())
+        .isEqualTo(PaymentStartOrderVisibility.CLASSIFIED_COLUMNS);
   }
 }

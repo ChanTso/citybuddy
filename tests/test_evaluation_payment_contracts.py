@@ -1,4 +1,5 @@
 import json
+import re
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -242,6 +243,26 @@ def test_terminal_payment_callers_use_the_shared_complete_closure() -> None:
         / "commerce-service/src/main/java/io/citybuddy/commerce/payment"
         / "MockPaymentRepository.java"
     ).read_text(encoding="utf-8")
+    visibility = (
+        ROOT
+        / "commerce-service/src/main/java/io/citybuddy/commerce/payment"
+        / "PaymentStartOrderVisibility.java"
+    ).read_text(encoding="utf-8")
+    visibility_test = (
+        ROOT
+        / "commerce-service/src/test/java/io/citybuddy/commerce/payment"
+        / "PaymentStartOrderVisibilityTest.java"
+    ).read_text(encoding="utf-8")
+    sandbox_repository = (
+        ROOT
+        / "commerce-service/src/main/java/io/citybuddy/commerce/evaluation"
+        / "EvaluationSandboxRepository.java"
+    ).read_text(encoding="utf-8")
+    controller = (
+        ROOT
+        / "commerce-service/src/main/java/io/citybuddy/commerce/payment"
+        / "MockPaymentController.java"
+    ).read_text(encoding="utf-8")
     refund = (
         ROOT / "commerce-service/src/main/java/io/citybuddy/commerce/refund/RefundService.java"
     ).read_text(encoding="utf-8")
@@ -326,6 +347,39 @@ def test_terminal_payment_callers_use_the_shared_complete_closure() -> None:
     )
     assert "enumerateStartAttemptVisibility" in repository
     assert "enumerateStartOrderVisibility" in repository
+    start_order_visibility = repository[
+        repository.index("List<PaymentStartOrderVisibility.Classification>") : repository.index(
+            "public Optional<OrderTruth> findEvaluationOrderForUpdate"
+        )
+    ]
+    assert start_order_visibility.count("jdbc.query(") == 1
+    assert 'standardOrderByIdSql("") + " AND sandbox_id = ?"' in start_order_visibility
+    assert "catch (" not in start_order_visibility
+    binding = repository[
+        repository.index("public void bindEvaluationOrderOwner") : repository.index(
+            "public Optional<AttemptRecord> findAttemptByOrderForUpdate"
+        )
+    ]
+    assert "EvaluationOwnerBindingProof proof" in binding
+    assert "fixtureOwner" not in binding
+    assert "proof.ownerHandle()" in binding
+    assert "proof.existingFixtureOwnerSubject()" in binding
+    assert "Optional<PaymentStartOrderVisibility.EvaluationOwnerBindingProof>" in resolver
+    assert "resolveStartCommandLocked(context)" in service
+    assert "rebound.bindingProof().isPresent()" in service
+    assert "sealed interface Classification" in visibility
+    assert "DirectOwner" in visibility
+    assert "BindableFixture" in visibility
+    assert "Concealed" in visibility
+    assert "tryFixtureOwner(order.evaluationOwnerHandle())" in visibility
+    assert "catch (" not in visibility
+    assert "return tryFixtureOwner(ownerHandle)" in sandbox_repository
+    assert 'Optional.of("eval-handle:" + ownerHandle)' in sandbox_repository
+    assert "exception.status() == 403" in controller
+    assert "exception.status() == 409" in controller
+    assert "exception.status() == 503" in controller
+    assert "COMMITTED_PAYMENT_TRUTH_INCONSISTENT" in controller
+    assert "DEPENDENCY_OBSERVATION_INDETERMINATE" in controller
     assert '"resolveStartCommandLocked"' in resolver
     assert "OwnershipVisibilityLocator.START_ATTEMPT_COMMAND" in resolver
     assert "OwnershipVisibilityLocator.START_OWNED_ORDER" in resolver
@@ -364,6 +418,60 @@ def test_terminal_payment_callers_use_the_shared_complete_closure() -> None:
         "payment_observer_credentials_issued_at",
     ):
         assert visibility_evidence in integration
+    for start_visibility_evidence in (
+        "payment_start_visibility_fields",
+        "payment_start_visibility_fault_sql",
+        "payment-start visibility matrix covers four singles and six pairs",
+        "payment-start true other owner",
+        "payment-start malformed fixture handle",
+        "payment-start valid handle with mismatched fixture subject",
+        "valid unbound fixture owner is visible before binding",
+        "direct owner visibility does not parse malformed fixture provenance",
+        "visible attempt replay does not reclassify malformed fixture provenance",
+    ):
+        assert start_visibility_evidence in integration
+    assert "classify(FIXTURE_OWNER, SANDBOX, null)" in visibility_test
+    assert '"A".repeat(44)' in visibility_test
+    for field in (
+        "order_id",
+        "sandbox_id",
+        "user_subject",
+        "evaluation_owner_handle",
+    ):
+        assert field in visibility
+        assert field in integration
+    classifier_fields = set(
+        re.findall(
+            r'"([^"]+)"',
+            re.search(
+                r"CLASSIFIED_COLUMNS\s*=\s*Set\.of\((.*?)\);",
+                visibility,
+                re.DOTALL,
+            ).group(1),
+        )
+    )
+    matrix_fields = set(
+        re.findall(
+            r"^\s+([a-z_]+)\s*$",
+            re.search(
+                r"payment_start_visibility_fields=\(\n(.*?)\n\)",
+                integration,
+                re.DOTALL,
+            ).group(1),
+            re.MULTILINE,
+        )
+    )
+    assert matrix_fields == classifier_fields
+    assert "CallerColumnRole.VISIBILITY_INPUT" in (
+        ROOT
+        / "commerce-service/src/main/java/io/citybuddy/commerce/payment"
+        / "EvaluationPaymentCommittedFaces.java"
+    ).read_text(encoding="utf-8")
+    assert "CallerColumnRole.BINDING_PROVENANCE" in (
+        ROOT
+        / "commerce-service/src/main/java/io/citybuddy/commerce/payment"
+        / "EvaluationPaymentCommittedFaces.java"
+    ).read_text(encoding="utf-8")
 
 
 def test_auth_provision_response_remains_minimally_disclosing() -> None:

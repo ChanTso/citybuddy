@@ -2,7 +2,6 @@ package io.citybuddy.commerce.payment;
 
 import io.citybuddy.commerce.evaluation.EvaluationAuditEntityType;
 import io.citybuddy.commerce.evaluation.EvaluationAuditReferenceIdentity;
-import io.citybuddy.commerce.evaluation.EvaluationSandboxRepository;
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
 import java.util.HexFormat;
@@ -103,7 +102,11 @@ public final class CommittedPaymentTruthResolver {
     Objects.requireNonNull(context, "Payment start context is required");
     List<MockPaymentRepository.AttemptRecord> commandAttempts =
         observeStartAttemptCommandLocator(context);
-    List<MockPaymentRepository.OrderTruth> visibleOrders = observeStartOwnedOrderLocator(context);
+    List<PaymentStartOrderVisibility.Visible> visibleOrders =
+        observeStartOwnedOrderLocator(context).stream()
+            .filter(PaymentStartOrderVisibility.Visible.class::isInstance)
+            .map(PaymentStartOrderVisibility.Visible.class::cast)
+            .toList();
     if (commandAttempts.isEmpty() && visibleOrders.isEmpty()) {
       return new ConcealedStart();
     }
@@ -124,8 +127,8 @@ public final class CommittedPaymentTruthResolver {
     }
     List<MockPaymentRepository.OrderTruth> orders =
         repository.enumerateOrderClosure(context.orderId(), LOCK);
-    requireSingleEqual(
-        orders, visibleOrders.getFirst(), "Payment start order closure is inconsistent");
+    PaymentStartOrderVisibility.Visible visibleOrder = visibleOrders.getFirst();
+    requireSingleEqual(orders, visibleOrder.order(), "Payment start order closure is inconsistent");
     MockPaymentRepository.OrderTruth order = orders.getFirst();
 
     if (!orderAttempts.isEmpty()) {
@@ -134,12 +137,11 @@ public final class CommittedPaymentTruthResolver {
       return startResolution(replay);
     }
 
-    requireCreateEligibleOrder(order, context);
+    requireCreateEligibleOrder(order, context, visibleOrder);
     List<MockPaymentRepository.PaymentLedgerRecord> ledger =
         repository.enumerateLedgerReplayClosure(null, order.orderId(), "");
     requirePendingLedgerClosure(ledger, order);
-    return new CreateEligible(
-        order, context.sandboxId() != null && !context.userSubject().equals(order.userSubject()));
+    return new CreateEligible(order, visibleOrder.bindingProof());
   }
 
   private List<MockPaymentRepository.AttemptRecord> observeStartAttemptCommandLocator(
@@ -153,7 +155,7 @@ public final class CommittedPaymentTruthResolver {
         context.userSubject(), context.requestIdempotencyKey(), LOCK);
   }
 
-  private List<MockPaymentRepository.OrderTruth> observeStartOwnedOrderLocator(
+  private List<PaymentStartOrderVisibility.Classification> observeStartOwnedOrderLocator(
       StartCommandContext context) {
     if (!CommittedPaymentCaller.PAYMENT_START_REPLAY
         .ownershipVisibilityLocators()
@@ -226,14 +228,10 @@ public final class CommittedPaymentTruthResolver {
   }
 
   private static void requireCreateEligibleOrder(
-      MockPaymentRepository.OrderTruth order, StartCommandContext context) {
-    boolean directOwner = context.userSubject().equals(order.userSubject());
-    boolean evaluationFixtureOwner =
-        context.sandboxId() != null
-            && order.evaluationOwnerHandle() != null
-            && EvaluationSandboxRepository.fixtureOwner(order.evaluationOwnerHandle())
-                .equals(order.userSubject());
-    if ((!directOwner && !evaluationFixtureOwner)
+      MockPaymentRepository.OrderTruth order,
+      StartCommandContext context,
+      PaymentStartOrderVisibility.Visible visibility) {
+    if (!visibility.order().equals(order)
         || !Objects.equals(context.sandboxId(), order.sandboxId())) {
       throw inconsistent("Payment start owned-order visibility changed while locking");
     }
@@ -678,8 +676,13 @@ public final class CommittedPaymentTruthResolver {
   public record ConcealedStart() implements StartCommandResolution {}
 
   public record CreateEligible(
-      MockPaymentRepository.OrderTruth order, boolean evaluationOwnerBindingRequired)
-      implements StartCommandResolution {}
+      MockPaymentRepository.OrderTruth order,
+      Optional<PaymentStartOrderVisibility.EvaluationOwnerBindingProof> bindingProof)
+      implements StartCommandResolution {
+    public CreateEligible {
+      bindingProof = Optional.ofNullable(bindingProof.orElse(null));
+    }
+  }
 
   public record PendingReplay(PendingPaymentTruth truth) implements StartCommandResolution {}
 

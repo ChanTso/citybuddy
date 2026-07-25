@@ -3,7 +3,6 @@ package io.citybuddy.commerce.payment;
 import io.citybuddy.commerce.evaluation.EvaluationAuditEntityType;
 import io.citybuddy.commerce.evaluation.EvaluationAuditReferenceIdentity;
 import io.citybuddy.commerce.evaluation.EvaluationAuditReferenceWriter;
-import io.citybuddy.commerce.evaluation.EvaluationSandboxRepository;
 import java.sql.Timestamp;
 import java.time.Instant;
 import java.util.List;
@@ -65,26 +64,21 @@ public class MockPaymentRepository {
     return List.copyOf(rows);
   }
 
-  List<OrderTruth> enumerateStartOrderVisibility(
+  List<PaymentStartOrderVisibility.Classification> enumerateStartOrderVisibility(
       String orderId, String userSubject, String sandboxId) {
+    List<OrderTruth> rows;
     if (sandboxId == null) {
-      return enumerateOwnedOrderVisibility(orderId, userSubject, "").stream()
-          .filter(order -> order.sandboxId() == null)
-          .toList();
+      rows = enumerateOwnedOrderVisibility(orderId, userSubject, "");
+    } else {
+      rows =
+          jdbc.query(
+              EvaluationPaymentCommittedFaces.standardOrderByIdSql("") + " AND sandbox_id = ?",
+              (result, row) -> mapOrder(result, "STANDARD"),
+              orderId,
+              sandboxId);
     }
-    List<OrderTruth> rows =
-        jdbc.query(
-            EvaluationPaymentCommittedFaces.standardOrderByIdSql("") + " AND sandbox_id = ?",
-            (result, row) -> mapOrder(result, "STANDARD"),
-            orderId,
-            sandboxId);
     return rows.stream()
-        .filter(
-            order ->
-                userSubject.equals(order.userSubject())
-                    || (order.evaluationOwnerHandle() != null
-                        && EvaluationSandboxRepository.fixtureOwner(order.evaluationOwnerHandle())
-                            .equals(order.userSubject())))
+        .map(order -> PaymentStartOrderVisibility.classify(order, userSubject, sandboxId))
         .toList();
   }
 
@@ -136,7 +130,7 @@ public class MockPaymentRepository {
   }
 
   public void bindEvaluationOrderOwner(
-      String orderId, String sandboxId, String ownerHandle, String userSubject) {
+      PaymentStartOrderVisibility.EvaluationOwnerBindingProof proof, String userSubject) {
     int changed =
         jdbc.update(
             """
@@ -146,10 +140,10 @@ public class MockPaymentRepository {
               AND user_subject = ? AND status = 'UNPAID' AND state_version = 1
             """,
             userSubject,
-            orderId,
-            sandboxId,
-            ownerHandle,
-            io.citybuddy.commerce.evaluation.EvaluationSandboxRepository.fixtureOwner(ownerHandle));
+            proof.orderId(),
+            proof.sandboxId(),
+            proof.ownerHandle(),
+            proof.existingFixtureOwnerSubject());
     if (changed != 1) {
       throw new IllegalStateException("Evaluation payment owner binding did not persist");
     }

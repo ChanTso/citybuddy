@@ -2,6 +2,7 @@ package io.citybuddy.commerce.payment;
 
 import io.citybuddy.commerce.catalog.CatalogException;
 import io.citybuddy.commerce.catalog.DirectUserAuthorizer;
+import io.citybuddy.commerce.evaluation.EvaluationRejectionReason;
 import io.citybuddy.commerce.evaluation.EvaluationSandboxException;
 import io.citybuddy.commerce.identity.IdentityVerificationUnavailableException;
 import jakarta.servlet.http.HttpServletRequest;
@@ -121,12 +122,34 @@ final class MockPaymentExceptionHandler {
 
   @ExceptionHandler(EvaluationSandboxException.class)
   ResponseEntity<Map<String, String>> handleSandbox(EvaluationSandboxException exception) {
-    LOG.warn("evaluation_request_rejected reason_code={}", exception.reason());
-    LOG.warn(
-        "mock_payment_request_rejected reason_code={}",
-        MockPaymentRejectionReason.SANDBOX_NOT_ACTIVE);
-    return ResponseEntity.status(403)
-        .body(Map.of("category", "AUTHORIZATION", "message", "Evaluation payment is unavailable"));
+    if (exception.status() == 403
+        && (exception.reason() == EvaluationRejectionReason.PAYMENT_SANDBOX_NOT_FOUND
+            || exception.reason() == EvaluationRejectionReason.PAYMENT_SANDBOX_NOT_ACTIVE)) {
+      LOG.warn("evaluation_request_rejected reason_code={}", exception.reason());
+      LOG.warn(
+          "mock_payment_request_rejected reason_code={}",
+          MockPaymentRejectionReason.SANDBOX_NOT_ACTIVE);
+      return ResponseEntity.status(403)
+          .body(
+              Map.of("category", "AUTHORIZATION", "message", "Evaluation payment is unavailable"));
+    }
+    if (exception.status() == 409) {
+      LOG.warn(
+          "mock_payment_request_rejected reason_code={}",
+          MockPaymentRejectionReason.COMMITTED_PAYMENT_TRUTH_INCONSISTENT);
+      return ResponseEntity.status(409)
+          .body(
+              Map.of("category", "CONFLICT", "message", "Committed payment truth is inconsistent"));
+    }
+    if (exception.status() == 503) {
+      LOG.warn(
+          "mock_payment_request_rejected reason_code={}",
+          MockPaymentRejectionReason.DEPENDENCY_OBSERVATION_INDETERMINATE);
+      return ResponseEntity.status(503)
+          .body(Map.of("category", "UNAVAILABLE", "message", "Payment service is unavailable"));
+    }
+    throw new IllegalStateException(
+        "Unsupported evaluation failure classification for payment boundary", exception);
   }
 
   @ExceptionHandler({

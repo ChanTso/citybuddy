@@ -109,16 +109,12 @@ public final class MockPaymentService {
     CommittedPaymentTruthResolver.CreateEligible eligible =
         (CommittedPaymentTruthResolver.CreateEligible) resolution;
     fenceSandbox(context.sandboxId());
-    if (eligible.evaluationOwnerBindingRequired()) {
-      MockPaymentRepository.OrderTruth visible = eligible.order();
+    if (eligible.bindingProof().isPresent()) {
       repository.bindEvaluationOrderOwner(
-          visible.orderId(),
-          context.sandboxId(),
-          visible.evaluationOwnerHandle(),
-          context.userSubject());
+          eligible.bindingProof().orElseThrow(), context.userSubject());
       resolution = truth.resolveStartCommandLocked(context);
       if (!(resolution instanceof CommittedPaymentTruthResolver.CreateEligible rebound)
-          || rebound.evaluationOwnerBindingRequired()) {
+          || rebound.bindingProof().isPresent()) {
         throw new CommittedPaymentIntegrityException(
             "Evaluation payment owner binding did not converge");
       }

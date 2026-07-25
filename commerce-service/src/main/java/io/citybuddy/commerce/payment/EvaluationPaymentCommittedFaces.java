@@ -79,6 +79,13 @@ public final class EvaluationPaymentCommittedFaces {
               "The fixture-owner handle is reset provenance; committed replay is anchored to the "
                   + "effective user_subject, while historical handle recovery is an owner-accepted "
                   + "internal-view residual risk."),
+          Map.of(
+              CommittedPaymentTruthResolver.CommittedPaymentCaller.PAYMENT_START_REPLAY,
+              Map.of(
+                  "order_id", CallerColumnRole.VISIBILITY_INPUT,
+                  "sandbox_id", CallerColumnRole.VISIBILITY_INPUT,
+                  "user_subject", CallerColumnRole.VISIBILITY_INPUT,
+                  "evaluation_owner_handle", CallerColumnRole.BINDING_PROVENANCE)),
           table(
               "standard_order",
               "order_id",
@@ -270,6 +277,25 @@ public final class EvaluationPaymentCommittedFaces {
       Map<String, CardinalityControl> cardinalityControls,
       Map<String, String> residualColumnDispositions,
       TableDefinition... tables) {
+    return face(
+        name,
+        stableKeys,
+        relationKeys,
+        cardinalityControls,
+        residualColumnDispositions,
+        Map.of(),
+        tables);
+  }
+
+  private static FaceDefinition face(
+      String name,
+      List<String> stableKeys,
+      List<String> relationKeys,
+      Map<String, CardinalityControl> cardinalityControls,
+      Map<String, String> residualColumnDispositions,
+      Map<CommittedPaymentTruthResolver.CommittedPaymentCaller, Map<String, CallerColumnRole>>
+          callerColumnDispositions,
+      TableDefinition... tables) {
     Map<String, List<String>> physicalTables = new LinkedHashMap<>();
     for (TableDefinition table : tables) {
       if (physicalTables.put(table.name(), table.columns()) != null) {
@@ -282,7 +308,8 @@ public final class EvaluationPaymentCommittedFaces {
         relationKeys,
         cardinalityControls,
         physicalTables,
-        residualColumnDispositions);
+        residualColumnDispositions,
+        callerColumnDispositions);
   }
 
   private static Map<String, CardinalityControl> cardinality(CardinalityControl... controls) {
@@ -313,7 +340,9 @@ public final class EvaluationPaymentCommittedFaces {
       List<String> relationKeys,
       Map<String, CardinalityControl> cardinalityControls,
       Map<String, List<String>> tables,
-      Map<String, String> residualColumnDispositions) {
+      Map<String, String> residualColumnDispositions,
+      Map<CommittedPaymentTruthResolver.CommittedPaymentCaller, Map<String, CallerColumnRole>>
+          callerColumnDispositions) {
     public FaceDefinition {
       stableKeys = List.copyOf(stableKeys);
       relationKeys = List.copyOf(relationKeys);
@@ -322,6 +351,11 @@ public final class EvaluationPaymentCommittedFaces {
       tables.forEach((table, columns) -> copy.put(table, List.copyOf(columns)));
       tables = Collections.unmodifiableMap(copy);
       residualColumnDispositions = Map.copyOf(residualColumnDispositions);
+      Map<CommittedPaymentTruthResolver.CommittedPaymentCaller, Map<String, CallerColumnRole>>
+          callerCopy = new LinkedHashMap<>();
+      callerColumnDispositions.forEach(
+          (caller, dispositions) -> callerCopy.put(caller, Map.copyOf(dispositions)));
+      callerColumnDispositions = Collections.unmodifiableMap(callerCopy);
       if (stableKeys.isEmpty() || tables.isEmpty()) {
         throw new IllegalArgumentException("A committed face requires keys and tables");
       }
@@ -335,6 +369,10 @@ public final class EvaluationPaymentCommittedFaces {
       tables.values().forEach(declaredColumns::addAll);
       if (!declaredColumns.containsAll(residualColumnDispositions.keySet())) {
         throw new IllegalArgumentException("Residual disposition names an undeclared column");
+      }
+      if (callerColumnDispositions.values().stream()
+          .anyMatch(dispositions -> !declaredColumns.containsAll(dispositions.keySet()))) {
+        throw new IllegalArgumentException("Caller disposition names an undeclared column");
       }
     }
 
@@ -355,6 +393,13 @@ public final class EvaluationPaymentCommittedFaces {
   public enum CardinalityMode {
     DATABASE_UNIQUE,
     INSERTABLE_SIBLING
+  }
+
+  public enum CallerColumnRole {
+    COMMITTED_CONTENT,
+    VISIBILITY_INPUT,
+    BINDING_PROVENANCE,
+    OWNER_ACCEPTED_RESIDUAL
   }
 
   public record CardinalityControl(String key, CardinalityMode mode, String constraintName) {
