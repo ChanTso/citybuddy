@@ -15,9 +15,10 @@ import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.ObjectProvider;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
-import org.springframework.dao.DataAccessException;
+import org.springframework.dao.DataAccessResourceFailureException;
 import org.springframework.http.ResponseEntity;
 import org.springframework.jdbc.core.JdbcTemplate;
+import org.springframework.transaction.CannotCreateTransactionException;
 import org.springframework.web.bind.annotation.ExceptionHandler;
 import org.springframework.web.bind.annotation.PathVariable;
 import org.springframework.web.bind.annotation.PostMapping;
@@ -206,8 +207,11 @@ public final class AgentToolController {
     return ResponseEntity.status(exception.status()).body(Map.of("error", exception.getMessage()));
   }
 
-  @ExceptionHandler(DataAccessException.class)
-  ResponseEntity<Map<String, String>> unavailable(DataAccessException exception) {
+  @ExceptionHandler({
+    DataAccessResourceFailureException.class,
+    CannotCreateTransactionException.class
+  })
+  ResponseEntity<Map<String, String>> unavailable(RuntimeException exception) {
     LOG.warn(
         "evaluation_request_rejected producer_boundary=TOOL_DATA_ACCESS"
             + " original_status=503 reason_code=TOOL_EVALUATION_COMPONENT_UNAVAILABLE");

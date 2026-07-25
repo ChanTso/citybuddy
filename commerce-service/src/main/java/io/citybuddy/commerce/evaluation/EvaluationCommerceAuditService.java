@@ -9,6 +9,7 @@ import java.util.List;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.dao.DataAccessException;
+import org.springframework.dao.DataAccessResourceFailureException;
 import org.springframework.dao.DuplicateKeyException;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.transaction.annotation.Transactional;
@@ -131,15 +132,7 @@ public class EvaluationCommerceAuditService {
           product.publicationVersion(),
           observedAt);
     } catch (DataAccessException exception) {
-      LOG.warn(
-          "evaluation_audit_failure producer_boundary=AUDIT_REFERENCE_INSERT"
-              + " reason_code=TOOL_AUDIT_PERSISTENCE_UNAVAILABLE"
-              + " product_fixture_read=true product_observation_insert=true"
-              + " audit_reference_insert=true transaction_rollback_required=true");
-      throw new EvaluationSandboxException(
-          503,
-          EvaluationRejectionReason.TOOL_AUDIT_PERSISTENCE_UNAVAILABLE,
-          "Evaluation audit persistence is unavailable");
+      throw auditInsertFailure(exception);
     }
     return product;
   }
@@ -300,6 +293,35 @@ public class EvaluationCommerceAuditService {
         409,
         EvaluationRejectionReason.TOOL_AUDIT_OPERATION_CONFLICT,
         "Conflicting evaluation operation");
+  }
+
+  static EvaluationSandboxException auditInsertFailure(DataAccessException exception) {
+    if (!isAuditPersistenceUnavailable(exception)) {
+      throw exception;
+    }
+    LOG.warn(
+        "evaluation_audit_failure producer_boundary=AUDIT_REFERENCE_INSERT"
+            + " reason_code=TOOL_AUDIT_PERSISTENCE_UNAVAILABLE"
+            + " product_fixture_read=true product_observation_insert=true"
+            + " audit_reference_insert=true transaction_rollback_required=true");
+    return new EvaluationSandboxException(
+        503,
+        EvaluationRejectionReason.TOOL_AUDIT_PERSISTENCE_UNAVAILABLE,
+        "Evaluation audit persistence is unavailable");
+  }
+
+  private static boolean isAuditPersistenceUnavailable(DataAccessException exception) {
+    if (exception instanceof DataAccessResourceFailureException) {
+      return true;
+    }
+    Throwable current = exception;
+    while (current != null) {
+      if (current instanceof SQLException sqlException && sqlException.getErrorCode() == 1142) {
+        return true;
+      }
+      current = current.getCause();
+    }
+    return false;
   }
 
   private static boolean matchesProductReference(

@@ -10,6 +10,7 @@ import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
 
 import io.citybuddy.commerce.identity.IdentityVerificationUnavailableException;
+import java.sql.SQLException;
 import java.time.Clock;
 import java.time.Instant;
 import java.time.ZoneOffset;
@@ -19,7 +20,12 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
 import org.springframework.boot.test.system.CapturedOutput;
 import org.springframework.boot.test.system.OutputCaptureExtension;
+import org.springframework.dao.CannotAcquireLockException;
+import org.springframework.dao.DataAccessException;
+import org.springframework.dao.DataAccessResourceFailureException;
+import org.springframework.dao.DataIntegrityViolationException;
 import org.springframework.dao.QueryTimeoutException;
+import org.springframework.jdbc.BadSqlGrammarException;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.jdbc.core.RowMapper;
 
@@ -153,5 +159,44 @@ class EvaluationAvailabilityClassificationTest {
     assertThat(output)
         .contains("reason_code=LIVENESS_SANDBOX_MISMATCH")
         .doesNotContain("private mismatch detail");
+  }
+
+  @Test
+  void auditInsertClassifiesOnlyPermissionAndResourceFailuresAsUnavailable() {
+    EvaluationSandboxException denied =
+        EvaluationCommerceAuditService.auditInsertFailure(
+            new BadSqlGrammarException(
+                "insert audit",
+                "private sql",
+                new SQLException("private permission detail", "42000", 1142)));
+    EvaluationSandboxException resource =
+        EvaluationCommerceAuditService.auditInsertFailure(
+            new DataAccessResourceFailureException("private resource detail"));
+
+    assertThat(denied.status()).isEqualTo(503);
+    assertThat(denied.reason())
+        .isEqualTo(EvaluationRejectionReason.TOOL_AUDIT_PERSISTENCE_UNAVAILABLE);
+    assertThat(resource.status()).isEqualTo(503);
+    assertThat(resource.reason())
+        .isEqualTo(EvaluationRejectionReason.TOOL_AUDIT_PERSISTENCE_UNAVAILABLE);
+
+    var lockTimeout =
+        new CannotAcquireLockException(
+            "private lock timeout", new SQLException("private lock detail", "41000", 1205));
+    var deadlock =
+        new CannotAcquireLockException(
+            "private deadlock", new SQLException("private lock detail", "40001", 1213));
+    var constraint = new DataIntegrityViolationException("private constraint detail");
+    var badSql =
+        new BadSqlGrammarException(
+            "insert audit",
+            "private sql",
+            new SQLException("private syntax detail", "42000", 1064));
+
+    for (DataAccessException visibleFailure :
+        List.<DataAccessException>of(lockTimeout, deadlock, constraint, badSql)) {
+      assertThatThrownBy(() -> EvaluationCommerceAuditService.auditInsertFailure(visibleFailure))
+          .isSameAs(visibleFailure);
+    }
   }
 }

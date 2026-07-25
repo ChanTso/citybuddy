@@ -24,12 +24,17 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
 import org.springframework.boot.test.system.CapturedOutput;
 import org.springframework.boot.test.system.OutputCaptureExtension;
+import org.springframework.dao.CannotAcquireLockException;
 import org.springframework.dao.DataAccessResourceFailureException;
+import org.springframework.dao.DataIntegrityViolationException;
+import org.springframework.dao.DuplicateKeyException;
 import org.springframework.http.MediaType;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.jdbc.core.RowMapper;
 import org.springframework.test.web.servlet.MockMvc;
 import org.springframework.test.web.servlet.setup.MockMvcBuilders;
+import org.springframework.transaction.CannotCreateTransactionException;
+import org.springframework.web.method.annotation.ExceptionHandlerMethodResolver;
 
 @ExtendWith(OutputCaptureExtension.class)
 class AgentToolControllerTest {
@@ -248,5 +253,23 @@ class AgentToolControllerTest {
             "producer_boundary=TOOL_DATA_ACCESS original_status=503"
                 + " reason_code=TOOL_EVALUATION_COMPONENT_UNAVAILABLE")
         .doesNotContain("private database resource detail");
+
+    ExceptionHandlerMethodResolver mappings =
+        new ExceptionHandlerMethodResolver(AgentToolController.class);
+    org.assertj.core.api.Assertions.assertThat(
+            mappings.resolveMethod(new DataAccessResourceFailureException("controlled")))
+        .isNotNull();
+    org.assertj.core.api.Assertions.assertThat(
+            mappings.resolveMethod(new CannotCreateTransactionException("controlled")))
+        .isNotNull();
+    org.assertj.core.api.Assertions.assertThat(
+            mappings.resolveMethod(new CannotAcquireLockException("controlled")))
+        .isNull();
+    org.assertj.core.api.Assertions.assertThat(
+            mappings.resolveMethod(new DuplicateKeyException("controlled")))
+        .isNull();
+    org.assertj.core.api.Assertions.assertThat(
+            mappings.resolveMethod(new DataIntegrityViolationException("controlled")))
+        .isNull();
   }
 }
