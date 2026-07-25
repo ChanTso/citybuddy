@@ -8,10 +8,12 @@ import java.time.Instant;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Optional;
+import java.util.regex.Pattern;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.transaction.annotation.Transactional;
 
 public class EvaluationSandboxRepository {
+  private static final Pattern OPAQUE_HANDLE = Pattern.compile("[A-Za-z0-9_-]{43}");
   private static final String COLUMNS =
       "sandbox_id, case_correlation, reset_idempotency_key, fixture_digest, fixture_count, "
           + "test_user_label, requested_ttl_seconds, auth_provision_idempotency_key, "
@@ -667,9 +669,15 @@ public class EvaluationSandboxRepository {
       long productVersion) {}
 
   public static String fixtureOwner(String ownerHandle) {
-    if (ownerHandle == null || ownerHandle.length() != 43) {
-      throw new EvaluationSandboxException(409, "Evaluation identity handle is invalid");
+    return tryFixtureOwner(ownerHandle)
+        .orElseThrow(
+            () -> new EvaluationSandboxException(409, "Evaluation identity handle is invalid"));
+  }
+
+  public static Optional<String> tryFixtureOwner(String ownerHandle) {
+    if (ownerHandle == null || !OPAQUE_HANDLE.matcher(ownerHandle).matches()) {
+      return Optional.empty();
     }
-    return "eval-handle:" + ownerHandle;
+    return Optional.of("eval-handle:" + ownerHandle);
   }
 }

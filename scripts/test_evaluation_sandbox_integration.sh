@@ -1302,7 +1302,7 @@ uv run python scripts/check_evaluation_token.py \
 direct_subject="$(uv run python scripts/read_json_field.py "$tmp_dir/direct.json" subject)"
 
 payment_order_id='00000000-0000-0000-0000-000000000105'
-reset_payment_sandbox sandbox-payment case-payment reset-payment "$payment_order_id" 1200
+reset_payment_sandbox sandbox-payment case-payment reset-payment "$payment_order_id" 3600
 payment_handle="$(uv run python scripts/read_json_field.py "$tmp_dir/http-response.json" testUserHandle)"
 assert_status 200 "issue payment sandbox direct token" \
   --request POST "http://127.0.0.1:$auth_port/auth/eval/test-token" \
@@ -1316,9 +1316,271 @@ uv run python scripts/check_evaluation_token.py \
   --token-file "$tmp_dir/payment-direct.jwt" --jwks-file "$tmp_dir/jwks.json" \
   --issuer https://identity.citybuddy.test --audience citybuddy-web \
   --token-type eval_direct_user --sandbox sandbox-payment \
-  --maximum-expiry "$(date -u -v+1201S +%s 2>/dev/null || date -u -d '+1201 seconds' +%s)" \
+  --maximum-expiry "$(date -u -v+3601S +%s 2>/dev/null || date -u -d '+3601 seconds' +%s)" \
   --output "$tmp_dir/payment-direct.json"
 payment_subject="$(uv run python scripts/read_json_field.py "$tmp_dir/payment-direct.json" subject)"
+payment_observer_credentials_issued_at="$(date +%s)"
+
+refresh_payment_observer_credentials() {
+  local now
+  now="$(date +%s)"
+  if ((now - payment_observer_credentials_issued_at < 300)); then
+    return
+  fi
+  assert_status 200 "refresh main sandbox direct token" \
+    --request POST "http://127.0.0.1:$auth_port/auth/eval/test-token" \
+    --user "evaluation-client:$evaluator_password" \
+    --header 'X-Eval-Sandbox-Id: sandbox-main' \
+    --header 'Content-Type: application/json' \
+    --data "{\"handle\":\"$main_handle\"}"
+  direct_token="$(uv run python scripts/read_json_field.py "$tmp_dir/http-response.json" accessToken)"
+  assert_status 200 "refresh payment observer evaluation token" \
+    --request POST "http://127.0.0.1:$auth_port/auth/eval/test-token" \
+    --user "evaluation-client:$evaluator_password" \
+    --header 'X-Eval-Sandbox-Id: sandbox-payment' \
+    --header 'Content-Type: application/json' \
+    --data "{\"handle\":\"$payment_handle\"}"
+  payment_token="$(uv run python scripts/read_json_field.py "$tmp_dir/http-response.json" accessToken)"
+  payment_observer_credentials_issued_at="$now"
+}
+
+payment_start_visibility_fields=(
+  order_id
+  sandbox_id
+  user_subject
+  evaluation_owner_handle
+)
+payment_start_visibility_order_id='00000000-0000-0000-0000-000000000220'
+payment_start_visibility_moved_order_id='00000000-0000-0000-0000-000000000221'
+payment_start_visibility_other_order_id='00000000-0000-0000-0000-000000000222'
+payment_start_visibility_mismatch_order_id='00000000-0000-0000-0000-000000000223'
+payment_start_visibility_direct_order_id='00000000-0000-0000-0000-000000000224'
+payment_start_visibility_unknown_order_id='00000000-0000-0000-0000-000000000225'
+payment_start_visibility_fault_sql=(
+  "order_id = '$payment_start_visibility_moved_order_id'"
+  "sandbox_id = 'sandbox-main'"
+  "user_subject = 'visibility-damaged-owner'"
+  "evaluation_owner_handle = 'short'"
+)
+assert_equal 4 "${#payment_start_visibility_fields[@]}" \
+  "payment-start visibility metadata has four finite persistent inputs"
+assert_equal 4 "${#payment_start_visibility_fault_sql[@]}" \
+  "payment-start visibility injection metadata covers every input"
+
+create_payment_start_visibility_order() {
+  local order_id="$1"
+  local owner_sql="$2"
+  local sandbox_sql="$3"
+  local handle_sql="$4"
+  mysql_query root "$root_password" commerce_db "
+    DELETE FROM standard_order
+    WHERE order_id IN ('$order_id', '$payment_start_visibility_moved_order_id');
+    INSERT INTO standard_order
+      (order_id, user_subject, sandbox_id, evaluation_owner_handle, product_id, product_name,
+       unit_price_minor, currency, quantity, total_price_minor, product_version, status,
+       state_version, created_at)
+    SELECT '$order_id', $owner_sql, $sandbox_sql, $handle_sql, product_id,
+      CONCAT(product_name, ' start-visibility'), unit_price_minor, currency, quantity,
+      total_price_minor, product_version, status, state_version, created_at
+    FROM standard_order WHERE order_id = '$payment_order_id';
+  "
+}
+
+payment_start_visibility_effects() {
+  mysql_query root "$root_password" commerce_db "
+    SELECT CONCAT(
+      (SELECT COUNT(*) FROM mock_payment_attempt
+        WHERE order_id IN ('$payment_start_visibility_order_id',
+          '$payment_start_visibility_moved_order_id',
+          '$payment_start_visibility_other_order_id',
+          '$payment_start_visibility_mismatch_order_id',
+          '$payment_start_visibility_direct_order_id')), ':',
+      (SELECT COUNT(*) FROM mock_payment_callback c JOIN mock_payment_attempt a
+        ON a.attempt_id = c.attempt_id
+        WHERE a.order_id IN ('$payment_start_visibility_order_id',
+          '$payment_start_visibility_moved_order_id',
+          '$payment_start_visibility_other_order_id',
+          '$payment_start_visibility_mismatch_order_id',
+          '$payment_start_visibility_direct_order_id')), ':',
+      (SELECT COUNT(*) FROM inventory_ledger
+        WHERE order_id IN ('$payment_start_visibility_order_id',
+          '$payment_start_visibility_moved_order_id',
+          '$payment_start_visibility_other_order_id',
+          '$payment_start_visibility_mismatch_order_id',
+          '$payment_start_visibility_direct_order_id')), ':',
+      (SELECT COUNT(*) FROM mock_refund
+        WHERE order_id IN ('$payment_start_visibility_order_id',
+          '$payment_start_visibility_moved_order_id',
+          '$payment_start_visibility_other_order_id',
+          '$payment_start_visibility_mismatch_order_id',
+          '$payment_start_visibility_direct_order_id')), ':',
+      (SELECT COUNT(*) FROM commerce_outbox))
+  "
+}
+
+payment_start_visibility_rows() {
+  mysql_query root "$root_password" commerce_db "
+    SELECT COALESCE(GROUP_CONCAT(CONCAT_WS('|', order_id, user_subject, sandbox_id,
+      COALESCE(evaluation_owner_handle, '<NULL>'), status, state_version)
+      ORDER BY order_id SEPARATOR ';'), '-')
+    FROM standard_order
+    WHERE order_id IN ('$payment_start_visibility_order_id',
+      '$payment_start_visibility_moved_order_id',
+      '$payment_start_visibility_other_order_id',
+      '$payment_start_visibility_mismatch_order_id',
+      '$payment_start_visibility_direct_order_id')
+  "
+}
+
+payment_start_reason_since() {
+  local log_start="$1"
+  local log_end="$2"
+  sed -n "$((log_start + 1)),${log_end}p" "$tmp_dir/commerce.log" 2>/dev/null \
+    | sed -n 's/.*mock_payment_request_rejected reason_code=\([^ ]*\).*/\1/p' \
+    | tail -n 1
+}
+
+assert_payment_start_concealed() {
+  local description="$1"
+  local order_id="$2"
+  local idempotency_key="$3"
+  local response_file="$4"
+  local effects_before rows_before log_start log_end status reason effects_after rows_after
+  effects_before="$(payment_start_visibility_effects)"
+  rows_before="$(payment_start_visibility_rows)"
+  log_start="$(wc -l <"$tmp_dir/commerce.log")"
+  status="$(request_status "$response_file" \
+    --request POST "http://127.0.0.1:$commerce_port/api/orders/$order_id/mock-payment" \
+    --header "Authorization: Bearer $payment_token" \
+    --header 'X-Eval-Sandbox-Id: sandbox-payment' \
+    --header "Idempotency-Key: $idempotency_key" \
+    --header 'Content-Type: application/json' \
+    --data '{"amountMinor":1800,"currency":"CNY"}')"
+  log_end="$(wc -l <"$tmp_dir/commerce.log")"
+  reason="$(payment_start_reason_since "$log_start" "$log_end")"
+  effects_after="$(payment_start_visibility_effects)"
+  rows_after="$(payment_start_visibility_rows)"
+  assert_equal 404 "$status" "$description is concealed"
+  assert_equal CONCEALED_NOT_FOUND "$reason" "$description has concealment attribution"
+  cmp "$tmp_dir/payment-start-visibility-unknown.json" "$response_file"
+  assert_equal "$effects_before" "$effects_after" "$description creates no durable effects"
+  assert_equal "$rows_before" "$rows_after" "$description does not bind or mutate the order"
+  if sed -n "$((log_start + 1)),${log_end}p" "$tmp_dir/commerce.log" \
+    | grep -Eq 'SANDBOX_NOT_ACTIVE|PAYMENT_SANDBOX_NOT_ACTIVE|evaluation_owner_handle|short'; then
+    echo "Payment-start concealment leaked an internal reason for $description." >&2
+    exit 1
+  fi
+}
+
+visibility_unknown_effects_before="$(payment_start_visibility_effects)"
+visibility_unknown_log_start="$(wc -l <"$tmp_dir/commerce.log")"
+payment_start_visibility_unknown_status="$(request_status \
+  "$tmp_dir/payment-start-visibility-unknown.json" \
+  --request POST \
+  "http://127.0.0.1:$commerce_port/api/orders/$payment_start_visibility_unknown_order_id/mock-payment" \
+  --header "Authorization: Bearer $payment_token" \
+  --header 'X-Eval-Sandbox-Id: sandbox-payment' \
+  --header 'Idempotency-Key: visibility-unknown' \
+  --header 'Content-Type: application/json' \
+  --data '{"amountMinor":1800,"currency":"CNY"}')"
+visibility_unknown_log_end="$(wc -l <"$tmp_dir/commerce.log")"
+assert_equal 404 "$payment_start_visibility_unknown_status" \
+  "payment-start unknown visibility baseline"
+assert_equal CONCEALED_NOT_FOUND \
+  "$(payment_start_reason_since "$visibility_unknown_log_start" "$visibility_unknown_log_end")" \
+  "payment-start unknown visibility attribution"
+assert_equal "$visibility_unknown_effects_before" "$(payment_start_visibility_effects)" \
+  "payment-start unknown candidate creates no durable effects"
+jq -e \
+  '. == {"category":"NOT_FOUND","message":"Payment order is missing or not owned"}' \
+  "$tmp_dir/payment-start-visibility-unknown.json" >/dev/null
+
+create_payment_start_visibility_order "$payment_start_visibility_other_order_id" \
+  "'visibility-other-owner'" "'sandbox-payment'" "'$payment_handle'"
+assert_payment_start_concealed "payment-start true other owner" \
+  "$payment_start_visibility_other_order_id" visibility-other \
+  "$tmp_dir/payment-start-visibility-other.json"
+
+create_payment_start_visibility_order "$payment_start_visibility_order_id" \
+  "'eval-handle:$payment_handle'" "'sandbox-payment'" "'$payment_handle'"
+mysql_query root "$root_password" commerce_db \
+  "UPDATE standard_order SET evaluation_owner_handle = 'short' WHERE order_id = '$payment_start_visibility_order_id'"
+assert_payment_start_concealed "payment-start malformed fixture handle" \
+  "$payment_start_visibility_order_id" visibility-malformed \
+  "$tmp_dir/payment-start-visibility-malformed.json"
+
+create_payment_start_visibility_order "$payment_start_visibility_mismatch_order_id" \
+  "'eval-handle:$payment_handle'" "'sandbox-payment'" "REPEAT('B', 43)"
+assert_payment_start_concealed "payment-start valid handle with mismatched fixture subject" \
+  "$payment_start_visibility_mismatch_order_id" visibility-mismatch \
+  "$tmp_dir/payment-start-visibility-mismatch.json"
+
+payment_start_visibility_cell_count=0
+for ((left = 0; left < ${#payment_start_visibility_fields[@]}; left++)); do
+  create_payment_start_visibility_order "$payment_start_visibility_order_id" \
+    "'eval-handle:$payment_handle'" "'sandbox-payment'" "'$payment_handle'"
+  mysql_query root "$root_password" commerce_db "
+    UPDATE standard_order SET ${payment_start_visibility_fault_sql[$left]}
+    WHERE order_id = '$payment_start_visibility_order_id';
+  "
+  assert_payment_start_concealed \
+    "payment-start visibility single ${payment_start_visibility_fields[$left]}" \
+    "$payment_start_visibility_order_id" "visibility-single-$left" \
+    "$tmp_dir/payment-start-visibility-single-$left.json"
+  payment_start_visibility_cell_count=$((payment_start_visibility_cell_count + 1))
+done
+for ((left = 0; left < ${#payment_start_visibility_fields[@]}; left++)); do
+  for ((right = left + 1; right < ${#payment_start_visibility_fields[@]}; right++)); do
+    create_payment_start_visibility_order "$payment_start_visibility_order_id" \
+      "'eval-handle:$payment_handle'" "'sandbox-payment'" "'$payment_handle'"
+    mysql_query root "$root_password" commerce_db "
+      UPDATE standard_order SET ${payment_start_visibility_fault_sql[$left]},
+        ${payment_start_visibility_fault_sql[$right]}
+      WHERE order_id = '$payment_start_visibility_order_id';
+    "
+    assert_payment_start_concealed \
+      "payment-start visibility pair ${payment_start_visibility_fields[$left]} + ${payment_start_visibility_fields[$right]}" \
+      "$payment_start_visibility_order_id" "visibility-pair-$left-$right" \
+      "$tmp_dir/payment-start-visibility-pair-$left-$right.json"
+    payment_start_visibility_cell_count=$((payment_start_visibility_cell_count + 1))
+  done
+done
+assert_equal 10 "$payment_start_visibility_cell_count" \
+  "payment-start visibility matrix covers four singles and six pairs"
+
+create_payment_start_visibility_order "$payment_start_visibility_order_id" \
+  "'eval-handle:$payment_handle'" "'sandbox-payment'" "'$payment_handle'"
+assert_status 409 "valid unbound fixture owner is visible before binding" \
+  --request POST \
+  "http://127.0.0.1:$commerce_port/api/orders/$payment_start_visibility_order_id/mock-payment" \
+  --header "Authorization: Bearer $payment_token" \
+  --header 'X-Eval-Sandbox-Id: sandbox-payment' \
+  --header 'Idempotency-Key: visibility-valid-unbound' \
+  --header 'Content-Type: application/json' \
+  --data '{"amountMinor":1801,"currency":"CNY"}'
+test "$(mysql_query root "$root_password" commerce_db \
+  "SELECT user_subject FROM standard_order WHERE order_id = '$payment_start_visibility_order_id'")" = \
+  "eval-handle:$payment_handle"
+
+create_payment_start_visibility_order "$payment_start_visibility_direct_order_id" \
+  "'$payment_subject'" "'sandbox-payment'" "'short'"
+assert_status 409 "direct owner visibility does not parse malformed fixture provenance" \
+  --request POST \
+  "http://127.0.0.1:$commerce_port/api/orders/$payment_start_visibility_direct_order_id/mock-payment" \
+  --header "Authorization: Bearer $payment_token" \
+  --header 'X-Eval-Sandbox-Id: sandbox-payment' \
+  --header 'Idempotency-Key: visibility-direct-owner' \
+  --header 'Content-Type: application/json' \
+  --data '{"amountMinor":1801,"currency":"CNY"}'
+
+mysql_query root "$root_password" commerce_db "
+  DELETE FROM standard_order WHERE order_id IN (
+    '$payment_start_visibility_order_id',
+    '$payment_start_visibility_moved_order_id',
+    '$payment_start_visibility_other_order_id',
+    '$payment_start_visibility_mismatch_order_id',
+    '$payment_start_visibility_direct_order_id');
+"
 assert_status 401 "evaluation token requires its exact sandbox header for payment" \
   --request POST "http://127.0.0.1:$commerce_port/api/orders/$payment_order_id/mock-payment" \
   --header "Authorization: Bearer $payment_token" \
@@ -1375,6 +1637,20 @@ payment_correlation_id="$(uv run python scripts/read_json_field.py "$tmp_dir/htt
 test "$(mysql_query commerce_app "$commerce_app_password" commerce_db \
   "SELECT CONCAT(user_subject, ':', sandbox_id, ':', evaluation_owner_handle) FROM standard_order WHERE order_id = '$payment_order_id'")" = \
   "$payment_subject:sandbox-payment:$payment_handle"
+mysql_query root "$root_password" commerce_db \
+  "UPDATE standard_order SET evaluation_owner_handle = 'short' WHERE order_id = '$payment_order_id'"
+assert_status 200 "visible attempt replay does not reclassify malformed fixture provenance" \
+  --request POST "http://127.0.0.1:$commerce_port/api/orders/$payment_order_id/mock-payment" \
+  --header "Authorization: Bearer $payment_token" \
+  --header 'X-Eval-Sandbox-Id: sandbox-payment' \
+  --header 'Idempotency-Key: payment-evaluation' \
+  --header 'Content-Type: application/json' \
+  --data '{"amountMinor":1800,"currency":"CNY"}'
+assert_equal "$payment_attempt_id" \
+  "$(uv run python scripts/read_json_field.py "$tmp_dir/http-response.json" attemptId)" \
+  "visible attempt replay returns the existing attempt"
+mysql_query root "$root_password" commerce_db \
+  "UPDATE standard_order SET evaluation_owner_handle = '$payment_handle' WHERE order_id = '$payment_order_id'"
 
 payment_event_id='00000000-0000-0000-0000-000000000106'
 payment_session='payment-session'
@@ -1588,6 +1864,45 @@ jq -e --arg event "$payment_event_id" \
   '.entries | length == 1 and .[0].entityType == "PAYMENT_CALLBACK" and .[0].entityId == $event' \
   "$tmp_dir/http-response.json" >/dev/null
 
+payment_caller_names=(
+  start
+  callback
+  state
+  audit
+)
+payment_caller_trust_boundaries=(
+  OWNER_CONCEALING_PUBLIC
+  AUTHENTICATED_CALLBACK
+  SANDBOX_WIDE_INTERNAL_EVALUATOR
+  SANDBOX_WIDE_INTERNAL_EVALUATOR
+)
+payment_caller_visibility_locators=(
+  'attempt.user_subject+request_idempotency_key|order.order_id+user_subject+sandbox_id'
+  'verified_signature+callback_request_locators'
+  'management_credential+sandbox_id'
+  'management_credential+sandbox_id+support_session_id'
+)
+payment_caller_visibility_sql=(
+  "SELECT CONCAT(
+    EXISTS(SELECT 1 FROM mock_payment_attempt
+      WHERE user_subject = '$payment_subject'
+        AND request_idempotency_key = 'payment-evaluation'), ':',
+    EXISTS(SELECT 1 FROM standard_order
+      WHERE order_id = '$payment_order_id' AND user_subject = '$payment_subject'
+        AND sandbox_id = 'sandbox-payment'))"
+  "SELECT '1'"
+  "SELECT '1'"
+  "SELECT '1'"
+)
+assert_equal 4 "${#payment_caller_names[@]}" "CB-116 active payment caller name inventory"
+assert_equal 4 "${#payment_caller_trust_boundaries[@]}" \
+  "CB-116 active payment caller trust-boundary inventory"
+assert_equal 4 "${#payment_caller_visibility_locators[@]}" \
+  "CB-116 active payment caller visibility-locator inventory"
+assert_equal 4 "${#payment_caller_visibility_sql[@]}" \
+  "CB-116 active payment caller visibility oracle inventory"
+payment_start_caller_index=0
+
 refresh_payment_callback_signature() {
   payment_timestamp="$(date +%s)"
   payment_signature="$(sign_payment_callback "$payment_timestamp" "$payment_callback_key" \
@@ -1597,11 +1912,41 @@ refresh_payment_callback_signature() {
 
 assert_payment_truth_fails_closed() {
   local description="$1"
-  local callback_status state_status audit_status commerce_log_start=0
+  local callback_status start_status state_status audit_status
+  local start_visibility start_expected=409
+  local durable_before durable_after commerce_log_start=0 start_log_end=0 callback_log_end=0
+  local start_reason callback_reason
+  refresh_payment_observer_credentials
   refresh_payment_callback_signature
+  durable_before="$(mysql_query commerce_app "$commerce_app_password" commerce_db \
+    "SELECT CONCAT(
+       (SELECT COUNT(*) FROM mock_payment_attempt WHERE order_id = '$payment_order_id'), ':',
+       (SELECT COALESCE(GROUP_CONCAT(CONCAT(status, '/', state_version)
+          ORDER BY status, state_version SEPARATOR ','), '-')
+          FROM standard_order WHERE order_id = '$payment_order_id'), ':',
+       (SELECT COALESCE(GROUP_CONCAT(CONCAT(state, '/', state_version)
+          ORDER BY state, state_version SEPARATOR ','), '-')
+          FROM mock_payment_attempt
+          WHERE request_idempotency_key = 'payment-evaluation'), ':',
+       (SELECT COUNT(*) FROM mock_payment_callback
+          WHERE callback_idempotency_key = '$payment_callback_key'), ':',
+       (SELECT COUNT(*) FROM inventory_ledger WHERE order_id = '$payment_order_id'), ':',
+       (SELECT COUNT(*) FROM mock_refund WHERE order_id = '$payment_order_id'), ':',
+       (SELECT COUNT(*) FROM commerce_outbox))")"
   if [[ -f "$tmp_dir/commerce.log" ]]; then
     commerce_log_start="$(wc -l <"$tmp_dir/commerce.log")"
   fi
+  start_status="$(request_status "$tmp_dir/payment-start-classification.json" \
+    --request POST "http://127.0.0.1:$commerce_port/api/orders/$payment_order_id/mock-payment" \
+    --header "Authorization: Bearer $payment_token" \
+    --header 'X-Eval-Sandbox-Id: sandbox-payment' \
+    --header 'Idempotency-Key: payment-evaluation' \
+    --header 'Content-Type: application/json' \
+    --data '{"amountMinor":1800,"currency":"CNY"}')"
+  if [[ -f "$tmp_dir/commerce.log" ]]; then
+    start_log_end="$(wc -l <"$tmp_dir/commerce.log")"
+  fi
+  start_reason="$(payment_start_reason_since "$commerce_log_start" "$start_log_end")"
   callback_status="$(request_status "$tmp_dir/payment-callback-classification.json" \
     --request POST "http://127.0.0.1:$commerce_port/internal/mock-payments/callback" \
     --header "X-Mock-Payment-Key-Id: $mock_payment_key" \
@@ -1610,6 +1955,10 @@ assert_payment_truth_fails_closed() {
     --header "Idempotency-Key: $payment_callback_key" \
     --header 'Content-Type: application/json' \
     --data "$payment_callback_body")"
+  if [[ -f "$tmp_dir/commerce.log" ]]; then
+    callback_log_end="$(wc -l <"$tmp_dir/commerce.log")"
+  fi
+  callback_reason="$(payment_start_reason_since "$start_log_end" "$callback_log_end")"
   state_status="$(request_status "$tmp_dir/payment-state-classification.json" \
     --request GET "http://127.0.0.1:$commerce_port/api/eval/state" \
     --user "evaluation-manager:$management_password" \
@@ -1618,9 +1967,35 @@ assert_payment_truth_fails_closed() {
     --request GET "http://127.0.0.1:$commerce_port/api/eval/audit/$payment_session" \
     --user "evaluation-manager:$management_password" \
     --header 'X-Eval-Sandbox-Id: sandbox-payment')"
-  if [[ "$callback_status:$state_status:$audit_status" != '409:409:409' ]]; then
-    echo "Cross-path classification mismatch for $description: callback=$callback_status state=$state_status audit=$audit_status" >&2
-    for response in payment-callback-classification payment-state-classification payment-audit-classification; do
+  durable_after="$(mysql_query commerce_app "$commerce_app_password" commerce_db \
+    "SELECT CONCAT(
+       (SELECT COUNT(*) FROM mock_payment_attempt WHERE order_id = '$payment_order_id'), ':',
+       (SELECT COALESCE(GROUP_CONCAT(CONCAT(status, '/', state_version)
+          ORDER BY status, state_version SEPARATOR ','), '-')
+          FROM standard_order WHERE order_id = '$payment_order_id'), ':',
+       (SELECT COALESCE(GROUP_CONCAT(CONCAT(state, '/', state_version)
+          ORDER BY state, state_version SEPARATOR ','), '-')
+          FROM mock_payment_attempt
+          WHERE request_idempotency_key = 'payment-evaluation'), ':',
+       (SELECT COUNT(*) FROM mock_payment_callback
+          WHERE callback_idempotency_key = '$payment_callback_key'), ':',
+       (SELECT COUNT(*) FROM inventory_ledger WHERE order_id = '$payment_order_id'), ':',
+       (SELECT COUNT(*) FROM mock_refund WHERE order_id = '$payment_order_id'), ':',
+       (SELECT COUNT(*) FROM commerce_outbox))")"
+  assert_equal "$durable_before" "$durable_after" \
+    "committed-payment observers create zero durable effects: $description"
+  start_visibility="$(mysql_query root "$root_password" commerce_db \
+    "${payment_caller_visibility_sql[$payment_start_caller_index]}")"
+  if [[ "$start_visibility" != *1* ]]; then
+    start_expected=404
+    cmp "$tmp_dir/payment-start-visibility-unknown.json" \
+      "$tmp_dir/payment-start-classification.json"
+  fi
+  if [[ "$start_status:$callback_status:$state_status:$audit_status" != \
+      "$start_expected:409:409:409" ]]; then
+    echo "Cross-path visibility/integrity mismatch for $description: start=$start_status/$start_visibility callback=$callback_status/1 state=$state_status/1 audit=$audit_status/1" >&2
+    for response in payment-start-classification payment-callback-classification \
+      payment-state-classification payment-audit-classification; do
       echo "$response-response" >&2
       cat "$tmp_dir/$response.json" >&2
     done
@@ -1631,7 +2006,25 @@ assert_payment_truth_fails_closed() {
     fi
     exit 1
   fi
-  echo "Verified cross-path classification 409:409:409: $description"
+  if [[ "$start_expected" == 409 ]]; then
+    assert_equal COMMITTED_PAYMENT_TRUTH_INCONSISTENT "$start_reason" \
+      "visible payment-start damage has durable-integrity attribution: $description"
+  else
+    assert_equal CONCEALED_NOT_FOUND "$start_reason" \
+      "concealed payment-start damage has concealment attribution: $description"
+    echo "Verified CONCEALED_BY_AUTHORIZATION: caller=start anchors=${payment_caller_visibility_locators[$payment_start_caller_index]} evidence=$start_visibility fault=$description"
+  fi
+  assert_equal COMMITTED_PAYMENT_TRUTH_INCONSISTENT "$callback_reason" \
+    "callback damage has durable-integrity attribution: $description"
+  for response in payment-start-classification payment-callback-classification \
+    payment-state-classification payment-audit-classification; do
+    if grep -Eq 'COMMITTED_PAYMENT_TRUTH_INCONSISTENT|CONCEALED_NOT_FOUND' \
+      "$tmp_dir/$response.json"; then
+      echo "$response leaked a server-only payment reason for $description." >&2
+      exit 1
+    fi
+  done
+  echo "Verified visibility × integrity classification $start_expected:409:409:409: $description"
 }
 
 assert_payment_audit_reconciliation_fails_closed() {
@@ -1877,6 +2270,8 @@ mysql_query root "$root_password" commerce_db \
 
 payment_attempt_succeeded_at="$(mysql_query root "$root_password" commerce_db \
   "SELECT DATE_FORMAT(succeeded_at, '%Y-%m-%d %H:%i:%s.%f') FROM mock_payment_attempt WHERE attempt_id = '$payment_attempt_id'")"
+payment_attempt_created_at="$(mysql_query root "$root_password" commerce_db \
+  "SELECT DATE_FORMAT(created_at, '%Y-%m-%d %H:%i:%s.%f') FROM mock_payment_attempt WHERE attempt_id = '$payment_attempt_id'")"
 payment_attempt_intent_hash="$(mysql_query root "$root_password" commerce_db \
   "SELECT intent_hash FROM mock_payment_attempt WHERE attempt_id = '$payment_attempt_id'")"
 payment_audit_tampered_sequence_id="$(mysql_query root "$root_password" commerce_db \
@@ -1896,9 +2291,17 @@ UPDATE standard_order SET order_id = '$payment_order_id'
 UPDATE standard_order SET user_subject = '$payment_subject', product_id = '$payment_product_id',
   total_price_minor = 1800, currency = 'CNY', status = 'PAID', state_version = 2,
   sandbox_id = 'sandbox-payment' WHERE order_id = '$payment_order_id';
+INSERT INTO mock_payment_attempt (attempt_id, callback_correlation_id, user_subject, order_id,
+  order_kind, sandbox_id, request_idempotency_key, intent_hash, amount_minor,
+  refunded_amount_minor, currency, state, state_version, succeeded_at, created_at)
+VALUES ('$payment_attempt_id', '$payment_correlation_id', '$payment_subject', '$payment_order_id',
+  'STANDARD', 'sandbox-payment', 'payment-evaluation', '$payment_attempt_intent_hash', 1800,
+  0, 'CNY', 'SUCCEEDED', 2, '$payment_attempt_succeeded_at', '$payment_attempt_created_at')
+ON DUPLICATE KEY UPDATE attempt_id = VALUES(attempt_id);
 UPDATE mock_payment_attempt SET callback_correlation_id = '$payment_correlation_id',
   user_subject = '$payment_subject', order_id = '$payment_order_id', order_kind = 'STANDARD',
-  sandbox_id = 'sandbox-payment', intent_hash = '$payment_attempt_intent_hash',
+  sandbox_id = 'sandbox-payment', request_idempotency_key = 'payment-evaluation',
+  intent_hash = '$payment_attempt_intent_hash',
   amount_minor = 1800, refunded_amount_minor = 0, currency = 'CNY',
   state = 'SUCCEEDED', state_version = 2, succeeded_at = '$payment_attempt_succeeded_at'
   WHERE attempt_id = '$payment_attempt_id';
@@ -2058,16 +2461,16 @@ mysql_query root "$root_password" commerce_db \
   "ALTER TABLE standard_order DROP CHECK chk_standard_order_payment_state"
 
 payment_callback_fault_locator="callback_event_id IN ('$payment_event_id', '$tampered_callback_event_id') OR callback_idempotency_key IN ('$payment_callback_key', 'tampered-callback-key') OR attempt_id IN ('$payment_attempt_id', '$tampered_callback_attempt_id')"
-payment_attempt_fault_locator="request_idempotency_key = 'payment-evaluation'"
+payment_attempt_fault_locator="attempt_id IN ('$payment_attempt_id', '$tampered_attempt_id')"
 payment_order_fault_locator="order_id IN ('$payment_order_id', '$tampered_order_id')"
 
 payment_predicate_labels=(
-  audit-row audit-sequence audit-anchor callback-row ledger-row
+  audit-row audit-sequence audit-anchor callback-row ledger-row attempt-row
   callback-event callback-idempotency-key callback-attempt callback-correlation callback-sandbox
   callback-session callback-trace callback-operation callback-intent callback-outcome callback-result
   callback-created-at
   attempt-id attempt-correlation attempt-owner attempt-order attempt-order-kind attempt-sandbox
-  attempt-intent attempt-amount attempt-refunded-amount attempt-currency attempt-state
+  attempt-request-key attempt-intent attempt-amount attempt-refunded-amount attempt-currency attempt-state
   attempt-state-version attempt-succeeded-at
   order-id order-sandbox order-owner order-product order-amount order-currency order-status
   order-state-version
@@ -2080,6 +2483,7 @@ payment_predicate_mutations=(
   "SET SESSION sql_mode = 'NO_ENGINE_SUBSTITUTION'; UPDATE eval_commerce_audit_reference SET created_at_anchor = 'CORRUPTED' WHERE audit_reference_id = '$payment_audit_reference_id'"
   "DELETE FROM mock_payment_callback WHERE $payment_callback_fault_locator"
   "DELETE FROM inventory_ledger WHERE movement_id = '$payment_movement_id'"
+  "DELETE FROM mock_payment_attempt WHERE $payment_attempt_fault_locator"
   "UPDATE mock_payment_callback SET callback_event_id = '$tampered_callback_event_id' WHERE $payment_callback_fault_locator"
   "UPDATE mock_payment_callback SET callback_idempotency_key = 'tampered-callback-key' WHERE $payment_callback_fault_locator"
   "UPDATE mock_payment_callback SET attempt_id = '$tampered_callback_attempt_id' WHERE $payment_callback_fault_locator"
@@ -2098,6 +2502,7 @@ payment_predicate_mutations=(
   "UPDATE mock_payment_attempt SET order_id = '$tampered_attempt_order_id' WHERE $payment_attempt_fault_locator"
   "UPDATE mock_payment_attempt SET order_kind = 'SECKILL' WHERE $payment_attempt_fault_locator"
   "UPDATE mock_payment_attempt SET sandbox_id = 'sandbox-main' WHERE $payment_attempt_fault_locator"
+  "UPDATE mock_payment_attempt SET request_idempotency_key = 'tampered-payment-start-key' WHERE $payment_attempt_fault_locator"
   "UPDATE mock_payment_attempt SET intent_hash = REPEAT('f', 64) WHERE $payment_attempt_fault_locator"
   "UPDATE mock_payment_attempt SET amount_minor = 1801 WHERE $payment_attempt_fault_locator"
   "UPDATE mock_payment_attempt SET refunded_amount_minor = 1 WHERE $payment_attempt_fault_locator"
@@ -2126,14 +2531,15 @@ payment_predicate_mutations=(
   "UPDATE inventory_ledger SET payment_currency = 'AUD' WHERE movement_id = '$payment_movement_id'"
 )
 
-assert_equal 49 "${#payment_predicate_labels[@]}" \
+assert_equal 51 "${#payment_predicate_labels[@]}" \
   "complete physical JOIN/WHERE corruption label matrix"
 assert_equal "${#payment_predicate_labels[@]}" "${#payment_predicate_mutations[@]}" \
   "physical JOIN/WHERE corruption labels and mutations stay aligned"
 
 is_committed_payment_face_index() {
-  local index="$1"
-  [[ "$index" == 0 || "$index" == 3 || "$index" == 4 || "$index" == 17 || "$index" == 29 ]]
+  local label="${payment_predicate_labels[$1]}"
+  [[ "$label" == audit-row || "$label" == callback-row || "$label" == ledger-row \
+    || "$label" == attempt-row || "$label" == attempt-id || "$label" == order-id ]]
 }
 
 for ((predicate_index = 0; predicate_index < ${#payment_predicate_mutations[@]}; predicate_index++)); do
@@ -2154,6 +2560,8 @@ for ((left_index = 0; left_index < ${#payment_predicate_mutations[@]}; left_inde
         && "${payment_predicate_labels[$right_index]}" == audit-* ]] \
       || [[ "${payment_predicate_labels[$left_index]}" == callback-row \
         && "${payment_predicate_labels[$right_index]}" == callback-* ]] \
+      || [[ "${payment_predicate_labels[$left_index]}" == attempt-row \
+        && "${payment_predicate_labels[$right_index]}" == attempt-* ]] \
       || [[ "${payment_predicate_labels[$left_index]}" == ledger-row \
         && "${payment_predicate_labels[$right_index]}" == ledger-* ]]; then
       first_mutation="$right_mutation"

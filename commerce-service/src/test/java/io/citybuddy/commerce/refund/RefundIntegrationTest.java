@@ -641,7 +641,7 @@ class RefundIntegrationTest {
         VALUES (?, ?, 'SECKILL_ORDER_CREATE', ?, ?, ?, ?, -1, -1)
         """,
         UUID.randomUUID().toString(),
-        "refund-order-create:" + transactionId,
+        "seckill-order-create:" + transactionId,
         orderId,
         reservationId,
         activityId,

@@ -16,6 +16,12 @@ public final class EvaluationPaymentCommittedFaces {
       face(
           "callback",
           List.of("callback_correlation_id", "callback_event_id", "callback_idempotency_key"),
+          List.of("attempt_id"),
+          cardinality(
+              sibling("callback_correlation_id"),
+              unique("callback_event_id", "PRIMARY"),
+              unique("callback_idempotency_key", "uq_mock_payment_callback_key"),
+              unique("attempt_id", "uq_mock_payment_callback_attempt")),
           table(
               "mock_payment_callback",
               "callback_event_id",
@@ -34,12 +40,12 @@ public final class EvaluationPaymentCommittedFaces {
   public static final FaceDefinition ATTEMPT =
       face(
           "attempt",
-          List.of("callback_correlation_id", "attempt_id", "order_id"),
-          Map.of(
-              "request_idempotency_key",
-              "The start-command key has no independent durable anchor after creation; its "
-                  + "database uniqueness and bounded-format invariant remain, and exact historical "
-                  + "value recovery is an owner-accepted internal-view residual risk."),
+          List.of("attempt_id", "callback_correlation_id"),
+          List.of("order_id"),
+          cardinality(
+              unique("attempt_id", "PRIMARY"),
+              unique("callback_correlation_id", "uq_mock_payment_callback_correlation"),
+              sibling("order_id")),
           table(
               "mock_payment_attempt",
               "attempt_id",
@@ -61,11 +67,20 @@ public final class EvaluationPaymentCommittedFaces {
       face(
           "order",
           List.of("order_id"),
+          List.of(),
+          cardinality(sibling("order_id")),
           Map.of(
               "evaluation_owner_handle",
               "The fixture-owner handle is reset provenance; committed replay is anchored to the "
                   + "effective user_subject, while historical handle recovery is an owner-accepted "
                   + "internal-view residual risk."),
+          Map.of(
+              CommittedPaymentTruthResolver.CommittedPaymentCaller.PAYMENT_START_REPLAY,
+              Map.of(
+                  "order_id", CallerColumnRole.VISIBILITY_INPUT,
+                  "sandbox_id", CallerColumnRole.VISIBILITY_INPUT,
+                  "user_subject", CallerColumnRole.VISIBILITY_INPUT,
+                  "evaluation_owner_handle", CallerColumnRole.BINDING_PROVENANCE)),
           table(
               "standard_order",
               "order_id",
@@ -84,6 +99,8 @@ public final class EvaluationPaymentCommittedFaces {
               "product_id",
               "reservation_id",
               "activity_id",
+              "transaction_event_id",
+              "quantity",
               "total_price_minor",
               "currency",
               "status",
@@ -92,7 +109,11 @@ public final class EvaluationPaymentCommittedFaces {
   public static final FaceDefinition LEDGER =
       face(
           "ledger",
-          List.of("order_id", "business_event_key"),
+          List.of("business_event_key"),
+          List.of("order_id"),
+          cardinality(
+              unique("business_event_key", "uq_inventory_ledger_business_event"),
+              sibling("order_id")),
           Map.of(
               "movement_id",
               "The database-generated movement primary key has uniqueness but no second content "
@@ -116,10 +137,14 @@ public final class EvaluationPaymentCommittedFaces {
   public static final FaceDefinition AUDIT =
       face(
           "audit",
-          List.of(
-              "entity_id",
-              "audit_reference_id",
-              "sandbox_id+support_session_id+trace_id+operation_id"),
+          List.of("audit_reference_id"),
+          List.of("entity_id", "sandbox_id+support_session_id+trace_id+operation_id"),
+          cardinality(
+              unique("audit_reference_id", "uq_eval_audit_reference_id"),
+              sibling("entity_id"),
+              unique(
+                  "sandbox_id+support_session_id+trace_id+operation_id",
+                  "uq_eval_audit_operation")),
           table(
               "eval_commerce_audit_reference",
               "sequence_id",
@@ -137,6 +162,10 @@ public final class EvaluationPaymentCommittedFaces {
 
   private EvaluationPaymentCommittedFaces() {}
 
+  public static List<FaceDefinition> all() {
+    return List.of(CALLBACK, ATTEMPT, ORDER, LEDGER, AUDIT);
+  }
+
   public static String onlyTable(FaceDefinition face) {
     if (face.tables().size() != 1) {
       throw new IllegalArgumentException(face.name() + " does not have exactly one table");
@@ -149,11 +178,17 @@ public final class EvaluationPaymentCommittedFaces {
   }
 
   public static String attemptIntentHash(
-      String orderId, long amountMinor, String currency, String sandboxId) {
+      String orderId,
+      String requestIdempotencyKey,
+      long amountMinor,
+      String currency,
+      String sandboxId) {
     try {
       MessageDigest digest = MessageDigest.getInstance("SHA-256");
       String canonical =
           orderId
+              + "\n"
+              + requestIdempotencyKey
               + "\n"
               + amountMinor
               + "\n"
@@ -186,6 +221,14 @@ public final class EvaluationPaymentCommittedFaces {
         + orderStableKey()
         + " = ?"
         + lockClause;
+  }
+
+  public static String standardOwnedOrderByIdSql(String lockClause) {
+    return standardOrderByIdSql("") + " AND user_subject = ?" + lockClause;
+  }
+
+  public static String seckillOwnedOrderByIdSql(String lockClause) {
+    return seckillOrderByIdSql("") + " AND user_subject = ?" + lockClause;
   }
 
   public static String orderFaceUnionSql() {
@@ -222,14 +265,39 @@ public final class EvaluationPaymentCommittedFaces {
   }
 
   private static FaceDefinition face(
-      String name, List<String> stableKeys, TableDefinition... tables) {
-    return face(name, stableKeys, Map.of(), tables);
+      String name,
+      List<String> stableKeys,
+      List<String> relationKeys,
+      Map<String, CardinalityControl> cardinalityControls,
+      TableDefinition... tables) {
+    return face(name, stableKeys, relationKeys, cardinalityControls, Map.of(), tables);
   }
 
   private static FaceDefinition face(
       String name,
       List<String> stableKeys,
+      List<String> relationKeys,
+      Map<String, CardinalityControl> cardinalityControls,
       Map<String, String> residualColumnDispositions,
+      TableDefinition... tables) {
+    return face(
+        name,
+        stableKeys,
+        relationKeys,
+        cardinalityControls,
+        residualColumnDispositions,
+        Map.of(),
+        tables);
+  }
+
+  private static FaceDefinition face(
+      String name,
+      List<String> stableKeys,
+      List<String> relationKeys,
+      Map<String, CardinalityControl> cardinalityControls,
+      Map<String, String> residualColumnDispositions,
+      Map<CommittedPaymentTruthResolver.CommittedPaymentCaller, Map<String, CallerColumnRole>>
+          callerColumnDispositions,
       TableDefinition... tables) {
     Map<String, List<String>> physicalTables = new LinkedHashMap<>();
     for (TableDefinition table : tables) {
@@ -237,7 +305,32 @@ public final class EvaluationPaymentCommittedFaces {
         throw new IllegalArgumentException("Duplicate face table " + table.name());
       }
     }
-    return new FaceDefinition(name, stableKeys, physicalTables, residualColumnDispositions);
+    return new FaceDefinition(
+        name,
+        stableKeys,
+        relationKeys,
+        cardinalityControls,
+        physicalTables,
+        residualColumnDispositions,
+        callerColumnDispositions);
+  }
+
+  private static Map<String, CardinalityControl> cardinality(CardinalityControl... controls) {
+    Map<String, CardinalityControl> byKey = new LinkedHashMap<>();
+    for (CardinalityControl control : controls) {
+      if (byKey.put(control.key(), control) != null) {
+        throw new IllegalArgumentException("Duplicate cardinality control for " + control.key());
+      }
+    }
+    return Collections.unmodifiableMap(byKey);
+  }
+
+  private static CardinalityControl unique(String key, String constraintName) {
+    return new CardinalityControl(key, CardinalityMode.DATABASE_UNIQUE, constraintName);
+  }
+
+  private static CardinalityControl sibling(String key) {
+    return new CardinalityControl(key, CardinalityMode.INSERTABLE_SIBLING, "");
   }
 
   private static TableDefinition table(String name, String... columns) {
@@ -247,22 +340,49 @@ public final class EvaluationPaymentCommittedFaces {
   public record FaceDefinition(
       String name,
       List<String> stableKeys,
+      List<String> relationKeys,
+      Map<String, CardinalityControl> cardinalityControls,
       Map<String, List<String>> tables,
-      Map<String, String> residualColumnDispositions) {
+      Map<String, String> residualColumnDispositions,
+      Map<CommittedPaymentTruthResolver.CommittedPaymentCaller, Map<String, CallerColumnRole>>
+          callerColumnDispositions) {
     public FaceDefinition {
       stableKeys = List.copyOf(stableKeys);
+      relationKeys = List.copyOf(relationKeys);
+      cardinalityControls = Map.copyOf(cardinalityControls);
       Map<String, List<String>> copy = new LinkedHashMap<>();
       tables.forEach((table, columns) -> copy.put(table, List.copyOf(columns)));
       tables = Collections.unmodifiableMap(copy);
       residualColumnDispositions = Map.copyOf(residualColumnDispositions);
+      Map<CommittedPaymentTruthResolver.CommittedPaymentCaller, Map<String, CallerColumnRole>>
+          callerCopy = new LinkedHashMap<>();
+      callerColumnDispositions.forEach(
+          (caller, dispositions) -> callerCopy.put(caller, Map.copyOf(dispositions)));
+      callerColumnDispositions = Collections.unmodifiableMap(callerCopy);
       if (stableKeys.isEmpty() || tables.isEmpty()) {
         throw new IllegalArgumentException("A committed face requires keys and tables");
+      }
+      LinkedHashSet<String> enumerationKeys = new LinkedHashSet<>(stableKeys);
+      enumerationKeys.addAll(relationKeys);
+      if (!cardinalityControls.keySet().equals(enumerationKeys)) {
+        throw new IllegalArgumentException(
+            "Every enumeration key requires exactly one cardinality control");
       }
       LinkedHashSet<String> declaredColumns = new LinkedHashSet<>();
       tables.values().forEach(declaredColumns::addAll);
       if (!declaredColumns.containsAll(residualColumnDispositions.keySet())) {
         throw new IllegalArgumentException("Residual disposition names an undeclared column");
       }
+      if (callerColumnDispositions.values().stream()
+          .anyMatch(dispositions -> !declaredColumns.containsAll(dispositions.keySet()))) {
+        throw new IllegalArgumentException("Caller disposition names an undeclared column");
+      }
+    }
+
+    public List<String> enumerationKeys() {
+      LinkedHashSet<String> keys = new LinkedHashSet<>(stableKeys);
+      keys.addAll(relationKeys);
+      return List.copyOf(keys);
     }
 
     public List<String> participatingColumns() {
@@ -270,6 +390,28 @@ public final class EvaluationPaymentCommittedFaces {
       tables.values().forEach(participating::addAll);
       participating.removeAll(residualColumnDispositions.keySet());
       return List.copyOf(participating);
+    }
+  }
+
+  public enum CardinalityMode {
+    DATABASE_UNIQUE,
+    INSERTABLE_SIBLING
+  }
+
+  public enum CallerColumnRole {
+    COMMITTED_CONTENT,
+    VISIBILITY_INPUT,
+    BINDING_PROVENANCE,
+    OWNER_ACCEPTED_RESIDUAL
+  }
+
+  public record CardinalityControl(String key, CardinalityMode mode, String constraintName) {
+    public CardinalityControl {
+      if (key.isBlank()
+          || (mode == CardinalityMode.DATABASE_UNIQUE && constraintName.isBlank())
+          || (mode == CardinalityMode.INSERTABLE_SIBLING && !constraintName.isEmpty())) {
+        throw new IllegalArgumentException("Invalid committed-face cardinality control");
+      }
     }
   }
 
