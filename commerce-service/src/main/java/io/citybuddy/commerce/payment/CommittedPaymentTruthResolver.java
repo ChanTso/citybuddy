@@ -163,7 +163,7 @@ public final class CommittedPaymentTruthResolver {
       throw new IllegalStateException("Payment start order locator is not registered");
     }
     return repository.enumerateStartOrderVisibility(
-        context.orderId(), context.userSubject(), context.sandboxId());
+        context.orderId(), context.userSubject(), context.sandboxId(), LOCK);
   }
 
   private PaymentStartReplayResolution resolveStartCandidateLocked(

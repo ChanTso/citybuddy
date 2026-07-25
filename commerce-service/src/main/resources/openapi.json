@@ -288,6 +288,7 @@
           "403": {"description": "Invalid permission, production evaluation context, or inactive evaluation sandbox", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/PaymentError"}}}},
           "404": {"description": "Missing or non-owned order", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/PaymentError"}}}},
           "409": {"description": "Ineligible order or conflicting idempotency/correlation", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/PaymentError"}}}},
+          "429": {"description": "Bounded committed-truth observation remains indeterminate", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/PaymentError"}}}},
           "503": {"description": "Authoritative payment or sandbox truth unavailable", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/PaymentError"}}}}
         }
       }
@@ -308,6 +309,7 @@
           "403": {"description": "Evaluation callback unavailable or sandbox inactive", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/PaymentError"}}}},
           "404": {"description": "Unknown callback correlation", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/PaymentError"}}}},
           "409": {"description": "Correlation, replay, or legal-transition conflict", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/PaymentError"}}}},
+          "429": {"description": "Bounded committed-truth observation remains indeterminate", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/PaymentError"}}}},
           "503": {"description": "Authoritative payment or sandbox truth unavailable", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/PaymentError"}}}}
         }
       }

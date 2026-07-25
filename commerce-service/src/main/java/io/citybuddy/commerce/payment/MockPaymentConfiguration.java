@@ -1,5 +1,6 @@
 package io.citybuddy.commerce.payment;
 
+import com.fasterxml.jackson.databind.ObjectMapper;
 import io.citybuddy.commerce.evaluation.EvaluationSandboxRepository;
 import java.time.Clock;
 import org.springframework.beans.factory.ObjectProvider;
@@ -23,16 +24,30 @@ public class MockPaymentConfiguration {
   }
 
   @Bean
-  MockPaymentService mockPaymentService(
-      MockPaymentRepository repository,
+  MockPaymentRequestParser mockPaymentRequestParser(ObjectMapper objectMapper) {
+    return new MockPaymentRequestParser(objectMapper);
+  }
+
+  @Bean
+  MockPaymentTransactions mockPaymentTransactions(
+      JdbcTemplate jdbcTemplate,
       PlatformTransactionManager transactionManager,
-      @Qualifier("catalogClock") ObjectProvider<Clock> catalogClock,
-      ObjectProvider<EvaluationSandboxRepository> sandboxes) {
+      MockPaymentProperties properties) {
     TransactionTemplate transaction = new TransactionTemplate(transactionManager);
     transaction.setPropagationBehavior(TransactionDefinition.PROPAGATION_REQUIRES_NEW);
+    return new MockPaymentTransactions(
+        jdbcTemplate, transaction, properties.lockWaitTimeoutSeconds());
+  }
+
+  @Bean
+  MockPaymentService mockPaymentService(
+      MockPaymentRepository repository,
+      MockPaymentTransactions transactions,
+      @Qualifier("catalogClock") ObjectProvider<Clock> catalogClock,
+      ObjectProvider<EvaluationSandboxRepository> sandboxes) {
     return new MockPaymentService(
         repository,
-        transaction,
+        transactions,
         catalogClock.getIfAvailable(Clock::systemUTC),
         sandboxes.getIfAvailable());
   }

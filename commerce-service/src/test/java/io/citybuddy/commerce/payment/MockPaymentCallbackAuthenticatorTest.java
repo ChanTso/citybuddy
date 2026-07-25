@@ -26,7 +26,7 @@ class MockPaymentCallbackAuthenticatorTest {
   private final MockPaymentCallbackAuthenticator authenticator =
       new MockPaymentCallbackAuthenticator(
           new MockPaymentProperties(
-              "payment:create", KEY_ID, SECRET, Duration.ofMinutes(5), Duration.ofSeconds(30)),
+              "payment:create", KEY_ID, SECRET, Duration.ofMinutes(5), Duration.ofSeconds(30), 1),
           Clock.fixed(NOW, ZoneOffset.UTC));
 
   @Test

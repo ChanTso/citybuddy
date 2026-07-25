@@ -6,6 +6,7 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import io.citybuddy.commerce.evaluation.EvaluationRejectionReason;
 import io.citybuddy.commerce.evaluation.EvaluationSandboxException;
 import java.util.Map;
+import java.util.Set;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
 import org.springframework.boot.test.system.CapturedOutput;
@@ -154,5 +155,65 @@ class MockPaymentRejectionAttributionTest {
     assertThat(mappings.resolveMethod(new CannotAcquireLockException("controlled"))).isNull();
     assertThat(mappings.resolveMethod(new DuplicateKeyException("controlled"))).isNull();
     assertThat(output).contains("reason_code=DEPENDENCY_OBSERVATION_INDETERMINATE");
+  }
+
+  @Test
+  void lockCompetitionUsesItsOwnBoundedServerAttribution(CapturedOutput output) {
+    MockPaymentExceptionHandler handler = new MockPaymentExceptionHandler();
+
+    var response =
+        handler.handle(
+            new MockPaymentException(
+                429,
+                "INDETERMINATE",
+                MockPaymentRejectionReason.PAYMENT_CONCURRENCY_OBSERVATION_INDETERMINATE,
+                "Payment truth is indeterminate; retry the same request"));
+
+    assertThat(response.getStatusCode().value()).isEqualTo(429);
+    assertThat(response.getBody())
+        .containsExactlyEntriesOf(
+            Map.of(
+                "category",
+                "INDETERMINATE",
+                "message",
+                "Payment truth is indeterminate; retry the same request"))
+        .doesNotContainKey("reason");
+    assertThat(output)
+        .contains("reason_code=PAYMENT_CONCURRENCY_OBSERVATION_INDETERMINATE")
+        .doesNotContain("1205")
+        .doesNotContain("1213")
+        .doesNotContain("innodb");
+  }
+
+  @Test
+  void exceptionProducerInventoryIsClosedAndRejectsMismatchedPublicClassification() {
+    assertThat(Set.of(MockPaymentRejectionReason.values()))
+        .containsExactlyInAnyOrder(
+            MockPaymentRejectionReason.NOT_APPLICABLE,
+            MockPaymentRejectionReason.DIRECT_USER_AUTHORIZATION_REJECTED,
+            MockPaymentRejectionReason.EVALUATION_COMPONENT_UNAVAILABLE,
+            MockPaymentRejectionReason.COMMITTED_PAYMENT_TRUTH_INCONSISTENT,
+            MockPaymentRejectionReason.IDEMPOTENCY_INTENT_CONFLICT,
+            MockPaymentRejectionReason.ORDER_NOT_ELIGIBLE,
+            MockPaymentRejectionReason.CONCEALED_NOT_FOUND,
+            MockPaymentRejectionReason.CALLBACK_TRUTH_NOT_FOUND,
+            MockPaymentRejectionReason.SANDBOX_NOT_ACTIVE,
+            MockPaymentRejectionReason.PAYMENT_CONCURRENCY_OBSERVATION_INDETERMINATE,
+            MockPaymentRejectionReason.DEPENDENCY_OBSERVATION_INDETERMINATE);
+    assertThat(
+            java.util.Arrays.stream(MockPaymentRejectionReason.values())
+                .filter(reason -> reason != MockPaymentRejectionReason.NOT_APPLICABLE)
+                .map(MockPaymentRejectionReason::producer))
+        .doesNotHaveDuplicates()
+        .doesNotContain("");
+    assertThatThrownBy(
+            () ->
+                new MockPaymentException(
+                    503,
+                    "UNAVAILABLE",
+                    MockPaymentRejectionReason.PAYMENT_CONCURRENCY_OBSERVATION_INDETERMINATE,
+                    "mismatched"))
+        .isInstanceOf(IllegalArgumentException.class)
+        .hasMessageContaining("attribution");
   }
 }

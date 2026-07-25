@@ -9,11 +9,13 @@ public record MockPaymentProperties(
     String callbackKeyId,
     String callbackSecret,
     Duration callbackMaximumAge,
-    Duration callbackClockSkew) {
+    Duration callbackClockSkew,
+    int lockWaitTimeoutSeconds) {
   public MockPaymentProperties {
     requiredPermission = defaultText(requiredPermission, "payment:create");
     callbackMaximumAge = callbackMaximumAge == null ? Duration.ofMinutes(5) : callbackMaximumAge;
     callbackClockSkew = callbackClockSkew == null ? Duration.ofSeconds(30) : callbackClockSkew;
+    lockWaitTimeoutSeconds = lockWaitTimeoutSeconds == 0 ? 1 : lockWaitTimeoutSeconds;
     requireText(requiredPermission, 128, "Payment permission");
     requireText(callbackKeyId, 64, "Callback key id");
     requireText(callbackSecret, 512, "Callback secret");
@@ -23,6 +25,9 @@ public record MockPaymentProperties(
     requirePositive(callbackMaximumAge, "Callback maximum age");
     if (callbackClockSkew.isNegative()) {
       throw new IllegalArgumentException("Callback clock skew must not be negative");
+    }
+    if (lockWaitTimeoutSeconds < 1 || lockWaitTimeoutSeconds > 60) {
+      throw new IllegalArgumentException("Payment lock wait timeout must be between 1 and 60");
     }
   }
 

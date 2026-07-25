@@ -31,16 +31,19 @@ commerce_pid=""
 agent_pid=""
 model_pid=""
 drop_proxy_pid=""
+payment_lock_holder_pid=""
 
 cleanup() {
   local status=$?
   local resource_stop_status=0
-  for pid in "$agent_pid" "$commerce_pid" "$auth_pid" "$model_pid" "$drop_proxy_pid"; do
+  for pid in "$agent_pid" "$commerce_pid" "$auth_pid" "$model_pid" "$drop_proxy_pid" \
+    "$payment_lock_holder_pid"; do
     if [[ -n "$pid" ]]; then
       kill "$pid" >/dev/null 2>&1 || true
     fi
   done
-  for pid in "$agent_pid" "$commerce_pid" "$auth_pid" "$model_pid" "$drop_proxy_pid"; do
+  for pid in "$agent_pid" "$commerce_pid" "$auth_pid" "$model_pid" "$drop_proxy_pid" \
+    "$payment_lock_holder_pid"; do
     if [[ -n "$pid" ]]; then
       wait "$pid" >/dev/null 2>&1 || true
     fi
@@ -366,6 +369,7 @@ start_commerce() {
       --citybuddy.mock-payment.callback-secret="$mock_payment_secret"
       --citybuddy.mock-payment.callback-maximum-age=5m
       --citybuddy.mock-payment.callback-clock-skew=30s
+      --citybuddy.mock-payment.lock-wait-timeout-seconds=1
       --citybuddy.refund.enabled=true
       --citybuddy.refund.required-permission=refund:create
       --citybuddy.actions.enabled=true
@@ -1578,6 +1582,117 @@ mysql_query root "$root_password" commerce_db "
     '$payment_start_visibility_mismatch_order_id',
     '$payment_start_visibility_direct_order_id');
 "
+
+payment_lock_order_id='00000000-0000-0000-0000-000000000226'
+payment_lock_attempt_id='00000000-0000-0000-0000-000000000227'
+payment_lock_correlation_id='00000000-0000-0000-0000-000000000228'
+payment_lock_key='payment-real-1205'
+create_payment_start_visibility_order "$payment_lock_order_id" \
+  "'$payment_subject'" "'sandbox-payment'" "'$payment_handle'"
+mysql_query root "$root_password" commerce_db "
+  INSERT INTO mock_payment_attempt
+    (attempt_id, callback_correlation_id, user_subject, order_id, order_kind, sandbox_id,
+     request_idempotency_key, intent_hash, amount_minor, currency)
+  VALUES
+    ('$payment_lock_attempt_id', '$payment_lock_correlation_id', '$payment_subject',
+     '$payment_lock_order_id', 'STANDARD', 'sandbox-payment', '$payment_lock_key',
+     SHA2(CONCAT('$payment_lock_order_id', '\n1800\nCNY\nsandbox-payment'), 256),
+     1800, 'CNY');
+"
+payment_lock_effects() {
+  mysql_query root "$root_password" commerce_db "
+    SELECT CONCAT(
+      (SELECT COUNT(*) FROM mock_payment_attempt WHERE order_id = '$payment_lock_order_id'), ':',
+      (SELECT COUNT(*) FROM mock_payment_callback c JOIN mock_payment_attempt a
+        ON a.attempt_id = c.attempt_id WHERE a.order_id = '$payment_lock_order_id'), ':',
+      (SELECT COUNT(*) FROM inventory_ledger WHERE order_id = '$payment_lock_order_id'), ':',
+      (SELECT COUNT(*) FROM mock_refund WHERE order_id = '$payment_lock_order_id'), ':',
+      (SELECT COUNT(*) FROM commerce_outbox), ':',
+      (SELECT COUNT(*) FROM pending_action), ':',
+      (SELECT COUNT(*) FROM action_receipt))
+  "
+}
+payment_lock_effects_before="$(payment_lock_effects)"
+(
+  mysql_query root "$root_password" commerce_db "
+    START TRANSACTION;
+    SELECT attempt_id
+    FROM mock_payment_attempt
+    WHERE attempt_id = '$payment_lock_attempt_id'
+    FOR UPDATE;
+    DO SLEEP(8);
+    ROLLBACK;
+  "
+) >"$tmp_dir/payment-lock-holder.log" 2>&1 &
+payment_lock_holder_pid=$!
+payment_lock_ready=0
+for _ in {1..100}; do
+  if [[ "$(mysql_query root "$root_password" commerce_db "
+      SELECT COUNT(*) FROM performance_schema.data_locks
+      WHERE OBJECT_SCHEMA = 'commerce_db' AND OBJECT_NAME = 'mock_payment_attempt'
+        AND LOCK_DATA LIKE '%$payment_lock_attempt_id%'")" != 0 ]]; then
+    payment_lock_ready=1
+    break
+  fi
+  sleep 0.1
+done
+assert_equal 1 "$payment_lock_ready" "controlled payment-start row lock is observable"
+payment_lock_log_start="$(wc -l <"$tmp_dir/commerce.log")"
+payment_lock_started_at="$(date +%s)"
+payment_lock_status="$(request_status "$tmp_dir/payment-lock-indeterminate.json" \
+  --request POST \
+  "http://127.0.0.1:$commerce_port/api/orders/$payment_lock_order_id/mock-payment" \
+  --header "Authorization: Bearer $payment_token" \
+  --header 'X-Eval-Sandbox-Id: sandbox-payment' \
+  --header "Idempotency-Key: $payment_lock_key" \
+  --header 'Content-Type: application/json' \
+  --data '{"amountMinor":1800,"currency":"CNY"}')"
+payment_lock_elapsed=$(( $(date +%s) - payment_lock_started_at ))
+payment_lock_log_end="$(wc -l <"$tmp_dir/commerce.log")"
+assert_equal 429 "$payment_lock_status" \
+  "real MySQL payment-start lock competition remains indeterminate"
+if ((payment_lock_elapsed > 7)); then
+  echo "Real payment-start lock wait exceeded its broad seven-second bound." >&2
+  exit 1
+fi
+jq -e \
+  '. == {"category":"INDETERMINATE","message":"Payment truth is indeterminate; retry the same request"}' \
+  "$tmp_dir/payment-lock-indeterminate.json" >/dev/null
+assert_equal PAYMENT_CONCURRENCY_OBSERVATION_INDETERMINATE \
+  "$(payment_start_reason_since "$payment_lock_log_start" "$payment_lock_log_end")" \
+  "real MySQL 1205 has precise server-only attribution"
+wait "$payment_lock_holder_pid"
+payment_lock_holder_pid=""
+assert_equal "$payment_lock_effects_before" "$(payment_lock_effects)" \
+  "indeterminate payment-start competition creates no durable effects"
+payment_pool_session_count="$(mysql_query root "$root_password" commerce_db "
+  SELECT COUNT(*)
+  FROM performance_schema.threads thread
+  JOIN performance_schema.variables_by_thread variable
+    ON variable.THREAD_ID = thread.THREAD_ID
+  WHERE thread.PROCESSLIST_USER = 'commerce_app'
+    AND LOWER(variable.VARIABLE_NAME) = 'innodb_lock_wait_timeout'
+")"
+payment_pool_session_leaks="$(mysql_query root "$root_password" commerce_db "
+  SELECT COUNT(*)
+  FROM performance_schema.threads thread
+  JOIN performance_schema.variables_by_thread variable
+    ON variable.THREAD_ID = thread.THREAD_ID
+  WHERE thread.PROCESSLIST_USER = 'commerce_app'
+    AND LOWER(variable.VARIABLE_NAME) = 'innodb_lock_wait_timeout'
+    AND CAST(variable.VARIABLE_VALUE AS UNSIGNED) <> @@GLOBAL.innodb_lock_wait_timeout
+")"
+if ((payment_pool_session_count < 1)); then
+  echo "No pooled commerce MySQL session was available for restoration evidence." >&2
+  exit 1
+fi
+assert_equal 0 "$payment_pool_session_leaks" \
+  "payment lock-wait policy is restored before pooled sessions are returned"
+mysql_query root "$root_password" commerce_db "
+  DELETE FROM mock_payment_attempt WHERE attempt_id = '$payment_lock_attempt_id';
+  DELETE FROM standard_order WHERE order_id = '$payment_lock_order_id';
+"
+
 assert_status 401 "evaluation token requires its exact sandbox header for payment" \
   --request POST "http://127.0.0.1:$commerce_port/api/orders/$payment_order_id/mock-payment" \
   --header "Authorization: Bearer $payment_token" \
@@ -1622,6 +1737,13 @@ assert_status 400 "payment start rejects an invalid known-field type" \
   --header 'Idempotency-Key: payment-invalid-amount-type' \
   --header 'Content-Type: application/json' \
   --data '{"amountMinor":{"value":1800},"currency":"CNY"}'
+assert_status 400 "payment start rejects duplicate semantic fields at the decoder boundary" \
+  --request POST "http://127.0.0.1:$commerce_port/api/orders/$payment_order_id/mock-payment" \
+  --header "Authorization: Bearer $payment_token" \
+  --header 'X-Eval-Sandbox-Id: sandbox-payment' \
+  --header 'Idempotency-Key: payment-duplicate-amount' \
+  --header 'Content-Type: application/json' \
+  --data '{"amountMinor":1700,"amountMinor":1800,"currency":"CNY"}'
 assert_status 201 "evaluation payment attempt binds token sandbox and fixture order" \
   --request POST "http://127.0.0.1:$commerce_port/api/orders/$payment_order_id/mock-payment" \
   --header "Authorization: Bearer $payment_token" \
@@ -1659,6 +1781,10 @@ payment_signature="$(sign_payment_callback "$payment_timestamp" "$payment_callba
   "$payment_event_id" "$payment_correlation_id" "$payment_order_id" sandbox-payment \
   "$payment_session" "$payment_trace" "$payment_operation")"
 payment_callback_body="{\"callbackEventId\":\"$payment_event_id\",\"callbackCorrelationId\":\"$payment_correlation_id\",\"orderId\":\"$payment_order_id\",\"amountMinor\":1800,\"currency\":\"CNY\",\"outcome\":\"SUCCEEDED\",\"sandboxId\":\"sandbox-payment\",\"supportSessionId\":\"$payment_session\",\"traceId\":\"$payment_trace\",\"operationId\":\"$payment_operation\"}"
+assert_status 400 "payment callback rejects duplicate semantic fields at the decoder boundary" \
+  --request POST "http://127.0.0.1:$commerce_port/internal/mock-payments/callback" \
+  --header 'Content-Type: application/json' \
+  --data "${payment_callback_body/\"amountMinor\":1800/\"amountMinor\":1700,\"amountMinor\":1800}"
 assert_status 401 "management and direct credentials cannot replace callback signature" \
   --request POST "http://127.0.0.1:$commerce_port/internal/mock-payments/callback" \
   --user "evaluation-manager:$management_password" \
@@ -1887,6 +2013,31 @@ payment_start_other_owner_status="$(request_status "$tmp_dir/payment-start-other
   --header 'Idempotency-Key: payment-other-owner-baseline' \
   --header 'Content-Type: application/json' \
   --data '{"amountMinor":1800,"currency":"CNY"}')"
+refund_parse_effects_before="$(mysql_query root "$root_password" commerce_db "
+  SELECT CONCAT(
+    (SELECT COUNT(*) FROM mock_refund WHERE order_id = '$payment_order_id'), ':',
+    (SELECT COUNT(*) FROM inventory_ledger WHERE order_id = '$payment_order_id'), ':',
+    (SELECT COUNT(*) FROM commerce_outbox), ':',
+    (SELECT COUNT(*) FROM pending_action), ':',
+    (SELECT COUNT(*) FROM action_receipt))
+")"
+assert_status 400 "direct refund rejects duplicate semantic fields at the decoder boundary" \
+  --request POST "http://127.0.0.1:$commerce_port/api/orders/$payment_order_id/refunds" \
+  --header "Authorization: Bearer $payment_refund_direct_token" \
+  --header 'Idempotency-Key: refund-duplicate-json' \
+  --header 'Content-Type: application/json' \
+  --data '{"amountMinor":100,"amountMinor":101,"currency":"CNY"}'
+jq -e \
+  '. == {"category":"VALIDATION","message":"Refund request is invalid"}' \
+  "$tmp_dir/http-response.json" >/dev/null
+assert_equal "$refund_parse_effects_before" "$(mysql_query root "$root_password" commerce_db "
+  SELECT CONCAT(
+    (SELECT COUNT(*) FROM mock_refund WHERE order_id = '$payment_order_id'), ':',
+    (SELECT COUNT(*) FROM inventory_ledger WHERE order_id = '$payment_order_id'), ':',
+    (SELECT COUNT(*) FROM commerce_outbox), ':',
+    (SELECT COUNT(*) FROM pending_action), ':',
+    (SELECT COUNT(*) FROM action_receipt))
+")" "invalid refund JSON creates no durable effects"
 payment_refund_unknown_status="$(request_status "$tmp_dir/payment-refund-unknown.json" \
   --request POST "http://127.0.0.1:$commerce_port/api/orders/$unknown_payment_order_id/refunds" \
   --header "Authorization: Bearer $payment_refund_direct_token" \

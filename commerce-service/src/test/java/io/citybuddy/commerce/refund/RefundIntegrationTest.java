@@ -103,6 +103,7 @@ class RefundIntegrationTest {
         "citybuddy.mock-payment.callback-secret", () -> required("MOCK_PAYMENT_CALLBACK_SECRET"));
     registry.add("citybuddy.mock-payment.callback-maximum-age", () -> "5m");
     registry.add("citybuddy.mock-payment.callback-clock-skew", () -> "30s");
+    registry.add("citybuddy.mock-payment.lock-wait-timeout-seconds", () -> "1");
     registry.add("citybuddy.refund.enabled", () -> "true");
     registry.add("citybuddy.refund.required-permission", () -> "refund:create");
     registry.add("citybuddy.obo.enabled", () -> "true");

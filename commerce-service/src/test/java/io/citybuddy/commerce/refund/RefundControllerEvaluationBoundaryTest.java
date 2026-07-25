@@ -19,7 +19,11 @@ class RefundControllerEvaluationBoundaryTest {
     RefundService service = mock(RefundService.class);
     MockMvc http =
         MockMvcBuilders.standaloneSetup(
-                new RefundController(identity.authorizer(), new RefundProperties(null), service))
+                new RefundController(
+                    identity.authorizer(),
+                    new RefundProperties(null),
+                    service,
+                    mock(RefundRequestParser.class)))
             .setControllerAdvice(new RefundExceptionHandler())
             .build();
 

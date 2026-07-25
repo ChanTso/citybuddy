@@ -3,6 +3,8 @@ package io.citybuddy.commerce.payment;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
+import com.zaxxer.hikari.HikariConfig;
+import com.zaxxer.hikari.HikariDataSource;
 import io.citybuddy.commerce.evaluation.EvaluationSandboxException;
 import io.citybuddy.commerce.evaluation.EvaluationSandboxRepository;
 import io.citybuddy.commerce.evaluation.EvaluationViewRepository;
@@ -12,6 +14,8 @@ import io.citybuddy.commerce.seckill.SeckillOrderRepository;
 import io.citybuddy.commerce.seckill.SeckillReservationRepository;
 import io.citybuddy.commerce.seckill.SeckillTimeoutMessage;
 import java.nio.charset.StandardCharsets;
+import java.sql.Connection;
+import java.sql.DriverManager;
 import java.sql.SQLException;
 import java.time.Clock;
 import java.time.Instant;
@@ -24,6 +28,9 @@ import java.util.Map;
 import java.util.UUID;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.ExecutionException;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
@@ -43,7 +50,9 @@ import org.springframework.http.HttpStatus;
 import org.springframework.http.MediaType;
 import org.springframework.http.ResponseEntity;
 import org.springframework.jdbc.core.JdbcTemplate;
+import org.springframework.jdbc.datasource.DataSourceTransactionManager;
 import org.springframework.jdbc.datasource.DriverManagerDataSource;
+import org.springframework.jdbc.datasource.SingleConnectionDataSource;
 import org.springframework.test.context.DynamicPropertyRegistry;
 import org.springframework.test.context.DynamicPropertySource;
 import org.springframework.transaction.PlatformTransactionManager;
@@ -89,6 +98,7 @@ class MockPaymentIntegrationTest {
         "citybuddy.mock-payment.callback-secret", () -> required("MOCK_PAYMENT_CALLBACK_SECRET"));
     registry.add("citybuddy.mock-payment.callback-maximum-age", () -> "5m");
     registry.add("citybuddy.mock-payment.callback-clock-skew", () -> "30s");
+    registry.add("citybuddy.mock-payment.lock-wait-timeout-seconds", () -> "1");
   }
 
   @Autowired private TestRestTemplate http;
@@ -574,7 +584,7 @@ class MockPaymentIntegrationTest {
           }
         };
     MockPaymentService failing =
-        new MockPaymentService(failingRepository, transactionTemplate(), Clock.systemUTC());
+        new MockPaymentService(failingRepository, paymentTransactions(jdbc), Clock.systemUTC());
 
     assertThatThrownBy(() -> failing.callback("callback-rollback", callback))
         .isInstanceOf(DataAccessResourceFailureException.class);
@@ -1010,7 +1020,8 @@ class MockPaymentIntegrationTest {
           }
         };
     MockPaymentService pausedReplay =
-        new MockPaymentService(pausedReplayRepository, transactionTemplate(), Clock.systemUTC());
+        new MockPaymentService(
+            pausedReplayRepository, paymentTransactions(jdbc), Clock.systemUTC());
 
     CompletableFuture<MockPaymentResult> replayFuture =
         CompletableFuture.supplyAsync(
@@ -1454,6 +1465,131 @@ class MockPaymentIntegrationTest {
   }
 
   @Test
+  void realMysqlLockWaitIsBoundedIndeterminateAndRestoresThePooledSession() throws Exception {
+    String orderId = seedStandardOrder(USER, 3450);
+    String idempotencyKey = "payment-real-lock-indeterminate";
+    Map<String, Long> effectsBefore = paymentEffects();
+    var executor = Executors.newSingleThreadExecutor();
+    try (HikariDataSource targetDataSource = singleConnectionPaymentDataSource();
+        Connection sibling =
+            DriverManager.getConnection(
+                required("CATALOG_MYSQL_URL"),
+                "commerce_app",
+                required("MYSQL_COMMERCE_APP_PASSWORD"))) {
+      JdbcTemplate targetJdbc = new JdbcTemplate(targetDataSource);
+      targetJdbc.execute("SET SESSION innodb_lock_wait_timeout = 7");
+      Long originalLockWait =
+          targetJdbc.queryForObject("SELECT @@SESSION.innodb_lock_wait_timeout", Long.class);
+      assertThat(originalLockWait).isEqualTo(7L);
+      LockTimeoutProbeRepository probe = new LockTimeoutProbeRepository(targetJdbc);
+      MockPaymentService bounded =
+          new MockPaymentService(
+              probe,
+              new MockPaymentTransactions(
+                  targetJdbc, paymentTransactionTemplate(targetDataSource), 1),
+              Clock.systemUTC());
+      sibling.setAutoCommit(false);
+      JdbcTemplate siblingJdbc = new JdbcTemplate(new SingleConnectionDataSource(sibling, true));
+      insertUncommittedAttempt(siblingJdbc, orderId, idempotencyKey, 3450);
+
+      long started = System.nanoTime();
+      Future<MockPaymentResult> target =
+          executor.submit(
+              () ->
+                  bounded.start(
+                      USER, orderId, idempotencyKey, new MockPaymentRequest(3450L, "AUD", null)));
+      try {
+        assertThatThrownBy(() -> getPaymentResult(target))
+            .isInstanceOfSatisfying(
+                MockPaymentException.class,
+                exception -> {
+                  assertThat(exception.status()).isEqualTo(429);
+                  assertThat(exception.category()).isEqualTo("INDETERMINATE");
+                  assertThat(exception.reason())
+                      .isEqualTo(
+                          MockPaymentRejectionReason.PAYMENT_CONCURRENCY_OBSERVATION_INDETERMINATE);
+                });
+        assertThat(TimeUnit.NANOSECONDS.toSeconds(System.nanoTime() - started)).isLessThan(8);
+        assertThat(probe.mysql1205Count()).isEqualTo(3);
+        assertThat(
+                targetJdbc.queryForObject("SELECT @@SESSION.innodb_lock_wait_timeout", Long.class))
+            .isEqualTo(originalLockWait);
+      } finally {
+        if (!target.isDone()) {
+          target.cancel(true);
+        }
+        sibling.rollback();
+      }
+    } finally {
+      executor.shutdownNow();
+    }
+    assertThat(paymentEffects()).isEqualTo(effectsBefore);
+    assertThat(
+            jdbc.queryForObject(
+                "SELECT COUNT(*) FROM mock_payment_attempt WHERE order_id = ?",
+                Long.class,
+                orderId))
+        .isZero();
+  }
+
+  @Test
+  void realMysqlLockCompetitionReobservesTheCommittedPendingSibling() throws Exception {
+    String orderId = seedStandardOrder(USER, 3475);
+    String idempotencyKey = "payment-real-lock-converges";
+    var executor = Executors.newSingleThreadExecutor();
+    try (HikariDataSource targetDataSource = singleConnectionPaymentDataSource();
+        Connection sibling =
+            DriverManager.getConnection(
+                required("CATALOG_MYSQL_URL"),
+                "commerce_app",
+                required("MYSQL_COMMERCE_APP_PASSWORD"))) {
+      JdbcTemplate targetJdbc = new JdbcTemplate(targetDataSource);
+      targetJdbc.execute("SET SESSION innodb_lock_wait_timeout = 9");
+      LockTimeoutProbeRepository probe = new LockTimeoutProbeRepository(targetJdbc);
+      MockPaymentService bounded =
+          new MockPaymentService(
+              probe,
+              new MockPaymentTransactions(
+                  targetJdbc, paymentTransactionTemplate(targetDataSource), 1),
+              Clock.systemUTC());
+      sibling.setAutoCommit(false);
+      JdbcTemplate siblingJdbc = new JdbcTemplate(new SingleConnectionDataSource(sibling, true));
+      String siblingAttempt = insertUncommittedAttempt(siblingJdbc, orderId, idempotencyKey, 3475);
+
+      Future<MockPaymentResult> target =
+          executor.submit(
+              () ->
+                  bounded.start(
+                      USER, orderId, idempotencyKey, new MockPaymentRequest(3475L, "AUD", null)));
+      try {
+        assertThat(probe.awaitFirstMysql1205()).isTrue();
+        sibling.commit();
+        MockPaymentResult resolved = target.get(8, TimeUnit.SECONDS);
+        assertThat(resolved.attemptId()).isEqualTo(siblingAttempt);
+        assertThat(resolved.state()).isEqualTo("PENDING");
+        assertThat(resolved.replayed()).isTrue();
+        assertThat(probe.mysql1205Count()).isOne();
+        assertThat(
+                targetJdbc.queryForObject("SELECT @@SESSION.innodb_lock_wait_timeout", Long.class))
+            .isEqualTo(9L);
+      } finally {
+        if (!target.isDone()) {
+          target.cancel(true);
+        }
+        sibling.rollback();
+      }
+    } finally {
+      executor.shutdownNow();
+    }
+    assertThat(
+            jdbc.queryForObject(
+                "SELECT COUNT(*) FROM mock_payment_attempt WHERE order_id = ?",
+                Long.class,
+                orderId))
+        .isOne();
+  }
+
+  @Test
   void callbackLockAndConstraintCompetitionResolveFromCommittedTruth() {
     String orderId = seedStandardOrder(USER, 3500);
     MockPaymentResult attempt =
@@ -1463,25 +1599,8 @@ class MockPaymentIntegrationTest {
     payments.callback("callback-deadlock", callback);
 
     AtomicInteger deadlockCalls = new AtomicInteger();
-    AtomicInteger deadlockObservations = new AtomicInteger();
     MockPaymentRepository oneDeadlock =
         new MockPaymentRepository(jdbc) {
-          @Override
-          public java.util.Optional<CallbackRecord> findCallbackByKey(String idempotencyKey) {
-            if (deadlockObservations.incrementAndGet() <= 2) {
-              return java.util.Optional.empty();
-            }
-            return super.findCallbackByKey(idempotencyKey);
-          }
-
-          @Override
-          public java.util.Optional<CallbackRecord> findCallbackByEvent(String eventId) {
-            if (deadlockObservations.incrementAndGet() <= 2) {
-              return java.util.Optional.empty();
-            }
-            return super.findCallbackByEvent(eventId);
-          }
-
           @Override
           public java.util.Optional<AttemptRecord> findAttemptByCorrelationForUpdate(
               String correlationId) {
@@ -1492,34 +1611,17 @@ class MockPaymentIntegrationTest {
           }
         };
     MockPaymentService retrying =
-        new MockPaymentService(oneDeadlock, transactionTemplate(), Clock.systemUTC());
+        new MockPaymentService(oneDeadlock, paymentTransactions(jdbc), Clock.systemUTC());
 
     MockPaymentCallbackResult converged = retrying.callback("callback-deadlock", callback);
     assertThat(converged.replayed()).isTrue();
-    assertThat(deadlockCalls).hasValue(2);
+    assertThat(deadlockCalls).hasValue(1);
     assertPaidTruth(orderId, attempt.attemptId(), "STANDARD_PAYMENT", 3500);
     assertThat(paymentMovementCount(attempt.attemptId())).isOne();
 
     AtomicInteger timeoutCalls = new AtomicInteger();
-    AtomicInteger timeoutObservations = new AtomicInteger();
     MockPaymentRepository lockTimeout =
         new MockPaymentRepository(jdbc) {
-          @Override
-          public java.util.Optional<CallbackRecord> findCallbackByKey(String idempotencyKey) {
-            if (timeoutObservations.incrementAndGet() <= 2) {
-              return java.util.Optional.empty();
-            }
-            return super.findCallbackByKey(idempotencyKey);
-          }
-
-          @Override
-          public java.util.Optional<CallbackRecord> findCallbackByEvent(String eventId) {
-            if (timeoutObservations.incrementAndGet() <= 2) {
-              return java.util.Optional.empty();
-            }
-            return super.findCallbackByEvent(eventId);
-          }
-
           @Override
           public java.util.Optional<AttemptRecord> findAttemptByCorrelationForUpdate(
               String correlationId) {
@@ -1528,34 +1630,17 @@ class MockPaymentIntegrationTest {
           }
         };
     MockPaymentService nonRetrying =
-        new MockPaymentService(lockTimeout, transactionTemplate(), Clock.systemUTC());
+        new MockPaymentService(lockTimeout, paymentTransactions(jdbc), Clock.systemUTC());
 
     MockPaymentCallbackResult timeoutConverged =
         nonRetrying.callback("callback-deadlock", callback);
     assertThat(timeoutConverged.replayed()).isTrue();
-    assertThat(timeoutCalls).hasValue(2);
+    assertThat(timeoutCalls).hasValue(1);
     assertThat(paymentMovementCount(attempt.attemptId())).isOne();
 
     AtomicInteger duplicateCalls = new AtomicInteger();
-    AtomicInteger duplicateObservations = new AtomicInteger();
     MockPaymentRepository duplicateConflict =
         new MockPaymentRepository(jdbc) {
-          @Override
-          public java.util.Optional<CallbackRecord> findCallbackByKey(String idempotencyKey) {
-            if (duplicateObservations.incrementAndGet() <= 2) {
-              return java.util.Optional.empty();
-            }
-            return super.findCallbackByKey(idempotencyKey);
-          }
-
-          @Override
-          public java.util.Optional<CallbackRecord> findCallbackByEvent(String eventId) {
-            if (duplicateObservations.incrementAndGet() <= 2) {
-              return java.util.Optional.empty();
-            }
-            return super.findCallbackByEvent(eventId);
-          }
-
           @Override
           public java.util.Optional<AttemptRecord> findAttemptByCorrelationForUpdate(
               String correlationId) {
@@ -1564,7 +1649,7 @@ class MockPaymentIntegrationTest {
           }
         };
     MockPaymentService duplicateRejecting =
-        new MockPaymentService(duplicateConflict, transactionTemplate(), Clock.systemUTC());
+        new MockPaymentService(duplicateConflict, paymentTransactions(jdbc), Clock.systemUTC());
 
     MockPaymentCallbackResult duplicateConverged =
         duplicateRejecting.callback("callback-deadlock", callback);
@@ -1592,7 +1677,7 @@ class MockPaymentIntegrationTest {
           }
         };
     MockPaymentService uncommittedRejecting =
-        new MockPaymentService(uncommittedTimeout, transactionTemplate(), Clock.systemUTC());
+        new MockPaymentService(uncommittedTimeout, paymentTransactions(jdbc), Clock.systemUTC());
 
     assertThatThrownBy(
             () ->
@@ -1601,10 +1686,10 @@ class MockPaymentIntegrationTest {
         .isInstanceOfSatisfying(
             MockPaymentException.class,
             exception -> {
-              assertThat(exception.status()).isEqualTo(409);
-              assertThat(exception.category()).isEqualTo("CONFLICT");
+              assertThat(exception.status()).isEqualTo(429);
+              assertThat(exception.category()).isEqualTo("INDETERMINATE");
             });
-    assertThat(uncommittedTimeoutCalls).hasValue(2);
+    assertThat(uncommittedTimeoutCalls).hasValue(1);
     assertThat(paymentMovementCount(uncommittedAttempt.attemptId())).isZero();
   }
 
@@ -1897,10 +1982,81 @@ class MockPaymentIntegrationTest {
         Clock.systemUTC());
   }
 
+  private Map<String, Long> paymentEffects() {
+    Map<String, Long> effects = new LinkedHashMap<>();
+    for (String table :
+        List.of(
+            "mock_payment_attempt",
+            "mock_payment_callback",
+            "inventory_ledger",
+            "commerce_outbox",
+            "mock_refund",
+            "pending_action",
+            "action_receipt")) {
+      effects.put(table, count(table));
+    }
+    return Map.copyOf(effects);
+  }
+
+  private static HikariDataSource singleConnectionPaymentDataSource() {
+    HikariConfig config = new HikariConfig();
+    config.setPoolName("payment-lock-boundary-" + UUID.randomUUID());
+    config.setJdbcUrl(required("CATALOG_MYSQL_URL"));
+    config.setUsername("commerce_app");
+    config.setPassword(required("MYSQL_COMMERCE_APP_PASSWORD"));
+    config.setMaximumPoolSize(1);
+    config.setMinimumIdle(1);
+    config.setConnectionTimeout(5000);
+    return new HikariDataSource(config);
+  }
+
+  private static TransactionTemplate paymentTransactionTemplate(HikariDataSource targetDataSource) {
+    TransactionTemplate transactions =
+        new TransactionTemplate(new DataSourceTransactionManager(targetDataSource));
+    transactions.setPropagationBehavior(TransactionDefinition.PROPAGATION_REQUIRES_NEW);
+    return transactions;
+  }
+
+  private static String insertUncommittedAttempt(
+      JdbcTemplate siblingJdbc, String orderId, String idempotencyKey, long amountMinor) {
+    String attemptId = UUID.randomUUID().toString();
+    siblingJdbc.update(
+        """
+        INSERT INTO mock_payment_attempt
+          (attempt_id, callback_correlation_id, user_subject, order_id, order_kind,
+           request_idempotency_key, intent_hash, amount_minor, currency)
+        VALUES (?, ?, ?, ?, 'STANDARD', ?, ?, ?, 'AUD')
+        """,
+        attemptId,
+        UUID.randomUUID().toString(),
+        USER,
+        orderId,
+        idempotencyKey,
+        EvaluationPaymentCommittedFaces.attemptIntentHash(orderId, amountMinor, "AUD", null),
+        amountMinor);
+    return attemptId;
+  }
+
+  private static MockPaymentResult getPaymentResult(Future<MockPaymentResult> future)
+      throws Exception {
+    try {
+      return future.get(8, TimeUnit.SECONDS);
+    } catch (ExecutionException exception) {
+      if (exception.getCause() instanceof RuntimeException runtime) {
+        throw runtime;
+      }
+      throw exception;
+    }
+  }
+
   private TransactionTemplate transactionTemplate() {
     TransactionTemplate transactions = new TransactionTemplate(transactionManager);
     transactions.setPropagationBehavior(TransactionDefinition.PROPAGATION_REQUIRES_NEW);
     return transactions;
+  }
+
+  private MockPaymentTransactions paymentTransactions(JdbcTemplate targetJdbc) {
+    return new MockPaymentTransactions(targetJdbc, transactionTemplate(), 1);
   }
 
   private MockPaymentCallbackResult concurrentCallback(
@@ -1935,7 +2091,7 @@ class MockPaymentIntegrationTest {
       EvaluationSandboxRepository sandboxRepository,
       Clock paymentClock) {
     return new MockPaymentService(
-        repository, transactionTemplate(), paymentClock, sandboxRepository);
+        repository, paymentTransactions(jdbc), paymentClock, sandboxRepository);
   }
 
   private MockPaymentRepository failingRepository(FailurePoint point) {
@@ -2078,6 +2234,54 @@ class MockPaymentIntegrationTest {
         new SQLException("controlled MySQL lock failure", "40001", errorCode));
   }
 
+  private static int mysqlErrorCode(Throwable failure) {
+    Throwable current = failure;
+    while (current != null) {
+      if (current instanceof SQLException sqlException) {
+        return sqlException.getErrorCode();
+      }
+      current = current.getCause();
+    }
+    return 0;
+  }
+
+  private static final class LockTimeoutProbeRepository extends MockPaymentRepository {
+    private final AtomicInteger mysql1205 = new AtomicInteger();
+    private final CountDownLatch firstMysql1205 = new CountDownLatch(1);
+
+    private LockTimeoutProbeRepository(JdbcTemplate jdbc) {
+      super(jdbc);
+    }
+
+    @Override
+    List<AttemptRecord> enumerateStartAttemptVisibility(
+        String userSubject, String requestIdempotencyKey, String lockClause) {
+      try {
+        return super.enumerateStartAttemptVisibility(
+            userSubject, requestIdempotencyKey, lockClause);
+      } catch (CannotAcquireLockException exception) {
+        if (mysqlErrorCode(exception) == 1205) {
+          mysql1205.incrementAndGet();
+          firstMysql1205.countDown();
+        }
+        throw exception;
+      }
+    }
+
+    private int mysql1205Count() {
+      return mysql1205.get();
+    }
+
+    private boolean awaitFirstMysql1205() {
+      try {
+        return firstMysql1205.await(5, TimeUnit.SECONDS);
+      } catch (InterruptedException exception) {
+        Thread.currentThread().interrupt();
+        return false;
+      }
+    }
+  }
+
   private void assertCallbackRejected(
       String idempotencyKey, MockPaymentCallbackRequest request, int expectedStatus) {
     assertThatThrownBy(() -> payments.callback(idempotencyKey, request))
@@ -2207,7 +2411,14 @@ class MockPaymentIntegrationTest {
 
   private long count(String table) {
     if (!java.util.Set.of(
-            "mock_payment_attempt", "mock_payment_callback", "standard_order", "inventory_ledger")
+            "mock_payment_attempt",
+            "mock_payment_callback",
+            "standard_order",
+            "inventory_ledger",
+            "commerce_outbox",
+            "mock_refund",
+            "pending_action",
+            "action_receipt")
         .contains(table)) {
       throw new IllegalArgumentException("Unexpected count table");
     }

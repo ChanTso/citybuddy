@@ -65,14 +65,16 @@ public class MockPaymentRepository {
   }
 
   List<PaymentStartOrderVisibility.Classification> enumerateStartOrderVisibility(
-      String orderId, String userSubject, String sandboxId) {
+      String orderId, String userSubject, String sandboxId, String lockClause) {
     List<OrderTruth> rows;
     if (sandboxId == null) {
-      rows = enumerateOwnedOrderVisibility(orderId, userSubject, "");
+      rows = enumerateOwnedOrderVisibility(orderId, userSubject, lockClause);
     } else {
       rows =
           jdbc.query(
-              EvaluationPaymentCommittedFaces.standardOrderByIdSql("") + " AND sandbox_id = ?",
+              EvaluationPaymentCommittedFaces.standardOrderByIdSql("")
+                  + " AND sandbox_id = ?"
+                  + lockClause,
               (result, row) -> mapOrder(result, "STANDARD"),
               orderId,
               sandboxId);
@@ -123,6 +125,7 @@ public class MockPaymentRepository {
             + " FROM "
             + attemptTable()
             + " WHERE user_subject = ? AND request_idempotency_key = ?"
+            + " LIMIT 2"
             + lockClause,
         MockPaymentRepository::mapAttempt,
         userSubject,
@@ -480,7 +483,7 @@ public class MockPaymentRepository {
             + " = ? OR "
             + keys.get(2)
             + " = ?"
-            + lockClause,
+            + cardinalityLockClause(lockClause),
         MockPaymentRepository::mapAttempt,
         target.attemptId(),
         target.callbackCorrelationId(),
@@ -501,7 +504,7 @@ public class MockPaymentRepository {
             + " = ? OR "
             + keys.get(2)
             + " = ?"
-            + lockClause,
+            + cardinalityLockClause(lockClause),
         MockPaymentRepository::mapAttempt,
         callbackCorrelationId,
         orderId);
@@ -518,7 +521,7 @@ public class MockPaymentRepository {
             + " WHERE "
             + keys.get(2)
             + " = ?"
-            + lockClause,
+            + cardinalityLockClause(lockClause),
         MockPaymentRepository::mapAttempt,
         orderId);
   }
@@ -535,7 +538,7 @@ public class MockPaymentRepository {
             + " WHERE "
             + keys.get(2)
             + " = ? AND user_subject = ?"
-            + lockClause,
+            + cardinalityLockClause(lockClause),
         MockPaymentRepository::mapAttempt,
         orderId,
         userSubject);
@@ -557,7 +560,7 @@ public class MockPaymentRepository {
             + " = ? OR "
             + relations.getFirst()
             + " = ?"
-            + lockClause,
+            + cardinalityLockClause(lockClause),
         MockPaymentRepository::mapCallback,
         target.callbackCorrelationId(),
         target.attemptId());
@@ -586,7 +589,7 @@ public class MockPaymentRepository {
             + " = ? OR "
             + keys.get(3)
             + " = ?"
-            + lockClause,
+            + cardinalityLockClause(lockClause),
         MockPaymentRepository::mapCallback,
         target.callbackCorrelationId(),
         canonical.callbackEventId(),
@@ -629,7 +632,7 @@ public class MockPaymentRepository {
             + keys.get(2)
             + " = ?"
             + relationPredicate
-            + lockClause,
+            + cardinalityLockClause(lockClause),
         MockPaymentRepository::mapCallback,
         arguments.toArray());
   }
@@ -707,7 +710,7 @@ public class MockPaymentRepository {
             + keys.get(1)
             + " = ? OR (sandbox_id <=> ? AND support_session_id <=> ? "
             + "AND trace_id <=> ? AND operation_id <=> ?)"
-            + lockClause,
+            + cardinalityLockClause(lockClause),
         MockPaymentRepository::mapAudit,
         referenceId,
         callback.callbackEventId(),
@@ -746,7 +749,7 @@ public class MockPaymentRepository {
             + keys.get(1)
             + " = ? OR (sandbox_id <=> ? AND support_session_id <=> ? "
             + "AND trace_id <=> ? AND operation_id <=> ?)"
-            + lockClause,
+            + cardinalityLockClause(lockClause),
         MockPaymentRepository::mapAudit,
         referenceId,
         request.callbackEventId(),
@@ -815,7 +818,8 @@ public class MockPaymentRepository {
   }
 
   private Optional<AttemptRecord> queryAttempt(String sql, Object... arguments) {
-    List<AttemptRecord> rows = jdbc.query(sql, MockPaymentRepository::mapAttempt, arguments);
+    List<AttemptRecord> rows =
+        jdbc.query(cardinalitySql(sql), MockPaymentRepository::mapAttempt, arguments);
     if (rows.size() > 1) {
       throw new MockPaymentIntegrityException("Payment attempt uniqueness is corrupted");
     }
@@ -823,11 +827,24 @@ public class MockPaymentRepository {
   }
 
   private Optional<CallbackRecord> queryCallback(String sql, Object... arguments) {
-    List<CallbackRecord> rows = jdbc.query(sql, MockPaymentRepository::mapCallback, arguments);
+    List<CallbackRecord> rows =
+        jdbc.query(cardinalitySql(sql), MockPaymentRepository::mapCallback, arguments);
     if (rows.size() > 1) {
       throw new MockPaymentIntegrityException("Payment callback uniqueness is corrupted");
     }
     return rows.stream().findFirst();
+  }
+
+  private static String cardinalitySql(String sql) {
+    String lock = " FOR UPDATE";
+    if (sql.endsWith(lock)) {
+      return sql.substring(0, sql.length() - lock.length()) + " LIMIT 2" + lock;
+    }
+    return sql + " LIMIT 2";
+  }
+
+  private static String cardinalityLockClause(String lockClause) {
+    return " LIMIT 2" + lockClause;
   }
 
   private static AttemptRecord mapAttempt(java.sql.ResultSet result, int row)

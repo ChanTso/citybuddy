@@ -24,6 +24,11 @@ public class RefundConfiguration {
   }
 
   @Bean
+  RefundRequestParser refundRequestParser(ObjectMapper objectMapper) {
+    return new RefundRequestParser(objectMapper);
+  }
+
+  @Bean
   RefundService refundService(
       RefundRepository refundRepository,
       JdbcTemplate jdbcTemplate,

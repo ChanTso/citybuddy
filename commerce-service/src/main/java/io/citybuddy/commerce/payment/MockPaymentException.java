@@ -21,6 +21,12 @@ public final class MockPaymentException extends RuntimeException {
     if (status == 403 && (reason == null || reason == MockPaymentRejectionReason.NOT_APPLICABLE)) {
       throw new IllegalArgumentException("HTTP 403 requires an attribution reason");
     }
+    if (reason == null
+        || (reason != MockPaymentRejectionReason.NOT_APPLICABLE
+            && (status != reason.status() || !category.equals(reason.category())))) {
+      throw new IllegalArgumentException(
+          "Payment rejection attribution does not match its response");
+    }
     this.status = status;
     this.category = category;
     this.reason = reason;

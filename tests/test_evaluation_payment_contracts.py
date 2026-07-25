@@ -353,7 +353,9 @@ def test_terminal_payment_callers_use_the_shared_complete_closure() -> None:
         )
     ]
     assert start_order_visibility.count("jdbc.query(") == 1
-    assert 'standardOrderByIdSql("") + " AND sandbox_id = ?"' in start_order_visibility
+    assert 'standardOrderByIdSql("")' in start_order_visibility
+    assert '+ " AND sandbox_id = ?"' in start_order_visibility
+    assert "+ lockClause" in start_order_visibility
     assert "catch (" not in start_order_visibility
     binding = repository[
         repository.index("public void bindEvaluationOrderOwner") : repository.index(

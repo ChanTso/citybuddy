@@ -18,7 +18,6 @@ import org.springframework.transaction.CannotCreateTransactionException;
 import org.springframework.web.bind.annotation.ExceptionHandler;
 import org.springframework.web.bind.annotation.PathVariable;
 import org.springframework.web.bind.annotation.PostMapping;
-import org.springframework.web.bind.annotation.RequestBody;
 import org.springframework.web.bind.annotation.RequestHeader;
 import org.springframework.web.bind.annotation.RestController;
 import org.springframework.web.bind.annotation.RestControllerAdvice;
@@ -29,14 +28,17 @@ public final class MockPaymentController {
   private final DirectUserAuthorizer authorizer;
   private final MockPaymentProperties properties;
   private final MockPaymentService service;
+  private final MockPaymentRequestParser requests;
 
   public MockPaymentController(
       DirectUserAuthorizer authorizer,
       MockPaymentProperties properties,
-      MockPaymentService service) {
+      MockPaymentService service,
+      MockPaymentRequestParser requests) {
     this.authorizer = authorizer;
     this.properties = properties;
     this.service = service;
+    this.requests = requests;
   }
 
   @PostMapping("/api/orders/{orderId}/mock-payment")
@@ -45,7 +47,7 @@ public final class MockPaymentController {
       @RequestHeader(value = "X-Eval-Sandbox-Id", required = false) String evalSandbox,
       @RequestHeader(value = "Idempotency-Key", required = false) String idempotencyKey,
       @PathVariable String orderId,
-      @RequestBody(required = false) MockPaymentRequest request) {
+      HttpServletRequest request) {
     DirectUserAuthorizer.DirectPrincipal subject;
     try {
       subject =
@@ -63,7 +65,12 @@ public final class MockPaymentController {
           exception.status(), "AUTHENTICATION", "Direct-user payment authorization failed");
     }
     MockPaymentResult result =
-        service.start(subject.subject(), subject.sandboxId(), orderId, idempotencyKey, request);
+        service.start(
+            subject.subject(),
+            subject.sandboxId(),
+            orderId,
+            idempotencyKey,
+            requests.start(request));
     return ResponseEntity.status(result.replayed() ? HttpStatus.OK : HttpStatus.CREATED)
         .body(result);
   }
@@ -74,11 +81,15 @@ public final class MockPaymentController {
 final class MockPaymentCallbackController {
   private final MockPaymentCallbackAuthenticator authenticator;
   private final MockPaymentService service;
+  private final MockPaymentRequestParser requests;
 
   MockPaymentCallbackController(
-      MockPaymentCallbackAuthenticator authenticator, MockPaymentService service) {
+      MockPaymentCallbackAuthenticator authenticator,
+      MockPaymentService service,
+      MockPaymentRequestParser requests) {
     this.authenticator = authenticator;
     this.service = service;
+    this.requests = requests;
   }
 
   @PostMapping("/internal/mock-payments/callback")
@@ -87,9 +98,10 @@ final class MockPaymentCallbackController {
       @RequestHeader(value = "X-Mock-Payment-Timestamp", required = false) String timestamp,
       @RequestHeader(value = "X-Mock-Payment-Signature", required = false) String signature,
       @RequestHeader(value = "Idempotency-Key", required = false) String idempotencyKey,
-      @RequestBody(required = false) MockPaymentCallbackRequest request) {
-    authenticator.authenticate(keyId, timestamp, signature, idempotencyKey, request);
-    return service.callback(idempotencyKey, request);
+      HttpServletRequest request) {
+    MockPaymentCallbackRequest parsed = requests.callback(request);
+    authenticator.authenticate(keyId, timestamp, signature, idempotencyKey, parsed);
+    return service.callback(idempotencyKey, parsed);
   }
 }
 

@@ -12,7 +12,6 @@ import org.springframework.web.bind.annotation.ExceptionHandler;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PathVariable;
 import org.springframework.web.bind.annotation.PostMapping;
-import org.springframework.web.bind.annotation.RequestBody;
 import org.springframework.web.bind.annotation.RequestHeader;
 import org.springframework.web.bind.annotation.RestController;
 import org.springframework.web.bind.annotation.RestControllerAdvice;
@@ -23,12 +22,17 @@ public final class RefundController {
   private final DirectUserAuthorizer authorizer;
   private final RefundProperties properties;
   private final RefundService service;
+  private final RefundRequestParser requests;
 
   public RefundController(
-      DirectUserAuthorizer authorizer, RefundProperties properties, RefundService service) {
+      DirectUserAuthorizer authorizer,
+      RefundProperties properties,
+      RefundService service,
+      RefundRequestParser requests) {
     this.authorizer = authorizer;
     this.properties = properties;
     this.service = service;
+    this.requests = requests;
   }
 
   @PostMapping("/api/orders/{orderId}/refunds")
@@ -37,9 +41,10 @@ public final class RefundController {
       @RequestHeader(value = "X-Eval-Sandbox-Id", required = false) String evalSandbox,
       @RequestHeader(value = "Idempotency-Key", required = false) String idempotencyKey,
       @PathVariable String orderId,
-      @RequestBody(required = false) RefundRequest request) {
+      HttpServletRequest request) {
     String subject = authorize(authorization, evalSandbox);
-    RefundResult result = service.request(subject, orderId, idempotencyKey, request);
+    RefundResult result =
+        service.request(subject, orderId, idempotencyKey, requests.parse(request));
     return ResponseEntity.status(result.replayed() ? HttpStatus.OK : HttpStatus.CREATED)
         .body(result);
   }
