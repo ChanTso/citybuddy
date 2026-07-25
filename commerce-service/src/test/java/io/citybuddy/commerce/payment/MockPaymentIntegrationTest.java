@@ -8,6 +8,7 @@ import com.zaxxer.hikari.HikariDataSource;
 import io.citybuddy.commerce.evaluation.EvaluationSandboxException;
 import io.citybuddy.commerce.evaluation.EvaluationSandboxRepository;
 import io.citybuddy.commerce.evaluation.EvaluationViewRepository;
+import io.citybuddy.commerce.mysql.BoundedMySqlTransactions;
 import io.citybuddy.commerce.seckill.SeckillActivityRepository;
 import io.citybuddy.commerce.seckill.SeckillCancellationService;
 import io.citybuddy.commerce.seckill.SeckillOrderRepository;
@@ -1486,7 +1487,8 @@ class MockPaymentIntegrationTest {
           new MockPaymentService(
               probe,
               new MockPaymentTransactions(
-                  targetJdbc, paymentTransactionTemplate(targetDataSource), 1),
+                  new BoundedMySqlTransactions(
+                      targetJdbc, paymentTransactionTemplate(targetDataSource), 1)),
               Clock.systemUTC());
       sibling.setAutoCommit(false);
       JdbcTemplate siblingJdbc = new JdbcTemplate(new SingleConnectionDataSource(sibling, true));
@@ -1550,7 +1552,8 @@ class MockPaymentIntegrationTest {
           new MockPaymentService(
               probe,
               new MockPaymentTransactions(
-                  targetJdbc, paymentTransactionTemplate(targetDataSource), 1),
+                  new BoundedMySqlTransactions(
+                      targetJdbc, paymentTransactionTemplate(targetDataSource), 1)),
               Clock.systemUTC());
       sibling.setAutoCommit(false);
       JdbcTemplate siblingJdbc = new JdbcTemplate(new SingleConnectionDataSource(sibling, true));
@@ -2056,7 +2059,8 @@ class MockPaymentIntegrationTest {
   }
 
   private MockPaymentTransactions paymentTransactions(JdbcTemplate targetJdbc) {
-    return new MockPaymentTransactions(targetJdbc, transactionTemplate(), 1);
+    return new MockPaymentTransactions(
+        new BoundedMySqlTransactions(targetJdbc, transactionTemplate(), 1));
   }
 
   private MockPaymentCallbackResult concurrentCallback(

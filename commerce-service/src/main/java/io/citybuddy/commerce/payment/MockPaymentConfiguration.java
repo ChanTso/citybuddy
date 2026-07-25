@@ -2,6 +2,7 @@ package io.citybuddy.commerce.payment;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
 import io.citybuddy.commerce.evaluation.EvaluationSandboxRepository;
+import io.citybuddy.commerce.mysql.BoundedMySqlTransactions;
 import java.time.Clock;
 import org.springframework.beans.factory.ObjectProvider;
 import org.springframework.beans.factory.annotation.Qualifier;
@@ -36,7 +37,8 @@ public class MockPaymentConfiguration {
     TransactionTemplate transaction = new TransactionTemplate(transactionManager);
     transaction.setPropagationBehavior(TransactionDefinition.PROPAGATION_REQUIRES_NEW);
     return new MockPaymentTransactions(
-        jdbcTemplate, transaction, properties.lockWaitTimeoutSeconds());
+        new BoundedMySqlTransactions(
+            jdbcTemplate, transaction, properties.lockWaitTimeoutSeconds()));
   }
 
   @Bean

@@ -372,6 +372,9 @@ start_commerce() {
       --citybuddy.mock-payment.lock-wait-timeout-seconds=1
       --citybuddy.refund.enabled=true
       --citybuddy.refund.required-permission=refund:create
+      --citybuddy.refund.lock-wait-timeout-seconds=1
+      --citybuddy.refund.maximum-observation-attempts=2
+      --citybuddy.refund.observation-backoff=25ms
       --citybuddy.actions.enabled=true
       --citybuddy.actions.required-scope=refund:create
       --citybuddy.actions.pending-ttl=15m

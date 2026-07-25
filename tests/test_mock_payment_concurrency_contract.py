@@ -7,6 +7,8 @@ PAYMENT = ROOT / "commerce-service/src/main/java/io/citybuddy/commerce/payment"
 PAYMENT_TEST = ROOT / "commerce-service/src/test/java/io/citybuddy/commerce/payment"
 REFUND = ROOT / "commerce-service/src/main/java/io/citybuddy/commerce/refund"
 REFUND_TEST = ROOT / "commerce-service/src/test/java/io/citybuddy/commerce/refund"
+MYSQL = ROOT / "commerce-service/src/main/java/io/citybuddy/commerce/mysql"
+MYSQL_TEST = ROOT / "commerce-service/src/test/java/io/citybuddy/commerce/mysql"
 
 
 def test_mock_payment_service_has_one_closed_transaction_entry_inventory() -> None:
@@ -36,15 +38,49 @@ def test_mock_payment_service_has_one_closed_transaction_entry_inventory() -> No
     assert "transactions.execute(" not in service
     assert "SET SESSION innodb_lock_wait_timeout" not in service
 
+    refund_service = (REFUND / "RefundService.java").read_text(encoding="utf-8")
+    refund_transactions = (REFUND / "RefundTransactions.java").read_text(encoding="utf-8")
+    refund_entry_block = re.search(
+        r"enum Entry \{(.*?)\n\s+private final Mode", refund_transactions, re.DOTALL
+    )
+    assert refund_entry_block is not None
+    refund_entries = set(
+        re.findall(r"^\s+([A-Z_]+)\(", refund_entry_block.group(1), re.MULTILINE)
+    )
+    expected_refund = {
+        "DIRECT_INITIAL_MUTATION",
+        "DIRECT_TRUTH_OBSERVATION",
+        "DIRECT_FINAL_MUTATION",
+        "DIRECT_FINAL_OBSERVATION",
+        "MARK_PROCESSING_MUTATION",
+        "MARK_PROCESSING_OBSERVATION",
+        "SUCCEED_MUTATION",
+        "SUCCEED_OBSERVATION",
+        "FAIL_MUTATION",
+        "FAIL_OBSERVATION",
+        "RECONCILE_MUTATION",
+        "RECONCILE_OBSERVATION",
+    }
+    assert refund_entries == expected_refund
+    for entry in expected_refund:
+        assert refund_service.count(f"RefundTransactions.Entry.{entry}") >= 1
+    assert "TransactionTemplate" not in refund_service
+    assert "transactions.execute(" not in refund_service
+    assert "SET SESSION innodb_lock_wait_timeout" not in refund_service
+
 
 def test_physical_lock_wait_boundary_is_session_scoped_and_restored() -> None:
-    transactions = (PAYMENT / "MockPaymentTransactions.java").read_text(encoding="utf-8")
+    transactions = (MYSQL / "BoundedMySqlTransactions.java").read_text(encoding="utf-8")
+    payment = (PAYMENT / "MockPaymentTransactions.java").read_text(encoding="utf-8")
+    refund = (REFUND / "RefundTransactions.java").read_text(encoding="utf-8")
     assert "TransactionSynchronizationManager.isActualTransactionActive()" in transactions
     assert 'queryForObject("SELECT @@SESSION.innodb_lock_wait_timeout"' in transactions
     assert '"SET SESSION innodb_lock_wait_timeout = " + lockWaitTimeoutSeconds' in transactions
     assert "finally {" in transactions
     assert '"SET SESSION innodb_lock_wait_timeout = " + previous' in transactions
     assert "setTimeout(" not in transactions
+    assert "BoundedMySqlTransactions" in payment
+    assert "BoundedMySqlTransactions" in refund
 
 
 def test_start_and_callback_expose_bounded_indeterminate_without_raw_lock_handler() -> None:
@@ -71,6 +107,7 @@ def test_transaction_and_failure_inventories_have_real_regression_anchors() -> N
     transaction_test = (PAYMENT_TEST / "MockPaymentTransactionsTest.java").read_text(
         encoding="utf-8"
     )
+    bounded_test = (MYSQL_TEST / "BoundedMySqlTransactionsTest.java").read_text(encoding="utf-8")
     concurrency_test = (PAYMENT_TEST / "MockPaymentConcurrencyTest.java").read_text(
         encoding="utf-8"
     )
@@ -78,11 +115,13 @@ def test_transaction_and_failure_inventories_have_real_regression_anchors() -> N
         encoding="utf-8"
     )
 
+    assert "registeredEntriesAreClosedAndRuntimeModeChecksAreEnforced" in transaction_test
     for evidence in (
+        "workUsesOneActiveSessionAndRestoresItsPriorPolicy",
         "restorationFailureIsVisibleAndCannotReturnAContaminatedSuccess",
-        "entryInventoryIsClosedAndCarriesModeLockOrderAndWritePolicy",
+        "inactiveTransactionCannotChangeSessionPolicy",
     ):
-        assert evidence in transaction_test
+        assert evidence in bounded_test
     for evidence in (
         "repeatedRealMysqlLockCodesBecomeAttributedIndeterminateWithoutMutation",
         "confirmedAbsenceAuthorizesExactlyOneFinalMutation",
@@ -96,6 +135,30 @@ def test_transaction_and_failure_inventories_have_real_regression_anchors() -> N
         "realMysqlLockCompetitionReobservesTheCommittedPendingSibling",
     ):
         assert evidence in integration_test
+
+    refund_transaction_test = (
+        REFUND_TEST / "RefundTransactionsTest.java"
+    ).read_text(encoding="utf-8")
+    refund_concurrency_test = (
+        REFUND_TEST / "RefundConcurrencyTest.java"
+    ).read_text(encoding="utf-8")
+    refund_integration_test = (
+        REFUND_TEST / "RefundIntegrationTest.java"
+    ).read_text(encoding="utf-8")
+    assert "entryInventoryIsClosedAndRuntimeModeChecksAreEnforced" in refund_transaction_test
+    assert "onlyMysql1205And1213AnywhereInTheCauseChainAreContention" in refund_transaction_test
+    assert "repeatedMysql1205ObservationIsIndeterminateWithoutMutationOrExceptionEscape" in (
+        refund_concurrency_test
+    )
+    for evidence in (
+        "callbackShapedAttemptLockBoundsDirectAndLifecycleObservationAndRestoresPoolPolicy",
+        "realMysql1205RollsBackInitialRequestThenNewTransactionReplaysSiblingTruth",
+        "controlledMysql1213AtDirectBoundaryRollsBackBeforeCommittedReplay",
+        "realMysqlDeadlockAcceptsEitherVictimAndRollsBackBothBoundedParticipants",
+        "realMysql1213RollsBackLifecycleBeforeBoundedReobservation",
+        "realMysql1213BoundsReconciliationWithoutReportingContradiction",
+    ):
+        assert evidence in refund_integration_test
 
 
 def test_visibility_and_request_acquisition_are_locking_bounded_and_total() -> None:

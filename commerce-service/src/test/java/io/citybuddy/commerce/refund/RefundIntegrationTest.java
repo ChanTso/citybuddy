@@ -10,6 +10,8 @@ import com.nimbusds.jose.JWSHeader;
 import com.nimbusds.jose.crypto.RSASSASigner;
 import com.nimbusds.jwt.JWTClaimsSet;
 import com.nimbusds.jwt.SignedJWT;
+import com.zaxxer.hikari.HikariConfig;
+import com.zaxxer.hikari.HikariDataSource;
 import io.citybuddy.commerce.action.ActionException;
 import io.citybuddy.commerce.action.ActionProperties;
 import io.citybuddy.commerce.action.ActionReceiptView;
@@ -18,6 +20,7 @@ import io.citybuddy.commerce.action.ActionRequestContext;
 import io.citybuddy.commerce.action.ActionService;
 import io.citybuddy.commerce.action.PendingActionView;
 import io.citybuddy.commerce.action.PrepareActionCommand;
+import io.citybuddy.commerce.mysql.BoundedMySqlTransactions;
 import io.citybuddy.commerce.payment.MockPaymentCallbackRequest;
 import io.citybuddy.commerce.payment.MockPaymentRepository;
 import io.citybuddy.commerce.payment.MockPaymentRequest;
@@ -33,6 +36,8 @@ import java.nio.file.Path;
 import java.security.KeyFactory;
 import java.security.interfaces.RSAPrivateKey;
 import java.security.spec.PKCS8EncodedKeySpec;
+import java.sql.Connection;
+import java.sql.DriverManager;
 import java.sql.SQLException;
 import java.time.Clock;
 import java.time.Instant;
@@ -45,13 +50,20 @@ import java.util.Optional;
 import java.util.UUID;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.ExecutionException;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicInteger;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.condition.EnabledIfEnvironmentVariable;
 import org.springframework.beans.factory.ObjectProvider;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.boot.test.web.client.TestRestTemplate;
+import org.springframework.dao.CannotAcquireLockException;
 import org.springframework.dao.DataAccessException;
 import org.springframework.http.HttpEntity;
 import org.springframework.http.HttpHeaders;
@@ -59,11 +71,15 @@ import org.springframework.http.HttpMethod;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
 import org.springframework.jdbc.core.JdbcTemplate;
+import org.springframework.jdbc.datasource.DataSourceTransactionManager;
 import org.springframework.jdbc.datasource.DriverManagerDataSource;
+import org.springframework.jdbc.datasource.SingleConnectionDataSource;
 import org.springframework.test.context.DynamicPropertyRegistry;
 import org.springframework.test.context.DynamicPropertySource;
 import org.springframework.transaction.PlatformTransactionManager;
 import org.springframework.transaction.TransactionDefinition;
+import org.springframework.transaction.support.TransactionSynchronization;
+import org.springframework.transaction.support.TransactionSynchronizationManager;
 import org.springframework.transaction.support.TransactionTemplate;
 
 @EnabledIfEnvironmentVariable(named = "CATALOG_INTEGRATION", matches = "true")
@@ -106,6 +122,9 @@ class RefundIntegrationTest {
     registry.add("citybuddy.mock-payment.lock-wait-timeout-seconds", () -> "1");
     registry.add("citybuddy.refund.enabled", () -> "true");
     registry.add("citybuddy.refund.required-permission", () -> "refund:create");
+    registry.add("citybuddy.refund.lock-wait-timeout-seconds", () -> "1");
+    registry.add("citybuddy.refund.maximum-observation-attempts", () -> "2");
+    registry.add("citybuddy.refund.observation-backoff", () -> "25ms");
     registry.add("citybuddy.obo.enabled", () -> "true");
     registry.add("citybuddy.obo.issuer", () -> "https://identity.citybuddy.test");
     registry.add("citybuddy.obo.jwks-url", () -> required("IDENTITY_JWKS_URL"));
@@ -1035,6 +1054,551 @@ class RefundIntegrationTest {
   }
 
   @Test
+  void callbackShapedAttemptLockBoundsDirectAndLifecycleObservationAndRestoresPoolPolicy()
+      throws Exception {
+    PaidFixture paid = seedPaidStandard(875, "refund-physical-lock");
+    long outboxBefore = jdbc.queryForObject("SELECT COUNT(*) FROM commerce_outbox", Long.class);
+    long pendingBefore = jdbc.queryForObject("SELECT COUNT(*) FROM pending_action", Long.class);
+    long receiptBefore = jdbc.queryForObject("SELECT COUNT(*) FROM action_receipt", Long.class);
+    ExecutorService executor = Executors.newSingleThreadExecutor();
+    try (HikariDataSource targetDataSource = singleConnectionRefundDataSource();
+        Connection sibling =
+            DriverManager.getConnection(
+                required("CATALOG_MYSQL_URL"),
+                "commerce_app",
+                required("MYSQL_COMMERCE_APP_PASSWORD"))) {
+      JdbcTemplate targetJdbc = new JdbcTemplate(targetDataSource);
+      targetJdbc.execute("SET SESSION innodb_lock_wait_timeout = 7");
+      assertThat(targetJdbc.queryForObject("SELECT @@SESSION.innodb_lock_wait_timeout", Long.class))
+          .isEqualTo(7L);
+      RefundService bounded =
+          service(new RefundRepository(targetJdbc, objectMapper), targetDataSource);
+
+      sibling.setAutoCommit(false);
+      JdbcTemplate siblingJdbc = new JdbcTemplate(new SingleConnectionDataSource(sibling, true));
+      assertThat(
+              siblingJdbc.queryForObject(
+                  "SELECT attempt_id FROM mock_payment_attempt WHERE attempt_id = ? FOR UPDATE",
+                  String.class,
+                  paid.attemptId()))
+          .isEqualTo(paid.attemptId());
+
+      long started = System.nanoTime();
+      Future<RefundResult> request =
+          executor.submit(
+              () ->
+                  bounded.request(
+                      USER,
+                      paid.orderId(),
+                      "refund-physical-lock",
+                      new RefundRequest(875L, "AUD", null)));
+      assertThatThrownBy(() -> futureResult(request))
+          .isInstanceOfSatisfying(
+              RefundException.class,
+              exception -> {
+                assertThat(exception.status()).isEqualTo(429);
+                assertThat(exception.reason())
+                    .isEqualTo(RefundRejectionReason.REFUND_CONCURRENCY_OBSERVATION_INDETERMINATE);
+              });
+      assertThat(TimeUnit.NANOSECONDS.toSeconds(System.nanoTime() - started)).isLessThan(8);
+      assertThat(refundCount(paid.orderId())).isZero();
+      assertThat(refundMovementCount(paid.orderId())).isZero();
+      assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM commerce_outbox", Long.class))
+          .isEqualTo(outboxBefore);
+      assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM pending_action", Long.class))
+          .isEqualTo(pendingBefore);
+      assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM action_receipt", Long.class))
+          .isEqualTo(receiptBefore);
+      assertThat(targetJdbc.queryForObject("SELECT @@SESSION.innodb_lock_wait_timeout", Long.class))
+          .isEqualTo(7L);
+      sibling.rollback();
+
+      RefundResult requested =
+          bounded.request(
+              USER, paid.orderId(), "refund-physical-lock", new RefundRequest(875L, "AUD", null));
+      sibling.setAutoCommit(false);
+      assertThat(
+              siblingJdbc.queryForObject(
+                  "SELECT attempt_id FROM mock_payment_attempt WHERE attempt_id = ? FOR UPDATE",
+                  String.class,
+                  paid.attemptId()))
+          .isEqualTo(paid.attemptId());
+      assertThatThrownBy(() -> bounded.markProcessing(requested.refundId()))
+          .isInstanceOf(RefundIndeterminateException.class);
+      assertThat(refundState(requested.refundId())).containsExactly("REQUESTED", "1", "0");
+      assertThatThrownBy(() -> bounded.reconcile(requested.refundId()))
+          .isInstanceOf(RefundIndeterminateException.class);
+      assertThat(refundState(requested.refundId())).containsExactly("REQUESTED", "1", "0");
+      assertThat(targetJdbc.queryForObject("SELECT @@SESSION.innodb_lock_wait_timeout", Long.class))
+          .isEqualTo(7L);
+      sibling.rollback();
+    } finally {
+      executor.shutdownNow();
+    }
+  }
+
+  @Test
+  void realMysql1205RollsBackInitialRequestThenNewTransactionReplaysSiblingTruth()
+      throws Exception {
+    PaidFixture paid = seedPaidStandard(900, "refund-1205-replay");
+    String refundId = UUID.randomUUID().toString();
+    String idempotencyKey = "refund-1205-replay";
+    long pendingBefore = jdbc.queryForObject("SELECT COUNT(*) FROM pending_action", Long.class);
+    long receiptBefore = jdbc.queryForObject("SELECT COUNT(*) FROM action_receipt", Long.class);
+    ExecutorService executor = Executors.newSingleThreadExecutor();
+    CountDownLatch initialRollback = new CountDownLatch(1);
+    CountDownLatch observationStarted = new CountDownLatch(1);
+    AtomicBoolean rollbackCompleted = new AtomicBoolean();
+    AtomicBoolean observationStartedBeforeRollback = new AtomicBoolean();
+    AtomicInteger requestCalls = new AtomicInteger();
+    AtomicInteger initialMysqlError = new AtomicInteger();
+    AtomicInteger initialCompletionStatus = new AtomicInteger(Integer.MIN_VALUE);
+    String rolledBackFixtureEvent = UUID.randomUUID().toString();
+    try (HikariDataSource targetDataSource = singleConnectionRefundDataSource();
+        Connection sibling =
+            DriverManager.getConnection(
+                required("CATALOG_MYSQL_URL"),
+                "commerce_app",
+                required("MYSQL_COMMERCE_APP_PASSWORD"))) {
+      JdbcTemplate targetJdbc = new JdbcTemplate(targetDataSource);
+      targetJdbc.execute("SET SESSION innodb_lock_wait_timeout = 7");
+      RefundRepository observedRefunds =
+          new RefundRepository(targetJdbc, objectMapper) {
+            @Override
+            public Optional<RefundRecord> findByRequestForUpdate(
+                String user, String orderId, String key) {
+              int call = requestCalls.incrementAndGet();
+              if (call > 1) {
+                observationStartedBeforeRollback.set(!rollbackCompleted.get());
+                observationStarted.countDown();
+                return super.findByRequestForUpdate(user, orderId, key);
+              }
+              TransactionSynchronizationManager.registerSynchronization(
+                  new TransactionSynchronization() {
+                    @Override
+                    public void afterCompletion(int status) {
+                      initialCompletionStatus.set(status);
+                      rollbackCompleted.set(true);
+                      initialRollback.countDown();
+                    }
+                  });
+              targetJdbc.update(
+                  """
+                  INSERT INTO commerce_outbox
+                    (event_id, aggregate_type, aggregate_id, aggregate_version, event_type, payload)
+                  VALUES (?, 'REFUND_ROLLBACK_FIXTURE', ?, 1, 'CONTROLLED_PRE_LOCK_WRITE',
+                          JSON_OBJECT('fixture', true))
+                  """,
+                  rolledBackFixtureEvent,
+                  paid.orderId());
+              try {
+                return super.findByRequestForUpdate(user, orderId, key);
+              } catch (RuntimeException failure) {
+                initialMysqlError.compareAndSet(0, mysqlVendorCode(failure));
+                throw failure;
+              }
+            }
+          };
+      RefundService bounded = service(observedRefunds, targetDataSource);
+
+      sibling.setAutoCommit(false);
+      JdbcTemplate siblingJdbc = new JdbcTemplate(new SingleConnectionDataSource(sibling, true));
+      siblingJdbc.update(
+          """
+          INSERT INTO mock_refund
+            (refund_id, user_subject, order_id, order_kind, payment_attempt_id,
+             request_idempotency_key, intent_hash, eligible_amount_minor,
+             requested_amount_minor, currency)
+          VALUES (?, ?, ?, 'STANDARD', ?, ?, SHA2(?, 256), 900, 300, 'AUD')
+          """,
+          refundId,
+          USER,
+          paid.orderId(),
+          paid.attemptId(),
+          idempotencyKey,
+          paid.orderId() + "\n300\nAUD");
+      siblingJdbc.update(
+          """
+          INSERT INTO commerce_outbox
+            (event_id, aggregate_type, aggregate_id, aggregate_version, event_type, payload)
+          VALUES (?, 'REFUND', ?, 1, 'REFUND_REQUESTED',
+                  JSON_OBJECT('refundId', ?, 'stateVersion', 1))
+          """,
+          UUID.randomUUID().toString(),
+          refundId,
+          refundId);
+
+      Future<RefundResult> request =
+          executor.submit(
+              () ->
+                  bounded.request(
+                      USER, paid.orderId(), idempotencyKey, new RefundRequest(300L, "AUD", null)));
+      assertThat(initialRollback.await(5, TimeUnit.SECONDS)).isTrue();
+      assertThat(initialMysqlError).hasValue(1205);
+      assertThat(initialCompletionStatus).hasValue(TransactionSynchronization.STATUS_ROLLED_BACK);
+      assertThat(
+              jdbc.queryForObject(
+                  "SELECT COUNT(*) FROM commerce_outbox WHERE event_id = ?",
+                  Long.class,
+                  rolledBackFixtureEvent))
+          .isZero();
+      assertThat(observationStarted.await(5, TimeUnit.SECONDS)).isTrue();
+      assertThat(observationStartedBeforeRollback).isFalse();
+      sibling.commit();
+
+      RefundResult replay = futureResult(request);
+      assertThat(requestCalls).hasValue(2);
+      assertThat(replay.refundId()).isEqualTo(refundId);
+      assertThat(replay.replayed()).isTrue();
+      assertThat(refundCount(paid.orderId())).isOne();
+      assertThat(refundMovementCount(paid.orderId())).isZero();
+      assertThat(refundOutboxCount(refundId)).isOne();
+      assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM pending_action", Long.class))
+          .isEqualTo(pendingBefore);
+      assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM action_receipt", Long.class))
+          .isEqualTo(receiptBefore);
+      assertThat(targetJdbc.queryForObject("SELECT @@SESSION.innodb_lock_wait_timeout", Long.class))
+          .isEqualTo(7L);
+    } finally {
+      executor.shutdownNow();
+    }
+  }
+
+  @Test
+  void controlledMysql1213AtDirectBoundaryRollsBackBeforeCommittedReplay() {
+    PaidFixture paid = seedPaidStandard(910, "refund-direct-controlled-deadlock");
+    String idempotencyKey = "refund-direct-controlled-deadlock";
+    RefundResult committed =
+        refunds.request(USER, paid.orderId(), idempotencyKey, new RefundRequest(300L, "AUD", null));
+    long refundCountBefore = refundCount(paid.orderId());
+    long outboxBefore = jdbc.queryForObject("SELECT COUNT(*) FROM commerce_outbox", Long.class);
+    long pendingBefore = jdbc.queryForObject("SELECT COUNT(*) FROM pending_action", Long.class);
+    long receiptBefore = jdbc.queryForObject("SELECT COUNT(*) FROM action_receipt", Long.class);
+    AtomicInteger calls = new AtomicInteger();
+    AtomicInteger initialCompletionStatus = new AtomicInteger(Integer.MIN_VALUE);
+    AtomicBoolean initialRolledBack = new AtomicBoolean();
+    AtomicBoolean observationStartedBeforeRollback = new AtomicBoolean();
+    try (HikariDataSource targetDataSource = singleConnectionRefundDataSource()) {
+      JdbcTemplate targetJdbc = new JdbcTemplate(targetDataSource);
+      targetJdbc.execute("SET SESSION innodb_lock_wait_timeout = 7");
+      RefundRepository observedRefunds =
+          new RefundRepository(targetJdbc, objectMapper) {
+            @Override
+            public Optional<RefundRecord> findByRequestForUpdate(
+                String user, String orderId, String key) {
+              if (calls.incrementAndGet() == 1) {
+                TransactionSynchronizationManager.registerSynchronization(
+                    new TransactionSynchronization() {
+                      @Override
+                      public void afterCompletion(int status) {
+                        initialCompletionStatus.set(status);
+                        initialRolledBack.set(true);
+                      }
+                    });
+                throw mysqlContention(1213);
+              }
+              observationStartedBeforeRollback.set(!initialRolledBack.get());
+              return super.findByRequestForUpdate(user, orderId, key);
+            }
+          };
+      RefundResult replay =
+          service(observedRefunds, targetDataSource)
+              .request(USER, paid.orderId(), idempotencyKey, new RefundRequest(300L, "AUD", null));
+
+      assertThat(replay.refundId()).isEqualTo(committed.refundId());
+      assertThat(replay.replayed()).isTrue();
+      assertThat(calls).hasValue(2);
+      assertThat(initialCompletionStatus).hasValue(TransactionSynchronization.STATUS_ROLLED_BACK);
+      assertThat(observationStartedBeforeRollback).isFalse();
+      assertThat(refundCount(paid.orderId())).isEqualTo(refundCountBefore);
+      assertThat(refundMovementCount(paid.orderId())).isZero();
+      assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM commerce_outbox", Long.class))
+          .isEqualTo(outboxBefore);
+      assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM pending_action", Long.class))
+          .isEqualTo(pendingBefore);
+      assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM action_receipt", Long.class))
+          .isEqualTo(receiptBefore);
+      assertThat(targetJdbc.queryForObject("SELECT @@SESSION.innodb_lock_wait_timeout", Long.class))
+          .isEqualTo(7L);
+    }
+  }
+
+  @Test
+  void realMysqlDeadlockAcceptsEitherVictimAndRollsBackBothBoundedParticipants() throws Exception {
+    String anchorX = UUID.randomUUID().toString();
+    String anchorY = UUID.randomUUID().toString();
+    String participantAWrite = UUID.randomUUID().toString();
+    String participantBWrite = UUID.randomUUID().toString();
+    List<String> fixtureEvents = List.of(anchorX, anchorY, participantAWrite, participantBWrite);
+    insertDeadlockFixtureEvent(anchorX, "anchor-x");
+    insertDeadlockFixtureEvent(anchorY, "anchor-y");
+    long deadlocksBefore = mysqlDeadlockCount();
+    ExecutorService executor = Executors.newFixedThreadPool(2);
+    CountDownLatch aLocked = new CountDownLatch(1);
+    CountDownLatch bLocked = new CountDownLatch(1);
+    CountDownLatch aCompleted = new CountDownLatch(1);
+    CountDownLatch bCompleted = new CountDownLatch(1);
+    AtomicInteger aCompletionStatus = new AtomicInteger(Integer.MIN_VALUE);
+    AtomicInteger bCompletionStatus = new AtomicInteger(Integer.MIN_VALUE);
+    try (HikariDataSource aDataSource = singleConnectionRefundDataSource();
+        HikariDataSource bDataSource = singleConnectionRefundDataSource()) {
+      JdbcTemplate aJdbc = new JdbcTemplate(aDataSource);
+      JdbcTemplate bJdbc = new JdbcTemplate(bDataSource);
+      aJdbc.execute("SET SESSION innodb_lock_wait_timeout = 7");
+      bJdbc.execute("SET SESSION innodb_lock_wait_timeout = 9");
+      RefundTransactions aTransactions = refundTransactions(aDataSource, 5);
+      RefundTransactions bTransactions = refundTransactions(bDataSource, 5);
+
+      Future<Object> participantA =
+          executor.submit(
+              () ->
+                  aTransactions.mutate(
+                      RefundTransactions.Entry.RECONCILE_MUTATION,
+                      () -> {
+                        registerRollbackObservation(aCompletionStatus, aCompleted);
+                        insertDeadlockFixtureEvent(aJdbc, participantAWrite, "participant-a");
+                        lockDeadlockFixtureEvent(aJdbc, anchorX);
+                        aLocked.countDown();
+                        awaitLatch(bLocked, "Deadlock participant B did not lock row Y");
+                        lockDeadlockFixtureEvent(aJdbc, anchorY);
+                        throw new ControlledFixtureRollback();
+                      }));
+      Future<Object> participantB =
+          executor.submit(
+              () ->
+                  bTransactions.mutate(
+                      RefundTransactions.Entry.RECONCILE_MUTATION,
+                      () -> {
+                        registerRollbackObservation(bCompletionStatus, bCompleted);
+                        insertDeadlockFixtureEvent(bJdbc, participantBWrite, "participant-b");
+                        lockDeadlockFixtureEvent(bJdbc, anchorY);
+                        bLocked.countDown();
+                        awaitLatch(aLocked, "Deadlock participant A did not lock row X");
+                        lockDeadlockFixtureEvent(bJdbc, anchorX);
+                        throw new ControlledFixtureRollback();
+                      }));
+
+      Throwable aFailure = futureFailure(participantA);
+      Throwable bFailure = futureFailure(participantB);
+      assertThat(aCompleted.await(5, TimeUnit.SECONDS)).isTrue();
+      assertThat(bCompleted.await(5, TimeUnit.SECONDS)).isTrue();
+      assertThat(aCompletionStatus).hasValue(TransactionSynchronization.STATUS_ROLLED_BACK);
+      assertThat(bCompletionStatus).hasValue(TransactionSynchronization.STATUS_ROLLED_BACK);
+      assertThat(List.of(aFailure, bFailure).stream().filter(f -> mysqlVendorCode(f) == 1213))
+          .hasSize(1);
+      assertThat(
+              List.of(aFailure, bFailure).stream()
+                  .filter(ControlledFixtureRollback.class::isInstance))
+          .hasSize(1);
+      assertThat(mysqlDeadlockCount()).isGreaterThan(deadlocksBefore);
+      assertThat(aJdbc.queryForObject("SELECT @@SESSION.innodb_lock_wait_timeout", Long.class))
+          .isEqualTo(7L);
+      assertThat(bJdbc.queryForObject("SELECT @@SESSION.innodb_lock_wait_timeout", Long.class))
+          .isEqualTo(9L);
+      assertThat(
+              jdbc.queryForObject(
+                  "SELECT COUNT(*) FROM commerce_outbox WHERE event_id IN (?, ?)",
+                  Long.class,
+                  participantAWrite,
+                  participantBWrite))
+          .isZero();
+      lockDeadlockFixtureEvent(jdbc, anchorX);
+      lockDeadlockFixtureEvent(jdbc, anchorY);
+    } finally {
+      executor.shutdownNow();
+      rootJdbc()
+          .update(
+              "DELETE FROM commerce_outbox WHERE event_id IN (?, ?, ?, ?)",
+              fixtureEvents.toArray());
+    }
+  }
+
+  @Test
+  void realMysql1213RollsBackLifecycleBeforeBoundedReobservation() throws Exception {
+    PaidFixture paid = seedPaidStandard(925, "refund-real-deadlock");
+    RefundResult requested =
+        refunds.request(
+            USER, paid.orderId(), "refund-real-deadlock", new RefundRequest(925L, "AUD", null));
+    ExecutorService executor = Executors.newFixedThreadPool(2);
+    CountDownLatch attemptLocked = new CountDownLatch(1);
+    CountDownLatch allowLifecycleToContinue = new CountDownLatch(1);
+    AtomicBoolean firstAttemptLock = new AtomicBoolean(true);
+    AtomicInteger lifecycleMysqlError = new AtomicInteger();
+    try (HikariDataSource targetDataSource = singleConnectionRefundDataSource();
+        Connection sibling =
+            DriverManager.getConnection(
+                required("CATALOG_MYSQL_URL"),
+                "commerce_app",
+                required("MYSQL_COMMERCE_APP_PASSWORD"))) {
+      JdbcTemplate targetJdbc = new JdbcTemplate(targetDataSource);
+      targetJdbc.execute("SET SESSION innodb_lock_wait_timeout = 7");
+      MockPaymentRepository pausedPayments =
+          new MockPaymentRepository(targetJdbc) {
+            @Override
+            public Optional<AttemptRecord> findAttemptByIdForUpdate(String attemptId) {
+              Optional<AttemptRecord> result = super.findAttemptByIdForUpdate(attemptId);
+              if (firstAttemptLock.compareAndSet(true, false)) {
+                attemptLocked.countDown();
+                awaitLatch(
+                    allowLifecycleToContinue, "Refund lifecycle deadlock fixture was not released");
+              }
+              return result;
+            }
+          };
+      RefundRepository observedRefunds =
+          new RefundRepository(targetJdbc, objectMapper) {
+            @Override
+            public Optional<RefundRecord> findByIdForUpdate(String refundId) {
+              try {
+                return super.findByIdForUpdate(refundId);
+              } catch (RuntimeException failure) {
+                lifecycleMysqlError.compareAndSet(0, mysqlVendorCode(failure));
+                throw failure;
+              }
+            }
+          };
+      RefundService bounded = service(observedRefunds, pausedPayments, targetDataSource);
+
+      sibling.setAutoCommit(false);
+      JdbcTemplate siblingJdbc = new JdbcTemplate(new SingleConnectionDataSource(sibling, true));
+      List<String> siblingRollbackEvents =
+          addDeadlockVictimWeight(siblingJdbc, "lifecycle:" + requested.refundId());
+      assertThat(
+              siblingJdbc.queryForObject(
+                  "SELECT refund_id FROM mock_refund WHERE refund_id = ? FOR UPDATE",
+                  String.class,
+                  requested.refundId()))
+          .isEqualTo(requested.refundId());
+
+      Future<RefundResult> lifecycle =
+          executor.submit(() -> bounded.markProcessing(requested.refundId()));
+      assertThat(attemptLocked.await(5, TimeUnit.SECONDS)).isTrue();
+      Future<String> callbackAttemptLock =
+          executor.submit(
+              () ->
+                  siblingJdbc.queryForObject(
+                      "SELECT attempt_id FROM mock_payment_attempt "
+                          + "WHERE attempt_id = ? FOR UPDATE",
+                      String.class,
+                      paid.attemptId()));
+      waitForMysqlLockWait();
+      allowLifecycleToContinue.countDown();
+
+      assertThatThrownBy(() -> futureResult(lifecycle))
+          .isInstanceOf(RefundIndeterminateException.class);
+      assertThat(callbackAttemptLock.get(5, TimeUnit.SECONDS)).isEqualTo(paid.attemptId());
+      assertThat(lifecycleMysqlError).hasValue(1213);
+      assertThat(refundState(requested.refundId())).containsExactly("REQUESTED", "1", "0");
+      assertThat(refundMovementCount(paid.orderId())).isZero();
+      assertThat(refundOutboxCount(requested.refundId())).isOne();
+      assertThat(targetJdbc.queryForObject("SELECT @@SESSION.innodb_lock_wait_timeout", Long.class))
+          .isEqualTo(7L);
+      sibling.rollback();
+      assertRolledBackEvents(siblingRollbackEvents);
+    } finally {
+      allowLifecycleToContinue.countDown();
+      executor.shutdownNow();
+    }
+  }
+
+  @Test
+  void realMysql1213BoundsReconciliationWithoutReportingContradiction() throws Exception {
+    PaidFixture paid = seedPaidStandard(930, "refund-reconcile-deadlock");
+    RefundResult requested =
+        refunds.request(
+            USER,
+            paid.orderId(),
+            "refund-reconcile-deadlock",
+            new RefundRequest(310L, "AUD", null));
+    ExecutorService executor = Executors.newFixedThreadPool(2);
+    CountDownLatch attemptLocked = new CountDownLatch(1);
+    CountDownLatch allowReconciliationToContinue = new CountDownLatch(1);
+    AtomicBoolean firstAttemptLock = new AtomicBoolean(true);
+    AtomicInteger reconciliationMysqlError = new AtomicInteger();
+    try (HikariDataSource targetDataSource = singleConnectionRefundDataSource();
+        Connection sibling =
+            DriverManager.getConnection(
+                required("CATALOG_MYSQL_URL"),
+                "commerce_app",
+                required("MYSQL_COMMERCE_APP_PASSWORD"))) {
+      JdbcTemplate targetJdbc = new JdbcTemplate(targetDataSource);
+      targetJdbc.execute("SET SESSION innodb_lock_wait_timeout = 7");
+      MockPaymentRepository pausedPayments =
+          new MockPaymentRepository(targetJdbc) {
+            @Override
+            public Optional<AttemptRecord> findAttemptByIdForUpdate(String attemptId) {
+              Optional<AttemptRecord> result = super.findAttemptByIdForUpdate(attemptId);
+              if (firstAttemptLock.compareAndSet(true, false)) {
+                attemptLocked.countDown();
+                awaitLatch(
+                    allowReconciliationToContinue,
+                    "Refund reconciliation deadlock fixture was not released");
+              }
+              return result;
+            }
+          };
+      RefundRepository observedRefunds =
+          new RefundRepository(targetJdbc, objectMapper) {
+            @Override
+            public Optional<RefundRecord> findByIdForUpdate(String refundId) {
+              try {
+                return super.findByIdForUpdate(refundId);
+              } catch (RuntimeException failure) {
+                reconciliationMysqlError.compareAndSet(0, mysqlVendorCode(failure));
+                throw failure;
+              }
+            }
+          };
+      RefundService bounded = service(observedRefunds, pausedPayments, targetDataSource);
+
+      sibling.setAutoCommit(false);
+      JdbcTemplate siblingJdbc = new JdbcTemplate(new SingleConnectionDataSource(sibling, true));
+      List<String> siblingRollbackEvents =
+          addDeadlockVictimWeight(siblingJdbc, "reconcile:" + requested.refundId());
+      assertThat(
+              siblingJdbc.queryForObject(
+                  "SELECT refund_id FROM mock_refund WHERE refund_id = ? FOR UPDATE",
+                  String.class,
+                  requested.refundId()))
+          .isEqualTo(requested.refundId());
+
+      Future<RefundReconciliationResult> reconciliation =
+          executor.submit(() -> bounded.reconcile(requested.refundId()));
+      assertThat(attemptLocked.await(5, TimeUnit.SECONDS)).isTrue();
+      Future<String> callbackAttemptLock =
+          executor.submit(
+              () ->
+                  siblingJdbc.queryForObject(
+                      "SELECT attempt_id FROM mock_payment_attempt "
+                          + "WHERE attempt_id = ? FOR UPDATE",
+                      String.class,
+                      paid.attemptId()));
+      waitForMysqlLockWait();
+      allowReconciliationToContinue.countDown();
+
+      assertThatThrownBy(() -> futureResult(reconciliation))
+          .isInstanceOfSatisfying(
+              RefundIndeterminateException.class,
+              exception ->
+                  assertThat(exception.reason())
+                      .isEqualTo(
+                          RefundRejectionReason.REFUND_CONCURRENCY_OBSERVATION_INDETERMINATE));
+      assertThat(callbackAttemptLock.get(5, TimeUnit.SECONDS)).isEqualTo(paid.attemptId());
+      assertThat(reconciliationMysqlError).hasValue(1213);
+      assertThat(refundState(requested.refundId())).containsExactly("REQUESTED", "1", "0");
+      assertThat(refundMovementCount(paid.orderId())).isZero();
+      assertThat(refundOutboxCount(requested.refundId())).isOne();
+      assertThat(targetJdbc.queryForObject("SELECT @@SESSION.innodb_lock_wait_timeout", Long.class))
+          .isEqualTo(7L);
+      sibling.rollback();
+      assertRolledBackEvents(siblingRollbackEvents);
+    } finally {
+      allowReconciliationToContinue.countDown();
+      executor.shutdownNow();
+    }
+  }
+
+  @Test
   void transactionEndFailureRollsBackRefundLedgerAggregateAndOutboxThenReplaySucceeds() {
     PaidFixture paid = seedPaidStandard(800, "rollback");
     RefundResult requested =
@@ -1492,14 +2056,220 @@ class RefundIntegrationTest {
   }
 
   private RefundService service(RefundRepository repository) {
+    TransactionTemplate transaction = transactionTemplate();
     return new RefundService(
-        repository, new MockPaymentRepository(jdbc), transactionTemplate(), Clock.systemUTC());
+        repository,
+        new MockPaymentRepository(jdbc),
+        new RefundTransactions(
+            new BoundedMySqlTransactions(jdbc, transaction, 1), 2, java.time.Duration.ofMillis(25)),
+        Clock.systemUTC());
+  }
+
+  private RefundService service(RefundRepository repository, HikariDataSource targetDataSource) {
+    return service(repository, targetDataSource, 1);
+  }
+
+  private RefundService service(
+      RefundRepository repository, HikariDataSource targetDataSource, int lockWaitTimeoutSeconds) {
+    JdbcTemplate targetJdbc = new JdbcTemplate(targetDataSource);
+    return service(
+        repository,
+        new MockPaymentRepository(targetJdbc),
+        targetDataSource,
+        lockWaitTimeoutSeconds);
+  }
+
+  private RefundService service(
+      RefundRepository repository,
+      MockPaymentRepository paymentRepository,
+      HikariDataSource targetDataSource) {
+    return service(repository, paymentRepository, targetDataSource, 1);
+  }
+
+  private RefundService service(
+      RefundRepository repository,
+      MockPaymentRepository paymentRepository,
+      HikariDataSource targetDataSource,
+      int lockWaitTimeoutSeconds) {
+    JdbcTemplate targetJdbc = new JdbcTemplate(targetDataSource);
+    TransactionTemplate transaction =
+        new TransactionTemplate(new DataSourceTransactionManager(targetDataSource));
+    transaction.setPropagationBehavior(TransactionDefinition.PROPAGATION_REQUIRES_NEW);
+    return new RefundService(
+        repository,
+        paymentRepository,
+        new RefundTransactions(
+            new BoundedMySqlTransactions(targetJdbc, transaction, lockWaitTimeoutSeconds),
+            2,
+            java.time.Duration.ofMillis(25)),
+        Clock.systemUTC());
   }
 
   private TransactionTemplate transactionTemplate() {
     TransactionTemplate transactions = new TransactionTemplate(transactionManager);
     transactions.setPropagationBehavior(TransactionDefinition.PROPAGATION_REQUIRES_NEW);
     return transactions;
+  }
+
+  private static HikariDataSource singleConnectionRefundDataSource() {
+    HikariConfig config = new HikariConfig();
+    config.setPoolName("refund-lock-boundary-" + UUID.randomUUID());
+    config.setJdbcUrl(required("CATALOG_MYSQL_URL"));
+    config.setUsername("commerce_app");
+    config.setPassword(required("MYSQL_COMMERCE_APP_PASSWORD"));
+    config.setMaximumPoolSize(1);
+    config.setMinimumIdle(1);
+    config.setConnectionTimeout(5000);
+    return new HikariDataSource(config);
+  }
+
+  private static <T> T futureResult(Future<T> future) throws Exception {
+    return futureResult(future, 8);
+  }
+
+  private static <T> T futureResult(Future<T> future, int timeoutSeconds) throws Exception {
+    try {
+      return future.get(timeoutSeconds, TimeUnit.SECONDS);
+    } catch (ExecutionException exception) {
+      if (exception.getCause() instanceof RuntimeException runtime) {
+        throw runtime;
+      }
+      throw exception;
+    }
+  }
+
+  private static Throwable futureFailure(Future<?> future) throws Exception {
+    try {
+      future.get(8, TimeUnit.SECONDS);
+      throw new AssertionError("Controlled transaction unexpectedly committed");
+    } catch (ExecutionException exception) {
+      return exception.getCause();
+    }
+  }
+
+  private void waitForMysqlLockWait() {
+    long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(5);
+    JdbcTemplate root = rootJdbc();
+    while (System.nanoTime() < deadline) {
+      Long waits =
+          root.queryForObject(
+              "SELECT COUNT(*) FROM performance_schema.data_lock_waits", Long.class);
+      if (waits != null && waits > 0) {
+        return;
+      }
+      Thread.onSpinWait();
+    }
+    throw new IllegalStateException("Controlled MySQL lock wait was not observed");
+  }
+
+  private RefundTransactions refundTransactions(
+      HikariDataSource dataSource, int lockWaitTimeoutSeconds) {
+    JdbcTemplate targetJdbc = new JdbcTemplate(dataSource);
+    TransactionTemplate transaction =
+        new TransactionTemplate(new DataSourceTransactionManager(dataSource));
+    transaction.setPropagationBehavior(TransactionDefinition.PROPAGATION_REQUIRES_NEW);
+    return new RefundTransactions(
+        new BoundedMySqlTransactions(targetJdbc, transaction, lockWaitTimeoutSeconds),
+        2,
+        java.time.Duration.ofMillis(25));
+  }
+
+  private static void registerRollbackObservation(
+      AtomicInteger completionStatus, CountDownLatch completed) {
+    TransactionSynchronizationManager.registerSynchronization(
+        new TransactionSynchronization() {
+          @Override
+          public void afterCompletion(int status) {
+            completionStatus.set(status);
+            completed.countDown();
+          }
+        });
+  }
+
+  private void insertDeadlockFixtureEvent(String eventId, String aggregateId) {
+    insertDeadlockFixtureEvent(jdbc, eventId, aggregateId);
+  }
+
+  private static void insertDeadlockFixtureEvent(
+      JdbcTemplate targetJdbc, String eventId, String aggregateId) {
+    targetJdbc.update(
+        """
+        INSERT INTO commerce_outbox
+          (event_id, aggregate_type, aggregate_id, aggregate_version, event_type, payload)
+        VALUES (?, 'REFUND_DEADLOCK_FIXTURE', ?, 1, 'CONTROLLED_DEADLOCK',
+                JSON_OBJECT('fixture', true))
+        """,
+        eventId,
+        aggregateId);
+  }
+
+  private static void lockDeadlockFixtureEvent(JdbcTemplate targetJdbc, String eventId) {
+    assertThat(
+            targetJdbc.queryForObject(
+                "SELECT event_id FROM commerce_outbox WHERE event_id = ? FOR UPDATE",
+                String.class,
+                eventId))
+        .isEqualTo(eventId);
+  }
+
+  private long mysqlDeadlockCount() {
+    Long count =
+        rootJdbc()
+            .queryForObject(
+                "SELECT COUNT FROM information_schema.innodb_metrics "
+                    + "WHERE NAME = 'lock_deadlocks'",
+                Long.class);
+    if (count == null) {
+      throw new IllegalStateException("MySQL deadlock metric is unavailable");
+    }
+    return count;
+  }
+
+  private List<String> addDeadlockVictimWeight(JdbcTemplate siblingJdbc, String aggregateId) {
+    List<String> eventIds = new java.util.ArrayList<>();
+    for (int index = 0; index < 32; index++) {
+      String eventId = UUID.randomUUID().toString();
+      eventIds.add(eventId);
+      siblingJdbc.update(
+          """
+          INSERT INTO commerce_outbox
+            (event_id, aggregate_type, aggregate_id, aggregate_version, event_type, payload)
+          VALUES (?, 'REFUND_DEADLOCK_FIXTURE', ?, 1, 'CONTROLLED_LOCK_WEIGHT',
+                  JSON_OBJECT('fixture', true))
+          """,
+          eventId,
+          aggregateId + ":" + index);
+    }
+    return List.copyOf(eventIds);
+  }
+
+  private void assertRolledBackEvents(List<String> eventIds) {
+    assertThat(eventIds)
+        .allSatisfy(
+            eventId ->
+                assertThat(
+                        jdbc.queryForObject(
+                            "SELECT COUNT(*) FROM commerce_outbox WHERE event_id = ?",
+                            Long.class,
+                            eventId))
+                    .isZero());
+  }
+
+  private static int mysqlVendorCode(Throwable failure) {
+    Throwable current = failure;
+    while (current != null) {
+      if (current instanceof SQLException sql) {
+        return sql.getErrorCode();
+      }
+      current = current.getCause();
+    }
+    return 0;
+  }
+
+  private static CannotAcquireLockException mysqlContention(int vendorCode) {
+    return new CannotAcquireLockException(
+        "controlled MySQL contention",
+        new SQLException("controlled MySQL contention", "40001", vendorCode));
   }
 
   private SeckillCancellationService cancellations() {
@@ -1895,4 +2665,6 @@ class RefundIntegrationTest {
 
   private record SeckillFixture(
       String orderId, String productId, String activityId, SeckillTimeoutMessage timeout) {}
+
+  private static final class ControlledFixtureRollback extends RuntimeException {}
 }

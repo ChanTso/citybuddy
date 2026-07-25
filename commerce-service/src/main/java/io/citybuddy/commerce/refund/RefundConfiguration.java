@@ -1,6 +1,7 @@
 package io.citybuddy.commerce.refund;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
+import io.citybuddy.commerce.mysql.BoundedMySqlTransactions;
 import io.citybuddy.commerce.payment.MockPaymentRepository;
 import java.time.Clock;
 import org.springframework.beans.factory.ObjectProvider;
@@ -33,13 +34,20 @@ public class RefundConfiguration {
       RefundRepository refundRepository,
       JdbcTemplate jdbcTemplate,
       PlatformTransactionManager transactionManager,
+      RefundProperties properties,
       @Qualifier("catalogClock") ObjectProvider<Clock> catalogClock) {
     TransactionTemplate transaction = new TransactionTemplate(transactionManager);
     transaction.setPropagationBehavior(TransactionDefinition.PROPAGATION_REQUIRES_NEW);
+    RefundTransactions transactions =
+        new RefundTransactions(
+            new BoundedMySqlTransactions(
+                jdbcTemplate, transaction, properties.lockWaitTimeoutSeconds()),
+            properties.maximumObservationAttempts(),
+            properties.observationBackoff());
     return new RefundService(
         refundRepository,
         new MockPaymentRepository(jdbcTemplate),
-        transaction,
+        transactions,
         catalogClock.getIfAvailable(Clock::systemUTC));
   }
 }

@@ -69,6 +69,48 @@ def test_openapi_exposes_only_closed_prepare_and_confirm_shapes() -> None:
     assert receipt["properties"]["status"]["const"] == "REQUESTED"
 
 
+def test_direct_refund_public_statuses_and_error_shape_are_closed() -> None:
+    document = json.loads(source("commerce-service/src/main/resources/openapi.json"))
+    operation = document["paths"]["/api/orders/{orderId}/refunds"]["post"]
+    assert set(operation["responses"]) == {
+        "200",
+        "201",
+        "400",
+        "401",
+        "403",
+        "404",
+        "409",
+        "429",
+        "503",
+    }
+    for status in ("400", "401", "403", "404", "409", "429", "503"):
+        schema = operation["responses"][status]["content"]["application/json"]["schema"]
+        assert schema == {"$ref": "#/components/schemas/RefundError"}
+
+    error = document["components"]["schemas"]["RefundError"]
+    assert error["additionalProperties"] is False
+    assert set(error["required"]) == {"category", "message"}
+    assert set(error["properties"]["category"]["enum"]) == {
+        "VALIDATION",
+        "AUTHENTICATION",
+        "AUTHORIZATION",
+        "NOT_FOUND",
+        "CONFLICT",
+        "INDETERMINATE",
+        "UNAVAILABLE",
+    }
+    serialized = json.dumps(error)
+    for internal in (
+        "reason",
+        "sql",
+        "lock",
+        "table",
+        "retry",
+        "REFUND_CONCURRENCY_OBSERVATION_INDETERMINATE",
+    ):
+        assert internal.lower() not in serialized.lower()
+
+
 def test_action_refund_reuses_payment_truth_and_one_transaction_event_time() -> None:
     payment = source(
         "commerce-service/src/main/java/io/citybuddy/commerce/payment/MockPaymentService.java"
