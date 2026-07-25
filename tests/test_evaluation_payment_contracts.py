@@ -440,27 +440,20 @@ def test_terminal_payment_callers_use_the_shared_complete_closure() -> None:
     ):
         assert field in visibility
         assert field in integration
-    classifier_fields = set(
-        re.findall(
-            r'"([^"]+)"',
-            re.search(
-                r"CLASSIFIED_COLUMNS\s*=\s*Set\.of\((.*?)\);",
-                visibility,
-                re.DOTALL,
-            ).group(1),
-        )
+    classifier_inventory = re.search(
+        r"CLASSIFIED_COLUMNS\s*=\s*Set\.of\((.*?)\);",
+        visibility,
+        re.DOTALL,
     )
-    matrix_fields = set(
-        re.findall(
-            r"^\s+([a-z_]+)\s*$",
-            re.search(
-                r"payment_start_visibility_fields=\(\n(.*?)\n\)",
-                integration,
-                re.DOTALL,
-            ).group(1),
-            re.MULTILINE,
-        )
+    assert classifier_inventory is not None
+    classifier_fields = set(re.findall(r'"([^"]+)"', classifier_inventory.group(1)))
+    matrix_inventory = re.search(
+        r"payment_start_visibility_fields=\(\n(.*?)\n\)",
+        integration,
+        re.DOTALL,
     )
+    assert matrix_inventory is not None
+    matrix_fields = set(re.findall(r"^\s+([a-z_]+)\s*$", matrix_inventory.group(1), re.MULTILINE))
     assert matrix_fields == classifier_fields
     assert "CallerColumnRole.VISIBILITY_INPUT" in (
         ROOT
