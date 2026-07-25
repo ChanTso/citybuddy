@@ -19,6 +19,19 @@
 4. Never split a `VERIFIED` or `IN_PROGRESS` slice. A `READY` slice may be replaced only before real implementation begins, when no unresolved implementation branch or pull request exists for it and the user explicitly approves the replacement map. New rows must have unique identifiers, unambiguous dependencies, and complete linked specifications where the rolling window requires them.
 5. Before a `PLANNED` slice enters the rolling specification window or becomes `READY`, apply a complexity gate. Route refinement is required when the proposed slice contains multiple independently deliverable outcomes with separable acceptance/rejection evidence, crosses multiple separable truth or transaction boundaries, or cannot reasonably be reviewed, tested, recovered, and merged as one coherent pull request. Do not split one atomic transaction, security boundary, or end-to-end invariant merely to reduce file count. The gate identifies a decision; it does not authorize a route change.
 6. Only one lane may be active at a time. Finish its review, required checks, merge, updated-main verification, and branch cleanup before starting another maintenance lane, route-refinement lane, or business slice.
+7. A `BLOCKED` slice may be superseded only when:
+   - its factual `BLOCKED` status and Completion record are merged to `main`;
+   - its implementation pull request is closed without merge and no unresolved implementation branch or open pull request remains;
+   - all configured required checks on the latest `main` commit have succeeded;
+   - the owner explicitly approves a Level 3 replacement map.
+
+   The original slice ID, Goal, `BLOCKED` status, blocker evidence, and failed implementation history remain immutable. Its Completion record may receive only an append-only supersession reference.
+
+   Replacement slices use new unique IDs and inherit no implementation, review, CI, verification, or resume-ready credit from the blocked pull request. Route refinement may add their specifications and remap only unstarted downstream dependencies.
+
+   The replacement map must preserve the original total outcome, truth ownership, security boundaries, atomic transaction boundaries, and dependency order. It must not split one atomic transaction or security boundary merely to reduce diff size.
+
+   The route-refinement lane must finish with exactly one eligible replacement slice `READY`, all other replacements `PLANNED`, no `IN_PROGRESS` row, and the original slice still `BLOCKED`.
 
 ## Quality and evidence
 
