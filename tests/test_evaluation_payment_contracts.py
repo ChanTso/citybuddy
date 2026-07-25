@@ -275,25 +275,25 @@ def test_terminal_payment_callers_use_the_shared_complete_closure() -> None:
 
     start_once = service[
         service.index("private MockPaymentResult startOnce") : service.index(
-            "private MockPaymentResult resolveExistingStart"
-        )
-    ]
-    existing_replay = service[
-        service.index("private MockPaymentResult resolveExistingStart") : service.index(
             "private MockPaymentCallbackResult callbackOnce"
         )
     ]
-    assert start_once.index("findAttemptByRequestForUpdate") < start_once.index(
-        "resolveExistingStart"
+    assert start_once.index("resolveStartCommandLocked(context)") < start_once.index(
+        "fenceSandbox(context.sandboxId());"
     )
-    assert start_once.index("resolveExistingStart") < start_once.index("fenceSandbox(sandboxId);")
-    assert existing_replay.index("resolveStartReplayLocked") < existing_replay.index(
-        "fenceSandbox(sandboxId);"
-    )
-    assert "committedStartResult(committed)" in existing_replay
-    assert "pendingStartResult(pending, true)" in existing_replay
+    assert "findAttemptByRequest" not in start_once
+    assert "findOrderForUpdate" not in start_once
+    assert "order.status()" not in start_once
+    assert "committedStartResult(committed.truth())" in start_once
+    assert "pendingStartResult(pending.truth(), true)" in start_once
+    assert "ConcealedStart" in start_once
+    assert "CreateEligible" in start_once
+    assert "PendingReplay" in start_once
+    assert "CommittedReplay" in start_once
     assert "PendingPaymentTruth" in resolver
     assert "implements PaymentStartReplayResolution" in resolver
+    assert "sealed interface StartCommandResolution" in resolver
+    assert "record StartCommandContext" in resolver
     assert "private static MockPaymentResult result(" not in service
     assert "private static MockPaymentCallbackResult callbackResult(" not in service
     assert "committedCallbackResult(committed, false)" in service
@@ -311,17 +311,24 @@ def test_terminal_payment_callers_use_the_shared_complete_closure() -> None:
     assert "EVALUATION_STATE" in evaluation_service
     assert "EVALUATION_AUDIT" in evaluation_service
     assert "resolveOrderIdentityLocked" not in resolver
-    visibility = resolver[
-        resolver.index(
-            "public Optional<CommittedPaymentTruth> resolveByOrderLocked"
-        ) : resolver.index("public PaymentStartReplayResolution resolveStartReplayLocked")
+    start_resolution = resolver[
+        resolver.index("public StartCommandResolution resolveStartCommandLocked") : resolver.index(
+            "public Optional<CommittedPaymentTruth> resolveReplayLocked"
+        )
     ]
-    assert "enumerateOwnedAttemptByOrderVisibility(orderId, userSubject, LOCK)" in visibility
-    assert "enumerateOwnedOrderVisibility(orderId, userSubject, LOCK)" in visibility
-    assert visibility.index("visibleAttempts.isEmpty() && visibleOrders.isEmpty()") < (
-        visibility.index("enumerateAttemptByOrderClosure(orderId, LOCK)")
+    assert "observeStartAttemptCommandLocator(context)" in start_resolution
+    assert "observeStartOwnedOrderLocator(context)" in start_resolution
+    assert start_resolution.index("observeStartAttemptCommandLocator(context)") < (
+        start_resolution.index("observeStartOwnedOrderLocator(context)")
     )
-    assert "enumerateOrderClosure(orderId, LOCK)" not in visibility
+    assert start_resolution.index("commandAttempts.isEmpty() && visibleOrders.isEmpty()") < (
+        start_resolution.index("enumerateAttemptByOrderClosure(context.orderId(), LOCK)")
+    )
+    assert "enumerateStartAttemptVisibility" in repository
+    assert "enumerateStartOrderVisibility" in repository
+    assert '"resolveStartCommandLocked"' in resolver
+    assert "OwnershipVisibilityLocator.START_ATTEMPT_COMMAND" in resolver
+    assert "OwnershipVisibilityLocator.START_OWNED_ORDER" in resolver
     assert (
         'WHERE "\n            + keys.get(2)\n            + " = ? AND user_subject = ?"'
         in repository

@@ -1,0 +1,134 @@
+package io.citybuddy.commerce.payment;
+
+import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.when;
+
+import java.util.List;
+import org.junit.jupiter.api.Test;
+
+class CommittedPaymentStartResolutionTest {
+  private static final String LOCK = " FOR UPDATE";
+  private static final String USER = "payment-owner";
+  private static final String ORDER_ID = "00000000-0000-0000-0000-000000000120";
+  private static final String KEY = "payment-start-resolution";
+  private static final long AMOUNT = 1800;
+  private static final String CURRENCY = "AUD";
+  private static final String INTENT =
+      EvaluationPaymentCommittedFaces.attemptIntentHash(ORDER_ID, AMOUNT, CURRENCY, null);
+
+  @Test
+  void concealedResolutionStillConsumesBothDeclaredVisibilityLocators() {
+    MockPaymentRepository repository = mock(MockPaymentRepository.class);
+    when(repository.enumerateStartAttemptVisibility(USER, KEY, LOCK)).thenReturn(List.of());
+    when(repository.enumerateStartOrderVisibility(ORDER_ID, USER, null)).thenReturn(List.of());
+
+    CommittedPaymentTruthResolver.StartCommandResolution resolution =
+        new CommittedPaymentTruthResolver(repository).resolveStartCommandLocked(context());
+
+    assertThat(resolution).isInstanceOf(CommittedPaymentTruthResolver.ConcealedStart.class);
+    verify(repository).enumerateStartAttemptVisibility(USER, KEY, LOCK);
+    verify(repository).enumerateStartOrderVisibility(ORDER_ID, USER, null);
+  }
+
+  @Test
+  void ownedOrderLocatorRoutesAnOwnerDamagedAttemptThroughTheCompleteClosure() {
+    MockPaymentRepository repository = mock(MockPaymentRepository.class);
+    MockPaymentRepository.OrderTruth order = unpaidOrder(USER);
+    MockPaymentRepository.AttemptRecord damaged = pendingAttempt("damaged-owner");
+    when(repository.enumerateStartAttemptVisibility(USER, KEY, LOCK)).thenReturn(List.of());
+    when(repository.enumerateStartOrderVisibility(ORDER_ID, USER, null)).thenReturn(List.of(order));
+    when(repository.enumerateAttemptByOrderClosure(ORDER_ID, LOCK)).thenReturn(List.of(damaged));
+    when(repository.enumerateOrderClosure(ORDER_ID, LOCK)).thenReturn(List.of(order));
+    when(repository.enumerateAttemptClosure(damaged, LOCK)).thenReturn(List.of(damaged));
+    when(repository.discoverCallbackClosure(damaged, "")).thenReturn(List.of());
+    when(repository.enumerateLedgerClosure(damaged, order, "")).thenReturn(List.of());
+
+    assertThatThrownBy(
+            () ->
+                new CommittedPaymentTruthResolver(repository).resolveStartCommandLocked(context()))
+        .isInstanceOf(CommittedPaymentIntegrityException.class);
+
+    verify(repository).enumerateStartAttemptVisibility(USER, KEY, LOCK);
+    verify(repository).enumerateStartOrderVisibility(ORDER_ID, USER, null);
+    verify(repository).enumerateAttemptByOrderClosure(ORDER_ID, LOCK);
+  }
+
+  @Test
+  void commandLocatorAloneCannotTurnAnOwnerDamagedOrderIntoAReplay() {
+    MockPaymentRepository repository = mock(MockPaymentRepository.class);
+    MockPaymentRepository.OrderTruth damagedOrder = unpaidOrder("damaged-owner");
+    MockPaymentRepository.AttemptRecord attempt = pendingAttempt(USER);
+    when(repository.enumerateStartAttemptVisibility(USER, KEY, LOCK)).thenReturn(List.of(attempt));
+    when(repository.enumerateStartOrderVisibility(ORDER_ID, USER, null)).thenReturn(List.of());
+    when(repository.enumerateAttemptClosure(attempt, LOCK)).thenReturn(List.of(attempt));
+    when(repository.enumerateOrderClosure(ORDER_ID, LOCK)).thenReturn(List.of(damagedOrder));
+    when(repository.discoverCallbackClosure(attempt, "")).thenReturn(List.of());
+    when(repository.enumerateLedgerClosure(attempt, damagedOrder, "")).thenReturn(List.of());
+
+    assertThatThrownBy(
+            () ->
+                new CommittedPaymentTruthResolver(repository).resolveStartCommandLocked(context()))
+        .isInstanceOf(CommittedPaymentIntegrityException.class);
+
+    verify(repository).enumerateStartAttemptVisibility(USER, KEY, LOCK);
+    verify(repository).enumerateStartOrderVisibility(ORDER_ID, USER, null);
+  }
+
+  @Test
+  void bothVisibleLocatorsProduceOnlyTheTypedPendingReplay() {
+    MockPaymentRepository repository = mock(MockPaymentRepository.class);
+    MockPaymentRepository.OrderTruth order = unpaidOrder(USER);
+    MockPaymentRepository.AttemptRecord attempt = pendingAttempt(USER);
+    when(repository.enumerateStartAttemptVisibility(USER, KEY, LOCK)).thenReturn(List.of(attempt));
+    when(repository.enumerateStartOrderVisibility(ORDER_ID, USER, null)).thenReturn(List.of(order));
+    when(repository.enumerateAttemptClosure(attempt, LOCK)).thenReturn(List.of(attempt));
+    when(repository.enumerateOrderClosure(ORDER_ID, LOCK)).thenReturn(List.of(order));
+    when(repository.discoverCallbackClosure(attempt, "")).thenReturn(List.of());
+    when(repository.enumerateLedgerClosure(attempt, order, "")).thenReturn(List.of());
+
+    CommittedPaymentTruthResolver.StartCommandResolution resolution =
+        new CommittedPaymentTruthResolver(repository).resolveStartCommandLocked(context());
+
+    assertThat(resolution).isInstanceOf(CommittedPaymentTruthResolver.PendingReplay.class);
+    verify(repository).enumerateStartAttemptVisibility(USER, KEY, LOCK);
+    verify(repository).enumerateStartOrderVisibility(ORDER_ID, USER, null);
+  }
+
+  private static CommittedPaymentTruthResolver.StartCommandContext context() {
+    return new CommittedPaymentTruthResolver.StartCommandContext(
+        USER, null, ORDER_ID, KEY, INTENT, AMOUNT, CURRENCY);
+  }
+
+  private static MockPaymentRepository.AttemptRecord pendingAttempt(String userSubject) {
+    return MockPaymentRepository.AttemptRecord.pending(
+        "00000000-0000-0000-0000-000000000121",
+        "00000000-0000-0000-0000-000000000122",
+        userSubject,
+        ORDER_ID,
+        "STANDARD",
+        null,
+        KEY,
+        INTENT,
+        AMOUNT,
+        CURRENCY);
+  }
+
+  private static MockPaymentRepository.OrderTruth unpaidOrder(String userSubject) {
+    return new MockPaymentRepository.OrderTruth(
+        "STANDARD",
+        ORDER_ID,
+        userSubject,
+        null,
+        null,
+        "payment-product",
+        null,
+        null,
+        AMOUNT,
+        CURRENCY,
+        "UNPAID",
+        1);
+  }
+}

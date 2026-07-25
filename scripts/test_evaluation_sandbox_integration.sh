@@ -1735,7 +1735,7 @@ assert_payment_truth_fails_closed() {
   local description="$1"
   local callback_status start_status refund_status state_status audit_status
   local start_visibility refund_visibility start_expected=409 refund_expected=409
-  local durable_before durable_after commerce_log_start=0
+  local durable_before durable_after commerce_log_start=0 start_log_end=0 start_reason
   refresh_payment_observer_credentials
   refresh_payment_callback_signature
   durable_before="$(mysql_query commerce_app "$commerce_app_password" commerce_db \
@@ -1752,7 +1752,9 @@ assert_payment_truth_fails_closed() {
           WHERE callback_idempotency_key = '$payment_callback_key'), ':',
        (SELECT COUNT(*) FROM inventory_ledger WHERE order_id = '$payment_order_id'), ':',
        (SELECT COUNT(*) FROM mock_refund WHERE order_id = '$payment_order_id'), ':',
-       (SELECT COUNT(*) FROM commerce_outbox))")"
+       (SELECT COUNT(*) FROM commerce_outbox), ':',
+       (SELECT COUNT(*) FROM pending_action), ':',
+       (SELECT COUNT(*) FROM action_receipt))")"
   if [[ -f "$tmp_dir/commerce.log" ]]; then
     commerce_log_start="$(wc -l <"$tmp_dir/commerce.log")"
   fi
@@ -1763,6 +1765,13 @@ assert_payment_truth_fails_closed() {
     --header 'Idempotency-Key: payment-evaluation' \
     --header 'Content-Type: application/json' \
     --data '{"amountMinor":1800,"currency":"CNY"}')"
+  if [[ -f "$tmp_dir/commerce.log" ]]; then
+    start_log_end="$(wc -l <"$tmp_dir/commerce.log")"
+  fi
+  start_reason="$(sed -n "$((commerce_log_start + 1)),${start_log_end}p" \
+    "$tmp_dir/commerce.log" 2>/dev/null \
+    | sed -n 's/.*mock_payment_request_rejected reason_code=\([^ ]*\).*/\1/p' \
+    | tail -n 1)"
   callback_status="$(request_status "$tmp_dir/payment-callback-classification.json" \
     --request POST "http://127.0.0.1:$commerce_port/internal/mock-payments/callback" \
     --header "X-Mock-Payment-Key-Id: $mock_payment_key" \
@@ -1799,7 +1808,9 @@ assert_payment_truth_fails_closed() {
           WHERE callback_idempotency_key = '$payment_callback_key'), ':',
        (SELECT COUNT(*) FROM inventory_ledger WHERE order_id = '$payment_order_id'), ':',
        (SELECT COUNT(*) FROM mock_refund WHERE order_id = '$payment_order_id'), ':',
-       (SELECT COUNT(*) FROM commerce_outbox))")"
+       (SELECT COUNT(*) FROM commerce_outbox), ':',
+       (SELECT COUNT(*) FROM pending_action), ':',
+       (SELECT COUNT(*) FROM action_receipt))")"
   if [[ "$durable_after" != "$durable_before" ]]; then
     echo "Committed-payment fault observers wrote durable effects for $description: $durable_before -> $durable_after" >&2
     exit 1
@@ -1830,6 +1841,13 @@ assert_payment_truth_fails_closed() {
         | grep 'evaluation_request_rejected reason_code=' >&2 || true
     fi
     exit 1
+  fi
+  if [[ "$start_expected" == 409 ]]; then
+    assert_equal COMMITTED_PAYMENT_TRUTH_INCONSISTENT "$start_reason" \
+      "visible payment start damage has durable-integrity attribution: $description"
+  else
+    assert_equal CONCEALED_NOT_FOUND "$start_reason" \
+      "concealed payment start damage has concealment attribution: $description"
   fi
   if [[ "$start_expected" == 404 ]]; then
     echo "Verified CONCEALED_BY_AUTHORIZATION: caller=start anchors=${payment_caller_visibility_locators[$payment_start_caller_index]} evidence=$start_visibility fault=$description"

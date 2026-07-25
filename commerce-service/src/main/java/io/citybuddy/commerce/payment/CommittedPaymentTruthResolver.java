@@ -2,6 +2,7 @@ package io.citybuddy.commerce.payment;
 
 import io.citybuddy.commerce.evaluation.EvaluationAuditEntityType;
 import io.citybuddy.commerce.evaluation.EvaluationAuditReferenceIdentity;
+import io.citybuddy.commerce.evaluation.EvaluationSandboxRepository;
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
 import java.util.HexFormat;
@@ -90,13 +91,81 @@ public final class CommittedPaymentTruthResolver {
   }
 
   /**
-   * Resolves an existing payment-start command without allowing the caller to infer success from
-   * the attempt row alone. A pending result proves the complete legal pre-payment shape; any
-   * indication of a committed payment must satisfy the complete committed closure.
+   * Classifies one payment-start command from both declared visibility locators and the complete
+   * durable payment closure.
+   *
+   * <p>The attempt-command and owned-order locators are both observed before either result is used.
+   * The owned-order lookup is owner scoped; only after it proves visibility may the broader
+   * order-relation enumeration participate in integrity classification. All locking durable
+   * enumerations acquire attempt rows before order rows, matching callback and refund lock order.
    */
-  public PaymentStartReplayResolution resolveStartReplayLocked(
-      CommittedPaymentCaller caller, MockPaymentRepository.AttemptRecord target) {
-    requireCaller(caller, CommittedPaymentCaller.PAYMENT_START_REPLAY);
+  public StartCommandResolution resolveStartCommandLocked(StartCommandContext context) {
+    Objects.requireNonNull(context, "Payment start context is required");
+    List<MockPaymentRepository.AttemptRecord> commandAttempts =
+        observeStartAttemptCommandLocator(context);
+    List<MockPaymentRepository.OrderTruth> visibleOrders = observeStartOwnedOrderLocator(context);
+    if (commandAttempts.isEmpty() && visibleOrders.isEmpty()) {
+      return new ConcealedStart();
+    }
+    if (commandAttempts.size() > 1 || visibleOrders.size() > 1) {
+      throw inconsistent("Payment start visibility cardinality is inconsistent");
+    }
+
+    if (!commandAttempts.isEmpty()) {
+      PaymentStartReplayResolution replay = resolveStartCandidateLocked(commandAttempts.getFirst());
+      requireStartCommandMatches(replay, context);
+      return startResolution(replay);
+    }
+
+    List<MockPaymentRepository.AttemptRecord> orderAttempts =
+        repository.enumerateAttemptByOrderClosure(context.orderId(), LOCK);
+    if (orderAttempts.size() > 1) {
+      throw inconsistent("Payment start order-attempt cardinality is inconsistent");
+    }
+    List<MockPaymentRepository.OrderTruth> orders =
+        repository.enumerateOrderClosure(context.orderId(), LOCK);
+    requireSingleEqual(
+        orders, visibleOrders.getFirst(), "Payment start order closure is inconsistent");
+    MockPaymentRepository.OrderTruth order = orders.getFirst();
+
+    if (!orderAttempts.isEmpty()) {
+      PaymentStartReplayResolution replay = resolveStartCandidateLocked(orderAttempts.getFirst());
+      requireStartCommandMatches(replay, context);
+      return startResolution(replay);
+    }
+
+    requireCreateEligibleOrder(order, context);
+    List<MockPaymentRepository.PaymentLedgerRecord> ledger =
+        repository.enumerateLedgerReplayClosure(null, order.orderId(), "");
+    requirePendingLedgerClosure(ledger, order);
+    return new CreateEligible(
+        order, context.sandboxId() != null && !context.userSubject().equals(order.userSubject()));
+  }
+
+  private List<MockPaymentRepository.AttemptRecord> observeStartAttemptCommandLocator(
+      StartCommandContext context) {
+    if (!CommittedPaymentCaller.PAYMENT_START_REPLAY
+        .ownershipVisibilityLocators()
+        .contains(OwnershipVisibilityLocator.START_ATTEMPT_COMMAND)) {
+      throw new IllegalStateException("Payment start attempt locator is not registered");
+    }
+    return repository.enumerateStartAttemptVisibility(
+        context.userSubject(), context.requestIdempotencyKey(), LOCK);
+  }
+
+  private List<MockPaymentRepository.OrderTruth> observeStartOwnedOrderLocator(
+      StartCommandContext context) {
+    if (!CommittedPaymentCaller.PAYMENT_START_REPLAY
+        .ownershipVisibilityLocators()
+        .contains(OwnershipVisibilityLocator.START_OWNED_ORDER)) {
+      throw new IllegalStateException("Payment start order locator is not registered");
+    }
+    return repository.enumerateStartOrderVisibility(
+        context.orderId(), context.userSubject(), context.sandboxId());
+  }
+
+  private PaymentStartReplayResolution resolveStartCandidateLocked(
+      MockPaymentRepository.AttemptRecord target) {
     List<MockPaymentRepository.AttemptRecord> attempts =
         repository.enumerateAttemptClosure(target, LOCK);
     requireSingleEqual(attempts, target, "Payment start attempt closure is inconsistent");
@@ -119,7 +188,7 @@ public final class CommittedPaymentTruthResolver {
             || ledger.stream()
                 .anyMatch(movement -> !"SECKILL_ORDER_CREATE".equals(movement.movementType()));
     if (committed) {
-      return resolve(caller, attempt, LOCK);
+      return resolve(CommittedPaymentCaller.PAYMENT_START_REPLAY, attempt, LOCK);
     }
 
     requirePendingPaymentRows(attempt, order);
@@ -128,6 +197,69 @@ public final class CommittedPaymentTruthResolver {
     }
     requirePendingLedgerClosure(ledger, order);
     return new PendingPaymentTruth(order, attempt);
+  }
+
+  private static StartCommandResolution startResolution(PaymentStartReplayResolution replay) {
+    if (replay instanceof CommittedPaymentTruth committed) {
+      return new CommittedReplay(committed);
+    }
+    return new PendingReplay((PendingPaymentTruth) replay);
+  }
+
+  private static void requireStartCommandMatches(
+      PaymentStartReplayResolution replay, StartCommandContext context) {
+    MockPaymentRepository.AttemptRecord attempt =
+        replay instanceof CommittedPaymentTruth committed
+            ? committed.attempt()
+            : ((PendingPaymentTruth) replay).attempt();
+    if (!attempt.userSubject().equals(context.userSubject())
+        || !attempt.orderId().equals(context.orderId())
+        || !Objects.equals(attempt.sandboxId(), context.sandboxId())
+        || !attempt.requestIdempotencyKey().equals(context.requestIdempotencyKey())
+        || !attempt.intentHash().equals(context.intentHash())
+        || attempt.amountMinor() != context.amountMinor()
+        || !attempt.currency().equals(context.currency())) {
+      throw startConflict(
+          MockPaymentRejectionReason.IDEMPOTENCY_INTENT_CONFLICT,
+          "Payment idempotency intent conflicts");
+    }
+  }
+
+  private static void requireCreateEligibleOrder(
+      MockPaymentRepository.OrderTruth order, StartCommandContext context) {
+    boolean directOwner = context.userSubject().equals(order.userSubject());
+    boolean evaluationFixtureOwner =
+        context.sandboxId() != null
+            && order.evaluationOwnerHandle() != null
+            && EvaluationSandboxRepository.fixtureOwner(order.evaluationOwnerHandle())
+                .equals(order.userSubject());
+    if ((!directOwner && !evaluationFixtureOwner)
+        || !Objects.equals(context.sandboxId(), order.sandboxId())) {
+      throw inconsistent("Payment start owned-order visibility changed while locking");
+    }
+    if (order.amountMinor() != context.amountMinor()
+        || !order.currency().equals(context.currency())) {
+      throw startConflict(
+          MockPaymentRejectionReason.IDEMPOTENCY_INTENT_CONFLICT,
+          "Payment request does not match authoritative order amount");
+    }
+    if (context.sandboxId() != null && !"STANDARD".equals(order.orderKind())) {
+      throw startConflict(
+          MockPaymentRejectionReason.ORDER_NOT_ELIGIBLE,
+          "Evaluation payment order kind is not supported");
+    }
+    if ("PAID".equals(order.status())) {
+      throw inconsistent("Paid order has no payment-attempt closure");
+    }
+    if (!"UNPAID".equals(order.status()) || order.stateVersion() != 1) {
+      throw startConflict(
+          MockPaymentRejectionReason.ORDER_NOT_ELIGIBLE, "Order is not eligible for payment");
+    }
+  }
+
+  private static MockPaymentException startConflict(
+      MockPaymentRejectionReason reason, String message) {
+    return new MockPaymentException(409, "CONFLICT", reason, message);
   }
 
   /**
@@ -531,22 +663,46 @@ public final class CommittedPaymentTruthResolver {
   public sealed interface PaymentStartReplayResolution
       permits PendingPaymentTruth, CommittedPaymentTruth {}
 
+  public sealed interface StartCommandResolution
+      permits ConcealedStart, CreateEligible, PendingReplay, CommittedReplay {}
+
+  public record StartCommandContext(
+      String userSubject,
+      String sandboxId,
+      String orderId,
+      String requestIdempotencyKey,
+      String intentHash,
+      long amountMinor,
+      String currency) {}
+
+  public record ConcealedStart() implements StartCommandResolution {}
+
+  public record CreateEligible(
+      MockPaymentRepository.OrderTruth order, boolean evaluationOwnerBindingRequired)
+      implements StartCommandResolution {}
+
+  public record PendingReplay(PendingPaymentTruth truth) implements StartCommandResolution {}
+
+  public record CommittedReplay(CommittedPaymentTruth truth) implements StartCommandResolution {}
+
   public enum CommittedPaymentCaller {
     PAYMENT_START_REPLAY(
         "POST /api/orders/{orderId}/mock-payment replay",
         TrustBoundary.OWNER_CONCEALING_PUBLIC,
         List.of("orderId", "userSubject", "requestIdempotencyKey", "evaluationSandbox"),
-        List.of("attempt.userSubject+requestIdempotencyKey", "order.orderId+userSubject+sandboxId"),
+        List.of(
+            OwnershipVisibilityLocator.START_ATTEMPT_COMMAND,
+            OwnershipVisibilityLocator.START_OWNED_ORDER),
         "mock-payment unknown/other-owner",
-        "resolveStartReplayLocked",
-        "PaymentStartReplayResolution",
+        "resolveStartCommandLocked",
+        "StartCommandResolution",
         RefundAccumulatorPolicy.EXACT_LEDGER_SUM,
         true),
     PRODUCTION_CALLBACK_REPLAY(
         "production callback replay",
         TrustBoundary.AUTHENTICATED_CALLBACK,
         List.of("callbackIdempotencyKey", "callbackEventId", "callbackCorrelationId", "orderId"),
-        List.of("verified callback signature"),
+        List.of(OwnershipVisibilityLocator.VERIFIED_CALLBACK_SIGNATURE),
         "signed callback unknown correlation",
         "resolveReplayLocked",
         "CommittedPaymentTruth",
@@ -561,7 +717,7 @@ public final class CommittedPaymentTruthResolver {
             "callbackCorrelationId",
             "orderId",
             "sandboxId"),
-        List.of("verified callback signature+sandbox context"),
+        List.of(OwnershipVisibilityLocator.VERIFIED_CALLBACK_SANDBOX_CONTEXT),
         "signed callback foreign/unknown evaluation correlation",
         "resolveReplayLocked",
         "CommittedPaymentTruth",
@@ -571,7 +727,9 @@ public final class CommittedPaymentTruthResolver {
         "direct refund eligibility and replay",
         TrustBoundary.OWNER_CONCEALING_PUBLIC,
         List.of("orderId", "userSubject", "refundIdempotencyKey"),
-        List.of("attempt.orderId+userSubject", "order.orderId+userSubject"),
+        List.of(
+            OwnershipVisibilityLocator.REFUND_OWNED_ATTEMPT,
+            OwnershipVisibilityLocator.REFUND_OWNED_ORDER),
         "refund unknown/other-owner",
         "resolveByOrderLocked",
         "CommittedPaymentTruth",
@@ -581,7 +739,10 @@ public final class CommittedPaymentTruthResolver {
         "Action prepare, confirm, and receipt replay",
         TrustBoundary.OWNER_CONCEALING_OBO,
         List.of("orderId", "userSubject", "supportSessionId", "traceId", "turnId", "sandboxId"),
-        List.of("OBO owner+session", "attempt/order owner", "sandbox binding"),
+        List.of(
+            OwnershipVisibilityLocator.OBO_OWNER_SESSION,
+            OwnershipVisibilityLocator.ACTION_PAYMENT_OWNER,
+            OwnershipVisibilityLocator.ACTION_SANDBOX_BINDING),
         "Action target unknown/other-owner",
         "resolveByOrderLocked",
         "CommittedPaymentTruth",
@@ -591,7 +752,7 @@ public final class CommittedPaymentTruthResolver {
         "refund lifecycle mutation",
         TrustBoundary.INTERNAL_DURABLE_IDENTITY,
         List.of("refundId", "paymentAttemptId"),
-        List.of("locked refund.paymentAttemptId"),
+        List.of(OwnershipVisibilityLocator.LOCKED_REFUND_ATTEMPT),
         "internal refund identity missing",
         "resolveLocked",
         "CommittedPaymentTruth",
@@ -601,7 +762,7 @@ public final class CommittedPaymentTruthResolver {
         "refund reconciliation",
         TrustBoundary.INTERNAL_DURABLE_IDENTITY,
         List.of("refundId", "paymentAttemptId"),
-        List.of("locked refund.paymentAttemptId"),
+        List.of(OwnershipVisibilityLocator.LOCKED_REFUND_ATTEMPT),
         "internal refund identity missing",
         "resolveLocked",
         "CommittedPaymentTruth",
@@ -611,7 +772,7 @@ public final class CommittedPaymentTruthResolver {
         "/api/eval/state",
         TrustBoundary.SANDBOX_WIDE_INTERNAL_EVALUATOR,
         List.of("sandboxId"),
-        List.of("management credential+sandbox scope"),
+        List.of(OwnershipVisibilityLocator.MANAGEMENT_SANDBOX_SCOPE),
         "evaluation sandbox unknown",
         "resolveSnapshot",
         "CommittedPaymentTruth",
@@ -621,7 +782,7 @@ public final class CommittedPaymentTruthResolver {
         "/api/eval/audit",
         TrustBoundary.SANDBOX_WIDE_INTERNAL_EVALUATOR,
         List.of("sandboxId", "supportSessionId"),
-        List.of("management credential+sandbox scope"),
+        List.of(OwnershipVisibilityLocator.MANAGEMENT_SANDBOX_AUDIT_SCOPE),
         "evaluation sandbox/audit unknown",
         "resolveSnapshot",
         "CommittedPaymentTruth",
@@ -631,7 +792,7 @@ public final class CommittedPaymentTruthResolver {
     private final String surface;
     private final TrustBoundary trustBoundary;
     private final List<String> canonicalRequestLocators;
-    private final List<String> ownershipVisibilityLocators;
+    private final List<OwnershipVisibilityLocator> ownershipVisibilityLocators;
     private final String concealedResponseFamily;
     private final String resolverMethod;
     private final String successInputType;
@@ -642,7 +803,7 @@ public final class CommittedPaymentTruthResolver {
         String surface,
         TrustBoundary trustBoundary,
         List<String> canonicalRequestLocators,
-        List<String> ownershipVisibilityLocators,
+        List<OwnershipVisibilityLocator> ownershipVisibilityLocators,
         String concealedResponseFamily,
         String resolverMethod,
         String successInputType,
@@ -675,7 +836,7 @@ public final class CommittedPaymentTruthResolver {
       return canonicalRequestLocators;
     }
 
-    public List<String> ownershipVisibilityLocators() {
+    public List<OwnershipVisibilityLocator> ownershipVisibilityLocators() {
       return ownershipVisibilityLocators;
     }
 
@@ -707,6 +868,31 @@ public final class CommittedPaymentTruthResolver {
     AUTHENTICATED_CALLBACK,
     INTERNAL_DURABLE_IDENTITY,
     SANDBOX_WIDE_INTERNAL_EVALUATOR
+  }
+
+  public enum OwnershipVisibilityLocator {
+    START_ATTEMPT_COMMAND("attempt.userSubject+requestIdempotencyKey"),
+    START_OWNED_ORDER("order.orderId+userSubject+sandboxId"),
+    VERIFIED_CALLBACK_SIGNATURE("verified callback signature"),
+    VERIFIED_CALLBACK_SANDBOX_CONTEXT("verified callback signature+sandbox context"),
+    REFUND_OWNED_ATTEMPT("attempt.orderId+userSubject"),
+    REFUND_OWNED_ORDER("order.orderId+userSubject"),
+    OBO_OWNER_SESSION("OBO owner+session"),
+    ACTION_PAYMENT_OWNER("attempt/order owner"),
+    ACTION_SANDBOX_BINDING("sandbox binding"),
+    LOCKED_REFUND_ATTEMPT("locked refund.paymentAttemptId"),
+    MANAGEMENT_SANDBOX_SCOPE("management credential+sandbox scope"),
+    MANAGEMENT_SANDBOX_AUDIT_SCOPE("management credential+sandbox+audit scope");
+
+    private final String description;
+
+    OwnershipVisibilityLocator(String description) {
+      this.description = description;
+    }
+
+    public String description() {
+      return description;
+    }
   }
 
   public record PendingPaymentTruth(

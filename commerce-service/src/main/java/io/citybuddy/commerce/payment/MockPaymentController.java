@@ -99,6 +99,9 @@ final class MockPaymentExceptionHandler {
 
   @ExceptionHandler(MockPaymentException.class)
   ResponseEntity<Map<String, String>> handle(MockPaymentException exception) {
+    if (exception.reason() != MockPaymentRejectionReason.NOT_APPLICABLE) {
+      LOG.warn("mock_payment_request_rejected reason_code={}", exception.reason());
+    }
     if (exception.status() == 403) {
       LOG.warn("evaluation_request_rejected reason_code={}", exception.reason());
     }
@@ -119,6 +122,9 @@ final class MockPaymentExceptionHandler {
   @ExceptionHandler(EvaluationSandboxException.class)
   ResponseEntity<Map<String, String>> handleSandbox(EvaluationSandboxException exception) {
     LOG.warn("evaluation_request_rejected reason_code={}", exception.reason());
+    LOG.warn(
+        "mock_payment_request_rejected reason_code={}",
+        MockPaymentRejectionReason.SANDBOX_NOT_ACTIVE);
     return ResponseEntity.status(403)
         .body(Map.of("category", "AUTHORIZATION", "message", "Evaluation payment is unavailable"));
   }
@@ -128,12 +134,18 @@ final class MockPaymentExceptionHandler {
     CannotCreateTransactionException.class
   })
   ResponseEntity<Map<String, String>> handleUnavailable(RuntimeException exception) {
+    LOG.warn(
+        "mock_payment_request_rejected reason_code={}",
+        MockPaymentRejectionReason.DEPENDENCY_OBSERVATION_INDETERMINATE);
     return ResponseEntity.status(503)
         .body(Map.of("category", "UNAVAILABLE", "message", "Payment service is unavailable"));
   }
 
   @ExceptionHandler(IdentityVerificationUnavailableException.class)
   ResponseEntity<Map<String, String>> handleIdentityUnavailable() {
+    LOG.warn(
+        "mock_payment_request_rejected reason_code={}",
+        MockPaymentRejectionReason.DEPENDENCY_OBSERVATION_INDETERMINATE);
     return ResponseEntity.status(503)
         .body(Map.of("category", "UNAVAILABLE", "message", "Payment service is unavailable"));
   }

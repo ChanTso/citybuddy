@@ -3,6 +3,7 @@ package io.citybuddy.commerce.payment;
 import static org.assertj.core.api.Assertions.assertThat;
 
 import io.citybuddy.commerce.payment.CommittedPaymentTruthResolver.CommittedPaymentCaller;
+import io.citybuddy.commerce.payment.CommittedPaymentTruthResolver.OwnershipVisibilityLocator;
 import io.citybuddy.commerce.payment.CommittedPaymentTruthResolver.RefundAccumulatorPolicy;
 import org.junit.jupiter.api.Test;
 
@@ -31,7 +32,7 @@ class CommittedPaymentCallerInventoryTest {
     assertThat(CommittedPaymentCaller.values())
         .extracting(CommittedPaymentCaller::successInputType)
         .allSatisfy(
-            type -> assertThat(type).isIn("PaymentStartReplayResolution", "CommittedPaymentTruth"));
+            type -> assertThat(type).isIn("StartCommandResolution", "CommittedPaymentTruth"));
     assertThat(CommittedPaymentCaller.values())
         .allSatisfy(
             caller -> {
@@ -41,6 +42,12 @@ class CommittedPaymentCallerInventoryTest {
               assertThat(caller.concealedResponseFamily()).isNotBlank();
             });
     assertThat(CommittedPaymentCaller.PAYMENT_START_REPLAY.committedBeforeLiveness()).isTrue();
+    assertThat(CommittedPaymentCaller.PAYMENT_START_REPLAY.resolverMethod())
+        .isEqualTo("resolveStartCommandLocked");
+    assertThat(CommittedPaymentCaller.PAYMENT_START_REPLAY.ownershipVisibilityLocators())
+        .containsExactly(
+            OwnershipVisibilityLocator.START_ATTEMPT_COMMAND,
+            OwnershipVisibilityLocator.START_OWNED_ORDER);
     assertThat(CommittedPaymentCaller.PRODUCTION_CALLBACK_REPLAY.committedBeforeLiveness())
         .isTrue();
     assertThat(CommittedPaymentCaller.EVALUATION_CALLBACK_REPLAY.committedBeforeLiveness())

@@ -835,17 +835,22 @@ class MockPaymentIntegrationTest {
                     completeKey,
                     new MockPaymentRequest(1801L, "CNY", null)))
         .isInstanceOfSatisfying(
-            MockPaymentException.class, exception -> assertThat(exception.status()).isEqualTo(409));
+            MockPaymentException.class,
+            exception -> {
+              assertThat(exception.status()).isEqualTo(409);
+              assertThat(exception.reason())
+                  .isEqualTo(MockPaymentRejectionReason.IDEMPOTENCY_INTENT_CONFLICT);
+            });
     assertThat(callbackCount(attempt.attemptId())).isOne();
     assertThat(paymentMovementCount(attempt.attemptId())).isOne();
     assertThat(paymentAuditCount(complete.sandboxId())).isOne();
   }
 
   @Test
-  void evaluationPaymentStartReplayReportsDamagedClosureBeforeInactiveSandbox() {
-    EvaluationPaymentFixture fixture = seedEvaluationPayment("start-replay-corrupt-dead");
+  void ownedOrderLocatorReportsDamagedAttemptOwnerBeforeInactiveSandbox() {
+    EvaluationPaymentFixture fixture = seedEvaluationPayment("start-replay-owner-corrupt-dead");
     MockPaymentService evaluation = evaluationPayments(new MockPaymentRepository(jdbc));
-    String startKey = "payment-start-replay-corrupt-dead";
+    String startKey = "payment-start-replay-owner-corrupt-dead";
     MockPaymentResult attempt =
         evaluation.start(
             fixture.userSubject(),
@@ -854,14 +859,16 @@ class MockPaymentIntegrationTest {
             startKey,
             new MockPaymentRequest(1800L, "CNY", null));
     evaluation.callback(
-        "callback-start-replay-corrupt-dead",
-        evaluationCallback(attempt, fixture.sandboxId(), "start-replay-corrupt-dead"));
+        "callback-start-replay-owner-corrupt-dead",
+        evaluationCallback(attempt, fixture.sandboxId(), "start-replay-owner-corrupt-dead"));
     assertThat(
             rootJdbc()
                 .update(
-                    "DELETE FROM mock_payment_callback WHERE attempt_id = ?", attempt.attemptId()))
+                    "UPDATE mock_payment_attempt SET user_subject = ? WHERE attempt_id = ?",
+                    "damaged-payment-owner",
+                    attempt.attemptId()))
         .isOne();
-    completeEvaluationSandbox(fixture, "complete-start-replay-corrupt-dead");
+    completeEvaluationSandbox(fixture, "complete-start-replay-owner-corrupt-dead");
 
     assertThatThrownBy(
             () ->
@@ -872,8 +879,15 @@ class MockPaymentIntegrationTest {
                     startKey,
                     new MockPaymentRequest(1800L, "CNY", null)))
         .isInstanceOfSatisfying(
-            MockPaymentException.class, exception -> assertThat(exception.status()).isEqualTo(409));
-    assertThat(callbackCount(attempt.attemptId())).isZero();
+            MockPaymentException.class,
+            exception -> {
+              assertThat(exception.status()).isEqualTo(409);
+              assertThat(exception.reason())
+                  .isEqualTo(MockPaymentRejectionReason.COMMITTED_PAYMENT_TRUTH_INCONSISTENT);
+              assertThat(exception.getMessage())
+                  .isEqualTo("Committed payment truth is inconsistent");
+            });
+    assertThat(callbackCount(attempt.attemptId())).isOne();
     assertThat(paymentMovementCount(attempt.attemptId())).isOne();
     assertThat(paymentAuditCount(fixture.sandboxId())).isOne();
   }
@@ -906,6 +920,31 @@ class MockPaymentIntegrationTest {
     assertThat(attemptState(attempt.attemptId())).containsExactly("PENDING", "1");
     assertThat(callbackCount(attempt.attemptId())).isZero();
     assertThat(paymentMovementCount(attempt.attemptId())).isZero();
+  }
+
+  @Test
+  void eligibleEvaluationOrderCannotCreateAnAttemptAfterSandboxCompletion() {
+    EvaluationPaymentFixture fixture = seedEvaluationPayment("new-start-dead");
+    MockPaymentService evaluation = evaluationPayments(new MockPaymentRepository(jdbc));
+    completeEvaluationSandbox(fixture, "complete-new-start-dead");
+
+    assertThatThrownBy(
+            () ->
+                evaluation.start(
+                    fixture.userSubject(),
+                    fixture.sandboxId(),
+                    fixture.orderId(),
+                    "payment-new-start-dead",
+                    new MockPaymentRequest(1800L, "CNY", null)))
+        .isInstanceOfSatisfying(
+            EvaluationSandboxException.class,
+            exception -> assertThat(exception.status()).isEqualTo(403));
+    assertThat(
+            jdbc.queryForObject(
+                "SELECT COUNT(*) FROM mock_payment_attempt WHERE order_id = ?",
+                Long.class,
+                fixture.orderId()))
+        .isZero();
   }
 
   @Test

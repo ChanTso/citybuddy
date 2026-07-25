@@ -53,6 +53,28 @@ class MockPaymentRejectionAttributionTest {
   }
 
   @Test
+  void durableIntegrityReasonStaysServerOnly(CapturedOutput output) {
+    MockPaymentExceptionHandler handler = new MockPaymentExceptionHandler();
+
+    var response =
+        handler.handle(
+            new MockPaymentException(
+                409,
+                "CONFLICT",
+                MockPaymentRejectionReason.COMMITTED_PAYMENT_TRUTH_INCONSISTENT,
+                "Committed payment truth is inconsistent"));
+
+    assertThat(response.getStatusCode().value()).isEqualTo(409);
+    assertThat(response.getBody())
+        .containsExactlyEntriesOf(
+            Map.of(
+                "category", "CONFLICT",
+                "message", "Committed payment truth is inconsistent"))
+        .doesNotContainKey("reason");
+    assertThat(output).contains("reason_code=COMMITTED_PAYMENT_TRUTH_INCONSISTENT");
+  }
+
+  @Test
   void unattributedForbiddenConstructionIsRejected() {
     assertThatThrownBy(
             () -> new MockPaymentException(403, "AUTHORIZATION", "unattributed rejection"))
@@ -68,7 +90,7 @@ class MockPaymentRejectionAttributionTest {
   }
 
   @Test
-  void onlyResourceAvailabilityFailuresMapToUnavailable() {
+  void onlyResourceAvailabilityFailuresMapToUnavailable(CapturedOutput output) {
     MockPaymentExceptionHandler handler = new MockPaymentExceptionHandler();
 
     var response =
@@ -90,5 +112,6 @@ class MockPaymentRejectionAttributionTest {
         .isNotNull();
     assertThat(mappings.resolveMethod(new CannotAcquireLockException("controlled"))).isNull();
     assertThat(mappings.resolveMethod(new DuplicateKeyException("controlled"))).isNull();
+    assertThat(output).contains("reason_code=DEPENDENCY_OBSERVATION_INDETERMINATE");
   }
 }

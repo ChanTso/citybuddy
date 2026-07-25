@@ -3,6 +3,7 @@ package io.citybuddy.commerce.payment;
 import io.citybuddy.commerce.evaluation.EvaluationAuditEntityType;
 import io.citybuddy.commerce.evaluation.EvaluationAuditReferenceIdentity;
 import io.citybuddy.commerce.evaluation.EvaluationAuditReferenceWriter;
+import io.citybuddy.commerce.evaluation.EvaluationSandboxRepository;
 import java.sql.Timestamp;
 import java.time.Instant;
 import java.util.List;
@@ -64,6 +65,29 @@ public class MockPaymentRepository {
     return List.copyOf(rows);
   }
 
+  List<OrderTruth> enumerateStartOrderVisibility(
+      String orderId, String userSubject, String sandboxId) {
+    if (sandboxId == null) {
+      return enumerateOwnedOrderVisibility(orderId, userSubject, "").stream()
+          .filter(order -> order.sandboxId() == null)
+          .toList();
+    }
+    List<OrderTruth> rows =
+        jdbc.query(
+            EvaluationPaymentCommittedFaces.standardOrderByIdSql("") + " AND sandbox_id = ?",
+            (result, row) -> mapOrder(result, "STANDARD"),
+            orderId,
+            sandboxId);
+    return rows.stream()
+        .filter(
+            order ->
+                userSubject.equals(order.userSubject())
+                    || (order.evaluationOwnerHandle() != null
+                        && EvaluationSandboxRepository.fixtureOwner(order.evaluationOwnerHandle())
+                            .equals(order.userSubject())))
+        .toList();
+  }
+
   public Optional<OrderTruth> findEvaluationOrderForUpdate(String orderId, String sandboxId) {
     return findEvaluationOrder(orderId, sandboxId, " FOR UPDATE");
   }
@@ -95,6 +119,20 @@ public class MockPaymentRepository {
             + "AND request_idempotency_key = ?",
         user,
         key);
+  }
+
+  List<AttemptRecord> enumerateStartAttemptVisibility(
+      String userSubject, String requestIdempotencyKey, String lockClause) {
+    return jdbc.query(
+        "SELECT "
+            + attemptColumns()
+            + " FROM "
+            + attemptTable()
+            + " WHERE user_subject = ? AND request_idempotency_key = ?"
+            + lockClause,
+        MockPaymentRepository::mapAttempt,
+        userSubject,
+        requestIdempotencyKey);
   }
 
   public void bindEvaluationOrderOwner(
