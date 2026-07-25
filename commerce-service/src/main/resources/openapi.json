@@ -110,6 +110,7 @@
           "400": {"description": "Unknown or malformed ToolSpec input"},
           "403": {"description": "Invalid OBO mode, scope, actor, session, or context"},
           "404": {"description": "Unknown tool or unpublished product"},
+          "409": {"description": "Committed evaluation operation conflicts with the requested observation"},
           "503": {"description": "Authoritative product or audit persistence unavailable"}
         }
       }
