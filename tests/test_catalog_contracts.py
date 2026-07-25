@@ -28,6 +28,7 @@ def test_catalog_contract_exposes_only_authenticated_published_reads() -> None:
         "/api/products/{productId}",
         "/api/orders",
         "/api/orders/{orderId}/mock-payment",
+        "/api/orders/{orderId}/refunds",
         "/api/seckill/activities/{activityId}/reservations",
         "/api/reservations/{reservationId}",
         "/internal/tools/catalog.product.get",
