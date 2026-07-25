@@ -44,9 +44,7 @@ def test_mock_payment_service_has_one_closed_transaction_entry_inventory() -> No
         r"enum Entry \{(.*?)\n\s+private final Mode", refund_transactions, re.DOTALL
     )
     assert refund_entry_block is not None
-    refund_entries = set(
-        re.findall(r"^\s+([A-Z_]+)\(", refund_entry_block.group(1), re.MULTILINE)
-    )
+    refund_entries = set(re.findall(r"^\s+([A-Z_]+)\(", refund_entry_block.group(1), re.MULTILINE))
     expected_refund = {
         "DIRECT_INITIAL_MUTATION",
         "DIRECT_TRUTH_OBSERVATION",
@@ -136,15 +134,15 @@ def test_transaction_and_failure_inventories_have_real_regression_anchors() -> N
     ):
         assert evidence in integration_test
 
-    refund_transaction_test = (
-        REFUND_TEST / "RefundTransactionsTest.java"
-    ).read_text(encoding="utf-8")
-    refund_concurrency_test = (
-        REFUND_TEST / "RefundConcurrencyTest.java"
-    ).read_text(encoding="utf-8")
-    refund_integration_test = (
-        REFUND_TEST / "RefundIntegrationTest.java"
-    ).read_text(encoding="utf-8")
+    refund_transaction_test = (REFUND_TEST / "RefundTransactionsTest.java").read_text(
+        encoding="utf-8"
+    )
+    refund_concurrency_test = (REFUND_TEST / "RefundConcurrencyTest.java").read_text(
+        encoding="utf-8"
+    )
+    refund_integration_test = (REFUND_TEST / "RefundIntegrationTest.java").read_text(
+        encoding="utf-8"
+    )
     assert "entryInventoryIsClosedAndRuntimeModeChecksAreEnforced" in refund_transaction_test
     assert "onlyMysql1205And1213AnywhereInTheCauseChainAreContention" in refund_transaction_test
     assert "repeatedMysql1205ObservationIsIndeterminateWithoutMutationOrExceptionEscape" in (
