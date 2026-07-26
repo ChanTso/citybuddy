@@ -87,7 +87,7 @@ public final class MockPaymentService {
     String intentHash = truth.callbackIntentHash(idempotencyKey, valid);
     try {
       return withCallbackDeadlockRetry(idempotencyKey, valid, intentHash);
-    } catch (MockPaymentIntegrityException exception) {
+    } catch (MockPaymentIntegrityException | CommittedPaymentIntegrityException exception) {
       throw conflict(
           MockPaymentRejectionReason.COMMITTED_PAYMENT_TRUTH_INCONSISTENT,
           "Committed payment truth is inconsistent");

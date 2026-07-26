@@ -1427,6 +1427,44 @@ class MockPaymentIntegrationTest {
   }
 
   @Test
+  void firstProductionCallbackRejectsDamagedOrderOriginAndRollsBackEveryPaymentWrite() {
+    String orderId = seedStandardOrder(USER, 1855);
+    MockPaymentResult attempt =
+        payments.start(
+            USER,
+            orderId,
+            "payment-first-callback-origin",
+            new MockPaymentRequest(1855L, "AUD", null));
+    MockPaymentCallbackRequest request = callback(attempt, UUID.randomUUID().toString());
+    String callbackKey = "callback-first-callback-origin";
+    long callbacksBefore = count("mock_payment_callback");
+    long movementsBefore = count("inventory_ledger");
+    long outboxBefore = outboxCount();
+    java.util.List<String> orderBefore = orderState(orderId);
+    java.util.List<String> attemptBefore = attemptState(attempt.attemptId());
+
+    assertThat(rootJdbc().update("DELETE FROM order_idempotency WHERE order_id = ?", orderId))
+        .isOne();
+
+    assertThatThrownBy(() -> payments.callback(callbackKey, request))
+        .isInstanceOfSatisfying(
+            MockPaymentException.class,
+            exception -> {
+              assertThat(exception.status()).isEqualTo(409);
+              assertThat(exception.reason())
+                  .isEqualTo(MockPaymentRejectionReason.COMMITTED_PAYMENT_TRUTH_INCONSISTENT);
+            });
+    assertThat(callback(request, callbackKey, Instant.now(), CALLBACK_SECRET).getStatusCode())
+        .isEqualTo(HttpStatus.CONFLICT);
+
+    assertThat(count("mock_payment_callback")).isEqualTo(callbacksBefore);
+    assertThat(count("inventory_ledger")).isEqualTo(movementsBefore);
+    assertThat(outboxCount()).isEqualTo(outboxBefore);
+    assertThat(orderState(orderId)).isEqualTo(orderBefore);
+    assertThat(attemptState(attempt.attemptId())).isEqualTo(attemptBefore);
+  }
+
+  @Test
   void productionStandardOrderOriginClosesMissingHashAndReplicaPairs() {
     String orderId = seedStandardOrder(USER, 1860);
     MockPaymentResult attempt =
@@ -2903,6 +2941,11 @@ class MockPaymentIntegrationTest {
             Long.class,
             orderId,
             movementType);
+    return count == null ? 0 : count;
+  }
+
+  private long outboxCount() {
+    Long count = jdbc.queryForObject("SELECT COUNT(*) FROM commerce_outbox", Long.class);
     return count == null ? 0 : count;
   }
 
