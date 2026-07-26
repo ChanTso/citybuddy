@@ -390,10 +390,14 @@ def test_terminal_payment_callers_use_the_shared_complete_closure() -> None:
     assert "EVALUATION_STATE" in evaluation_service
     assert "EVALUATION_AUDIT" in evaluation_service
     assert "classifyAuditOrigin" in evaluation_repository
-    assert "reference.entityType()" not in evaluation_repository[
-        evaluation_repository.index("static AuditOrigin classifyAuditOrigin") :
-        evaluation_repository.index("private static boolean hasProductRoot")
-    ]
+    assert (
+        "reference.entityType()"
+        not in evaluation_repository[
+            evaluation_repository.index(
+                "static AuditOrigin classifyAuditOrigin"
+            ) : evaluation_repository.index("private static boolean hasProductRoot")
+        ]
+    )
     for reason in (
         "STATE_COMMITTED_PAYMENT_TRUTH_INCONSISTENT",
         "AUDIT_COMMITTED_PAYMENT_TRUTH_INCONSISTENT",

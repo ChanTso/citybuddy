@@ -176,8 +176,10 @@ def test_evaluation_audit_is_append_only_scoped_and_not_agent_evidence() -> None
         "private List<IntegrityAuditReference> allAuditReferences", maxsplit=1
     )[1].split("private List<ProductObservationTruth>", maxsplit=1)[0]
     assert "entity_type =" not in total_audit_query
-    assert "sequenceOrderConsistent(references)" in repository
-    assert "EvaluationLegacyAuditCommitmentStore.load(jdbc).isConsistent()" in repository
+    assert "nonPaymentSequenceOrderConsistent(classifiedReferences)" in repository
+    assert "repository.auditSequenceOrderConsistent(audit)" in payment_resolver
+    assert "EvaluationLegacyAuditCommitmentStore.load(jdbc)" in repository
+    assert "legacy.isConsistent()" in repository
     assert "paidOrderTruths(sandboxId)" in repository
     assert "paymentLedgerTruths(sandboxId)" in repository
     assert "succeededCallbackTruths(sandboxId)" in repository
