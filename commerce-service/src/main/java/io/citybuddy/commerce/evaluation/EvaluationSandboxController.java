@@ -114,8 +114,10 @@ public final class EvaluationSandboxController {
 
   @ExceptionHandler(EvaluationSandboxException.class)
   ResponseEntity<Map<String, String>> rejected(EvaluationSandboxException exception) {
-    if (exception.status() == 403) {
+    if (exception.reason() != EvaluationRejectionReason.NOT_APPLICABLE) {
       LOG.warn("evaluation_request_rejected reason_code={}", exception.reason());
+    }
+    if (exception.status() == 403) {
       return ResponseEntity.status(403).body(Map.of("error", "Forbidden"));
     }
     return ResponseEntity.status(exception.status()).body(Map.of("error", exception.getMessage()));

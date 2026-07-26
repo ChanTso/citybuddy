@@ -86,7 +86,6 @@ def test_payment_schema_and_code_keep_production_and_evaluation_truth_separate()
         / "commerce-service/src/main/java/io/citybuddy/commerce/evaluation"
         / "EvaluationViewService.java"
     ).read_text(encoding="utf-8")
-
     assert "chk_standard_order_eval_binding" in migration
     assert "chk_mock_payment_callback_eval_context" in migration
     assert "PAYMENT_CALLBACK" in migration
@@ -337,6 +336,11 @@ def test_terminal_payment_callers_use_the_shared_complete_closure() -> None:
         / "commerce-service/src/main/java/io/citybuddy/commerce/evaluation"
         / "EvaluationViewService.java"
     ).read_text(encoding="utf-8")
+    evaluation_reasons = (
+        ROOT
+        / "commerce-service/src/main/java/io/citybuddy/commerce/evaluation"
+        / "EvaluationRejectionReason.java"
+    ).read_text(encoding="utf-8")
     integration = (ROOT / "scripts/test_evaluation_sandbox_integration.sh").read_text(
         encoding="utf-8"
     )
@@ -385,6 +389,19 @@ def test_terminal_payment_callers_use_the_shared_complete_closure() -> None:
     assert "paymentTruth.resolveSnapshot(caller, attempt)" in evaluation_repository
     assert "EVALUATION_STATE" in evaluation_service
     assert "EVALUATION_AUDIT" in evaluation_service
+    assert "classifyAuditOrigin" in evaluation_repository
+    assert "reference.entityType()" not in evaluation_repository[
+        evaluation_repository.index("static AuditOrigin classifyAuditOrigin") :
+        evaluation_repository.index("private static boolean hasProductRoot")
+    ]
+    for reason in (
+        "STATE_COMMITTED_PAYMENT_TRUTH_INCONSISTENT",
+        "AUDIT_COMMITTED_PAYMENT_TRUTH_INCONSISTENT",
+        "STATE_EVALUATION_AUDIT_TRUTH_INCONSISTENT",
+        "AUDIT_EVALUATION_AUDIT_TRUTH_INCONSISTENT",
+    ):
+        assert reason in evaluation_reasons
+        assert reason in integration
     assert "resolveOrderIdentityLocked" not in resolver
     start_resolution = resolver[
         resolver.index("public StartCommandResolution resolveStartCommandLocked") : resolver.index(

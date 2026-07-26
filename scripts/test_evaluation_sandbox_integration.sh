@@ -1448,6 +1448,96 @@ payment_start_reason_since() {
     | tail -n 1
 }
 
+evaluation_reasons_since() {
+  local log_start="$1"
+  local log_end="$2"
+  sed -n "$((log_start + 1)),${log_end}p" "$tmp_dir/commerce.log" 2>/dev/null \
+    | sed -n 's/.*evaluation_request_rejected reason_code=\([^ ]*\).*/\1/p'
+}
+
+state_payment_integrity_reason='STATE_COMMITTED_PAYMENT_TRUTH_INCONSISTENT'
+audit_payment_integrity_reason='AUDIT_COMMITTED_PAYMENT_TRUTH_INCONSISTENT'
+state_audit_integrity_reason='STATE_EVALUATION_AUDIT_TRUTH_INCONSISTENT'
+audit_audit_integrity_reason='AUDIT_EVALUATION_AUDIT_TRUTH_INCONSISTENT'
+
+evaluation_payment_origin_reason() {
+  local route="$1"
+  local origin
+  origin="$(mysql_query root "$root_password" commerce_db "
+SELECT CASE
+  WHEN COUNT(*) = 0 THEN 'PAYMENT_CALLBACK'
+  WHEN SUM(CASE WHEN product_root = payment_root OR payment_root = 0 THEN 1 ELSE 0 END) > 0
+    THEN 'AMBIGUOUS_OR_ORPHAN'
+  ELSE 'PAYMENT_CALLBACK'
+END
+FROM (
+  SELECT
+    EXISTS (
+      SELECT 1
+      FROM eval_commerce_product_observation product_root
+      WHERE product_root.observation_id = audit.audit_reference_id
+         OR product_root.product_id = audit.entity_id
+         OR (
+           product_root.sandbox_id <=> audit.sandbox_id
+           AND product_root.support_session_id <=> audit.support_session_id
+           AND product_root.trace_id <=> audit.trace_id
+           AND product_root.operation_id <=> audit.operation_id
+         )
+    ) AS product_root,
+    EXISTS (
+      SELECT 1
+      FROM mock_payment_callback callback_root
+      LEFT JOIN mock_payment_attempt attempt_root
+        ON attempt_root.attempt_id = callback_root.attempt_id
+      WHERE audit.audit_reference_id = SHA2(CONCAT(
+              callback_root.sandbox_id, CHAR(10),
+              callback_root.support_session_id, CHAR(10),
+              callback_root.trace_id, CHAR(10),
+              callback_root.operation_id, CHAR(10),
+              callback_root.callback_event_id, CHAR(10),
+              attempt_root.state_version), 256)
+         OR audit.entity_id = callback_root.callback_event_id
+         OR (
+           audit.sandbox_id <=> callback_root.sandbox_id
+           AND audit.support_session_id <=> callback_root.support_session_id
+           AND audit.trace_id <=> callback_root.trace_id
+           AND audit.operation_id <=> callback_root.operation_id
+         )
+    ) AS payment_root
+  FROM eval_commerce_audit_reference audit
+  WHERE audit.audit_reference_id = '$payment_audit_reference_id'
+     OR audit.entity_id = '$payment_event_id'
+     OR (
+       audit.sandbox_id = 'sandbox-payment'
+       AND audit.support_session_id = '$payment_session'
+       AND audit.trace_id = '$payment_trace'
+       AND audit.operation_id = '$payment_operation'
+     )
+) authoritative_origin
+")"
+  if [[ "$route:$origin" == STATE:PAYMENT_CALLBACK ]]; then
+    printf '%s' "$state_payment_integrity_reason"
+  elif [[ "$route:$origin" == AUDIT:PAYMENT_CALLBACK ]]; then
+    printf '%s' "$audit_payment_integrity_reason"
+  elif [[ "$route" == STATE ]]; then
+    printf '%s' "$state_audit_integrity_reason"
+  else
+    printf '%s' "$audit_audit_integrity_reason"
+  fi
+}
+
+assert_no_evaluation_integrity_reason_since() {
+  local log_start="$1"
+  local log_end="$2"
+  local description="$3"
+  if evaluation_reasons_since "$log_start" "$log_end" \
+    | grep -Eq '^(STATE|AUDIT)_(COMMITTED_PAYMENT|EVALUATION_AUDIT)_TRUTH_INCONSISTENT$'; then
+    echo "Successful evaluation request acquired integrity attribution: $description" >&2
+    evaluation_reasons_since "$log_start" "$log_end" >&2
+    exit 1
+  fi
+}
+
 assert_payment_start_concealed() {
   local description="$1"
   local order_id="$2"
@@ -1927,7 +2017,9 @@ assert_payment_truth_fails_closed() {
   local callback_status start_status state_status audit_status
   local start_visibility start_expected=409
   local durable_before durable_after commerce_log_start=0 start_log_end=0 callback_log_end=0
-  local start_reason callback_reason
+  local state_log_start=0 state_log_end=0 audit_log_start=0 audit_log_end=0
+  local start_reason callback_reason state_reason audit_reason
+  local expected_state_reason expected_audit_reason
   refresh_payment_observer_credentials
   refresh_payment_callback_signature
   durable_before="$(mysql_query commerce_app "$commerce_app_password" commerce_db \
@@ -1971,14 +2063,22 @@ assert_payment_truth_fails_closed() {
     callback_log_end="$(wc -l <"$tmp_dir/commerce.log")"
   fi
   callback_reason="$(payment_start_reason_since "$start_log_end" "$callback_log_end")"
+  state_log_start="$(wc -l <"$tmp_dir/commerce.log")"
   state_status="$(request_status "$tmp_dir/payment-state-classification.json" \
     --request GET "http://127.0.0.1:$commerce_port/api/eval/state" \
     --user "evaluation-manager:$management_password" \
     --header 'X-Eval-Sandbox-Id: sandbox-payment')"
+  state_log_end="$(wc -l <"$tmp_dir/commerce.log")"
+  state_reason="$(evaluation_reasons_since "$state_log_start" "$state_log_end")"
+  audit_log_start="$(wc -l <"$tmp_dir/commerce.log")"
   audit_status="$(request_status "$tmp_dir/payment-audit-classification.json" \
     --request GET "http://127.0.0.1:$commerce_port/api/eval/audit/$payment_session" \
     --user "evaluation-manager:$management_password" \
     --header 'X-Eval-Sandbox-Id: sandbox-payment')"
+  audit_log_end="$(wc -l <"$tmp_dir/commerce.log")"
+  audit_reason="$(evaluation_reasons_since "$audit_log_start" "$audit_log_end")"
+  expected_state_reason="$(evaluation_payment_origin_reason STATE)"
+  expected_audit_reason="$(evaluation_payment_origin_reason AUDIT)"
   durable_after="$(mysql_query commerce_app "$commerce_app_password" commerce_db \
     "SELECT CONCAT(
        (SELECT COUNT(*) FROM mock_payment_attempt WHERE order_id = '$payment_order_id'), ':',
@@ -2028,6 +2128,10 @@ assert_payment_truth_fails_closed() {
   fi
   assert_equal COMMITTED_PAYMENT_TRUTH_INCONSISTENT "$callback_reason" \
     "callback damage has durable-integrity attribution: $description"
+  assert_equal "$expected_state_reason" "$state_reason" \
+    "state damage has authoritative-origin request-local attribution: $description"
+  assert_equal "$expected_audit_reason" "$audit_reason" \
+    "audit damage has authoritative-origin request-local attribution: $description"
   for response in payment-start-classification payment-callback-classification \
     payment-state-classification payment-audit-classification; do
     if grep -Eq 'COMMITTED_PAYMENT_TRUTH_INCONSISTENT|CONCEALED_NOT_FOUND' \
@@ -2046,7 +2150,7 @@ assert_payment_audit_reconciliation_fails_closed() {
 
 assert_payment_truth_equivalence_preserving() {
   local description="$1"
-  local durable_before durable_after
+  local durable_before durable_after state_log_start state_log_end audit_log_start audit_log_end
   refresh_payment_observer_credentials
   refresh_payment_callback_signature
   durable_before="$(mysql_query commerce_app "$commerce_app_password" commerce_db \
@@ -2074,14 +2178,22 @@ assert_payment_truth_equivalence_preserving() {
     --header "Idempotency-Key: $payment_callback_key" \
     --header 'Content-Type: application/json' \
     --data "$payment_callback_body"
+  state_log_start="$(wc -l <"$tmp_dir/commerce.log")"
   assert_status 200 "$description preserves evaluation state" \
     --request GET "http://127.0.0.1:$commerce_port/api/eval/state" \
     --user "evaluation-manager:$management_password" \
     --header 'X-Eval-Sandbox-Id: sandbox-payment'
+  state_log_end="$(wc -l <"$tmp_dir/commerce.log")"
+  assert_no_evaluation_integrity_reason_since "$state_log_start" "$state_log_end" \
+    "$description restored state"
+  audit_log_start="$(wc -l <"$tmp_dir/commerce.log")"
   assert_status 200 "$description preserves evaluation audit" \
     --request GET "http://127.0.0.1:$commerce_port/api/eval/audit/$payment_session" \
     --user "evaluation-manager:$management_password" \
     --header 'X-Eval-Sandbox-Id: sandbox-payment'
+  audit_log_end="$(wc -l <"$tmp_dir/commerce.log")"
+  assert_no_evaluation_integrity_reason_since "$audit_log_start" "$audit_log_end" \
+    "$description restored audit"
   durable_after="$(mysql_query commerce_app "$commerce_app_password" commerce_db \
     "SELECT CONCAT(
        (SELECT COUNT(*) FROM mock_payment_attempt WHERE order_id = '$payment_order_id'), ':',
@@ -2099,6 +2211,7 @@ assert_payment_truth_equivalence_preserving() {
 
 assert_unrelated_payment_audit_reconciliation_fails_closed() {
   local description="$1"
+  local state_log_start state_log_end audit_log_start audit_log_end
   refresh_payment_callback_signature
   assert_status 200 "$description does not contaminate exact committed callback replay" \
     --request POST "http://127.0.0.1:$commerce_port/internal/mock-payments/callback" \
@@ -2108,28 +2221,49 @@ assert_unrelated_payment_audit_reconciliation_fails_closed() {
     --header "Idempotency-Key: $payment_callback_key" \
     --header 'Content-Type: application/json' \
     --data "$payment_callback_body"
+  state_log_start="$(wc -l <"$tmp_dir/commerce.log")"
   assert_status 409 "$description rejects evaluation state" \
     --request GET "http://127.0.0.1:$commerce_port/api/eval/state" \
     --user "evaluation-manager:$management_password" \
     --header 'X-Eval-Sandbox-Id: sandbox-payment'
+  state_log_end="$(wc -l <"$tmp_dir/commerce.log")"
+  assert_equal STATE_EVALUATION_AUDIT_TRUTH_INCONSISTENT \
+    "$(evaluation_reasons_since "$state_log_start" "$state_log_end")" \
+    "$description state has request-local non-payment audit-integrity attribution"
+  audit_log_start="$(wc -l <"$tmp_dir/commerce.log")"
   assert_status 409 "$description rejects evaluation audit" \
     --request GET "http://127.0.0.1:$commerce_port/api/eval/audit/$payment_session" \
     --user "evaluation-manager:$management_password" \
     --header 'X-Eval-Sandbox-Id: sandbox-payment'
+  audit_log_end="$(wc -l <"$tmp_dir/commerce.log")"
+  assert_equal AUDIT_EVALUATION_AUDIT_TRUTH_INCONSISTENT \
+    "$(evaluation_reasons_since "$audit_log_start" "$audit_log_end")" \
+    "$description audit has request-local non-payment audit-integrity attribution"
 }
 
 assert_audit_totality_fails_closed() {
   local sandbox_id="$1"
   local support_session_id="$2"
   local description="$3"
+  local state_log_start state_log_end audit_log_start audit_log_end
+  state_log_start="$(wc -l <"$tmp_dir/commerce.log")"
   assert_status 409 "$description rejects evaluation state" \
     --request GET "http://127.0.0.1:$commerce_port/api/eval/state" \
     --user "evaluation-manager:$management_password" \
     --header "X-Eval-Sandbox-Id: $sandbox_id"
+  state_log_end="$(wc -l <"$tmp_dir/commerce.log")"
+  assert_equal STATE_EVALUATION_AUDIT_TRUTH_INCONSISTENT \
+    "$(evaluation_reasons_since "$state_log_start" "$state_log_end")" \
+    "$description state has request-local non-payment audit-integrity attribution"
+  audit_log_start="$(wc -l <"$tmp_dir/commerce.log")"
   assert_status 409 "$description rejects evaluation audit" \
     --request GET "http://127.0.0.1:$commerce_port/api/eval/audit/$support_session_id" \
     --user "evaluation-manager:$management_password" \
     --header "X-Eval-Sandbox-Id: $sandbox_id"
+  audit_log_end="$(wc -l <"$tmp_dir/commerce.log")"
+  assert_equal AUDIT_EVALUATION_AUDIT_TRUTH_INCONSISTENT \
+    "$(evaluation_reasons_since "$audit_log_start" "$audit_log_end")" \
+    "$description audit has request-local non-payment audit-integrity attribution"
 }
 
 payment_audit_reference_id="$(mysql_query commerce_app "$commerce_app_password" commerce_db \

@@ -44,6 +44,14 @@ INTEGRITY_ENUMERATOR_PREDICATE_HEURISTICS = {
         "c.attempt_id": "stable callback/attempt correlation key",
         "c.callback_correlation_id": "stable callback/attempt correlation key",
         "c.callback_event_id": "stable callback/audit correlation key",
+        "audit_root.sandbox_id": "stable exact callback/audit context tuple",
+        "audit_root.support_session_id": "stable exact callback/audit context tuple",
+        "audit_root.trace_id": "stable exact callback/audit context tuple",
+        "audit_root.operation_id": "stable exact callback/audit context tuple",
+        "c.sandbox_id": "stable exact callback/audit context tuple",
+        "c.support_session_id": "stable exact callback/audit context tuple",
+        "c.trace_id": "stable exact callback/audit context tuple",
+        "c.operation_id": "stable exact callback/audit context tuple",
         "sandbox_id": "stable sandbox key source for attempt and audit faces",
     },
     (LEGACY_COMMITMENT_STORE, "load"): {
@@ -360,8 +368,8 @@ def test_direct_integrity_predicates_match_the_review_heuristic() -> None:
 
     evaluation_source = source(EVALUATION_VIEW_REPOSITORY)
     evaluation_methods = java_methods(evaluation_source)
-    reachable = {"auditReferencesConsistent"}
-    pending = ["auditReferencesConsistent"]
+    reachable = {"auditReferencesConsistency"}
+    pending = ["auditReferencesConsistency"]
     while pending:
         method = pending.pop()
         body = evaluation_methods[method]
@@ -380,7 +388,7 @@ def test_direct_integrity_predicates_match_the_review_heuristic() -> None:
     assert reachable_sql_enumerators == registered_evaluation
     assert (
         "EvaluationLegacyAuditCommitmentStore.load(jdbc)"
-        in evaluation_methods["auditReferencesConsistent"]
+        in evaluation_methods["auditReferencesConsistency"]
     )
 
 

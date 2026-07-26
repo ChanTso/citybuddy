@@ -849,13 +849,14 @@ public class MockPaymentRepository {
     return rows.stream().findFirst();
   }
 
-  boolean auditSequenceOrderConsistent(String sandboxId) {
+  boolean auditSequenceOrderConsistent(PaymentAuditRecord auditRecord) {
     Integer contradictions =
         jdbc.queryForObject(
             """
             SELECT COUNT(*)
             FROM eval_commerce_audit_reference audit
-            WHERE audit.sandbox_id = ?
+            WHERE audit.audit_reference_id = ?
+              AND audit.sandbox_id = ?
               AND EXISTS (
                 SELECT 1 FROM eval_commerce_audit_reference peer
                 WHERE peer.sandbox_id = audit.sandbox_id
@@ -869,7 +870,8 @@ public class MockPaymentRepository {
               )
             """,
             Integer.class,
-            sandboxId);
+            auditRecord.auditReferenceId(),
+            auditRecord.sandboxId());
     return contradictions != null && contradictions == 0;
   }
 

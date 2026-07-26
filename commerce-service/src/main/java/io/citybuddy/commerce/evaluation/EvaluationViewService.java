@@ -26,12 +26,14 @@ public class EvaluationViewService {
     List<EvaluationViewRepository.ProductView> products = repository.products(sandboxId);
     List<EvaluationViewRepository.EffectView> effects = repository.effects(sandboxId);
     List<EvaluationViewRepository.PaymentView> payments = repository.payments(sandboxId);
-    if (!repository.auditReferencesConsistent(
-        sandboxId,
-        io.citybuddy.commerce.payment.CommittedPaymentTruthResolver.CommittedPaymentCaller
-            .EVALUATION_STATE)) {
-      throw new EvaluationSandboxException(409, "Evaluation payment truth is inconsistent");
-    }
+    requireAuditConsistency(
+        repository.auditReferencesConsistency(
+            sandboxId,
+            io.citybuddy.commerce.payment.CommittedPaymentTruthResolver.CommittedPaymentCaller
+                .EVALUATION_STATE),
+        EvaluationRejectionReason.STATE_COMMITTED_PAYMENT_TRUTH_INCONSISTENT,
+        EvaluationRejectionReason.STATE_EVALUATION_AUDIT_TRUTH_INCONSISTENT,
+        "Evaluation payment truth is inconsistent");
     if ("ACTIVE".equals(sandbox.lifecycleState()) && products.size() != sandbox.fixtureCount()) {
       throw new EvaluationSandboxException(409, "Evaluation sandbox truth is inconsistent");
     }
@@ -51,7 +53,10 @@ public class EvaluationViewService {
               && payment.orderStateVersion() == 2
               && payment.movementCount() == 1;
       if (!pending && !succeeded) {
-        throw new EvaluationSandboxException(409, "Evaluation payment truth is inconsistent");
+        throw new EvaluationSandboxException(
+            409,
+            EvaluationRejectionReason.STATE_COMMITTED_PAYMENT_TRUTH_INCONSISTENT,
+            "Evaluation payment truth is inconsistent");
       }
     }
     return new StateView(sandbox, products, effects, payments);
@@ -63,12 +68,14 @@ public class EvaluationViewService {
       String supportSessionId,
       EvaluationViewRequestParser.AuditPageRequest page) {
     observableSandbox(sandboxId);
-    if (!repository.auditReferencesConsistent(
-        sandboxId,
-        io.citybuddy.commerce.payment.CommittedPaymentTruthResolver.CommittedPaymentCaller
-            .EVALUATION_AUDIT)) {
-      throw new EvaluationSandboxException(409, "Evaluation audit truth is inconsistent");
-    }
+    requireAuditConsistency(
+        repository.auditReferencesConsistency(
+            sandboxId,
+            io.citybuddy.commerce.payment.CommittedPaymentTruthResolver.CommittedPaymentCaller
+                .EVALUATION_AUDIT),
+        EvaluationRejectionReason.AUDIT_COMMITTED_PAYMENT_TRUTH_INCONSISTENT,
+        EvaluationRejectionReason.AUDIT_EVALUATION_AUDIT_TRUTH_INCONSISTENT,
+        "Evaluation audit truth is inconsistent");
     List<EvaluationViewRepository.AuditReference> fetched =
         repository.audit(sandboxId, supportSessionId, page.after(), page.limit() + 1);
     if (fetched.isEmpty()) {
@@ -112,6 +119,20 @@ public class EvaluationViewService {
       return value != null && java.util.UUID.fromString(value).toString().equals(value);
     } catch (IllegalArgumentException exception) {
       return false;
+    }
+  }
+
+  private static void requireAuditConsistency(
+      EvaluationViewRepository.AuditConsistency consistency,
+      EvaluationRejectionReason paymentReason,
+      EvaluationRejectionReason nonPaymentReason,
+      String message) {
+    if (consistency == EvaluationViewRepository.AuditConsistency.PAYMENT_TRUTH_INCONSISTENT) {
+      throw new EvaluationSandboxException(409, paymentReason, message);
+    }
+    if (consistency
+        == EvaluationViewRepository.AuditConsistency.NON_PAYMENT_AUDIT_TRUTH_INCONSISTENT) {
+      throw new EvaluationSandboxException(409, nonPaymentReason, message);
     }
   }
 

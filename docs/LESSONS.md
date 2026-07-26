@@ -312,3 +312,9 @@ This file records only factual pitfalls supported by merged pull-request, commit
 - 现象：知识重建生命周期曾把下游 CB-130 依赖挂在完整的“正向切换 + 自动回滚 + 安全清理”尾端，但 CB-130 及全部下游尚无代码、schema、状态或证据消费自动 rollback 或 retired-index cleanup；实际使用的知识基础已经由 CB-113 的完整重建验证、持久 checkpoint 与原子正向 alias 切换交付。
 - 解决：所有者在 CB-113 验证后将 CB-114/115 保留为现有链接规格并标记 `DEFERRED`，把 CB-130 的真实依赖改为 `CB-113, CB-121`，并明确登记人工恢复与重复重建存储增长的残余风险。恢复这两个演进结果只能由新的 vNext Goal 明确授权，不能在 CB-152 后自动激活。
 - 结论：路线依赖应表达下游真实消费的代码、schema、状态与证据，而不是把可选运维演进机械地串成阻塞前置。延后自动恢复或破坏性清理时，应保留未来规格、明确当前承诺终点和残余风险，同时禁止用“延后”偷偷实现 rollback 或删除行为。
+
+## CB-116 — Authoritative audit-origin attribution
+
+- 现象：evaluation state/audit 已为 payment durable-integrity 409 增加独立 server-only reason，但 product audit 的 `entity_type` 被损坏为 `PAYMENT_CALLBACK` 后也获得 payment reason；只断言 409 或在整份历史日志中查到 reason 会形成 producer-attribution 假绿。
+- 根因：领域分类先按共享 audit 表中可能被损坏的 discriminator 过滤，再执行完整性对账。损坏字段同时充当归因权威和被校验内容，使跨类型损坏能把 unrelated product failure 移入 payment producer。
+- 结论：故障归因不得信任可能被损坏的 type/discriminator。必须先由独立 durable business root 唯一建立 entity family，再把 discriminator 当作内容校验；无根、双根、cross-family 或 orphan 固定 fail closed，但使用明确的 non-payment audit-integrity attribution。集成证据必须绑定单次请求的日志增量，不能让另一路请求或旧日志贡献 reason。

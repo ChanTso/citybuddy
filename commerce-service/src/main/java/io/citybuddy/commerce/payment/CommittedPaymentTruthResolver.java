@@ -577,7 +577,7 @@ public final class CommittedPaymentTruthResolver {
         || audit.entityVersion() != attempt.stateVersion()
         || !"OBSERVED".equals(audit.outcome())
         || !"BUSINESS_EVENT".equals(audit.createdAtAnchor())
-        || !repository.auditSequenceOrderConsistent(audit.sandboxId())) {
+        || !repository.auditSequenceOrderConsistent(audit)) {
       throw inconsistent("Evaluation payment audit content is inconsistent");
     }
     return Optional.of(audit);

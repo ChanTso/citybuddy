@@ -839,15 +839,15 @@ class MockPaymentIntegrationTest {
 
     EvaluationViewRepository views = new EvaluationViewRepository(jdbc);
     assertThat(
-            views.auditReferencesConsistent(
+            views.auditReferencesConsistency(
                 fixture.sandboxId(),
                 CommittedPaymentTruthResolver.CommittedPaymentCaller.EVALUATION_STATE))
-        .isFalse();
+        .isEqualTo(EvaluationViewRepository.AuditConsistency.PAYMENT_TRUTH_INCONSISTENT);
     assertThat(
-            views.auditReferencesConsistent(
+            views.auditReferencesConsistency(
                 fixture.sandboxId(),
                 CommittedPaymentTruthResolver.CommittedPaymentCaller.EVALUATION_AUDIT))
-        .isFalse();
+        .isEqualTo(EvaluationViewRepository.AuditConsistency.PAYMENT_TRUTH_INCONSISTENT);
   }
 
   @Test
