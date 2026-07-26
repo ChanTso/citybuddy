@@ -20,9 +20,11 @@ public final class CommittedPaymentTruthResolver {
   private static final String LOCK = " FOR UPDATE";
 
   private final MockPaymentRepository repository;
+  private final CommittedOrderOriginResolver orderOrigins;
 
   public CommittedPaymentTruthResolver(MockPaymentRepository repository) {
     this.repository = repository;
+    this.orderOrigins = new CommittedOrderOriginResolver(repository);
   }
 
   public String callbackIntentHash(String idempotencyKey, MockPaymentCallbackRequest request) {
@@ -347,6 +349,7 @@ public final class CommittedPaymentTruthResolver {
         repository.enumerateOrderClosure(attempt.orderId(), lockClause);
     requireCardinality(orders, "Payment order closure is inconsistent");
     MockPaymentRepository.OrderTruth order = orders.getFirst();
+    orderOrigins.resolve(order);
 
     List<MockPaymentRepository.CallbackRecord> discovered =
         repository.discoverCallbackClosure(attempt, "");
@@ -368,6 +371,7 @@ public final class CommittedPaymentTruthResolver {
         repository.enumerateAuditClosure(callback, attempt.stateVersion(), "");
     Optional<MockPaymentRepository.PaymentAuditRecord> audit =
         requireAuditClosure(auditRows, attempt, callback);
+    requireCorrelatedContentGroups(attempt, callback, audit);
 
     return new CommittedPaymentTruth(order, attempt, callback, paymentMovement, audit);
   }
@@ -403,8 +407,6 @@ public final class CommittedPaymentTruthResolver {
         || !Objects.equals(callback.sandboxId(), attempt.sandboxId())
         || !"SUCCEEDED".equals(callback.requestedOutcome())
         || !"APPLIED".equals(callback.resultState())
-        || attempt.succeededAt() == null
-        || !attempt.succeededAt().equals(callback.createdAt())
         || !callback.intentHash().equals(callbackIntentHash(attempt, callback))) {
       throw inconsistent("Committed payment content is inconsistent");
     }
@@ -574,12 +576,61 @@ public final class CommittedPaymentTruthResolver {
         || !audit.entityId().equals(callback.callbackEventId())
         || audit.entityVersion() != attempt.stateVersion()
         || !"OBSERVED".equals(audit.outcome())
-        || !audit.createdAt().equals(callback.createdAt())
         || !"BUSINESS_EVENT".equals(audit.createdAtAnchor())
         || !repository.auditSequenceOrderConsistent(audit.sandboxId())) {
       throw inconsistent("Evaluation payment audit content is inconsistent");
     }
     return Optional.of(audit);
+  }
+
+  private static void requireCorrelatedContentGroups(
+      MockPaymentRepository.AttemptRecord attempt,
+      MockPaymentRepository.CallbackRecord callback,
+      Optional<MockPaymentRepository.PaymentAuditRecord> audit) {
+    for (EvaluationPaymentCommittedFaces.CorrelatedContentGroup group :
+        EvaluationPaymentCommittedFaces.correlatedContentGroups()) {
+      switch (group.id()) {
+        case PAYMENT_EVENT_TIME -> requirePaymentEventTime(group, attempt, callback, audit);
+      }
+    }
+  }
+
+  private static void requirePaymentEventTime(
+      EvaluationPaymentCommittedFaces.CorrelatedContentGroup group,
+      MockPaymentRepository.AttemptRecord attempt,
+      MockPaymentRepository.CallbackRecord callback,
+      Optional<MockPaymentRepository.PaymentAuditRecord> audit) {
+    EvaluationPaymentCommittedFaces.PaymentTruthScope scope =
+        attempt.sandboxId() == null
+            ? EvaluationPaymentCommittedFaces.PaymentTruthScope.PRODUCTION
+            : EvaluationPaymentCommittedFaces.PaymentTruthScope.EVALUATION;
+    List<EvaluationPaymentCommittedFaces.ColumnRef> expectedMembers =
+        scope == EvaluationPaymentCommittedFaces.PaymentTruthScope.PRODUCTION
+            ? List.of(
+                new EvaluationPaymentCommittedFaces.ColumnRef(
+                    "mock_payment_callback", "created_at"),
+                new EvaluationPaymentCommittedFaces.ColumnRef(
+                    "mock_payment_attempt", "succeeded_at"))
+            : List.of(
+                new EvaluationPaymentCommittedFaces.ColumnRef(
+                    "mock_payment_callback", "created_at"),
+                new EvaluationPaymentCommittedFaces.ColumnRef(
+                    "mock_payment_attempt", "succeeded_at"),
+                new EvaluationPaymentCommittedFaces.ColumnRef(
+                    "eval_commerce_audit_reference", "created_at"));
+    List<EvaluationPaymentCommittedFaces.ColumnRef> registeredMembers =
+        group.membersFor(scope).stream().map(member -> member.column()).toList();
+    if (!registeredMembers.containsAll(expectedMembers)
+        || !expectedMembers.containsAll(registeredMembers)
+        || attempt.succeededAt() == null
+        || callback.createdAt() == null
+        || !attempt.succeededAt().equals(callback.createdAt())
+        || (scope == EvaluationPaymentCommittedFaces.PaymentTruthScope.EVALUATION
+            && (audit.isEmpty()
+                || audit.orElseThrow().createdAt() == null
+                || !audit.orElseThrow().createdAt().equals(callback.createdAt())))) {
+      throw inconsistent("Committed payment event-time group is inconsistent");
+    }
   }
 
   private static boolean matchesPaymentMovement(
@@ -640,14 +691,18 @@ public final class CommittedPaymentTruthResolver {
       return order.reservationId() == null
           && order.activityId() == null
           && order.transactionEventId() == null
-          && order.quantity() == null;
+          && order.quantity() != null
+          && order.quantity() > 0
+          && order.productVersion() != null
+          && order.productVersion() > 0;
     }
     return "SECKILL".equals(order.orderKind())
         && order.reservationId() != null
         && order.activityId() != null
         && order.transactionEventId() != null
         && order.quantity() != null
-        && order.quantity() > 0;
+        && order.quantity() > 0
+        && order.productVersion() == null;
   }
 
   private static void requireLedgerAcquisitionBound(

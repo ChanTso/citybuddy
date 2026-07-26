@@ -25,7 +25,8 @@ public class RefundRepository {
         jdbc.query(
             """
             SELECT order_id, user_subject, sandbox_id, evaluation_owner_handle, product_id,
-                   total_price_minor, currency, status, state_version
+                   quantity, product_version, unit_price_minor, total_price_minor, currency,
+                   status, state_version
             FROM standard_order
             WHERE order_id = ?
             """,
@@ -40,7 +41,9 @@ public class RefundRepository {
                     null,
                     null,
                     null,
-                    null,
+                    result.getObject("quantity", Long.class),
+                    result.getObject("product_version", Long.class),
+                    result.getLong("unit_price_minor"),
                     result.getLong("total_price_minor"),
                     result.getString("currency"),
                     result.getString("status"),
@@ -51,7 +54,8 @@ public class RefundRepository {
             """
             SELECT order_id, user_subject, NULL AS sandbox_id, NULL AS evaluation_owner_handle,
                    product_id, reservation_id, activity_id, transaction_event_id, quantity,
-                   total_price_minor, currency, status, state_version
+                   NULL AS product_version, unit_price_minor, total_price_minor, currency, status,
+                   state_version
             FROM seckill_order
             WHERE order_id = ?
             """,
@@ -67,6 +71,8 @@ public class RefundRepository {
                     result.getString("activity_id"),
                     result.getString("transaction_event_id"),
                     result.getObject("quantity", Long.class),
+                    result.getObject("product_version", Long.class),
+                    result.getLong("unit_price_minor"),
                     result.getLong("total_price_minor"),
                     result.getString("currency"),
                     result.getString("status"),

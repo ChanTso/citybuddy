@@ -371,10 +371,12 @@ public final class EvaluationViewRepository {
         FROM %s
         WHERE order_id IN (%s)
         ORDER BY order_id, movement_id
+        LIMIT %d
         """
             .formatted(
                 EvaluationPaymentCommittedFaces.onlyTable(EvaluationPaymentCommittedFaces.LEDGER),
-                EvaluationPaymentCommittedFaces.evaluationOrderKeysBySandboxSql()),
+                EvaluationPaymentCommittedFaces.evaluationOrderKeysBySandboxSql(),
+                EvaluationPaymentCommittedFaces.MAXIMUM_LEDGER_CLOSURE_ROWS + 1),
         (result, row) ->
             new PaymentLedgerTruth(
                 result.getString("movement_id"),

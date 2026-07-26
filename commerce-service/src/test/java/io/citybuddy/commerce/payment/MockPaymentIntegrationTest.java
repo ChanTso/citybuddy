@@ -6,6 +6,7 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import io.citybuddy.commerce.evaluation.EvaluationSandboxException;
 import io.citybuddy.commerce.evaluation.EvaluationSandboxRepository;
 import io.citybuddy.commerce.evaluation.EvaluationViewRepository;
+import io.citybuddy.commerce.order.StandardOrderIntentCommitment;
 import io.citybuddy.commerce.seckill.SeckillActivityRepository;
 import io.citybuddy.commerce.seckill.SeckillCancellationService;
 import io.citybuddy.commerce.seckill.SeckillOrderRepository;
@@ -17,6 +18,7 @@ import java.time.Clock;
 import java.time.Instant;
 import java.time.ZoneId;
 import java.time.temporal.ChronoUnit;
+import java.util.ArrayList;
 import java.util.HexFormat;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -27,6 +29,7 @@ import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
+import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.condition.EnabledIfEnvironmentVariable;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -95,6 +98,16 @@ class MockPaymentIntegrationTest {
   @Autowired private JdbcTemplate jdbc;
   @Autowired private MockPaymentService payments;
   @Autowired private PlatformTransactionManager transactionManager;
+  private final List<String> seededStandardOrderIds = new ArrayList<>();
+
+  @AfterEach
+  void removeStandardOrderOriginFixtures() {
+    JdbcTemplate root = rootJdbc();
+    for (String orderId : seededStandardOrderIds) {
+      root.update("DELETE FROM order_idempotency WHERE order_id = ?", orderId);
+    }
+    seededStandardOrderIds.clear();
+  }
 
   @Test
   void directApiAndSignedCallbackKeepOneAuthoritativePaidTruth() {
@@ -514,10 +527,11 @@ class MockPaymentIntegrationTest {
     SeckillFixture sibling =
         seedSeckillOrder("ambiguous-" + UUID.randomUUID().toString().substring(0, 8), 1600);
     assertThat(
-            jdbc.update(
-                "UPDATE seckill_order SET order_id = ? WHERE order_id = ?",
-                standardOrderId,
-                sibling.orderId()))
+            rootJdbc()
+                .update(
+                    "UPDATE seckill_order SET order_id = ? WHERE order_id = ?",
+                    standardOrderId,
+                    sibling.orderId()))
         .isOne();
     long attemptsBefore = count("mock_payment_attempt");
 
@@ -803,6 +817,40 @@ class MockPaymentIntegrationTest {
   }
 
   @Test
+  void evaluationViewsClassifyDamagedOrderOriginAsInconsistentInsteadOfFailingUnexpectedly() {
+    EvaluationPaymentFixture fixture = seedEvaluationPayment("view-order-origin-damage");
+    MockPaymentService evaluation = evaluationPayments(new MockPaymentRepository(jdbc));
+    MockPaymentResult attempt =
+        evaluation.start(
+            fixture.userSubject(),
+            fixture.sandboxId(),
+            fixture.orderId(),
+            "view-order-origin-damage",
+            new MockPaymentRequest(1800L, "CNY", null));
+    evaluation.callback(
+        "callback-view-order-origin-damage",
+        evaluationCallback(attempt, fixture.sandboxId(), "view-order-origin-damage"));
+    assertThat(
+            rootJdbc()
+                .update(
+                    "UPDATE standard_order SET quantity = quantity + 1 WHERE order_id = ?",
+                    fixture.orderId()))
+        .isOne();
+
+    EvaluationViewRepository views = new EvaluationViewRepository(jdbc);
+    assertThat(
+            views.auditReferencesConsistent(
+                fixture.sandboxId(),
+                CommittedPaymentTruthResolver.CommittedPaymentCaller.EVALUATION_STATE))
+        .isFalse();
+    assertThat(
+            views.auditReferencesConsistent(
+                fixture.sandboxId(),
+                CommittedPaymentTruthResolver.CommittedPaymentCaller.EVALUATION_AUDIT))
+        .isFalse();
+  }
+
+  @Test
   void callbackTransactionRollsBackEveryPartialWriteAndRetryConverges() {
     String orderId = seedStandardOrder(USER, 2200);
     MockPaymentResult attempt =
@@ -880,10 +928,11 @@ class MockPaymentIntegrationTest {
     assertThat(count("inventory_ledger")).isEqualTo(movementsBefore);
 
     assertThat(
-            jdbc.update(
-                "UPDATE mock_payment_attempt SET state = 'FAILED', state_version = 2 "
-                    + "WHERE attempt_id = ? AND state = 'PENDING' AND state_version = 1",
-                mismatched.attemptId()))
+            rootJdbc()
+                .update(
+                    "UPDATE mock_payment_attempt SET state = 'FAILED', state_version = 2 "
+                        + "WHERE attempt_id = ? AND state = 'PENDING' AND state_version = 1",
+                    mismatched.attemptId()))
         .isOne();
     assertCallbackRejected(
         "callback-failed-attempt", callback(mismatched, UUID.randomUUID().toString()), 409);
@@ -1278,6 +1327,357 @@ class MockPaymentIntegrationTest {
     assertThat(committedReplay.state()).isEqualTo("SUCCEEDED");
     assertThat(committedReplay.replayed()).isTrue();
     assertPaidTruth(orderId, attempt.attemptId(), "STANDARD_PAYMENT", 1830);
+  }
+
+  @Test
+  void productionCommittedReplayAcceptsOnlyTheCompletePaymentEventTimeEquivalenceGroup() {
+    String orderId = seedStandardOrder(USER, 1840);
+    MockPaymentResult attempt =
+        payments.start(
+            USER, orderId, "payment-time-group", new MockPaymentRequest(1840L, "AUD", null));
+    MockPaymentCallbackRequest callback = callback(attempt, UUID.randomUUID().toString());
+    String callbackKey = "callback-time-group";
+    payments.callback(callbackKey, callback);
+    long callbacksBefore = count("mock_payment_callback");
+    long movementsBefore = count("inventory_ledger");
+
+    assertThat(
+            rootJdbc()
+                .update(
+                    """
+                UPDATE mock_payment_callback
+                SET created_at = TIMESTAMPADD(MICROSECOND, 1, created_at)
+                WHERE attempt_id = ?
+                """,
+                    attempt.attemptId()))
+        .isOne();
+    assertThatThrownBy(() -> payments.callback(callbackKey, callback))
+        .isInstanceOfSatisfying(
+            MockPaymentException.class, exception -> assertThat(exception.status()).isEqualTo(409));
+
+    assertThat(
+            rootJdbc()
+                .update(
+                    """
+                UPDATE mock_payment_attempt
+                SET succeeded_at = TIMESTAMPADD(MICROSECOND, 1, succeeded_at)
+                WHERE attempt_id = ?
+                """,
+                    attempt.attemptId()))
+        .isOne();
+    assertThat(payments.callback(callbackKey, callback).replayed()).isTrue();
+    assertThat(count("mock_payment_callback")).isEqualTo(callbacksBefore);
+    assertThat(count("inventory_ledger")).isEqualTo(movementsBefore);
+
+    assertThat(
+            rootJdbc()
+                .update(
+                    """
+                UPDATE mock_payment_attempt
+                SET succeeded_at = TIMESTAMPADD(MICROSECOND, 1, succeeded_at)
+                WHERE attempt_id = ?
+                """,
+                    attempt.attemptId()))
+        .isOne();
+    assertThatThrownBy(() -> payments.callback(callbackKey, callback))
+        .isInstanceOfSatisfying(
+            MockPaymentException.class, exception -> assertThat(exception.status()).isEqualTo(409));
+    assertThat(count("mock_payment_callback")).isEqualTo(callbacksBefore);
+    assertThat(count("inventory_ledger")).isEqualTo(movementsBefore);
+  }
+
+  @Test
+  void productionCommittedReplayRejectsAProductReplicaRewriteAgainstItsOrderOrigin() {
+    String orderId = seedStandardOrder(USER, 1850);
+    MockPaymentResult attempt =
+        payments.start(
+            USER, orderId, "payment-product-origin", new MockPaymentRequest(1850L, "AUD", null));
+    MockPaymentCallbackRequest callback = callback(attempt, UUID.randomUUID().toString());
+    String callbackKey = "callback-product-origin";
+    payments.callback(callbackKey, callback);
+    long callbacksBefore = count("mock_payment_callback");
+    long movementsBefore = count("inventory_ledger");
+    String tamperedProduct = "tampered-origin-product";
+
+    assertThat(
+            rootJdbc()
+                .update(
+                    "UPDATE standard_order SET product_id = ? WHERE order_id = ?",
+                    tamperedProduct,
+                    orderId))
+        .isOne();
+    assertThat(
+            rootJdbc()
+                .update(
+                    "UPDATE inventory_ledger SET product_id = ? WHERE order_id = ?",
+                    tamperedProduct,
+                    orderId))
+        .isOne();
+
+    assertThatThrownBy(() -> payments.callback(callbackKey, callback))
+        .isInstanceOfSatisfying(
+            MockPaymentException.class,
+            exception -> {
+              assertThat(exception.status()).isEqualTo(409);
+              assertThat(exception.reason())
+                  .isEqualTo(MockPaymentRejectionReason.COMMITTED_PAYMENT_TRUTH_INCONSISTENT);
+            });
+    assertThat(count("mock_payment_callback")).isEqualTo(callbacksBefore);
+    assertThat(count("inventory_ledger")).isEqualTo(movementsBefore);
+  }
+
+  @Test
+  void productionStandardOrderOriginClosesMissingHashAndReplicaPairs() {
+    String orderId = seedStandardOrder(USER, 1860);
+    MockPaymentResult attempt =
+        payments.start(
+            USER, orderId, "payment-standard-origin", new MockPaymentRequest(1860L, "AUD", null));
+    MockPaymentCallbackRequest callback = callback(attempt, UUID.randomUUID().toString());
+    String callbackKey = "callback-standard-origin";
+    payments.callback(callbackKey, callback);
+    String originalProduct =
+        jdbc.queryForObject(
+            "SELECT product_id FROM standard_order WHERE order_id = ?", String.class, orderId);
+    String originalIntent =
+        jdbc.queryForObject(
+            "SELECT intent_hash FROM order_idempotency WHERE order_id = ?", String.class, orderId);
+    String tamperedProduct = "tampered-standard-origin";
+    String tamperedIntent = StandardOrderIntentCommitment.hash(tamperedProduct, 1, 1);
+
+    rootJdbc().update("DELETE FROM order_idempotency WHERE order_id = ?", orderId);
+    assertCommittedReplayIntegrityConflict(callbackKey, callback);
+    insertStandardOrigin(orderId, originalIntent);
+
+    rootJdbc()
+        .update(
+            "UPDATE order_idempotency SET intent_hash = REPEAT('f', 64) WHERE order_id = ?",
+            orderId);
+    assertCommittedReplayIntegrityConflict(callbackKey, callback);
+    rootJdbc()
+        .update(
+            "UPDATE order_idempotency SET intent_hash = ? WHERE order_id = ?",
+            originalIntent,
+            orderId);
+
+    rootJdbc()
+        .update(
+            "UPDATE standard_order SET product_id = ? WHERE order_id = ?",
+            tamperedProduct,
+            orderId);
+    rootJdbc()
+        .update(
+            "UPDATE inventory_ledger SET product_id = ? WHERE order_id = ?",
+            tamperedProduct,
+            orderId);
+    assertCommittedReplayIntegrityConflict(callbackKey, callback);
+    restoreStandardProduct(orderId, originalProduct, originalIntent);
+
+    rootJdbc()
+        .update(
+            "UPDATE standard_order SET product_id = ? WHERE order_id = ?",
+            tamperedProduct,
+            orderId);
+    rootJdbc()
+        .update(
+            "UPDATE order_idempotency SET intent_hash = ? WHERE order_id = ?",
+            tamperedIntent,
+            orderId);
+    assertCommittedReplayIntegrityConflict(callbackKey, callback);
+    restoreStandardProduct(orderId, originalProduct, originalIntent);
+
+    rootJdbc()
+        .update(
+            "UPDATE inventory_ledger SET product_id = ? WHERE order_id = ?",
+            tamperedProduct,
+            orderId);
+    rootJdbc()
+        .update(
+            "UPDATE order_idempotency SET intent_hash = ? WHERE order_id = ?",
+            tamperedIntent,
+            orderId);
+    assertCommittedReplayIntegrityConflict(callbackKey, callback);
+    restoreStandardProduct(orderId, originalProduct, originalIntent);
+
+    assertThat(payments.callback(callbackKey, callback).replayed()).isTrue();
+    assertThat(
+            payments
+                .start(
+                    USER,
+                    orderId,
+                    "payment-standard-origin",
+                    new MockPaymentRequest(1860L, "AUD", null))
+                .replayed())
+        .isTrue();
+  }
+
+  @Test
+  void productionSeckillProductReplicasRemainAnchoredToTheActivity() {
+    SeckillFixture fixture =
+        seedSeckillOrder("product-origin-" + UUID.randomUUID().toString().substring(0, 8), 1870);
+    MockPaymentResult attempt =
+        payments.start(
+            USER,
+            fixture.orderId(),
+            "payment-seckill-product-origin",
+            new MockPaymentRequest(1870L, "AUD", null));
+    MockPaymentCallbackRequest callback = callback(attempt, UUID.randomUUID().toString());
+    String callbackKey = "callback-seckill-product-origin";
+    payments.callback(callbackKey, callback);
+    String originalProduct =
+        jdbc.queryForObject(
+            "SELECT product_id FROM seckill_order WHERE order_id = ?",
+            String.class,
+            fixture.orderId());
+    String activityId =
+        jdbc.queryForObject(
+            "SELECT activity_id FROM seckill_order WHERE order_id = ?",
+            String.class,
+            fixture.orderId());
+    String tamperedProduct =
+        "tampered-seckill-origin-" + UUID.randomUUID().toString().substring(0, 8);
+    rootJdbc()
+        .update(
+            """
+        INSERT INTO product
+          (product_id, name, description, price_minor, currency, stock_quantity, available,
+           publication_state, publication_version)
+        VALUES (?, 'Tampered fixture', '', 1870, 'AUD', 1, TRUE, 'PUBLISHED', 1)
+        """,
+            tamperedProduct);
+
+    rootJdbc()
+        .update(
+            "UPDATE seckill_order SET product_id = ? WHERE order_id = ?",
+            tamperedProduct,
+            fixture.orderId());
+    rootJdbc()
+        .update(
+            "UPDATE inventory_ledger SET product_id = ? WHERE order_id = ?",
+            tamperedProduct,
+            fixture.orderId());
+    assertCommittedReplayIntegrityConflict(callbackKey, callback);
+    restoreSeckillProducts(fixture.orderId(), activityId, originalProduct);
+
+    rootJdbc()
+        .update(
+            "UPDATE seckill_activity SET product_id = ? WHERE activity_id = ?",
+            tamperedProduct,
+            activityId);
+    rootJdbc()
+        .update(
+            "UPDATE seckill_order SET product_id = ? WHERE order_id = ?",
+            tamperedProduct,
+            fixture.orderId());
+    assertCommittedReplayIntegrityConflict(callbackKey, callback);
+    restoreSeckillProducts(fixture.orderId(), activityId, originalProduct);
+
+    rootJdbc()
+        .update(
+            "UPDATE seckill_activity SET product_id = ? WHERE activity_id = ?",
+            tamperedProduct,
+            activityId);
+    rootJdbc()
+        .update(
+            "UPDATE inventory_ledger SET product_id = ? WHERE order_id = ?",
+            tamperedProduct,
+            fixture.orderId());
+    assertCommittedReplayIntegrityConflict(callbackKey, callback);
+    restoreSeckillProducts(fixture.orderId(), activityId, originalProduct);
+
+    assertThat(payments.callback(callbackKey, callback).replayed()).isTrue();
+  }
+
+  @Test
+  void productionSeckillOrderRelationsRemainAnchoredToTheReservation() {
+    SeckillFixture fixture =
+        seedSeckillOrder(
+            "reservation-origin-" + UUID.randomUUID().toString().substring(0, 8), 1875);
+    MockPaymentResult attempt =
+        payments.start(
+            USER,
+            fixture.orderId(),
+            "payment-seckill-reservation-origin",
+            new MockPaymentRequest(1875L, "AUD", null));
+    MockPaymentCallbackRequest callback = callback(attempt, UUID.randomUUID().toString());
+    String callbackKey = "callback-seckill-reservation-origin";
+    payments.callback(callbackKey, callback);
+    String reservationId =
+        jdbc.queryForObject(
+            "SELECT reservation_id FROM seckill_order WHERE order_id = ?",
+            String.class,
+            fixture.orderId());
+    String activityId =
+        jdbc.queryForObject(
+            "SELECT activity_id FROM seckill_order WHERE order_id = ?",
+            String.class,
+            fixture.orderId());
+    long callbacksBefore = count("mock_payment_callback");
+    long movementsBefore = count("inventory_ledger");
+
+    rootJdbc()
+        .update(
+            "UPDATE seckill_reservation SET user_subject = ? WHERE reservation_id = ?",
+            OTHER_USER,
+            reservationId);
+    assertCommittedReplayIntegrityConflict(callbackKey, callback);
+    rootJdbc()
+        .update(
+            "UPDATE seckill_reservation SET user_subject = ? WHERE reservation_id = ?",
+            USER,
+            reservationId);
+
+    rootJdbc()
+        .update(
+            "UPDATE seckill_reservation SET activity_id = ? WHERE reservation_id = ?",
+            "tampered-" + activityId,
+            reservationId);
+    assertCommittedReplayIntegrityConflict(callbackKey, callback);
+    rootJdbc()
+        .update(
+            "UPDATE seckill_reservation SET activity_id = ? WHERE reservation_id = ?",
+            activityId,
+            reservationId);
+
+    rootJdbc()
+        .update(
+            "UPDATE seckill_reservation SET quantity = 2 WHERE reservation_id = ?", reservationId);
+    assertCommittedReplayIntegrityConflict(callbackKey, callback);
+    rootJdbc()
+        .update(
+            "UPDATE seckill_reservation SET quantity = 1 WHERE reservation_id = ?", reservationId);
+
+    String otherOrderId = UUID.randomUUID().toString();
+    rootJdbc()
+        .update(
+            "UPDATE seckill_reservation SET order_id = ? WHERE reservation_id = ?",
+            otherOrderId,
+            reservationId);
+    assertCommittedReplayIntegrityConflict(callbackKey, callback);
+    rootJdbc()
+        .update(
+            "UPDATE seckill_reservation SET order_id = ? WHERE reservation_id = ?",
+            fixture.orderId(),
+            reservationId);
+
+    rootJdbc()
+        .update(
+            "UPDATE seckill_reservation SET state = 'CANCELLED', projection_version = 4 "
+                + "WHERE reservation_id = ?",
+            reservationId);
+    assertCommittedReplayIntegrityConflict(callbackKey, callback);
+    rootJdbc()
+        .update(
+            "UPDATE seckill_reservation SET state = 'ORDERED', projection_version = 3 "
+                + "WHERE reservation_id = ?",
+            reservationId);
+
+    assertThat(
+            rootJdbc()
+                .update("DELETE FROM seckill_reservation WHERE reservation_id = ?", reservationId))
+        .isOne();
+    assertCommittedReplayIntegrityConflict(callbackKey, callback);
+    assertThat(count("mock_payment_callback")).isEqualTo(callbacksBefore);
+    assertThat(count("inventory_ledger")).isEqualTo(movementsBefore);
   }
 
   @Test
@@ -1846,8 +2246,10 @@ class MockPaymentIntegrationTest {
         .isInstanceOfSatisfying(
             MockPaymentException.class,
             exception -> {
-              assertThat(exception.status()).isEqualTo(409);
-              assertThat(exception.category()).isEqualTo("CONFLICT");
+              assertThat(exception.status()).isEqualTo(503);
+              assertThat(exception.category()).isEqualTo("UNAVAILABLE");
+              assertThat(exception.reason())
+                  .isEqualTo(MockPaymentRejectionReason.DEPENDENCY_OBSERVATION_INDETERMINATE);
             });
     assertThat(uncommittedTimeoutCalls).hasValue(2);
     assertThat(paymentMovementCount(uncommittedAttempt.attemptId())).isZero();
@@ -2037,6 +2439,7 @@ class MockPaymentIntegrationTest {
 
   private String seedStandardOrder(String user, long amount) {
     String orderId = UUID.randomUUID().toString();
+    String productId = "payment-product-" + orderId.substring(0, 8);
     jdbc.update(
         """
         INSERT INTO standard_order
@@ -2046,10 +2449,68 @@ class MockPaymentIntegrationTest {
         """,
         orderId,
         user,
-        "payment-product-" + orderId.substring(0, 8),
+        productId,
         amount,
         amount);
+    jdbc.update(
+        """
+        INSERT INTO order_idempotency (user_subject, idempotency_key, intent_hash, order_id)
+        VALUES (?, ?, ?, ?)
+        """,
+        user,
+        "origin-" + orderId,
+        StandardOrderIntentCommitment.hash(productId, 1, 1),
+        orderId);
+    seededStandardOrderIds.add(orderId);
     return orderId;
+  }
+
+  private void insertStandardOrigin(String orderId, String intentHash) {
+    jdbc.update(
+        """
+        INSERT INTO order_idempotency (user_subject, idempotency_key, intent_hash, order_id)
+        VALUES (?, ?, ?, ?)
+        """,
+        USER,
+        "origin-" + orderId,
+        intentHash,
+        orderId);
+  }
+
+  private void restoreStandardProduct(String orderId, String productId, String intentHash) {
+    rootJdbc()
+        .update("UPDATE standard_order SET product_id = ? WHERE order_id = ?", productId, orderId);
+    rootJdbc()
+        .update(
+            "UPDATE inventory_ledger SET product_id = ? WHERE order_id = ?", productId, orderId);
+    rootJdbc()
+        .update(
+            "UPDATE order_idempotency SET intent_hash = ? WHERE order_id = ?", intentHash, orderId);
+  }
+
+  private void restoreSeckillProducts(String orderId, String activityId, String productId) {
+    rootJdbc()
+        .update(
+            "UPDATE seckill_activity SET product_id = ? WHERE activity_id = ?",
+            productId,
+            activityId);
+    rootJdbc()
+        .update("UPDATE seckill_order SET product_id = ? WHERE order_id = ?", productId, orderId);
+    rootJdbc()
+        .update(
+            "UPDATE inventory_ledger SET product_id = ? WHERE order_id = ?", productId, orderId);
+  }
+
+  private void assertCommittedReplayIntegrityConflict(
+      String callbackKey, MockPaymentCallbackRequest callback) {
+    assertThatThrownBy(() -> payments.callback(callbackKey, callback))
+        .isInstanceOfSatisfying(
+            MockPaymentException.class,
+            exception -> {
+              assertThat(exception.status()).isEqualTo(409);
+              assertThat(exception.reason())
+                  .isEqualTo(MockPaymentRejectionReason.COMMITTED_PAYMENT_TRUTH_INCONSISTENT);
+            });
   }
 
   private SeckillFixture seedSeckillOrder(String suffix, long amount) {

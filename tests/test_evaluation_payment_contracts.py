@@ -16,6 +16,7 @@ def test_mock_payment_callback_contract_is_bounded_signed_and_sandbox_exact() ->
 
     assert start["security"] == [{"directUserBearer": []}]
     assert callback["security"] == [{"mockPaymentKeyId": [], "mockPaymentSignature": []}]
+    assert set(callback["responses"]) == {"200", "400", "401", "403", "404", "409", "503"}
     assert {parameter["name"] for parameter in callback["parameters"]} == {
         "X-Mock-Payment-Timestamp",
         "Idempotency-Key",
@@ -64,6 +65,11 @@ def test_payment_schema_and_code_keep_production_and_evaluation_truth_separate()
         ROOT
         / "commerce-service/src/main/java/io/citybuddy/commerce/payment"
         / "EvaluationPaymentCommittedFaces.java"
+    ).read_text(encoding="utf-8")
+    fault_inventory = (
+        ROOT
+        / "commerce-service/src/test/java/io/citybuddy/commerce/payment"
+        / "EvaluationPaymentFaultInventoryCommand.java"
     ).read_text(encoding="utf-8")
     committed_resolver = (
         ROOT
@@ -163,6 +169,13 @@ def test_payment_schema_and_code_keep_production_and_evaluation_truth_separate()
     assert "seckillOrderByIdSql(String lockClause)" in committed_faces
     assert "EvaluationPaymentCommittedFaces.orderFaceUnionSql()" in evaluation_view
     assert "EvaluationPaymentCommittedFaces.evaluationOrderKeysBySandboxSql()" in evaluation_view
+    ledger_view = evaluation_view[
+        evaluation_view.index(
+            "private List<PaymentLedgerTruth> paymentLedgerTruths"
+        ) : evaluation_view.index("private List<SucceededCallbackTruth> succeededCallbackTruths")
+    ]
+    assert "LIMIT %d" in ledger_view
+    assert "EvaluationPaymentCommittedFaces.MAXIMUM_LEDGER_CLOSURE_ROWS + 1" in ledger_view
     for attempt_projection in (
         "a.intent_hash AS attempt_intent_hash",
         "a.refunded_amount_minor AS attempt_refunded_amount_minor",
@@ -195,6 +208,19 @@ def test_payment_schema_and_code_keep_production_and_evaluation_truth_separate()
         assert f'"{seckill_content_column}",' in committed_faces
     assert "residualColumnDispositions" in committed_faces
     assert "participatingColumns()" in committed_faces
+    for responsibility in (
+        "AUTHORITATIVE_ROOT",
+        "HASH_COMMITTED",
+        "ORIGIN_COMMITTED",
+        "DERIVED_REPLICA",
+        "DATABASE_CONSTRAINED",
+        "CORRELATED_GROUP",
+        "OWNER_ACCEPTED_RESIDUAL",
+    ):
+        assert responsibility in committed_faces
+    assert "CorrelatedContentGroupId.PAYMENT_EVENT_TIME" in committed_faces
+    assert "columnResponsibilities()" in fault_inventory
+    assert "responsibility().applicableScopes()" in fault_inventory
     callback_order_closure = repository[
         repository.index("private Optional<OrderTruth> findOrder") : repository.index(
             "public Optional<AttemptRecord> findAttemptByRequestForUpdate"
@@ -232,7 +258,38 @@ def test_payment_schema_and_code_keep_production_and_evaluation_truth_separate()
     ):
         assert independent_fault in integration
     assert "attempt-request-key" in integration
-    assert "assert_equal 51" in integration
+    assert "assert_equal 55" in integration
+    assert "assert_equal 55" in integration
+    assert "assert_equal 1485" in integration
+    assert "payment_transformation_classification" in integration
+    assert "payment_observed_transformation_classification" in integration
+    assert "EQUIVALENCE_PRESERVING" in integration
+    assert "concealed-authorization=$payment_start_visibility_cell_count" in integration
+    assert "full PAYMENT_EVENT_TIME group shift" in integration
+    assert "full PAYMENT_EVENT_TIME group shift that breaks audit relative order" in integration
+    assert "production callback four-face physical corruption label matrix" in integration
+    assert (
+        "evaluation state/audit ledger closure exceeds the physical acquisition bound"
+        in integration
+    )
+
+    contracts = (ROOT / "docs/CONTRACTS.md").read_text(encoding="utf-8")
+    residual_decision = contracts[
+        contracts.index(
+            "The shared definition distinguishes exact/invariant-backed participating columns"
+        ) : contracts.index(
+            "**Resolved Level 3 route decision — 2026-07-23 (terminal portfolio route"
+        )
+    ]
+    assert "The start-command `request_idempotency_key` is canonical business intent" in (
+        residual_decision
+    )
+    assert "owner rejected treating it as an internal residual" in residual_decision
+    assert "Three internal-only residual dispositions" not in residual_decision
+    assert "Two internal-only residual dispositions" in residual_decision
+    assert "CB-116 committed payment event time" in residual_decision
+    assert "single `PAYMENT_EVENT_TIME` correlated content group" in residual_decision
+    assert "no independent absolute-microsecond commitment" in residual_decision
 
 
 def test_terminal_payment_callers_use_the_shared_complete_closure() -> None:

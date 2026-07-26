@@ -206,7 +206,10 @@ def test_evaluation_audit_is_append_only_scoped_and_not_agent_evidence() -> None
     assert 'movement.businessEventKey().equals("mock-payment:" + attempt.attemptId())' in (
         payment_resolver
     )
-    assert "audit.createdAt().equals(callback.createdAt())" in payment_resolver
+    assert "EvaluationPaymentCommittedFaces.correlatedContentGroups()" in payment_resolver
+    assert "case PAYMENT_EVENT_TIME -> requirePaymentEventTime" in payment_resolver
+    assert "!attempt.succeededAt().equals(callback.createdAt())" in payment_resolver
+    assert "!audit.orElseThrow().createdAt().equals(callback.createdAt())" in payment_resolver
     assert '"LEGACY_CUTOFF".equals(reference.createdAtAnchor())' in repository
     assert "FROM eval_sandbox" in audit_service
     assert "FOR UPDATE" in audit_service

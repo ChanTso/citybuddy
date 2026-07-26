@@ -11,7 +11,8 @@ import java.util.UUID;
 import org.springframework.jdbc.core.JdbcTemplate;
 
 public class MockPaymentRepository {
-  static final int MAXIMUM_LEDGER_CLOSURE_ROWS = 1024;
+  static final int MAXIMUM_LEDGER_CLOSURE_ROWS =
+      EvaluationPaymentCommittedFaces.MAXIMUM_LEDGER_CLOSURE_ROWS;
 
   private final JdbcTemplate jdbc;
 
@@ -64,6 +65,68 @@ public class MockPaymentRepository {
             orderId,
             userSubject));
     return List.copyOf(rows);
+  }
+
+  List<StandardOrderOriginRecord> enumerateStandardOrderOrigin(String orderId) {
+    int acquisitionBound = EvaluationPaymentCommittedFaces.MAXIMUM_ORDER_ORIGIN_ROWS + 1;
+    return jdbc.query(
+        """
+        SELECT user_subject, idempotency_key, intent_hash, order_id
+        FROM order_idempotency
+        WHERE order_id = ?
+        LIMIT %d
+        """
+            .formatted(acquisitionBound),
+        (result, row) ->
+            new StandardOrderOriginRecord(
+                result.getString("user_subject"),
+                result.getString("idempotency_key"),
+                result.getString("intent_hash"),
+                result.getString("order_id")),
+        orderId);
+  }
+
+  List<SeckillActivityOriginRecord> enumerateSeckillActivityOrigin(String activityId) {
+    if (activityId == null) {
+      return List.of();
+    }
+    int acquisitionBound = EvaluationPaymentCommittedFaces.MAXIMUM_ORDER_ORIGIN_ROWS + 1;
+    return jdbc.query(
+        """
+        SELECT activity_id, product_id
+        FROM seckill_activity
+        WHERE activity_id = ?
+        LIMIT %d
+        """
+            .formatted(acquisitionBound),
+        (result, row) ->
+            new SeckillActivityOriginRecord(
+                result.getString("activity_id"), result.getString("product_id")),
+        activityId);
+  }
+
+  List<SeckillReservationOriginRecord> enumerateSeckillReservationOrigin(String reservationId) {
+    if (reservationId == null) {
+      return List.of();
+    }
+    int acquisitionBound = EvaluationPaymentCommittedFaces.MAXIMUM_ORDER_ORIGIN_ROWS + 1;
+    return jdbc.query(
+        """
+        SELECT reservation_id, user_subject, activity_id, quantity, state, order_id
+        FROM seckill_reservation
+        WHERE reservation_id = ?
+        LIMIT %d
+        """
+            .formatted(acquisitionBound),
+        (result, row) ->
+            new SeckillReservationOriginRecord(
+                result.getString("reservation_id"),
+                result.getString("user_subject"),
+                result.getString("activity_id"),
+                result.getLong("quantity"),
+                result.getString("state"),
+                result.getString("order_id")),
+        reservationId);
   }
 
   List<PaymentStartOrderVisibility.Classification> enumerateStartOrderVisibility(
@@ -890,6 +953,8 @@ public class MockPaymentRepository {
         result.getString("activity_id"),
         result.getString("transaction_event_id"),
         result.getObject("quantity", Long.class),
+        result.getObject("product_version", Long.class),
+        result.getLong("unit_price_minor"),
         result.getLong("total_price_minor"),
         result.getString("currency"),
         result.getString("status"),
@@ -957,10 +1022,59 @@ public class MockPaymentRepository {
       String activityId,
       String transactionEventId,
       Long quantity,
+      Long productVersion,
+      long unitPriceMinor,
       long amountMinor,
       String currency,
       String status,
-      long stateVersion) {}
+      long stateVersion) {
+    public OrderTruth(
+        String orderKind,
+        String orderId,
+        String userSubject,
+        String sandboxId,
+        String evaluationOwnerHandle,
+        String productId,
+        String reservationId,
+        String activityId,
+        String transactionEventId,
+        Long quantity,
+        long amountMinor,
+        String currency,
+        String status,
+        long stateVersion) {
+      this(
+          orderKind,
+          orderId,
+          userSubject,
+          sandboxId,
+          evaluationOwnerHandle,
+          productId,
+          reservationId,
+          activityId,
+          transactionEventId,
+          "STANDARD".equals(orderKind) && quantity == null ? 1L : quantity,
+          "STANDARD".equals(orderKind) ? 1L : null,
+          amountMinor,
+          amountMinor,
+          currency,
+          status,
+          stateVersion);
+    }
+  }
+
+  record StandardOrderOriginRecord(
+      String userSubject, String idempotencyKey, String intentHash, String orderId) {}
+
+  record SeckillActivityOriginRecord(String activityId, String productId) {}
+
+  record SeckillReservationOriginRecord(
+      String reservationId,
+      String userSubject,
+      String activityId,
+      long quantity,
+      String state,
+      String orderId) {}
 
   public record AttemptRecord(
       String attemptId,

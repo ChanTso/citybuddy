@@ -421,7 +421,7 @@ public final class MockPaymentService {
     if (committed != null) {
       return committed;
     }
-    throw conflict(
+    throw unavailable(
         MockPaymentRejectionReason.DEPENDENCY_OBSERVATION_INDETERMINATE,
         "Callback could not be serialized with its concurrent result");
   }
@@ -603,5 +603,10 @@ public final class MockPaymentService {
 
   private static MockPaymentException conflict(MockPaymentRejectionReason reason, String message) {
     return new MockPaymentException(409, "CONFLICT", reason, message);
+  }
+
+  private static MockPaymentException unavailable(
+      MockPaymentRejectionReason reason, String message) {
+    return new MockPaymentException(503, "UNAVAILABLE", reason, message);
   }
 }
