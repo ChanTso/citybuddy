@@ -2,6 +2,10 @@ package io.citybuddy.commerce.catalog;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
+import static org.mockito.ArgumentMatchers.anyString;
+import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.Mockito.doAnswer;
+import static org.mockito.Mockito.reset;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -28,6 +32,7 @@ import java.security.interfaces.RSAPrivateKey;
 import java.security.spec.PKCS8EncodedKeySpec;
 import java.sql.Connection;
 import java.sql.DriverManager;
+import java.sql.SQLException;
 import java.time.Duration;
 import java.time.Instant;
 import java.util.ArrayList;
@@ -44,6 +49,7 @@ import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicReference;
 import org.apache.rocketmq.client.apis.ClientConfiguration;
 import org.apache.rocketmq.client.apis.ClientServiceProvider;
 import org.apache.rocketmq.client.apis.producer.Producer;
@@ -69,6 +75,7 @@ import org.springframework.jdbc.datasource.DriverManagerDataSource;
 import org.springframework.jdbc.datasource.SingleConnectionDataSource;
 import org.springframework.test.context.DynamicPropertyRegistry;
 import org.springframework.test.context.DynamicPropertySource;
+import org.springframework.test.context.bean.override.mockito.MockitoSpyBean;
 import org.springframework.transaction.support.TransactionTemplate;
 
 @EnabledIfEnvironmentVariable(named = "CATALOG_INTEGRATION", matches = "true")
@@ -121,7 +128,8 @@ class CatalogIntegrationTest {
   @Autowired private StringRedisTemplate redis;
   @Autowired private TestRestTemplate rest;
   @Autowired private TransactionTemplate transactions;
-  @Autowired private OrderRepository orderRepository;
+  @MockitoSpyBean private OrderRepository orderRepository;
+  private int orderIdempotencyBaseline;
 
   @Test
   void provesCatalogTruthCacheOutboxAndNormalEventRecovery() throws Exception {
@@ -134,6 +142,8 @@ class CatalogIntegrationTest {
 
   @Test
   void provesStandardOrderApiAtomicityIdempotencyAndConcurrency() throws Exception {
+    orderIdempotencyBaseline =
+        jdbc.queryForObject("SELECT COUNT(*) FROM order_idempotency", Integer.class);
     seedOrderProduct("order-main", 10, true, "PUBLISHED", 4);
     ResponseEntity<JsonNode> created =
         postOrder(
@@ -409,54 +419,112 @@ class CatalogIntegrationTest {
   }
 
   private void proveConcurrentDuplicateIdempotency() throws Exception {
-    for (int round = 1; round <= 5; round++) {
-      String productId = "order-duplicate-" + round;
-      String idempotencyKey = "duplicate-key-" + round;
-      seedOrderProduct(productId, 5, true, "PUBLISHED", 1);
-      var executor = Executors.newFixedThreadPool(8);
-      try {
-        CountDownLatch ready = new CountDownLatch(8);
-        CountDownLatch start = new CountDownLatch(1);
-        List<java.util.concurrent.Future<ResponseEntity<JsonNode>>> futures = new ArrayList<>();
-        for (int index = 0; index < 8; index++) {
-          futures.add(
-              executor.submit(
-                  () -> {
-                    ready.countDown();
-                    start.await();
-                    return postOrder(
-                        token(),
-                        idempotencyKey,
-                        Map.of("productId", productId, "quantity", 1, "expectedProductVersion", 1));
-                  }));
-        }
-        assertThat(ready.await(5, TimeUnit.SECONDS)).isTrue();
-        start.countDown();
-        int created = 0;
-        int replayed = 0;
-        String orderId = null;
-        for (var future : futures) {
-          ResponseEntity<JsonNode> response = future.get(15, TimeUnit.SECONDS);
-          assertThat(response.getStatusCode()).isIn(HttpStatus.CREATED, HttpStatus.OK);
-          if (response.getStatusCode() == HttpStatus.CREATED) {
-            created++;
-          } else {
-            replayed++;
-          }
-          String current = response.getBody().get("orderId").asText();
-          if (orderId == null) {
-            orderId = current;
-          }
-          assertThat(current).isEqualTo(orderId);
-        }
-        assertThat(created).isEqualTo(1);
-        assertThat(replayed).isEqualTo(7);
-      } finally {
-        executor.shutdownNow();
+    proveCreatorCommitsWithinDuplicateObservationBudget();
+    provePersistentlyUnobservableTruthIsRetryableAndSideEffectFree();
+    assertTotalIdempotencyCount(7);
+  }
+
+  private void proveCreatorCommitsWithinDuplicateObservationBudget() throws Exception {
+    String namespace = UUID.randomUUID().toString().substring(0, 12);
+    String productId = "order-duplicate-committed-" + namespace;
+    String idempotencyKey = "duplicate-committed-key-" + namespace;
+    seedOrderProduct(productId, 5, true, "PUBLISHED", 1);
+    OrderScenarioState baseline = orderScenarioState(productId, idempotencyKey);
+    CreatorCommitPhase phase = new CreatorCommitPhase();
+    installCreatorCommitPhase(idempotencyKey, phase);
+    var executor = Executors.newFixedThreadPool(8);
+    Future<ResponseEntity<JsonNode>> creator = null;
+    List<Future<ResponseEntity<JsonNode>>> duplicates = new ArrayList<>();
+    try {
+      creator =
+          executor.submit(() -> postOrder(token(), idempotencyKey, orderIntent(productId, 1)));
+      assertThat(phase.awaitCreatorReservation()).isTrue();
+
+      for (int index = 0; index < 7; index++) {
+        duplicates.add(
+            executor.submit(() -> postOrder(token(), idempotencyKey, orderIntent(productId, 1))));
       }
-      assertOrderCardinality(productId, 4, 1, 1, 1);
+      assertThat(phase.awaitEveryDuplicateCompetition()).isTrue();
+      phase.allowCreatorCommit();
+
+      List<ResponseEntity<JsonNode>> responses = new ArrayList<>();
+      responses.add(creator.get(20, TimeUnit.SECONDS));
+      for (Future<ResponseEntity<JsonNode>> duplicate : duplicates) {
+        responses.add(duplicate.get(20, TimeUnit.SECONDS));
+      }
+
+      assertThat(
+              responses.stream().filter(response -> response.getStatusCode() == HttpStatus.CREATED))
+          .hasSize(1);
+      assertThat(responses.stream().filter(response -> response.getStatusCode() == HttpStatus.OK))
+          .hasSize(7);
+      assertThat(responses)
+          .allSatisfy(
+              response -> {
+                assertThat(response.getStatusCode())
+                    .as("creator and duplicates must converge without terminal errors")
+                    .isIn(HttpStatus.CREATED, HttpStatus.OK);
+                assertThat(response.getBody()).isNotNull();
+              });
+      assertThat(responses.stream().map(response -> response.getBody().get("orderId").asText()))
+          .containsOnly(responses.getFirst().getBody().get("orderId").asText());
+      assertThat(phase.mysqlCompetitionCodes())
+          .as("duplicates must encounter real MySQL contention before creator commit")
+          .hasSizeGreaterThanOrEqualTo(7)
+          .allMatch(code -> code == 1205 || code == 1213);
+      assertOrderScenarioDelta(baseline, productId, idempotencyKey, -1, 1, 1, 1);
+    } finally {
+      phase.allowCreatorCommit();
+      if (creator != null && !creator.isDone()) {
+        creator.cancel(true);
+      }
+      for (Future<ResponseEntity<JsonNode>> duplicate : duplicates) {
+        if (!duplicate.isDone()) {
+          duplicate.cancel(true);
+        }
+      }
+      executor.shutdownNow();
+      reset(orderRepository);
     }
-    assertTotalIdempotencyCount(10);
+  }
+
+  private void provePersistentlyUnobservableTruthIsRetryableAndSideEffectFree() throws Exception {
+    String namespace = UUID.randomUUID().toString().substring(0, 12);
+    String productId = "order-duplicate-indeterminate-" + namespace;
+    String idempotencyKey = "duplicate-indeterminate-key-" + namespace;
+    seedOrderProduct(productId, 5, true, "PUBLISHED", 1);
+    OrderScenarioState baseline = orderScenarioState(productId, idempotencyKey);
+    MysqlCompetitionProbe competition = new MysqlCompetitionProbe();
+    installMysqlCompetitionProbe(idempotencyKey, competition);
+    var executor = Executors.newSingleThreadExecutor();
+    Future<ResponseEntity<JsonNode>> target = null;
+    try (Connection blocker = lockMissingIdempotencyGap(idempotencyKey)) {
+      long started = System.nanoTime();
+      target = executor.submit(() -> postOrder(token(), idempotencyKey, orderIntent(productId, 1)));
+      ResponseEntity<JsonNode> indeterminate = target.get(25, TimeUnit.SECONDS);
+      Duration elapsed = Duration.ofNanos(System.nanoTime() - started);
+
+      assertOrderError(indeterminate, HttpStatus.TOO_MANY_REQUESTS, "CONCURRENCY_EXHAUSTED");
+      assertThat(elapsed).isLessThan(Duration.ofSeconds(20));
+      assertThat(competition.mysqlCodes())
+          .as("the bounded response must be caused by real InnoDB lock waits")
+          .contains(1205)
+          .allMatch(code -> code == 1205 || code == 1213);
+      assertOrderScenarioDelta(baseline, productId, idempotencyKey, 0, 0, 0, 0);
+
+      blocker.rollback();
+      ResponseEntity<JsonNode> retry =
+          postOrder(token(), idempotencyKey, orderIntent(productId, 1));
+      assertThat(retry.getStatusCode()).isEqualTo(HttpStatus.CREATED);
+      assertThat(retry.getBody().get("replayed").asBoolean()).isFalse();
+      assertOrderScenarioDelta(baseline, productId, idempotencyKey, -1, 1, 1, 1);
+    } finally {
+      if (target != null && !target.isDone()) {
+        target.cancel(true);
+      }
+      executor.shutdownNow();
+      reset(orderRepository);
+    }
   }
 
   private void proveControlledRetryExhaustionClassifications() throws Exception {
@@ -464,7 +532,7 @@ class CatalogIntegrationTest {
     proveIndeterminateObservationWaitsForCommittedSibling();
     proveConflictingSiblingAfterControlledExhaustion();
     proveMissingTruthAfterControlledExhaustion();
-    assertTotalIdempotencyCount(14);
+    assertTotalIdempotencyCount(11);
   }
 
   private void proveCommittedSiblingAfterControlledExhaustion() throws Exception {
@@ -661,6 +729,112 @@ class CatalogIntegrationTest {
     return blocker;
   }
 
+  private void installCreatorCommitPhase(String idempotencyKey, CreatorCommitPhase phase) {
+    doAnswer(
+            invocation -> {
+              try {
+                return invocation.callRealMethod();
+              } catch (Throwable failure) {
+                phase.recordCompetition(failure);
+                throw failure;
+              }
+            })
+        .when(orderRepository)
+        .findIdempotencyForUpdate(anyString(), eq(idempotencyKey));
+    doAnswer(
+            invocation -> {
+              try {
+                invocation.callRealMethod();
+                if (phase.claimCreator()) {
+                  phase.creatorReserved();
+                  phase.awaitCreatorRelease();
+                }
+                return null;
+              } catch (Throwable failure) {
+                phase.recordCompetition(failure);
+                throw failure;
+              }
+            })
+        .when(orderRepository)
+        .reserveIdempotency(anyString(), eq(idempotencyKey), anyString(), anyString());
+  }
+
+  private void installMysqlCompetitionProbe(
+      String idempotencyKey, MysqlCompetitionProbe competition) {
+    doAnswer(
+            invocation -> {
+              try {
+                return invocation.callRealMethod();
+              } catch (Throwable failure) {
+                competition.record(failure);
+                throw failure;
+              }
+            })
+        .when(orderRepository)
+        .findIdempotencyForUpdate(anyString(), eq(idempotencyKey));
+    doAnswer(
+            invocation -> {
+              try {
+                return invocation.callRealMethod();
+              } catch (Throwable failure) {
+                competition.record(failure);
+                throw failure;
+              }
+            })
+        .when(orderRepository)
+        .reserveIdempotency(anyString(), eq(idempotencyKey), anyString(), anyString());
+  }
+
+  private OrderScenarioState orderScenarioState(String productId, String idempotencyKey) {
+    return new OrderScenarioState(
+        jdbc.queryForObject(
+            "SELECT stock_quantity FROM product WHERE product_id = ?", Long.class, productId),
+        jdbc.queryForObject(
+            """
+            SELECT COUNT(*)
+            FROM order_idempotency
+            WHERE user_subject = 'catalog-user' AND idempotency_key = ?
+            """,
+            Integer.class,
+            idempotencyKey),
+        jdbc.queryForObject(
+            "SELECT COUNT(*) FROM standard_order WHERE product_id = ?", Integer.class, productId),
+        jdbc.queryForObject(
+            """
+            SELECT COUNT(*)
+            FROM commerce_outbox
+            WHERE aggregate_type = 'STANDARD_ORDER'
+              AND event_type = 'STANDARD_ORDER_CREATED'
+              AND JSON_UNQUOTE(JSON_EXTRACT(payload, '$.productId')) = ?
+            """,
+            Integer.class,
+            productId));
+  }
+
+  private void assertOrderScenarioDelta(
+      OrderScenarioState baseline,
+      String productId,
+      String idempotencyKey,
+      long stockDelta,
+      int idempotencyDelta,
+      int orderDelta,
+      int outboxDelta) {
+    OrderScenarioState actual = orderScenarioState(productId, idempotencyKey);
+    assertThat(actual.stock()).isEqualTo(baseline.stock() + stockDelta);
+    assertThat(actual.idempotency()).isEqualTo(baseline.idempotency() + idempotencyDelta);
+    assertThat(actual.orders()).isEqualTo(baseline.orders() + orderDelta);
+    assertThat(actual.outbox()).isEqualTo(baseline.outbox() + outboxDelta);
+  }
+
+  private static Optional<Integer> mysqlVendorCode(Throwable failure) {
+    for (Throwable current = failure; current != null; current = current.getCause()) {
+      if (current instanceof SQLException sqlException) {
+        return Optional.of(sqlException.getErrorCode());
+      }
+    }
+    return Optional.empty();
+  }
+
   private static Map<String, Object> orderIntent(String productId, int quantity) {
     return Map.of("productId", productId, "quantity", quantity, "expectedProductVersion", 1);
   }
@@ -710,7 +884,7 @@ class CatalogIntegrationTest {
     assertThat(postOrder(token(), idempotencyKey, intent).getStatusCode())
         .isEqualTo(HttpStatus.CREATED);
     assertOrderCardinality(productId, 4, 1, 1, 1);
-    assertTotalIdempotencyCount(15);
+    assertTotalIdempotencyCount(12);
   }
 
   private void waitForApplicationDatabase() throws InterruptedException {
@@ -726,6 +900,77 @@ class CatalogIntegrationTest {
       }
     }
     throw new AssertionError("Commerce application database pool did not recover", lastFailure);
+  }
+
+  private static final class CreatorCommitPhase {
+    private final AtomicReference<Thread> creator = new AtomicReference<>();
+    private final CountDownLatch creatorReserved = new CountDownLatch(1);
+    private final CountDownLatch duplicateCompetition = new CountDownLatch(7);
+    private final CountDownLatch releaseCreator = new CountDownLatch(1);
+    private final Map<Long, Integer> competitionCodes = new ConcurrentHashMap<>();
+
+    private boolean claimCreator() {
+      return creator.compareAndSet(null, Thread.currentThread());
+    }
+
+    private void creatorReserved() {
+      creatorReserved.countDown();
+    }
+
+    private boolean awaitCreatorReservation() throws InterruptedException {
+      return creatorReserved.await(10, TimeUnit.SECONDS);
+    }
+
+    private void awaitCreatorRelease() {
+      try {
+        if (!releaseCreator.await(15, TimeUnit.SECONDS)) {
+          throw new IllegalStateException("Controlled creator commit was not released");
+        }
+      } catch (InterruptedException exception) {
+        Thread.currentThread().interrupt();
+        throw new IllegalStateException("Controlled creator commit was interrupted", exception);
+      }
+    }
+
+    private void allowCreatorCommit() {
+      releaseCreator.countDown();
+    }
+
+    private void recordCompetition(Throwable failure) {
+      Optional<Integer> code = mysqlVendorCode(failure);
+      if (code.isEmpty() || (code.get() != 1205 && code.get() != 1213)) {
+        return;
+      }
+      Thread current = Thread.currentThread();
+      if (current == creator.get()) {
+        return;
+      }
+      if (competitionCodes.putIfAbsent(current.threadId(), code.get()) == null) {
+        duplicateCompetition.countDown();
+      }
+    }
+
+    private boolean awaitEveryDuplicateCompetition() throws InterruptedException {
+      return duplicateCompetition.await(12, TimeUnit.SECONDS);
+    }
+
+    private List<Integer> mysqlCompetitionCodes() {
+      return List.copyOf(competitionCodes.values());
+    }
+  }
+
+  private static final class MysqlCompetitionProbe {
+    private final Map<Long, Integer> codes = new ConcurrentHashMap<>();
+
+    private void record(Throwable failure) {
+      mysqlVendorCode(failure)
+          .filter(code -> code == 1205 || code == 1213)
+          .ifPresent(code -> codes.putIfAbsent(Thread.currentThread().threadId(), code));
+    }
+
+    private List<Integer> mysqlCodes() {
+      return List.copyOf(codes.values());
+    }
   }
 
   private static final class ExhaustionProbeRepository extends OrderRepository {
@@ -813,6 +1058,8 @@ class CatalogIntegrationTest {
       ResponseEntity<JsonNode> sibling,
       int finalResolutionReads) {}
 
+  private record OrderScenarioState(long stock, int idempotency, int orders, int outbox) {}
+
   private void seedOrderProduct(
       String productId, long stock, boolean available, String publicationState, long version) {
     jdbc.update(
@@ -868,7 +1115,7 @@ class CatalogIntegrationTest {
 
   private void assertTotalIdempotencyCount(int expected) {
     assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM order_idempotency", Integer.class))
-        .isEqualTo(expected);
+        .isEqualTo(orderIdempotencyBaseline + expected);
   }
 
   private void assertIdempotencyKeysAbsent(String... keys) {
