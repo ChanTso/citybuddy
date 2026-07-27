@@ -35,6 +35,8 @@ def test_catalog_contract_exposes_only_authenticated_published_reads() -> None:
         "/internal/knowledge/snapshot",
         "/internal/eval/sandboxes/{sandboxId}/liveness",
         "/internal/mock-payments/callback",
+        "/internal/tools/actions/prepare",
+        "/internal/tools/actions/{pendingActionId}/confirm",
     }
     for path in [
         contract["paths"]["/api/products"],

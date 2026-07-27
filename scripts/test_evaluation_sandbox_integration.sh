@@ -370,6 +370,7 @@ start_auth() {
     --citybuddy.identity.overlap-kid=overlap-key \
     --citybuddy.identity.overlap-public-key-path="$tmp_dir/overlap-public.pem" \
     '--citybuddy.identity.exchange-scopes[0]=catalog:read' \
+    '--citybuddy.identity.exchange-scopes[1]=refund:create' \
     ${profile_argument[@]+"${profile_argument[@]}"} \
     >>"$tmp_dir/auth.log" 2>&1 &
   auth_pid=$!
@@ -392,6 +393,17 @@ start_commerce() {
       --citybuddy.mock-payment.callback-secret="$mock_payment_secret"
       --citybuddy.mock-payment.callback-maximum-age=5m
       --citybuddy.mock-payment.callback-clock-skew=30s
+      --citybuddy.refund.enabled=true
+      --citybuddy.refund.required-permission=refund:create
+      --citybuddy.refund.lock-wait-timeout-seconds=1
+      --citybuddy.refund.maximum-observation-attempts=2
+      --citybuddy.refund.observation-backoff=25ms
+      --citybuddy.actions.enabled=true
+      --citybuddy.actions.required-scope=refund:create
+      --citybuddy.actions.pending-ttl=15m
+      --citybuddy.actions.lock-wait-timeout-seconds=1
+      --citybuddy.actions.maximum-observation-attempts=2
+      --citybuddy.actions.observation-backoff=25ms
     )
   fi
   port_log_offset log_offset "$tmp_dir/commerce.log"
@@ -829,6 +841,7 @@ ALTER TABLE eval_commerce_audit_legacy_watermark COMMENT='V013_AWAITING_COMMITME
 "
 
 make ENV_FILE="$env_file" COMPOSE_PROJECT_NAME="$project" migrate-commerce
+make ENV_FILE="$env_file" COMPOSE_PROJECT_NAME="$project" grant-access
 
 commerce_migration_grants="$(mysql_query commerce_migration "$commerce_migration_password" '' \
   'SHOW GRANTS FOR CURRENT_USER')"
@@ -866,7 +879,7 @@ mysql_query auth_app "$auth_app_password" commerce_db "
 INSERT INTO auth_service_identity (service_id, client_id, credential_hash, state, allowed_scopes) VALUES
   ('00000000-0000-0000-0000-000000000101', 'commerce-service', '$commerce_service_hash', 'ACTIVE', 'eval:principal:manage'),
   ('00000000-0000-0000-0000-000000000102', 'evaluation-client', '$evaluator_hash', 'ACTIVE', 'eval:test-token:issue'),
-  ('00000000-0000-0000-0000-000000000103', 'agent-service', '$agent_service_hash', 'ACTIVE', 'catalog:read');
+  ('00000000-0000-0000-0000-000000000103', 'agent-service', '$agent_service_hash', 'ACTIVE', 'catalog:read refund:create');
 INSERT INTO auth_signing_key_metadata (kid, state, activated_at, retire_after) VALUES
   ('current-key', 'CURRENT', CURRENT_TIMESTAMP(6), NULL),
   ('overlap-key', 'OVERLAP', CURRENT_TIMESTAMP(6), TIMESTAMPADD(HOUR, 1, CURRENT_TIMESTAMP(6)));
@@ -3560,6 +3573,45 @@ assert_status 200 "payment state recovers after every authoritative row is resto
   --user "evaluation-manager:$management_password" \
   --header 'X-Eval-Sandbox-Id: sandbox-payment'
 
+action_session='action-payment-session'
+action_trace='action-payment-trace'
+action_turn='00000000-0000-0000-0000-000000000401'
+assert_status 200 "exchange sandbox-bound Action OBO token" \
+  --request POST "http://127.0.0.1:$auth_port/auth/token/exchange" \
+  --user "agent-service:$agent_service_password" \
+  --header "X-User-Authorization: Bearer $payment_token" \
+  --header 'X-Eval-Sandbox-Id: sandbox-payment' \
+  --header 'Content-Type: application/json' \
+  --data "{\"sessionId\":\"$action_session\",\"userSubject\":\"$payment_subject\",\"scope\":\"refund:create\"}"
+action_obo_token="$(uv run python scripts/read_json_field.py "$tmp_dir/http-response.json" accessToken)"
+assert_status 201 "prepare sandbox-bound refund Action" \
+  --request POST "http://127.0.0.1:$commerce_port/internal/tools/actions/prepare" \
+  --header "Authorization: Bearer $action_obo_token" \
+  --header "X-Support-Session-Id: $action_session" \
+  --header 'X-Eval-Sandbox-Id: sandbox-payment' \
+  --header "X-Agent-Trace-Id: $action_trace" \
+  --header "X-Agent-Turn-Id: $action_turn" \
+  --header 'Content-Type: application/json' \
+  --data "{\"actionType\":\"REFUND_REQUEST\",\"arguments\":{\"orderId\":\"$payment_order_id\",\"amountMinor\":500,\"currency\":\"CNY\"}}"
+action_pending_id="$(uv run python scripts/read_json_field.py "$tmp_dir/http-response.json" pendingActionId)"
+assert_status 200 "confirm sandbox-bound refund Action atomically" \
+  --request POST "http://127.0.0.1:$commerce_port/internal/tools/actions/$action_pending_id/confirm" \
+  --header "Authorization: Bearer $action_obo_token" \
+  --header "X-Support-Session-Id: $action_session" \
+  --header 'X-Eval-Sandbox-Id: sandbox-payment' \
+  --header "X-Agent-Trace-Id: $action_trace" \
+  --header "X-Agent-Turn-Id: $action_turn"
+action_receipt_id="$(uv run python scripts/read_json_field.py "$tmp_dir/http-response.json" receiptId)"
+action_refund_id="$(uv run python scripts/read_json_field.py "$tmp_dir/http-response.json" refundId)"
+assert_equal 'CONSUMED:2:1' \
+  "$(mysql_query commerce_app "$commerce_app_password" commerce_db \
+    "SELECT CONCAT(state, ':', state_version, ':', consumed_at IS NOT NULL) FROM pending_action WHERE pending_action_id = '$action_pending_id'")" \
+  "Action confirm consumes exactly one PendingAction"
+assert_equal '1:1:1' \
+  "$(mysql_query commerce_app "$commerce_app_password" commerce_db \
+    "SELECT CONCAT((SELECT COUNT(*) FROM action_receipt WHERE receipt_id = '$action_receipt_id'), ':', (SELECT COUNT(*) FROM mock_refund WHERE refund_id = '$action_refund_id'), ':', (SELECT COUNT(*) FROM commerce_outbox WHERE aggregate_type = 'REFUND' AND aggregate_id = '$action_refund_id' AND event_type = 'REFUND_REQUESTED'))")" \
+  "Action confirm commits one receipt, refund, and Outbox row"
+
 stop_process commerce_pid "$commerce_pid"
 start_commerce evaluation "http://127.0.0.1:$auth_port"
 payment_replay_timestamp="$(date +%s)"
@@ -3583,6 +3635,22 @@ assert_status 200 "payment-first completion serializes after the committed callb
   --header 'Idempotency-Key: complete-payment' \
   --header 'Content-Type: application/json' \
   --data '{"caseCorrelation":"case-payment"}'
+action_effects_before_dead_replay="$(mysql_query commerce_app "$commerce_app_password" commerce_db \
+  "SELECT CONCAT((SELECT COUNT(*) FROM action_receipt WHERE pending_action_id = '$action_pending_id'), ':', (SELECT COUNT(*) FROM mock_refund WHERE order_id = '$payment_order_id'), ':', (SELECT COUNT(*) FROM commerce_outbox WHERE aggregate_type = 'REFUND' AND aggregate_id = '$action_refund_id'))")"
+assert_status 200 "completed sandbox replays committed ActionReceipt before mutable liveness" \
+  --request POST "http://127.0.0.1:$commerce_port/internal/tools/actions/$action_pending_id/confirm" \
+  --header "Authorization: Bearer $action_obo_token" \
+  --header "X-Support-Session-Id: $action_session" \
+  --header 'X-Eval-Sandbox-Id: sandbox-payment' \
+  --header "X-Agent-Trace-Id: $action_trace" \
+  --header "X-Agent-Turn-Id: $action_turn"
+assert_equal true \
+  "$(jq -r '.replayed' "$tmp_dir/http-response.json")" \
+  "committed Action replay is explicitly durable"
+assert_equal "$action_effects_before_dead_replay" \
+  "$(mysql_query commerce_app "$commerce_app_password" commerce_db \
+    "SELECT CONCAT((SELECT COUNT(*) FROM action_receipt WHERE pending_action_id = '$action_pending_id'), ':', (SELECT COUNT(*) FROM mock_refund WHERE order_id = '$payment_order_id'), ':', (SELECT COUNT(*) FROM commerce_outbox WHERE aggregate_type = 'REFUND' AND aggregate_id = '$action_refund_id'))")" \
+  "completed-sandbox Action replay creates zero effects"
 payment_dead_timestamp="$(date +%s)"
 payment_dead_signature="$(sign_payment_callback "$payment_dead_timestamp" \
   "$payment_callback_key" "$payment_event_id" "$payment_correlation_id" "$payment_order_id" \

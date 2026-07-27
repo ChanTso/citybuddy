@@ -330,7 +330,7 @@ public class RefundRepository {
     return !rows.isEmpty();
   }
 
-  public void insertOutbox(RefundRecord refund, String eventType, long version) {
+  public OutboxIdentity insertOutbox(RefundRecord refund, String eventType, long version) {
     String eventId = UUID.randomUUID().toString();
     Map<String, Object> event =
         Map.of(
@@ -352,6 +352,7 @@ public class RefundRepository {
         version,
         eventType,
         json(event));
+    return new OutboxIdentity(eventId);
   }
 
   private Optional<RefundRecord> queryRefund(String sql, Object... arguments) {
@@ -460,4 +461,6 @@ public class RefundRepository {
       long activityQuotaDelta,
       long amountMinor,
       String currency) {}
+
+  public record OutboxIdentity(String eventId) {}
 }

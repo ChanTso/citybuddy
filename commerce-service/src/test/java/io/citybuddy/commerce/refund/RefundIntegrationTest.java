@@ -1102,11 +1102,11 @@ class RefundIntegrationTest {
     RefundRepository failAtOutbox =
         new RefundRepository(jdbc, objectMapper) {
           @Override
-          public void insertOutbox(RefundRecord refund, String eventType, long version) {
+          public OutboxIdentity insertOutbox(RefundRecord refund, String eventType, long version) {
             if ("REFUND_SUCCEEDED".equals(eventType)) {
               throw new IllegalStateException("controlled failure after refund ledger");
             }
-            super.insertOutbox(refund, eventType, version);
+            return super.insertOutbox(refund, eventType, version);
           }
         };
     RefundService failing = service(failAtOutbox);
@@ -1127,11 +1127,11 @@ class RefundIntegrationTest {
     RefundRepository failRequestOutbox =
         new RefundRepository(jdbc, objectMapper) {
           @Override
-          public void insertOutbox(RefundRecord refund, String eventType, long version) {
+          public OutboxIdentity insertOutbox(RefundRecord refund, String eventType, long version) {
             if ("REFUND_REQUESTED".equals(eventType)) {
               throw new IllegalStateException("controlled failure after refund insert");
             }
-            super.insertOutbox(refund, eventType, version);
+            return super.insertOutbox(refund, eventType, version);
           }
         };
     assertThatThrownBy(
@@ -1247,12 +1247,13 @@ class RefundIntegrationTest {
     RefundRepository pausedSuccessRepository =
         new RefundRepository(jdbc, objectMapper) {
           @Override
-          public void insertOutbox(RefundRecord current, String eventType, long version) {
-            super.insertOutbox(current, eventType, version);
+          public OutboxIdentity insertOutbox(RefundRecord current, String eventType, long version) {
+            OutboxIdentity outbox = super.insertOutbox(current, eventType, version);
             if ("REFUND_SUCCEEDED".equals(eventType)) {
               successReadyToCommit.countDown();
               awaitLatch(releaseSuccessCommit, "Concurrent refund success was not released");
             }
+            return outbox;
           }
         };
 
