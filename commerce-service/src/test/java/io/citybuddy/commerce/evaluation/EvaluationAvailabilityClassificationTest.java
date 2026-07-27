@@ -162,6 +162,88 @@ class EvaluationAvailabilityClassificationTest {
   }
 
   @Test
+  void statePaymentIntegrityConflictIsAttributedWithoutLeakingReason(CapturedOutput output) {
+    EvaluationSandboxController controller =
+        new EvaluationSandboxController(null, null, null, null, null);
+
+    var response =
+        controller.rejected(
+            new EvaluationSandboxException(
+                409,
+                EvaluationRejectionReason.STATE_COMMITTED_PAYMENT_TRUTH_INCONSISTENT,
+                "Evaluation payment truth is inconsistent"));
+
+    assertThat(response.getStatusCode().value()).isEqualTo(409);
+    assertThat(response.getBody())
+        .containsExactlyEntriesOf(Map.of("error", "Evaluation payment truth is inconsistent"));
+    assertThat(response.getBody().toString())
+        .doesNotContain("STATE_COMMITTED_PAYMENT_TRUTH_INCONSISTENT");
+    assertThat(output)
+        .contains("reason_code=STATE_COMMITTED_PAYMENT_TRUTH_INCONSISTENT")
+        .doesNotContain("private payment detail");
+  }
+
+  @Test
+  void auditPaymentIntegrityConflictIsAttributedWithoutLeakingReason(CapturedOutput output) {
+    EvaluationSandboxController controller =
+        new EvaluationSandboxController(null, null, null, null, null);
+
+    var response =
+        controller.rejected(
+            new EvaluationSandboxException(
+                409,
+                EvaluationRejectionReason.AUDIT_COMMITTED_PAYMENT_TRUTH_INCONSISTENT,
+                "Evaluation audit truth is inconsistent"));
+
+    assertThat(response.getStatusCode().value()).isEqualTo(409);
+    assertThat(response.getBody())
+        .containsExactlyEntriesOf(Map.of("error", "Evaluation audit truth is inconsistent"));
+    assertThat(response.getBody().toString())
+        .doesNotContain("AUDIT_COMMITTED_PAYMENT_TRUTH_INCONSISTENT");
+    assertThat(output).contains("reason_code=AUDIT_COMMITTED_PAYMENT_TRUTH_INCONSISTENT");
+  }
+
+  @Test
+  void genericConflictDoesNotAcquirePaymentIntegrityAttribution(CapturedOutput output) {
+    EvaluationSandboxController controller =
+        new EvaluationSandboxController(null, null, null, null, null);
+
+    var response =
+        controller.rejected(
+            new EvaluationSandboxException(409, "Evaluation audit truth is inconsistent"));
+
+    assertThat(response.getStatusCode().value()).isEqualTo(409);
+    assertThat(response.getBody())
+        .containsExactlyEntriesOf(Map.of("error", "Evaluation audit truth is inconsistent"));
+    assertThat(output)
+        .doesNotContain("STATE_COMMITTED_PAYMENT_TRUTH_INCONSISTENT")
+        .doesNotContain("AUDIT_COMMITTED_PAYMENT_TRUTH_INCONSISTENT");
+  }
+
+  @Test
+  void nonPaymentAuditIntegrityConflictIsAttributedWithoutLeakingReason(CapturedOutput output) {
+    EvaluationSandboxController controller =
+        new EvaluationSandboxController(null, null, null, null, null);
+
+    var response =
+        controller.rejected(
+            new EvaluationSandboxException(
+                409,
+                EvaluationRejectionReason.STATE_EVALUATION_AUDIT_TRUTH_INCONSISTENT,
+                "Evaluation audit truth is inconsistent"));
+
+    assertThat(response.getStatusCode().value()).isEqualTo(409);
+    assertThat(response.getBody())
+        .containsExactlyEntriesOf(Map.of("error", "Evaluation audit truth is inconsistent"));
+    assertThat(response.getBody().toString())
+        .doesNotContain("STATE_EVALUATION_AUDIT_TRUTH_INCONSISTENT");
+    assertThat(output)
+        .contains("reason_code=STATE_EVALUATION_AUDIT_TRUTH_INCONSISTENT")
+        .doesNotContain("STATE_COMMITTED_PAYMENT_TRUTH_INCONSISTENT")
+        .doesNotContain("AUDIT_COMMITTED_PAYMENT_TRUTH_INCONSISTENT");
+  }
+
+  @Test
   void auditInsertClassifiesOnlyPermissionAndResourceFailuresAsUnavailable() {
     EvaluationSandboxException denied =
         EvaluationCommerceAuditService.auditInsertFailure(

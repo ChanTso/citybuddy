@@ -122,9 +122,12 @@ request. A later semantic diff change requires the checklist to be executed and 
 ### Bidirectional audit/state completeness reconciliation
 
 - Make the reconciliation predicate total over every audited row in the sandbox scope. Do not let
-  an `entity_type` or other `WHERE` filter remove a row from the reconciler's responsibility; dispatch
-  every row by its declared type to that type's business anchor. Keep the type whitelist closed and
-  fail closed for an unknown or future type.
+  an `entity_type` or other `WHERE` filter remove a row from the reconciler's responsibility. Do not
+  trust a stored type/discriminator to establish the record family: first derive zero, one, or
+  multiple candidate families from independent durable business roots, then validate the
+  discriminator as ordinary content. Exactly one root may establish a family; no root or multiple
+  roots is ambiguous/orphan damage and fails closed with non-payment/cross-family attribution.
+  Keep the writer type whitelist closed and fail closed for an unknown or future stored type.
 - Separate enumeration from validity assertions. Every reconciliation `JOIN`/`WHERE` predicate must
   be classified in the pull request: enumeration may use only the stable sandbox scope, stable
   business keys, and the terminal classification that defines a truth face. Intent hashes,
@@ -268,6 +271,11 @@ request. A later semantic diff change requires the checklist to be executed and 
   keep private claims, resource state, dependency details, and the reason code out of the public
   response. A shared status and response body without a producer-level attribution channel is not
   sufficient evidence for an intermittent classification failure.
+- Bind producer attribution to an authoritative durable root, not to a potentially damaged
+  type/discriminator on the rejected row. Establish the entity family independently, then validate
+  the discriminator. A product-origin, cross-family, ambiguous, or orphan audit row must not acquire
+  a payment-specific reason merely by declaring `PAYMENT_CALLBACK`; route-local request/log offsets
+  must prove the exact producer, and an unrelated 409 must fail a payment-integrity assertion.
 - Separate credential or authoritative-state validation from dependency acquisition. Invalid
   credentials and positively confirmed inactive, missing, or mismatched state may produce the
   contract rejection; JWKS refresh failure, timeout, connection exhaustion, database read failure,
@@ -313,9 +321,11 @@ request. A later semantic diff change requires the checklist to be executed and 
   state/audit reconciliation, and has a single-column three-path fault cell; a compound mutation may
   not stand in for its constituent columns. Any excluded column needs an executable per-column
   disposition and an explicit residual-risk rationale. The currently accepted no-second-anchor
-  residuals are start `request_idempotency_key`, fixture `evaluation_owner_handle`, and generated
-  ledger `movement_id`; do not generalize this exception to production idempotency, refund, inventory,
-  transaction, or authorization truth.
+  residuals are fixture `evaluation_owner_handle` and generated ledger `movement_id`. The start
+  `request_idempotency_key` is canonical idempotency content and must be committed and reconciled even
+  for an evaluation-created attempt; do not turn a production intent-bearing column into an
+  internal-view residual. Do not generalize either accepted residual to production idempotency,
+  refund, inventory, transaction, or authorization truth.
 - Review exception-to-HTTP mappings against the full subtype hierarchy. Do not map a broad database
   superclass such as `DataAccessException` to unavailable when it also contains lock-contention and
   constraint-conflict subtypes. Prove connection/resource failure, lock timeout/deadlock, duplicate

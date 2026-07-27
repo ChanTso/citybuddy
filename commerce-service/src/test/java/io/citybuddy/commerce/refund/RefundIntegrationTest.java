@@ -10,6 +10,7 @@ import com.nimbusds.jose.JWSHeader;
 import com.nimbusds.jose.crypto.RSASSASigner;
 import com.nimbusds.jwt.JWTClaimsSet;
 import com.nimbusds.jwt.SignedJWT;
+import io.citybuddy.commerce.order.StandardOrderIntentCommitment;
 import io.citybuddy.commerce.payment.MockPaymentCallbackRequest;
 import io.citybuddy.commerce.payment.MockPaymentRepository;
 import io.citybuddy.commerce.payment.MockPaymentRequest;
@@ -557,6 +558,7 @@ class RefundIntegrationTest {
 
   private String seedStandardOrder(String user, long amount, String suffix) {
     String orderId = UUID.randomUUID().toString();
+    String productId = "refund-product-" + suffix;
     jdbc.update(
         """
         INSERT INTO standard_order
@@ -566,9 +568,18 @@ class RefundIntegrationTest {
         """,
         orderId,
         user,
-        "refund-product-" + suffix,
+        productId,
         amount,
         amount);
+    jdbc.update(
+        """
+        INSERT INTO order_idempotency (user_subject, idempotency_key, intent_hash, order_id)
+        VALUES (?, ?, ?, ?)
+        """,
+        user,
+        "origin-" + orderId,
+        StandardOrderIntentCommitment.hash(productId, 1, 1),
+        orderId);
     return orderId;
   }
 
@@ -641,7 +652,7 @@ class RefundIntegrationTest {
         VALUES (?, ?, 'SECKILL_ORDER_CREATE', ?, ?, ?, ?, -1, -1)
         """,
         UUID.randomUUID().toString(),
-        "refund-order-create:" + transactionId,
+        "seckill-order-create:" + transactionId,
         orderId,
         reservationId,
         activityId,

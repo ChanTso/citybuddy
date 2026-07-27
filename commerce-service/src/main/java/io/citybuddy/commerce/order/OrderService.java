@@ -1,9 +1,5 @@
 package io.citybuddy.commerce.order;
 
-import java.nio.charset.StandardCharsets;
-import java.security.MessageDigest;
-import java.security.NoSuchAlgorithmException;
-import java.util.HexFormat;
 import java.util.Set;
 import java.util.UUID;
 import org.springframework.dao.DataAccessResourceFailureException;
@@ -227,19 +223,11 @@ public final class OrderService {
       throw failure(400, OrderCategory.VALIDATION, "Order request is invalid", correlationId);
     }
     String normalizedProductId = productId.strip();
-    String canonical =
-        normalizedProductId.length() + ":" + normalizedProductId + ":" + quantity + ":" + version;
-    return new ValidatedRequest(normalizedProductId, quantity, version, sha256(canonical));
-  }
-
-  private static String sha256(String value) {
-    try {
-      return HexFormat.of()
-          .formatHex(
-              MessageDigest.getInstance("SHA-256").digest(value.getBytes(StandardCharsets.UTF_8)));
-    } catch (NoSuchAlgorithmException exception) {
-      throw new IllegalStateException("SHA-256 is unavailable", exception);
-    }
+    return new ValidatedRequest(
+        normalizedProductId,
+        quantity,
+        version,
+        StandardOrderIntentCommitment.hash(normalizedProductId, quantity, version));
   }
 
   private static OrderException failure(

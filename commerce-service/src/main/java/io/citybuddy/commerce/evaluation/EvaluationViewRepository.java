@@ -1,6 +1,9 @@
 package io.citybuddy.commerce.evaluation;
 
+import io.citybuddy.commerce.payment.CommittedPaymentIntegrityException;
+import io.citybuddy.commerce.payment.CommittedPaymentTruthResolver;
 import io.citybuddy.commerce.payment.EvaluationPaymentCommittedFaces;
+import io.citybuddy.commerce.payment.MockPaymentRepository;
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
 import java.sql.ResultSet;
@@ -25,9 +28,13 @@ public final class EvaluationViewRepository {
               EvaluationAuditEntityType.PAYMENT_CALLBACK));
 
   private final JdbcTemplate jdbc;
+  private final MockPaymentRepository payments;
+  private final CommittedPaymentTruthResolver paymentTruth;
 
   public EvaluationViewRepository(JdbcTemplate jdbc) {
     this.jdbc = jdbc;
+    this.payments = new MockPaymentRepository(jdbc);
+    this.paymentTruth = new CommittedPaymentTruthResolver(payments);
   }
 
   public void validateSchema() {
@@ -237,136 +244,97 @@ public final class EvaluationViewRepository {
         fetchLimit);
   }
 
-  public boolean auditReferencesConsistent(String sandboxId) {
+  public AuditConsistency auditReferencesConsistency(
+      String sandboxId, CommittedPaymentTruthResolver.CommittedPaymentCaller caller) {
     List<IntegrityAuditReference> references = allAuditReferences(sandboxId);
     List<ProductObservationTruth> productTruths = productObservationTruths(sandboxId);
-    if (!EvaluationLegacyAuditCommitmentStore.load(jdbc).isConsistent()
-        || !sequenceOrderConsistent(references)
-        || !paymentFaceCardinalitiesConsistent(sandboxId)
-        || !paymentTruthsConsistent(
-            references,
+    List<SucceededCallbackTruth> callbacks = succeededCallbackTruths(sandboxId);
+    EvaluationLegacyAuditCommitmentStore.Snapshot legacy =
+        EvaluationLegacyAuditCommitmentStore.load(jdbc);
+    List<ClassifiedAuditReference> classifiedReferences =
+        references.stream()
+            .map(
+                reference ->
+                    new ClassifiedAuditReference(
+                        reference,
+                        classifyAuditOrigin(reference, productTruths, callbacks, legacy)))
+            .toList();
+    boolean paymentConsistent =
+        paymentTruthsConsistent(
+            caller,
+            classifiedReferences,
             paidOrderTruths(sandboxId),
             paymentLedgerTruths(sandboxId),
-            succeededCallbackTruths(sandboxId))) {
-      return false;
+            callbacks);
+    boolean otherAuditConsistent =
+        legacy.isConsistent()
+            && nonPaymentSequenceOrderConsistent(classifiedReferences)
+            && otherAuditTruthsConsistent(classifiedReferences, productTruths, legacy);
+    return classifyAuditConsistency(paymentConsistent, otherAuditConsistent);
+  }
+
+  static AuditConsistency classifyAuditConsistency(
+      boolean paymentConsistent, boolean otherAuditConsistent) {
+    if (!otherAuditConsistent) {
+      return AuditConsistency.NON_PAYMENT_AUDIT_TRUTH_INCONSISTENT;
     }
+    return paymentConsistent
+        ? AuditConsistency.CONSISTENT
+        : AuditConsistency.PAYMENT_TRUTH_INCONSISTENT;
+  }
+
+  private boolean otherAuditTruthsConsistent(
+      List<ClassifiedAuditReference> references,
+      List<ProductObservationTruth> productTruths,
+      EvaluationLegacyAuditCommitmentStore.Snapshot legacy) {
     for (ProductObservationTruth truth : productTruths) {
       if (!productObservationIsAuthoritative(truth)
           || references.stream()
+                  .filter(reference -> reference.origin() == AuditOrigin.PRODUCT_OBSERVATION)
+                  .map(ClassifiedAuditReference::reference)
                   .filter(reference -> matches(reference, truth) || matchesLegacy(reference, truth))
                   .count()
               != 1) {
         return false;
       }
     }
-    for (IntegrityAuditReference reference : references) {
-      Optional<EvaluationAuditEntityType> storedType =
-          EvaluationAuditEntityType.fromStored(reference.entityType());
-      if (storedType.isEmpty()
-          || (!"BUSINESS_EVENT".equals(reference.createdAtAnchor())
-              && !"LEGACY_CUTOFF".equals(reference.createdAtAnchor()))) {
+    for (ClassifiedAuditReference classified : references) {
+      IntegrityAuditReference reference = classified.reference();
+      if (classified.origin() == AuditOrigin.AMBIGUOUS_OR_ORPHAN) {
         return false;
       }
-      boolean matched;
-      if ("LEGACY_CUTOFF".equals(reference.createdAtAnchor())) {
-        matched =
-            storedType.get() == EvaluationAuditEntityType.PRODUCT_FIXTURE
-                && legacyProductReferenceConsistent(reference, productTruths);
-      } else {
-        matched =
-            switch (storedType.get()) {
-              case PRODUCT_FIXTURE ->
-                  productTruths.stream().filter(truth -> matches(reference, truth)).count() == 1;
-              case PAYMENT_CALLBACK -> true;
-            };
+      if (classified.origin() == AuditOrigin.PAYMENT_CALLBACK) {
+        continue;
       }
-      if (!matched) {
+      if ("LEGACY_CUTOFF".equals(reference.createdAtAnchor())) {
+        if (!legacy.contains(reference.sequence(), reference.auditReferenceId())
+            || !legacyProductReferenceConsistent(reference, productTruths)) {
+          return false;
+        }
+        continue;
+      }
+      if (!"BUSINESS_EVENT".equals(reference.createdAtAnchor())
+          || productTruths.stream().filter(truth -> matches(reference, truth)).count() != 1) {
         return false;
       }
     }
     return true;
   }
 
-  private boolean paymentFaceCardinalitiesConsistent(String sandboxId) {
-    String callbackTable =
-        EvaluationPaymentCommittedFaces.onlyTable(EvaluationPaymentCommittedFaces.CALLBACK);
-    String callbackKey = EvaluationPaymentCommittedFaces.CALLBACK.stableKeys().getFirst();
-    String attemptTable =
-        EvaluationPaymentCommittedFaces.onlyTable(EvaluationPaymentCommittedFaces.ATTEMPT);
-    String attemptKey = EvaluationPaymentCommittedFaces.ATTEMPT.stableKeys().getFirst();
-    String ledgerTable =
-        EvaluationPaymentCommittedFaces.onlyTable(EvaluationPaymentCommittedFaces.LEDGER);
-    String auditTable =
-        EvaluationPaymentCommittedFaces.onlyTable(EvaluationPaymentCommittedFaces.AUDIT);
-    return duplicateGroupCount(
-                "SELECT "
-                    + callbackKey
-                    + " FROM "
-                    + callbackTable
-                    + " WHERE "
-                    + callbackKey
-                    + " IN (SELECT "
-                    + callbackKey
-                    + " FROM "
-                    + callbackTable
-                    + " WHERE sandbox_id = ?) GROUP BY "
-                    + callbackKey
-                    + " HAVING COUNT(*) > 1",
-                sandboxId)
-            == 0
-        && duplicateGroupCount(
-                "SELECT "
-                    + attemptKey
-                    + " FROM "
-                    + attemptTable
-                    + " WHERE "
-                    + attemptKey
-                    + " IN (SELECT "
-                    + attemptKey
-                    + " FROM "
-                    + attemptTable
-                    + " WHERE sandbox_id = ?) GROUP BY "
-                    + attemptKey
-                    + " HAVING COUNT(*) > 1",
-                sandboxId)
-            == 0
-        && duplicateGroupCount(
-                "SELECT order_id FROM ("
-                    + EvaluationPaymentCommittedFaces.orderFaceUnionSql()
-                    + ") committed_order WHERE order_id IN ("
-                    + EvaluationPaymentCommittedFaces.evaluationOrderKeysBySandboxSql()
-                    + ") GROUP BY order_id HAVING COUNT(*) > 1",
-                sandboxId)
-            == 0
-        && duplicateGroupCount(
-                "SELECT order_id FROM "
-                    + ledgerTable
-                    + " WHERE order_id IN ("
-                    + EvaluationPaymentCommittedFaces.evaluationOrderKeysBySandboxSql()
-                    + ") GROUP BY order_id HAVING COUNT(*) > 1",
-                sandboxId)
-            == 0
-        && duplicateGroupCount(
-                "SELECT entity_id FROM "
-                    + auditTable
-                    + " WHERE entity_id IN (SELECT callback_event_id FROM "
-                    + callbackTable
-                    + " WHERE sandbox_id = ?) GROUP BY entity_id HAVING COUNT(*) > 1",
-                sandboxId)
-            == 0;
-  }
-
-  private int duplicateGroupCount(String groupedQuery, String sandboxId) {
-    Integer count =
-        jdbc.queryForObject(
-            "SELECT COUNT(*) FROM (" + groupedQuery + ") duplicate_groups",
-            Integer.class,
-            sandboxId);
-    return count == null ? 0 : count;
-  }
-
   public static Set<EvaluationAuditEntityType> reconciledAuditTypes() {
     return RECONCILED_AUDIT_TYPES;
+  }
+
+  public enum AuditConsistency {
+    CONSISTENT,
+    PAYMENT_TRUTH_INCONSISTENT,
+    NON_PAYMENT_AUDIT_TRUTH_INCONSISTENT
+  }
+
+  enum AuditOrigin {
+    PRODUCT_OBSERVATION,
+    PAYMENT_CALLBACK,
+    AMBIGUOUS_OR_ORPHAN
   }
 
   private List<IntegrityAuditReference> allAuditReferences(String sandboxId) {
@@ -441,10 +409,12 @@ public final class EvaluationViewRepository {
         FROM %s
         WHERE order_id IN (%s)
         ORDER BY order_id, movement_id
+        LIMIT %d
         """
             .formatted(
                 EvaluationPaymentCommittedFaces.onlyTable(EvaluationPaymentCommittedFaces.LEDGER),
-                EvaluationPaymentCommittedFaces.evaluationOrderKeysBySandboxSql()),
+                EvaluationPaymentCommittedFaces.evaluationOrderKeysBySandboxSql(),
+                EvaluationPaymentCommittedFaces.MAXIMUM_LEDGER_CLOSURE_ROWS + 1),
         (result, row) ->
             new PaymentLedgerTruth(
                 result.getString("movement_id"),
@@ -484,12 +454,22 @@ public final class EvaluationViewRepository {
            OR c.callback_event_id IN (
                 SELECT entity_id FROM %s WHERE sandbox_id = ?
               )
+           OR EXISTS (
+                SELECT 1
+                FROM %s audit_root
+                WHERE audit_root.sandbox_id = ?
+                  AND audit_root.sandbox_id <=> c.sandbox_id
+                  AND audit_root.support_session_id <=> c.support_session_id
+                  AND audit_root.trace_id <=> c.trace_id
+                  AND audit_root.operation_id <=> c.operation_id
+              )
         ORDER BY a.order_id, c.callback_event_id
         """
             .formatted(
                 EvaluationPaymentCommittedFaces.onlyTable(EvaluationPaymentCommittedFaces.CALLBACK),
                 EvaluationPaymentCommittedFaces.onlyTable(EvaluationPaymentCommittedFaces.ATTEMPT),
                 EvaluationPaymentCommittedFaces.onlyTable(EvaluationPaymentCommittedFaces.ATTEMPT),
+                EvaluationPaymentCommittedFaces.onlyTable(EvaluationPaymentCommittedFaces.AUDIT),
                 EvaluationPaymentCommittedFaces.onlyTable(EvaluationPaymentCommittedFaces.AUDIT)),
         (result, row) ->
             new SucceededCallbackTruth(
@@ -520,6 +500,7 @@ public final class EvaluationViewRepository {
                     ? null
                     : result.getTimestamp("attempt_succeeded_at").toInstant()),
         sandboxId,
+        sandboxId,
         sandboxId);
   }
 
@@ -537,15 +518,78 @@ public final class EvaluationViewRepository {
                     truth.productVersion()));
   }
 
-  private static boolean sequenceOrderConsistent(List<IntegrityAuditReference> references) {
-    Instant previousCreatedAt = null;
-    for (IntegrityAuditReference reference : references) {
-      if (previousCreatedAt != null && reference.createdAt().isBefore(previousCreatedAt)) {
-        return false;
+  private static boolean nonPaymentSequenceOrderConsistent(
+      List<ClassifiedAuditReference> references) {
+    for (int earlierIndex = 0; earlierIndex < references.size(); earlierIndex++) {
+      ClassifiedAuditReference earlier = references.get(earlierIndex);
+      for (int laterIndex = earlierIndex + 1; laterIndex < references.size(); laterIndex++) {
+        ClassifiedAuditReference later = references.get(laterIndex);
+        if (later.reference().createdAt().isBefore(earlier.reference().createdAt())
+            && earlier.origin() != AuditOrigin.PAYMENT_CALLBACK
+            && later.origin() != AuditOrigin.PAYMENT_CALLBACK) {
+          return false;
+        }
       }
-      previousCreatedAt = reference.createdAt();
     }
     return true;
+  }
+
+  static AuditOrigin classifyAuditOrigin(
+      IntegrityAuditReference reference,
+      List<ProductObservationTruth> productTruths,
+      List<SucceededCallbackTruth> callbacks,
+      EvaluationLegacyAuditCommitmentStore.Snapshot legacy) {
+    boolean productRoot =
+        legacy.contains(reference.sequence(), reference.auditReferenceId())
+            || productTruths.stream().anyMatch(truth -> hasProductRoot(reference, truth));
+    boolean paymentRoot =
+        callbacks.stream().anyMatch(callback -> hasPaymentRoot(reference, callback));
+    if (productRoot == paymentRoot) {
+      return AuditOrigin.AMBIGUOUS_OR_ORPHAN;
+    }
+    return productRoot ? AuditOrigin.PRODUCT_OBSERVATION : AuditOrigin.PAYMENT_CALLBACK;
+  }
+
+  private static boolean hasProductRoot(
+      IntegrityAuditReference reference, ProductObservationTruth truth) {
+    return reference.auditReferenceId().equals(truth.observationId())
+        || reference.entityId().equals(truth.productId())
+        || sameContext(reference, truth);
+  }
+
+  private static boolean hasPaymentRoot(
+      IntegrityAuditReference reference, SucceededCallbackTruth callback) {
+    boolean canonicalReferenceRoot =
+        callback.attemptStateVersion() > 0
+            && reference
+                .auditReferenceId()
+                .equals(
+                    EvaluationAuditReferenceIdentity.paymentCallback(
+                        callback.sandboxId(),
+                        callback.supportSessionId(),
+                        callback.traceId(),
+                        callback.operationId(),
+                        callback.callbackEventId(),
+                        callback.attemptStateVersion()));
+    return canonicalReferenceRoot
+        || reference.entityId().equals(callback.callbackEventId())
+        || sameContext(reference, callback);
+  }
+
+  private static boolean sameContext(
+      IntegrityAuditReference reference, ProductObservationTruth truth) {
+    return Objects.equals(reference.sandboxId(), truth.sandboxId())
+        && Objects.equals(reference.supportSessionId(), truth.supportSessionId())
+        && Objects.equals(reference.traceId(), truth.traceId())
+        && Objects.equals(reference.operationId(), truth.operationId());
+  }
+
+  private static boolean sameContext(
+      IntegrityAuditReference reference, SucceededCallbackTruth callback) {
+    return Objects.equals(reference.sandboxId(), callback.sandboxId())
+        && Objects.equals(reference.supportSessionId(), callback.supportSessionId())
+        && Objects.equals(reference.traceId(), callback.traceId())
+        && Objects.equals(reference.operationId(), callback.operationId());
   }
 
   private static boolean legacyProductReferenceConsistent(
@@ -600,18 +644,16 @@ public final class EvaluationViewRepository {
         && "LEGACY_CUTOFF".equals(reference.createdAtAnchor());
   }
 
-  private static boolean paymentTruthsConsistent(
-      List<IntegrityAuditReference> references,
+  private boolean paymentTruthsConsistent(
+      CommittedPaymentTruthResolver.CommittedPaymentCaller caller,
+      List<ClassifiedAuditReference> references,
       List<PaidOrderTruth> orders,
       List<PaymentLedgerTruth> ledgers,
       List<SucceededCallbackTruth> callbacks) {
     List<IntegrityAuditReference> paymentReferences =
         references.stream()
-            .filter(
-                reference ->
-                    EvaluationAuditEntityType.PAYMENT_CALLBACK
-                        .name()
-                        .equals(reference.entityType()))
+            .filter(reference -> reference.origin() == AuditOrigin.PAYMENT_CALLBACK)
+            .map(ClassifiedAuditReference::reference)
             .toList();
     Set<String> orderKeys =
         orders.stream().map(PaidOrderTruth::orderId).collect(Collectors.toSet());
@@ -660,104 +702,34 @@ public final class EvaluationViewRepository {
           paymentReferences.stream()
               .filter(reference -> reference.entityId().equals(callback.callbackEventId()))
               .toList();
-      if (matchingReferences.size() != 1
-          || !paymentTruthIsAuthoritative(order, ledger, callback, matchingReferences.getFirst())) {
+      if (matchingReferences.size() != 1) {
+        return false;
+      }
+      try {
+        MockPaymentRepository.AttemptRecord attempt =
+            payments.findAttemptById(callback.attemptId()).orElse(null);
+        if (attempt == null) {
+          return false;
+        }
+        CommittedPaymentTruthResolver.CommittedPaymentTruth committed =
+            paymentTruth.resolveSnapshot(caller, attempt);
+        if (!committed.order().orderId().equals(order.orderId())
+            || !committed.paymentMovement().businessEventKey().equals(ledger.businessEventKey())
+            || !committed.callback().callbackEventId().equals(callback.callbackEventId())
+            || committed.evaluationAudit().isEmpty()
+            || !committed
+                .evaluationAudit()
+                .orElseThrow()
+                .auditReferenceId()
+                .equals(matchingReferences.getFirst().auditReferenceId())
+            || attempt.refundedAmountMinor() != 0) {
+          return false;
+        }
+      } catch (CommittedPaymentIntegrityException exception) {
         return false;
       }
     }
     return true;
-  }
-
-  private static boolean paymentTruthIsAuthoritative(
-      PaidOrderTruth order,
-      PaymentLedgerTruth ledger,
-      SucceededCallbackTruth callback,
-      IntegrityAuditReference reference) {
-    String expectedIntentHash =
-        sha256(
-            String.join(
-                "\n",
-                callback.callbackEventId(),
-                callback.callbackCorrelationId(),
-                callback.attemptOrderId(),
-                Long.toString(callback.attemptAmountMinor()),
-                callback.attemptCurrency(),
-                callback.requestedOutcome(),
-                callback.sandboxId(),
-                callback.supportSessionId(),
-                callback.traceId(),
-                callback.operationId(),
-                callback.callbackIdempotencyKey()));
-    PaymentAuditTruth truth =
-        new PaymentAuditTruth(
-            callback.sandboxId(),
-            callback.supportSessionId(),
-            callback.traceId(),
-            callback.operationId(),
-            callback.callbackEventId(),
-            callback.attemptStateVersion(),
-            callback.createdAt());
-    return "STANDARD".equals(order.orderKind())
-        && "PAID".equals(order.status())
-        && order.stateVersion() == 2
-        && "STANDARD".equals(callback.attemptOrderKind())
-        && "SUCCEEDED".equals(callback.attemptState())
-        && callback.attemptStateVersion() == 2
-        && "SUCCEEDED".equals(callback.requestedOutcome())
-        && "APPLIED".equals(callback.resultState())
-        && callback.intentHash().equals(expectedIntentHash)
-        && callback.callbackCorrelationId().equals(callback.attemptCorrelationId())
-        && callback.sandboxId().equals(callback.attemptSandboxId())
-        && callback.sandboxId().equals(order.sandboxId())
-        && callback.attemptUserSubject().equals(order.userSubject())
-        && callback.attemptOrderId().equals(order.orderId())
-        && callback.attemptAmountMinor() == order.totalPriceMinor()
-        && callback.attemptCurrency().equals(order.currency())
-        && callback
-            .attemptIntentHash()
-            .equals(
-                EvaluationPaymentCommittedFaces.attemptIntentHash(
-                    callback.attemptOrderId(),
-                    callback.attemptAmountMinor(),
-                    callback.attemptCurrency(),
-                    callback.attemptSandboxId()))
-        && callback.attemptRefundedAmountMinor() == 0
-        && Objects.equals(callback.attemptSucceededAt(), callback.createdAt())
-        && ledger.businessEventKey().equals("mock-payment:" + callback.attemptId())
-        && "STANDARD_PAYMENT".equals(ledger.movementType())
-        && ledger.orderId().equals(order.orderId())
-        && ledger.reservationId() == null
-        && ledger.activityId() == null
-        && ledger.productId().equals(order.productId())
-        && ledger.sandboxId().equals(order.sandboxId())
-        && ledger.inventoryDelta() == 0
-        && ledger.activityQuotaDelta() == 0
-        && Objects.equals(ledger.paymentAmountMinor(), order.totalPriceMinor())
-        && order.currency().equals(ledger.paymentCurrency())
-        && matches(reference, truth);
-  }
-
-  private static boolean matches(IntegrityAuditReference reference, PaymentAuditTruth truth) {
-    return reference
-            .auditReferenceId()
-            .equals(
-                EvaluationAuditReferenceIdentity.paymentCallback(
-                    truth.sandboxId(),
-                    truth.supportSessionId(),
-                    truth.traceId(),
-                    truth.operationId(),
-                    truth.callbackEventId(),
-                    truth.entityVersion()))
-        && reference.sandboxId().equals(truth.sandboxId())
-        && reference.supportSessionId().equals(truth.supportSessionId())
-        && reference.traceId().equals(truth.traceId())
-        && reference.operationId().equals(truth.operationId())
-        && reference.entityType().equals(EvaluationAuditEntityType.PAYMENT_CALLBACK.name())
-        && reference.entityId().equals(truth.callbackEventId())
-        && reference.entityVersion() == truth.entityVersion()
-        && "OBSERVED".equals(reference.outcome())
-        && reference.createdAt().equals(truth.createdAt())
-        && "BUSINESS_EVENT".equals(reference.createdAtAnchor());
   }
 
   private static String sha256(String value) {
@@ -822,7 +794,7 @@ public final class EvaluationViewRepository {
     return value == null ? null : value.toInstant();
   }
 
-  private record ProductObservationTruth(
+  record ProductObservationTruth(
       String observationId,
       String sandboxId,
       String supportSessionId,
@@ -858,7 +830,7 @@ public final class EvaluationViewRepository {
       Long paymentAmountMinor,
       String paymentCurrency) {}
 
-  private record SucceededCallbackTruth(
+  record SucceededCallbackTruth(
       String callbackEventId,
       String callbackIdempotencyKey,
       String attemptId,
@@ -893,7 +865,7 @@ public final class EvaluationViewRepository {
       long entityVersion,
       Instant createdAt) {}
 
-  private record IntegrityAuditReference(
+  record IntegrityAuditReference(
       long sequence,
       String auditReferenceId,
       String sandboxId,
@@ -906,6 +878,8 @@ public final class EvaluationViewRepository {
       String outcome,
       Instant createdAt,
       String createdAtAnchor) {}
+
+  private record ClassifiedAuditReference(IntegrityAuditReference reference, AuditOrigin origin) {}
 
   public record SandboxView(
       String sandboxId,

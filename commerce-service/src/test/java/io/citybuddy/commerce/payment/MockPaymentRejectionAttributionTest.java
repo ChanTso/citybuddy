@@ -3,6 +3,8 @@ package io.citybuddy.commerce.payment;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
+import io.citybuddy.commerce.evaluation.EvaluationRejectionReason;
+import io.citybuddy.commerce.evaluation.EvaluationSandboxException;
 import java.util.Map;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
@@ -53,6 +55,67 @@ class MockPaymentRejectionAttributionTest {
   }
 
   @Test
+  void durableIntegrityReasonStaysServerOnly(CapturedOutput output) {
+    MockPaymentExceptionHandler handler = new MockPaymentExceptionHandler();
+
+    var response =
+        handler.handle(
+            new MockPaymentException(
+                409,
+                "CONFLICT",
+                MockPaymentRejectionReason.COMMITTED_PAYMENT_TRUTH_INCONSISTENT,
+                "Committed payment truth is inconsistent"));
+
+    assertThat(response.getStatusCode().value()).isEqualTo(409);
+    assertThat(response.getBody())
+        .containsExactlyEntriesOf(
+            Map.of(
+                "category", "CONFLICT",
+                "message", "Committed payment truth is inconsistent"))
+        .doesNotContainKey("reason");
+    assertThat(output).contains("reason_code=COMMITTED_PAYMENT_TRUTH_INCONSISTENT");
+  }
+
+  @Test
+  void sandboxHandlerPreservesExactRootCauseClasses(CapturedOutput output) {
+    MockPaymentExceptionHandler handler = new MockPaymentExceptionHandler();
+
+    var inactive =
+        handler.handleSandbox(
+            new EvaluationSandboxException(
+                403,
+                EvaluationRejectionReason.PAYMENT_SANDBOX_NOT_ACTIVE,
+                "private inactive detail"));
+    assertThat(inactive.getStatusCode().value()).isEqualTo(403);
+    assertThat(inactive.getBody())
+        .containsExactlyEntriesOf(
+            Map.of("category", "AUTHORIZATION", "message", "Evaluation payment is unavailable"));
+
+    var damaged =
+        handler.handleSandbox(new EvaluationSandboxException(409, "private integrity detail"));
+    assertThat(damaged.getStatusCode().value()).isEqualTo(409);
+    assertThat(damaged.getBody())
+        .containsExactlyEntriesOf(
+            Map.of("category", "CONFLICT", "message", "Committed payment truth is inconsistent"));
+
+    var indeterminate =
+        handler.handleSandbox(new EvaluationSandboxException(503, "private dependency detail"));
+    assertThat(indeterminate.getStatusCode().value()).isEqualTo(503);
+    assertThat(indeterminate.getBody())
+        .containsExactlyEntriesOf(
+            Map.of("category", "UNAVAILABLE", "message", "Payment service is unavailable"));
+
+    assertThat(output)
+        .contains("reason_code=PAYMENT_SANDBOX_NOT_ACTIVE")
+        .contains("reason_code=SANDBOX_NOT_ACTIVE")
+        .contains("reason_code=COMMITTED_PAYMENT_TRUTH_INCONSISTENT")
+        .contains("reason_code=DEPENDENCY_OBSERVATION_INDETERMINATE")
+        .doesNotContain("private inactive detail")
+        .doesNotContain("private integrity detail")
+        .doesNotContain("private dependency detail");
+  }
+
+  @Test
   void unattributedForbiddenConstructionIsRejected() {
     assertThatThrownBy(
             () -> new MockPaymentException(403, "AUTHORIZATION", "unattributed rejection"))
@@ -68,7 +131,7 @@ class MockPaymentRejectionAttributionTest {
   }
 
   @Test
-  void onlyResourceAvailabilityFailuresMapToUnavailable() {
+  void onlyResourceAvailabilityFailuresMapToUnavailable(CapturedOutput output) {
     MockPaymentExceptionHandler handler = new MockPaymentExceptionHandler();
 
     var response =
@@ -90,5 +153,6 @@ class MockPaymentRejectionAttributionTest {
         .isNotNull();
     assertThat(mappings.resolveMethod(new CannotAcquireLockException("controlled"))).isNull();
     assertThat(mappings.resolveMethod(new DuplicateKeyException("controlled"))).isNull();
+    assertThat(output).contains("reason_code=DEPENDENCY_OBSERVATION_INDETERMINATE");
   }
 }
