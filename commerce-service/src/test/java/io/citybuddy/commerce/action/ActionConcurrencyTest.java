@@ -13,6 +13,7 @@ import static org.mockito.Mockito.when;
 import io.citybuddy.commerce.action.ActionRepository.ActionReceiptRecord;
 import io.citybuddy.commerce.action.ActionRepository.PendingActionRecord;
 import io.citybuddy.commerce.evaluation.EvaluationSandboxAccess;
+import io.citybuddy.commerce.refund.RefundRepository.RefundIntegrityException;
 import io.citybuddy.commerce.refund.RefundService;
 import java.sql.SQLException;
 import java.time.Clock;
@@ -112,6 +113,46 @@ class ActionConcurrencyTest {
                         "REFUND_REQUEST", "00000000-0000-0000-0000-000000000123", 500L, "AUD")))
         .isSameAs(unexpected);
     verifyNoInteractions(repository, refunds);
+  }
+
+  @Test
+  void refundProgrammerFailureRemainsVisible() {
+    IllegalStateException programmerFailure =
+        new IllegalStateException("controlled missing Action transaction");
+    executePrepareMutation();
+    when(refunds.prepareActionInCurrentTransaction(
+            eq("action-owner"), eq("00000000-0000-0000-0000-000000000123"), any(), eq(null)))
+        .thenThrow(programmerFailure);
+
+    assertThatThrownBy(
+            () ->
+                service.prepare(
+                    context(),
+                    new PrepareActionCommand(
+                        "REFUND_REQUEST", "00000000-0000-0000-0000-000000000123", 500L, "AUD")))
+        .isSameAs(programmerFailure);
+  }
+
+  @Test
+  void typedRefundIntegrityFailureRemainsAnAttributedDurableConflict() {
+    executePrepareMutation();
+    when(refunds.prepareActionInCurrentTransaction(
+            eq("action-owner"), eq("00000000-0000-0000-0000-000000000123"), any(), eq(null)))
+        .thenThrow(new RefundIntegrityException("controlled refund uniqueness corruption"));
+
+    assertThatThrownBy(
+            () ->
+                service.prepare(
+                    context(),
+                    new PrepareActionCommand(
+                        "REFUND_REQUEST", "00000000-0000-0000-0000-000000000123", 500L, "AUD")))
+        .isInstanceOfSatisfying(
+            ActionException.class,
+            exception -> {
+              assertThat(exception.status()).isEqualTo(409);
+              assertThat(exception.reason())
+                  .isEqualTo(ActionRejectionReason.ACTION_DURABLE_TRUTH_INCONSISTENT);
+            });
   }
 
   @Test
@@ -450,6 +491,16 @@ class ActionConcurrencyTest {
             invocation -> {
               @SuppressWarnings("unchecked")
               Supplier<Optional<PendingActionView>> work = invocation.getArgument(1);
+              return work.get();
+            });
+  }
+
+  private void executePrepareMutation() {
+    when(transactions.mutate(eq(ActionTransactions.Entry.PREPARE_INITIAL_MUTATION), any()))
+        .thenAnswer(
+            invocation -> {
+              @SuppressWarnings("unchecked")
+              Supplier<PendingActionView> work = invocation.getArgument(1);
               return work.get();
             });
   }

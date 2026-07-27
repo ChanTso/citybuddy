@@ -79,7 +79,7 @@ public class RefundRepository {
                     result.getLong("state_version")),
             orderId);
     if (standard.size() + seckill.size() > 1) {
-      throw new IllegalStateException("Refund order identifier is ambiguous");
+      throw new RefundIntegrityException("Refund order identifier is ambiguous");
     }
     return standard.isEmpty() ? seckill.stream().findFirst() : standard.stream().findFirst();
   }
@@ -283,7 +283,7 @@ public class RefundRepository {
                     result.getString("payment_currency")),
             businessEventKey);
     if (rows.size() > 1) {
-      throw new IllegalStateException("Ledger business event uniqueness is corrupted");
+      throw new RefundIntegrityException("Ledger business event uniqueness is corrupted");
     }
     return rows.stream().findFirst();
   }
@@ -358,7 +358,7 @@ public class RefundRepository {
   private Optional<RefundRecord> queryRefund(String sql, Object... arguments) {
     List<RefundRecord> rows = jdbc.query(sql, RefundRepository::mapRefund, arguments);
     if (rows.size() > 1) {
-      throw new IllegalStateException("Refund uniqueness is corrupted");
+      throw new RefundIntegrityException("Refund uniqueness is corrupted");
     }
     return rows.stream().findFirst();
   }
@@ -398,7 +398,13 @@ public class RefundRepository {
 
   private static void requireOne(int changed, String message) {
     if (changed != 1) {
-      throw new IllegalStateException(message);
+      throw new RefundIntegrityException(message);
+    }
+  }
+
+  public static final class RefundIntegrityException extends IllegalStateException {
+    public RefundIntegrityException(String message) {
+      super(message);
     }
   }
 

@@ -10,6 +10,7 @@ import io.citybuddy.commerce.evaluation.EvaluationSandboxAccess;
 import io.citybuddy.commerce.evaluation.EvaluationSandboxException;
 import io.citybuddy.commerce.refund.RefundException;
 import io.citybuddy.commerce.refund.RefundRejectionReason;
+import io.citybuddy.commerce.refund.RefundRepository.RefundIntegrityException;
 import io.citybuddy.commerce.refund.RefundRequest;
 import io.citybuddy.commerce.refund.RefundResult;
 import io.citybuddy.commerce.refund.RefundService;
@@ -899,7 +900,7 @@ public final class ActionService {
         throw validation("Action refund request is invalid");
       }
       throw exception;
-    } catch (IllegalStateException exception) {
+    } catch (RefundIntegrityException exception) {
       throw new ActionIntegrityException("Action durable truth is inconsistent", exception);
     }
   }
