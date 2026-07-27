@@ -67,9 +67,7 @@ public final class ActionService {
     } catch (RuntimeException failure) {
       ActionUniqueConflict uniqueConflict =
           failure instanceof ActionUniqueConflict conflict ? conflict : null;
-      if (uniqueConflict != null
-          || failure instanceof DuplicateKeyException
-          || ActionTransactions.isMySqlContention(failure)) {
+      if (uniqueConflict != null || ActionTransactions.isMySqlContention(failure)) {
         Optional<PendingActionView> observed =
             observePreparedWithinBound(
                 validContext,
@@ -96,20 +94,26 @@ public final class ActionService {
     } catch (RuntimeException failure) {
       ActionUniqueConflict uniqueConflict =
           failure instanceof ActionUniqueConflict conflict ? conflict : null;
-      if (uniqueConflict != null
-          || failure instanceof DuplicateKeyException
-          || ActionTransactions.isMySqlContention(failure)) {
-        Optional<ActionReceiptView> observed =
-            observeReceiptWithinBound(
-                validContext,
-                pendingActionId,
-                uniqueConflict == null ? null : uniqueConflict.receipt());
-        if (observed.isPresent()) {
-          return observed.orElseThrow();
-        }
-        throw indeterminate("Action confirmation remains indeterminate");
+      ConfirmCompetitionProducer producer;
+      if (uniqueConflict != null) {
+        producer = ConfirmCompetitionProducer.ACTION_RECEIPT_UNIQUE;
+      } else if (failure instanceof DuplicateKeyException) {
+        producer = ConfirmCompetitionProducer.NESTED_REFUND_OR_OUTBOX_UNIQUE;
+      } else if (ActionTransactions.isMySqlContention(failure)) {
+        producer = ConfirmCompetitionProducer.MYSQL_CONTENTION;
+      } else {
+        throw classifyDependency(failure);
       }
-      throw classifyDependency(failure);
+      Optional<ActionReceiptView> observed =
+          observeReceiptWithinBound(
+              validContext,
+              pendingActionId,
+              uniqueConflict == null ? null : uniqueConflict.receipt(),
+              producer);
+      if (observed.isPresent()) {
+        return observed.orElseThrow();
+      }
+      throw indeterminate("Action confirmation remains indeterminate");
     }
   }
 
@@ -356,7 +360,10 @@ public final class ActionService {
   }
 
   private Optional<ActionReceiptView> observeReceiptWithinBound(
-      ValidatedContext context, String pendingActionId, ActionReceiptRecord attempted) {
+      ValidatedContext context,
+      String pendingActionId,
+      ActionReceiptRecord attempted,
+      ConfirmCompetitionProducer producer) {
     for (int attempt = 1; attempt <= transactions.maximumObservationAttempts(); attempt++) {
       try {
         return transactions.observe(
@@ -393,6 +400,10 @@ public final class ActionService {
                 if ("CONSUMED".equals(pending.state())) {
                   throw integrityFailure("Consumed PendingAction has no ActionReceipt");
                 }
+                if (producer == ConfirmCompetitionProducer.NESTED_REFUND_OR_OUTBOX_UNIQUE) {
+                  throw integrityFailure(
+                      "Prepared PendingAction conflicts with existing refund or Outbox truth");
+                }
                 return Optional.empty();
               }
               return Optional.of(validateReceipt(pending, receipt, true));
@@ -407,6 +418,12 @@ public final class ActionService {
       }
     }
     return Optional.empty();
+  }
+
+  private enum ConfirmCompetitionProducer {
+    ACTION_RECEIPT_UNIQUE,
+    NESTED_REFUND_OR_OUTBOX_UNIQUE,
+    MYSQL_CONTENTION
   }
 
   private static PendingActionRecord onePendingCandidate(

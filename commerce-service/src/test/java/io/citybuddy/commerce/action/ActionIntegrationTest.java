@@ -634,6 +634,13 @@ class ActionIntegrationTest {
         .isEqualTo("PREPARED:1:1");
     assertThat(rowCount("mock_refund", "order_id", orderId)).isZero();
     assertThat(rowCount("action_receipt", "pending_action_id", pendingId)).isZero();
+    assertThat(
+            jdbc.queryForObject(
+                "SELECT COUNT(*) FROM commerce_outbox WHERE aggregate_type = 'REFUND' "
+                    + "AND JSON_UNQUOTE(JSON_EXTRACT(payload, '$.orderId')) = ?",
+                Long.class,
+                orderId))
+        .isZero();
   }
 
   private ResponseEntity<JsonNode> prepare(
