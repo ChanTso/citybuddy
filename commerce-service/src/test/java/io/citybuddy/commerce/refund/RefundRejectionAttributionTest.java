@@ -3,6 +3,7 @@ package io.citybuddy.commerce.refund;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
+import io.citybuddy.commerce.identity.IdentityVerificationUnavailableException;
 import java.util.Map;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
@@ -56,15 +57,22 @@ class RefundRejectionAttributionTest {
     var response =
         handler.handleUnavailable(
             new DataAccessResourceFailureException("private persistence detail"));
+    var identityResponse =
+        handler.handleUnavailable(
+            new IdentityVerificationUnavailableException(
+                new IllegalStateException("private JWKS detail")));
 
     assertThat(response.getStatusCode().value()).isEqualTo(503);
     assertThat(response.getBody())
         .containsExactlyEntriesOf(
             Map.of("category", "UNAVAILABLE", "message", "Refund service is unavailable"))
         .doesNotContainKey("reason");
+    assertThat(identityResponse.getStatusCode().value()).isEqualTo(503);
+    assertThat(identityResponse.getBody()).isEqualTo(response.getBody());
     assertThat(output)
         .contains("reason_code=REFUND_DEPENDENCY_UNAVAILABLE")
-        .doesNotContain("private persistence detail");
+        .doesNotContain("private persistence detail")
+        .doesNotContain("private JWKS detail");
   }
 
   @Test

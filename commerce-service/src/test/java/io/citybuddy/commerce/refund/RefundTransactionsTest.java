@@ -50,6 +50,16 @@ class RefundTransactionsTest {
   void onlyMysql1205And1213AnywhereInTheCauseChainAreContention() {
     assertThat(RefundTransactions.isMySqlContention(mysqlLockFailure(1205))).isTrue();
     assertThat(RefundTransactions.isMySqlContention(mysqlLockFailure(1213))).isTrue();
+    assertThat(
+            RefundTransactions.isMySqlContention(
+                new CannotAcquireLockException(
+                    "outer",
+                    new SQLException(
+                        "non-contention wrapper",
+                        "HY000",
+                        0,
+                        new SQLException("lock timeout", "HY000", 1205)))))
+        .isTrue();
     assertThat(RefundTransactions.isMySqlContention(mysqlLockFailure(1040))).isFalse();
     assertThat(
             RefundTransactions.isMySqlContention(

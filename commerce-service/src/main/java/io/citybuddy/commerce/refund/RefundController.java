@@ -2,6 +2,7 @@ package io.citybuddy.commerce.refund;
 
 import io.citybuddy.commerce.catalog.CatalogException;
 import io.citybuddy.commerce.catalog.DirectUserAuthorizer;
+import io.citybuddy.commerce.identity.IdentityVerificationUnavailableException;
 import jakarta.servlet.http.HttpServletRequest;
 import java.util.Map;
 import org.slf4j.Logger;
@@ -90,7 +91,8 @@ final class RefundExceptionHandler {
 
   @ExceptionHandler({
     DataAccessResourceFailureException.class,
-    CannotCreateTransactionException.class
+    CannotCreateTransactionException.class,
+    IdentityVerificationUnavailableException.class
   })
   ResponseEntity<Map<String, String>> handleUnavailable(RuntimeException exception) {
     LOG.warn(

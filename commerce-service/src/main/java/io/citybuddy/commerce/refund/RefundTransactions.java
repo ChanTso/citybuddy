@@ -47,8 +47,9 @@ final class RefundTransactions {
   static boolean isMySqlContention(Throwable failure) {
     Throwable current = failure;
     while (current != null) {
-      if (current instanceof SQLException sql) {
-        return sql.getErrorCode() == 1205 || sql.getErrorCode() == 1213;
+      if (current instanceof SQLException sql
+          && (sql.getErrorCode() == 1205 || sql.getErrorCode() == 1213)) {
+        return true;
       }
       current = current.getCause();
     }

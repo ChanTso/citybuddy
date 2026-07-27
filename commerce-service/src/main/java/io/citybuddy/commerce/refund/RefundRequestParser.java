@@ -5,9 +5,11 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import jakarta.servlet.http.HttpServletRequest;
 import java.util.Set;
+import java.util.regex.Pattern;
 
 final class RefundRequestParser {
   static final int MAXIMUM_REQUEST_BYTES = 4096;
+  private static final Pattern CURRENCY = Pattern.compile("[A-Z]{3}");
 
   private final ObjectMapper objectMapper;
 
@@ -33,8 +35,11 @@ final class RefundRequestParser {
             || parser.nextToken() != null
             || !integral(value, "amountMinor")
             || !textual(value, "currency")
-            || !optionalTextual(value, "userSubject")
             || !fieldsAllowed(value)) {
+          throw invalid();
+        }
+        if (value.get("amountMinor").longValue() < 1
+            || !CURRENCY.matcher(value.get("currency").textValue()).matches()) {
           throw invalid();
         }
         return objectMapper.treeToValue(value, RefundRequest.class);
@@ -56,13 +61,8 @@ final class RefundRequestParser {
     return item != null && item.isTextual();
   }
 
-  private static boolean optionalTextual(JsonNode value, String field) {
-    JsonNode item = value.get(field);
-    return item == null || item.isNull() || item.isTextual();
-  }
-
   private static boolean fieldsAllowed(JsonNode value) {
-    Set<String> allowed = Set.of("amountMinor", "currency", "userSubject");
+    Set<String> allowed = Set.of("amountMinor", "currency");
     return value.properties().stream().allMatch(entry -> allowed.contains(entry.getKey()));
   }
 

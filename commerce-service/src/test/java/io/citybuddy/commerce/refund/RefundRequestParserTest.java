@@ -13,8 +13,7 @@ class RefundRequestParserTest {
 
   @Test
   void acceptsOneStrictRefundObject() {
-    RefundRequest request =
-        parser.parse(request("{\"amountMinor\":100,\"currency\":\"AUD\",\"userSubject\":null}"));
+    RefundRequest request = parser.parse(request("{\"amountMinor\":100,\"currency\":\"AUD\"}"));
 
     assertThat(request.amountMinor()).isEqualTo(100);
     assertThat(request.currency()).isEqualTo("AUD");
@@ -26,6 +25,14 @@ class RefundRequestParserTest {
     assertInvalid("{\"amountMinor\":100,\"currency\":\"AUD\"} {}");
     assertInvalid("{\"amountMinor\":\"100\",\"currency\":\"AUD\"}");
     assertInvalid("{\"amountMinor\":100,\"currency\":\"AUD\",\"extra\":\"value\"}");
+    assertInvalid("{\"amountMinor\":100,\"currency\":\"AUD\",\"userSubject\":null}");
+    assertInvalid("{}");
+    assertInvalid("{\"amountMinor\":null,\"currency\":\"AUD\"}");
+    assertInvalid("{\"amountMinor\":100,\"currency\":null}");
+    assertInvalid("{\"amountMinor\":0,\"currency\":\"AUD\"}");
+    assertInvalid("{\"amountMinor\":1.0,\"currency\":\"AUD\"}");
+    assertInvalid("{\"amountMinor\":100,\"currency\":\"ÅUD\"}");
+    assertInvalid("{\"amountMinor\":100,\"currency\":\"A\\u0000D\"}");
     assertInvalid("null");
     MockHttpServletRequest malformed = new MockHttpServletRequest();
     malformed.setContent(new byte[] {(byte) 0xc3, (byte) 0x28});
