@@ -248,6 +248,28 @@
         }
       }
     },
+    "/api/orders/{orderId}/refunds": {
+      "post": {
+        "operationId": "requestRefund",
+        "security": [{"directUserBearer": []}],
+        "parameters": [
+          {"name": "orderId", "in": "path", "required": true, "schema": {"type": "string", "format": "uuid"}},
+          {"name": "Idempotency-Key", "in": "header", "required": true, "schema": {"type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[A-Za-z0-9._:-]+$"}}
+        ],
+        "requestBody": {"required": true, "content": {"application/json": {"schema": {"$ref": "#/components/schemas/RefundRequest"}}}},
+        "responses": {
+          "200": {"description": "Same owner, order, key, and canonical refund intent replay", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/RefundResult"}}}},
+          "201": {"description": "One eligible refund request created atomically with its Outbox event", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/RefundResult"}}}},
+          "400": {"description": "Malformed or out-of-bounds refund intent", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/RefundError"}}}},
+          "401": {"description": "Invalid direct-user identity", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/RefundError"}}}},
+          "403": {"description": "Invalid refund permission or evaluation context", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/RefundError"}}}},
+          "404": {"description": "Missing or non-owned order", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/RefundError"}}}},
+          "409": {"description": "Refund intent, eligibility, lifecycle, or visible durable-integrity conflict", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/RefundError"}}}},
+          "429": {"description": "Bounded committed refund-truth observation remains indeterminate", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/RefundError"}}}},
+          "503": {"description": "Authoritative refund or payment persistence unavailable", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/RefundError"}}}}
+        }
+      }
+    },
     "/internal/mock-payments/callback": {
       "post": {
         "operationId": "applyMockPaymentCallback",
@@ -636,6 +658,43 @@
         "properties": {
           "category": {"type": "string", "enum": ["AUTHENTICATION", "AUTHORIZATION", "VALIDATION", "NOT_FOUND", "CONFLICT", "UNAVAILABLE"]},
           "message": {"type": "string", "minLength": 1, "maxLength": 128}
+        }
+      },
+      "RefundRequest": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["amountMinor", "currency"],
+        "properties": {
+          "amountMinor": {"type": "integer", "minimum": 1},
+          "currency": {"type": "string", "pattern": "^[A-Z]{3}$"}
+        }
+      },
+      "RefundResult": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["refundId", "orderId", "orderKind", "paymentAttemptId", "eligibleAmountMinor", "requestedAmountMinor", "refundedAmountMinor", "currency", "state", "stateVersion", "replayed"],
+        "properties": {
+          "refundId": {"type": "string", "format": "uuid"},
+          "orderId": {"type": "string", "format": "uuid"},
+          "orderKind": {"type": "string", "enum": ["STANDARD", "SECKILL"]},
+          "paymentAttemptId": {"type": "string", "format": "uuid"},
+          "eligibleAmountMinor": {"type": "integer", "minimum": 1},
+          "requestedAmountMinor": {"type": "integer", "minimum": 1},
+          "refundedAmountMinor": {"type": "integer", "minimum": 0},
+          "currency": {"type": "string", "pattern": "^[A-Z]{3}$"},
+          "state": {"type": "string", "enum": ["REQUESTED", "PROCESSING", "SUCCEEDED", "FAILED"]},
+          "stateVersion": {"type": "integer", "minimum": 1, "maximum": 3},
+          "failureCode": {"type": ["string", "null"], "pattern": "^[A-Z][A-Z0-9_]{0,63}$"},
+          "replayed": {"type": "boolean"}
+        }
+      },
+      "RefundError": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["category", "message"],
+        "properties": {
+          "category": {"type": "string", "enum": ["VALIDATION", "AUTHENTICATION", "AUTHORIZATION", "NOT_FOUND", "CONFLICT", "INDETERMINATE", "UNAVAILABLE"]},
+          "message": {"type": "string", "minLength": 1, "maxLength": 160}
         }
       },
       "Product": {

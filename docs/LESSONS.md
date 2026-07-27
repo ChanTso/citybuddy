@@ -318,3 +318,10 @@ This file records only factual pitfalls supported by merged pull-request, commit
 - 现象：evaluation state/audit 已为 payment durable-integrity 409 增加独立 server-only reason，但 product audit 的 `entity_type` 被损坏为 `PAYMENT_CALLBACK` 后也获得 payment reason；只断言 409 或在整份历史日志中查到 reason 会形成 producer-attribution 假绿。
 - 根因：领域分类先按共享 audit 表中可能被损坏的 discriminator 过滤，再执行完整性对账。损坏字段同时充当归因权威和被校验内容，使跨类型损坏能把 unrelated product failure 移入 payment producer。
 - 结论：故障归因不得信任可能被损坏的 type/discriminator。必须先由独立 durable business root 唯一建立 entity family，再把 discriminator 当作内容校验；无根、双根、cross-family 或 orphan 固定 fail closed，但使用明确的 non-payment audit-integrity attribution。集成证据必须绑定单次请求的日志增量，不能让另一路请求或旧日志贡献 reason。
+
+## CB-117 — Refund contention safety and bounded recovery
+
+- 现象：退款入口复用 committed-payment 真值后，direct refund、生命周期推进和 reconciliation 的锁竞争可能沿原事务继续，或在事务外再次执行 locking validation；只给部分入口设置 lock wait 又会保留数据库默认长等待。首轮统一边界后，独立复核进一步证明 session policy 恢复失败若包裹原 work 的 MySQL 1205/1213，宽泛 cause-chain 扫描会把 cleanup failure 重新分类为普通竞争并进入恢复。
+- 根因：业务恢复与 JDBC session 清理拥有不同的 producer 语义，但异常树中“最深 vendor code”被错误当成唯一根因。`finally` 中发生不等于清理成功；若 restoration provenance 没有优先级，可能污染连接池的失败会被嵌套的旧竞争码遮蔽。
+- 解决：中立 executor 在真实事务连接上保存、设置并恢复 `innodb_lock_wait_timeout`，退款专用边界覆盖 direct、processing、success、failure、reconciliation 全部顶层入口。1205/1213 必须先让原事务异常退出并回滚，再在新的 bounded transaction 中完成锁定读取和完整验证；direct refund 最多一次 confirmed-absence final mutation，内部生命周期返回 typed indeterminate。恢复失败使用专用资源失败类型，竞争分类器在扫描 SQLException vendor code 前先拒绝该 provenance；确定性测试证明已完成的 work 结果被丢弃、不启动 observation/final mutation，并固定归因到 server-only dependency-unavailable。真实 MySQL 1205/1213、全回滚、零部分 refund/ledger/Outbox、PendingAction 未消费、ActionReceipt 不重复以及单连接池跨借用 session policy 恢复全部通过。
+- 结论：异常根因分类不能只寻找最深技术码；当外层 producer 表示资源清理或 session policy 恢复失败时，它必须优先于被包裹的旧业务/竞争异常。否则 cleanup failure 会被误作可恢复竞争并把可能受污染的连接静默归还。`docs/REVIEW_CHECKLIST.md` 已加入该 recurring defect class。
