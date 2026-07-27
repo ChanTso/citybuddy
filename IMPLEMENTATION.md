@@ -1,8 +1,8 @@
 # CityBuddy implementation index
 
-**Document version:** v0.34\
-**Verification date:** 2026-07-26\
-**Repository phase:** Committed payment truth closure and authorization visibility ready
+**Document version:** v0.35\
+**Verification date:** 2026-07-27\
+**Repository phase:** Refund contention safety and bounded recovery ready
 
 ## How to use this index
 
@@ -124,8 +124,8 @@ The linked slice name is the canonical detailed specification. Target outcomes a
 | [CB-114 — Knowledge rollback catch-up and atomic restoration](docs/slices/CB-114.md) | P1 | `DEFERRED` | `CB-113` |
 | [CB-115 — Expired knowledge-index candidate and predecessor cleanup](docs/slices/CB-115.md) | P1 | `DEFERRED` | `CB-114` |
 | [CB-120 — Commerce PendingAction and atomic ActionReceipt transaction](docs/slices/CB-120.md) | P1 | `BLOCKED` | `CB-071`, `CB-082` |
-| [CB-116 — Committed payment truth closure and authorization visibility](docs/slices/CB-116.md) | P1 | `IN_PROGRESS` | `CB-071`, `CB-105` |
-| [CB-117 — Refund contention safety and bounded recovery](docs/slices/CB-117.md) | P1 | `PLANNED` | `CB-116` |
+| [CB-116 — Committed payment truth closure and authorization visibility](docs/slices/CB-116.md) | P1 | `VERIFIED` | `CB-071`, `CB-105` |
+| [CB-117 — Refund contention safety and bounded recovery](docs/slices/CB-117.md) | P1 | `READY` | `CB-116` |
 | [CB-118 — Commerce PendingAction and atomic ActionReceipt transaction](docs/slices/CB-118.md) | P1 | `PLANNED` | `CB-116`, `CB-117`, `CB-082` |
 | [CB-121 — Agent confirmation, receipt projection, and turn commit](docs/slices/CB-121.md) | P1 | `PLANNED` | `CB-118`, `CB-082` |
 | [CB-130 — Memory watermarks, prompt/PII, and tiered output safety](docs/slices/CB-130.md) | P1 | `PLANNED` | `CB-113`, `CB-121` |
