@@ -6,6 +6,12 @@ import stat
 import subprocess
 from pathlib import Path
 
+import pytest
+import yaml  # type: ignore[import-untyped]
+from yaml.constructor import ConstructorError  # type: ignore[import-untyped]
+from yaml.nodes import MappingNode  # type: ignore[import-untyped]
+from yaml.tokens import AliasToken, AnchorToken  # type: ignore[import-untyped]
+
 ROOT = Path(__file__).parents[1]
 CREDENTIAL_NAMES = (
     "MYSQL_BOOTSTRAP_PASSWORD",
@@ -20,6 +26,302 @@ CREDENTIAL_NAMES = (
     "REDIS_AGENT_CACHE_PASSWORD",
     "REDIS_INDEXER_CACHE_PASSWORD",
 )
+REQUIRED_INTEGRATION_TARGETS = (
+    "test-runtime-integration",
+    "test-mysql-integration",
+    "test-identity-integration",
+    "test-evaluation-identity-integration",
+    "test-evaluation-sandbox-integration",
+    "test-catalog-integration",
+    "test-redis-integration",
+    "test-elasticsearch-integration",
+    "test-knowledge-search-integration",
+    "test-retrieval-evidence-integration",
+    "test-rocketmq-integration",
+    "test-knowledge-indexer-rocketmq-spike",
+    "test-knowledge-sync-integration",
+    "test-knowledge-rebuild-integration",
+)
+INVALID_INTEGRATION_TIMEOUT_CASES = (
+    "nested-timeout",
+    "notes-block-scalar",
+    "direct-timeout-block-scalar",
+    "missing-direct-timeout",
+    "duplicate-direct-timeout",
+    "boolean-timeout",
+    "job-timeout-in-metadata",
+    "job-timeout-in-strategy",
+    "job-timeout-in-env",
+    "job-timeout-in-steps",
+    "job-timeout-fixed",
+    "evaluation-budget-too-small",
+    "ordinary-budget-too-large",
+    "extra-target",
+    "missing-target",
+    "duplicate-target",
+    "merge-key-timeout",
+    "anchor-only",
+    "alias-entire-entry",
+)
+
+
+class StrictWorkflowLoader(yaml.SafeLoader):  # type: ignore[misc]
+    def construct_mapping(
+        self,
+        node: yaml.Node,
+        deep: bool = False,
+    ) -> dict[object, object]:
+        if not isinstance(node, MappingNode):
+            raise ConstructorError(
+                None,
+                None,
+                "expected a mapping node",
+                node.start_mark,
+            )
+
+        mapping: dict[object, object] = {}
+        for key_node, value_node in node.value:
+            if key_node.tag == "tag:yaml.org,2002:merge":
+                raise ConstructorError(
+                    "while constructing a workflow mapping",
+                    node.start_mark,
+                    "YAML merge keys are not allowed",
+                    key_node.start_mark,
+                )
+            key = self.construct_object(key_node, deep=deep)
+            try:
+                duplicate = key in mapping
+            except TypeError as exc:
+                raise ConstructorError(
+                    "while constructing a workflow mapping",
+                    node.start_mark,
+                    "found an unhashable mapping key",
+                    key_node.start_mark,
+                ) from exc
+            if duplicate:
+                raise ConstructorError(
+                    "while constructing a workflow mapping",
+                    node.start_mark,
+                    f"found duplicate key {key!r}",
+                    key_node.start_mark,
+                )
+            mapping[key] = self.construct_object(value_node, deep=deep)
+        return mapping
+
+
+def load_strict_workflow(text: str) -> dict[object, object]:
+    for token in yaml.scan(text, Loader=StrictWorkflowLoader):
+        if isinstance(token, AnchorToken | AliasToken):
+            raise ConstructorError(
+                "while scanning a workflow",
+                token.start_mark,
+                "YAML anchors and aliases are not allowed",
+                token.start_mark,
+            )
+    loaded = yaml.load(text, Loader=StrictWorkflowLoader)
+    assert type(loaded) is dict
+    return loaded
+
+
+def validate_integration_timeout_contract(text: str) -> dict[str, int]:
+    workflow = load_strict_workflow(text)
+    jobs = workflow["jobs"]
+    assert type(jobs) is dict
+    integration = jobs["integration"]
+    assert type(integration) is dict
+    assert integration["timeout-minutes"] == "${{ matrix.timeout_minutes }}"
+
+    strategy = integration["strategy"]
+    assert type(strategy) is dict
+    matrix = strategy["matrix"]
+    assert type(matrix) is dict
+    include = matrix["include"]
+    assert type(include) is list
+
+    timeout_by_target: dict[str, int] = {}
+    for entry in include:
+        assert type(entry) is dict
+        target = entry["target"]
+        timeout_minutes = entry["timeout_minutes"]
+        assert type(target) is str
+        assert type(timeout_minutes) is int
+        assert target not in timeout_by_target
+        timeout_by_target[target] = timeout_minutes
+
+    assert set(timeout_by_target) == set(REQUIRED_INTEGRATION_TARGETS)
+    assert timeout_by_target["test-evaluation-sandbox-integration"] == 60
+    assert all(
+        timeout_by_target[target] == 30
+        for target in REQUIRED_INTEGRATION_TARGETS
+        if target != "test-evaluation-sandbox-integration"
+    )
+    return timeout_by_target
+
+
+def replace_once(text: str, old: str, new: str) -> str:
+    assert text.count(old) == 1
+    return text.replace(old, new, 1)
+
+
+def invalid_integration_timeout_workflows(workflow: str) -> dict[str, str]:
+    job_timeout = "    timeout-minutes: ${{ matrix.timeout_minutes }}\n"
+    runtime_entry = """          - target: test-runtime-integration
+            java: false
+            python: false
+            timeout_minutes: 30
+"""
+    mysql_entry = """          - target: test-mysql-integration
+            java: false
+            python: false
+            timeout_minutes: 30
+"""
+    evaluation_entry = """          - target: test-evaluation-sandbox-integration
+            java: true
+            python: true
+            timeout_minutes: 60
+"""
+    rebuild_tail = """          - target: test-knowledge-rebuild-integration
+            java: true
+            python: true
+            timeout_minutes: 30
+    steps:
+"""
+
+    without_job_timeout = replace_once(workflow, job_timeout, "")
+    job_timeout_in_strategy = replace_once(
+        workflow,
+        job_timeout + "    strategy:\n",
+        ("    strategy:\n      timeout-minutes: ${{ matrix.timeout_minutes }}\n"),
+    )
+    job_timeout_in_steps = replace_once(
+        without_job_timeout,
+        """      - name: Run integration suite
+        run: make ${{ matrix.target }}
+""",
+        """      - name: Run integration suite
+        timeout-minutes: ${{ matrix.timeout_minutes }}
+        run: make ${{ matrix.target }}
+""",
+    )
+    anchored_runtime_entry = runtime_entry.replace(
+        "          - target:",
+        "          - &runtime\n            target:",
+        1,
+    )
+
+    return {
+        "nested-timeout": replace_once(
+            workflow,
+            runtime_entry,
+            runtime_entry.replace(
+                "            timeout_minutes: 30\n",
+                "            metadata:\n              timeout_minutes: 30\n",
+            ),
+        ),
+        "notes-block-scalar": replace_once(
+            workflow,
+            runtime_entry,
+            runtime_entry.replace(
+                "            timeout_minutes: 30\n",
+                "            notes: |\n              timeout_minutes: 30\n",
+            ),
+        ),
+        "direct-timeout-block-scalar": replace_once(
+            workflow,
+            runtime_entry,
+            runtime_entry.replace(
+                "            timeout_minutes: 30\n",
+                "            timeout_minutes: |\n              30\n",
+            ),
+        ),
+        "missing-direct-timeout": replace_once(
+            workflow,
+            runtime_entry,
+            runtime_entry.replace("            timeout_minutes: 30\n", ""),
+        ),
+        "duplicate-direct-timeout": replace_once(
+            workflow,
+            runtime_entry,
+            runtime_entry.replace(
+                "            timeout_minutes: 30\n",
+                ("            timeout_minutes: 30\n            timeout_minutes: 30\n"),
+            ),
+        ),
+        "boolean-timeout": replace_once(
+            workflow,
+            runtime_entry,
+            runtime_entry.replace("timeout_minutes: 30", "timeout_minutes: true"),
+        ),
+        "job-timeout-in-metadata": replace_once(
+            workflow,
+            job_timeout,
+            ("    metadata:\n      timeout-minutes: ${{ matrix.timeout_minutes }}\n"),
+        ),
+        "job-timeout-in-strategy": job_timeout_in_strategy,
+        "job-timeout-in-env": replace_once(
+            workflow,
+            job_timeout,
+            ("    env:\n      timeout-minutes: ${{ matrix.timeout_minutes }}\n"),
+        ),
+        "job-timeout-in-steps": job_timeout_in_steps,
+        "job-timeout-fixed": replace_once(
+            workflow,
+            job_timeout,
+            "    timeout-minutes: 30\n",
+        ),
+        "evaluation-budget-too-small": replace_once(
+            workflow,
+            evaluation_entry,
+            evaluation_entry.replace("timeout_minutes: 60", "timeout_minutes: 30"),
+        ),
+        "ordinary-budget-too-large": replace_once(
+            workflow,
+            runtime_entry,
+            runtime_entry.replace("timeout_minutes: 30", "timeout_minutes: 60"),
+        ),
+        "extra-target": replace_once(
+            workflow,
+            rebuild_tail,
+            rebuild_tail.replace(
+                "    steps:\n",
+                (
+                    "          - target: test-extra-integration\n"
+                    "            java: false\n"
+                    "            python: false\n"
+                    "            timeout_minutes: 30\n"
+                    "    steps:\n"
+                ),
+            ),
+        ),
+        "missing-target": replace_once(workflow, runtime_entry, ""),
+        "duplicate-target": replace_once(
+            workflow,
+            runtime_entry,
+            runtime_entry + runtime_entry,
+        ),
+        "merge-key-timeout": replace_once(
+            workflow,
+            runtime_entry,
+            runtime_entry.replace(
+                "            timeout_minutes: 30\n",
+                "            <<: {timeout_minutes: 30}\n",
+            ),
+        ),
+        "anchor-only": replace_once(
+            workflow,
+            runtime_entry,
+            anchored_runtime_entry,
+        ),
+        "alias-entire-entry": replace_once(
+            replace_once(
+                workflow,
+                runtime_entry,
+                anchored_runtime_entry,
+            ),
+            mysql_entry,
+            "          - *runtime\n",
+        ),
+    }
 
 
 def run_script(script: str, env_file: Path) -> subprocess.CompletedProcess[str]:
@@ -270,29 +572,15 @@ def test_local_ci_order_and_parallel_workflow_cover_every_required_target() -> N
     )
     assert aggregate_target is not None
     aggregate_commands = aggregate_target.group(1)
-    expected_targets = (
-        "test-runtime-integration",
-        "test-mysql-integration",
-        "test-identity-integration",
-        "test-evaluation-identity-integration",
-        "test-evaluation-sandbox-integration",
-        "test-catalog-integration",
-        "test-redis-integration",
-        "test-elasticsearch-integration",
-        "test-knowledge-search-integration",
-        "test-retrieval-evidence-integration",
-        "test-rocketmq-integration",
-        "test-knowledge-indexer-rocketmq-spike",
-        "test-knowledge-sync-integration",
-        "test-knowledge-rebuild-integration",
-    )
-    positions = [aggregate_commands.index(target) for target in expected_targets]
+    positions = [aggregate_commands.index(target) for target in REQUIRED_INTEGRATION_TARGETS]
     assert positions == sorted(positions)
     assert "ci: java-ci python-ci web-ci repo-ci test-integration" in makefile
     assert "setup: setup-java setup-python setup-web setup-repo" in makefile
 
-    matrix_targets = re.findall(r"^\s+- target: (test-[a-z0-9-]+)$", workflow, flags=re.MULTILINE)
-    assert matrix_targets == list(expected_targets)
+    assert validate_integration_timeout_contract(workflow) == {
+        target: 60 if target == "test-evaluation-sandbox-integration" else 30
+        for target in REQUIRED_INTEGRATION_TARGETS
+    }
     for target in ("java-ci", "python-ci", "web-ci", "repo-ci"):
         assert f"run: make {target}" in workflow
     assert "cancel-in-progress: true" in workflow
@@ -300,7 +588,6 @@ def test_local_ci_order_and_parallel_workflow_cover_every_required_target() -> N
     assert "if: always()" in workflow
     assert "needs: [java, python, web, repository, integration]" in workflow
     assert workflow.count('test "$result" = success') == 1
-    assert "timeout-minutes: 30" in workflow
 
     for service in (
         "mysql",
@@ -320,6 +607,21 @@ def test_local_ci_order_and_parallel_workflow_cover_every_required_target() -> N
     assert "sleep " not in integration
     assert "allocate_test_ports" not in mysql_integration
     assert 'source "$repo_root/scripts/test_dynamic_ports.sh"' in mysql_integration
+
+
+@pytest.mark.parametrize(
+    "case_name",
+    INVALID_INTEGRATION_TIMEOUT_CASES,
+)
+def test_integration_timeout_contract_rejects_non_direct_or_incomplete_metadata(
+    case_name: str,
+) -> None:
+    workflow = (ROOT / ".github" / "workflows" / "ci.yml").read_text()
+    invalid_workflows = invalid_integration_timeout_workflows(workflow)
+
+    assert set(invalid_workflows) == set(INVALID_INTEGRATION_TIMEOUT_CASES)
+    with pytest.raises((AssertionError, KeyError, ConstructorError)):
+        validate_integration_timeout_contract(invalid_workflows[case_name])
 
 
 def test_grant_job_uses_only_fixed_manifest_and_isolated_bootstrap_config() -> None:
