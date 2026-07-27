@@ -181,6 +181,69 @@ class ActionConcurrencyTest {
     verifyNoInteractions(refunds);
   }
 
+  @Test
+  void confirmedAbsenceAfterContentionIsAttributedIndeterminate() {
+    CannotAcquireLockException lock = mysqlFailure(1205);
+    when(transactions.maximumObservationAttempts()).thenReturn(1);
+    doThrow(lock)
+        .when(transactions)
+        .mutate(eq(ActionTransactions.Entry.PREPARE_INITIAL_MUTATION), any());
+    when(transactions.observe(eq(ActionTransactions.Entry.PREPARE_TRUTH_OBSERVATION), any()))
+        .thenAnswer(
+            invocation -> {
+              @SuppressWarnings("unchecked")
+              Supplier<Optional<PendingActionView>> work = invocation.getArgument(1);
+              return work.get();
+            });
+    when(repository.findPendingByTurnForUpdate(
+            "action-owner", "support-session", "00000000-0000-0000-0000-000000000119"))
+        .thenReturn(Optional.empty());
+
+    assertThatThrownBy(
+            () ->
+                service.prepare(
+                    context(),
+                    new PrepareActionCommand(
+                        "REFUND_REQUEST", "00000000-0000-0000-0000-000000000123", 500L, "AUD")))
+        .isInstanceOfSatisfying(
+            ActionException.class,
+            exception -> {
+              assertThat(exception.status()).isEqualTo(429);
+              assertThat(exception.reason())
+                  .isEqualTo(ActionRejectionReason.ACTION_CONCURRENCY_OBSERVATION_INDETERMINATE);
+            });
+    verifyNoInteractions(refunds);
+  }
+
+  @Test
+  void preparedWithoutReceiptAfterConfirmContentionIsAttributedIndeterminate() {
+    CannotAcquireLockException lock = mysqlFailure(1213);
+    when(transactions.maximumObservationAttempts()).thenReturn(1);
+    doThrow(lock)
+        .when(transactions)
+        .mutate(eq(ActionTransactions.Entry.CONFIRM_INITIAL_MUTATION), any());
+    when(transactions.observe(eq(ActionTransactions.Entry.CONFIRM_TRUTH_OBSERVATION), any()))
+        .thenAnswer(
+            invocation -> {
+              @SuppressWarnings("unchecked")
+              Supplier<Optional<ActionReceiptView>> work = invocation.getArgument(1);
+              return work.get();
+            });
+    PendingActionRecord pending = prepared();
+    when(repository.findPendingByIdForUpdate(ACTION)).thenReturn(Optional.of(pending));
+    when(repository.findReceiptByPending(ACTION)).thenReturn(Optional.empty());
+
+    assertThatThrownBy(() -> service.confirm(context(), ACTION))
+        .isInstanceOfSatisfying(
+            ActionException.class,
+            exception -> {
+              assertThat(exception.status()).isEqualTo(429);
+              assertThat(exception.reason())
+                  .isEqualTo(ActionRejectionReason.ACTION_CONCURRENCY_OBSERVATION_INDETERMINATE);
+            });
+    verifyNoInteractions(refunds);
+  }
+
   private static ActionRequestContext context() {
     return new ActionRequestContext(
         "action-owner",
@@ -189,6 +252,61 @@ class ActionConcurrencyTest {
         "00000000-0000-0000-0000-000000000119",
         null,
         "refund:create");
+  }
+
+  private static PendingActionRecord prepared() {
+    Instant createdAt = Instant.parse("2026-07-27T00:00:00Z");
+    Instant expiresAt = createdAt.plus(Duration.ofMinutes(15));
+    String order = "00000000-0000-0000-0000-000000000123";
+    String argumentHash = ActionCanonical.hash("REFUND_REQUEST", order, "500", "AUD");
+    String actionKey =
+        ActionCanonical.hash(
+            "action-owner",
+            "support-session",
+            "00000000-0000-0000-0000-000000000119",
+            "REFUND_REQUEST",
+            argumentHash);
+    return new PendingActionRecord(
+        ACTION,
+        actionKey,
+        ActionCanonical.hash(
+            ACTION,
+            actionKey,
+            "REFUND_REQUEST",
+            argumentHash,
+            "action-owner",
+            "support-session",
+            "trace-118",
+            "00000000-0000-0000-0000-000000000119",
+            "refund:create",
+            "",
+            order,
+            "STANDARD",
+            "00000000-0000-0000-0000-000000000124",
+            "1",
+            "500",
+            "AUD",
+            expiresAt.toString(),
+            createdAt.toString()),
+        "REFUND_REQUEST",
+        argumentHash,
+        "action-owner",
+        "support-session",
+        "trace-118",
+        "00000000-0000-0000-0000-000000000119",
+        "refund:create",
+        null,
+        order,
+        "STANDARD",
+        "00000000-0000-0000-0000-000000000124",
+        1,
+        500,
+        "AUD",
+        "PREPARED",
+        1,
+        expiresAt,
+        null,
+        createdAt);
   }
 
   private static CannotAcquireLockException mysqlFailure(int vendorCode) {

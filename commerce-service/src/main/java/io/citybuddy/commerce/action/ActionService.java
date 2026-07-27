@@ -18,6 +18,7 @@ import java.time.temporal.ChronoUnit;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
+import java.util.Optional;
 import java.util.UUID;
 import java.util.function.Supplier;
 import java.util.regex.Pattern;
@@ -65,10 +66,10 @@ public final class ActionService {
     } catch (RuntimeException failure) {
       if (failure instanceof DuplicateKeyException
           || ActionTransactions.isMySqlContention(failure)) {
-        PendingActionView observed =
+        Optional<PendingActionView> observed =
             observePreparedWithinBound(validContext, validCommand, argumentHash, actionKey);
-        if (observed != null) {
-          return observed;
+        if (observed.isPresent()) {
+          return observed.orElseThrow();
         }
         throw indeterminate("PendingAction prepare remains indeterminate");
       }
@@ -86,9 +87,10 @@ public final class ActionService {
     } catch (RuntimeException failure) {
       if (failure instanceof DuplicateKeyException
           || ActionTransactions.isMySqlContention(failure)) {
-        ActionReceiptView observed = observeReceiptWithinBound(validContext, pendingActionId);
-        if (observed != null) {
-          return observed;
+        Optional<ActionReceiptView> observed =
+            observeReceiptWithinBound(validContext, pendingActionId);
+        if (observed.isPresent()) {
+          return observed.orElseThrow();
         }
         throw indeterminate("Action confirmation remains indeterminate");
       }
@@ -257,7 +259,7 @@ public final class ActionService {
     return receiptView(receipt, false);
   }
 
-  private PendingActionView observePreparedWithinBound(
+  private Optional<PendingActionView> observePreparedWithinBound(
       ValidatedContext context, ValidatedCommand command, String argumentHash, String actionKey) {
     for (int attempt = 1; attempt <= transactions.maximumObservationAttempts(); attempt++) {
       try {
@@ -270,20 +272,21 @@ public final class ActionService {
                           context.userSubject(), context.supportSessionId(), context.turnId())
                       .orElse(null);
               if (pending == null) {
-                return null;
+                return Optional.empty();
               }
-              return resolvePreparedReplay(pending, context, command, argumentHash, actionKey);
+              return Optional.of(
+                  resolvePreparedReplay(pending, context, command, argumentHash, actionKey));
             });
       } catch (RuntimeException failure) {
         if (!ActionTransactions.isMySqlContention(failure)) {
           throw classifyDependency(failure);
         }
         if (attempt == transactions.maximumObservationAttempts() || !transactions.pause(attempt)) {
-          return null;
+          return Optional.empty();
         }
       }
     }
-    return null;
+    return Optional.empty();
   }
 
   private PendingActionView resolvePreparedReplay(
@@ -317,7 +320,7 @@ public final class ActionService {
     return pendingView(pending, true);
   }
 
-  private ActionReceiptView observeReceiptWithinBound(
+  private Optional<ActionReceiptView> observeReceiptWithinBound(
       ValidatedContext context, String pendingActionId) {
     for (int attempt = 1; attempt <= transactions.maximumObservationAttempts(); attempt++) {
       try {
@@ -338,20 +341,20 @@ public final class ActionService {
                 if ("CONSUMED".equals(pending.state())) {
                   throw integrityFailure("Consumed PendingAction has no ActionReceipt");
                 }
-                return null;
+                return Optional.empty();
               }
-              return validateReceipt(pending, receipt, true);
+              return Optional.of(validateReceipt(pending, receipt, true));
             });
       } catch (RuntimeException failure) {
         if (!ActionTransactions.isMySqlContention(failure)) {
           throw classifyDependency(failure);
         }
         if (attempt == transactions.maximumObservationAttempts() || !transactions.pause(attempt)) {
-          return null;
+          return Optional.empty();
         }
       }
     }
-    return null;
+    return Optional.empty();
   }
 
   private ActionReceiptView validateReceipt(

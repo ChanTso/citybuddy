@@ -168,4 +168,49 @@ class ActionControllerTest {
         .andExpect(status().isForbidden())
         .andExpect(jsonPath("$.error").value("Forbidden"));
   }
+
+  @Test
+  void missingContextHeadersUseOnlyDocumentedClosedErrors() throws Exception {
+    when(authorizer.authorize(anyString(), any(OboAuthorizer.AuthorizationRequest.class)))
+        .thenReturn(new OboAuthorizer.OboPrincipal("user-1", "session-1", "refund:create", null));
+
+    for (String route :
+        new String[] {
+          "/internal/tools/actions/prepare", "/internal/tools/actions/" + ACTION + "/confirm"
+        }) {
+      mvc.perform(
+              post(route)
+                  .header("Authorization", "Bearer signed-obo")
+                  .header("X-Agent-Trace-Id", "trace-1")
+                  .header("X-Agent-Turn-Id", TURN)
+                  .contentType(MediaType.APPLICATION_JSON)
+                  .content(route.endsWith("prepare") ? "{}" : ""))
+          .andExpect(status().isForbidden())
+          .andExpect(jsonPath("$.error").value("Forbidden"))
+          .andExpect(jsonPath("$.category").doesNotExist());
+
+      mvc.perform(
+              post(route)
+                  .header("Authorization", "Bearer signed-obo")
+                  .header("X-Support-Session-Id", "session-1")
+                  .header("X-Agent-Turn-Id", TURN)
+                  .contentType(MediaType.APPLICATION_JSON)
+                  .content(route.endsWith("prepare") ? "{}" : ""))
+          .andExpect(status().isBadRequest())
+          .andExpect(jsonPath("$.category").value("VALIDATION"))
+          .andExpect(jsonPath("$.message").isNotEmpty());
+
+      mvc.perform(
+              post(route)
+                  .header("Authorization", "Bearer signed-obo")
+                  .header("X-Support-Session-Id", "session-1")
+                  .header("X-Agent-Trace-Id", "trace-1")
+                  .contentType(MediaType.APPLICATION_JSON)
+                  .content(route.endsWith("prepare") ? "{}" : ""))
+          .andExpect(status().isBadRequest())
+          .andExpect(jsonPath("$.category").value("VALIDATION"))
+          .andExpect(jsonPath("$.message").isNotEmpty());
+    }
+    verifyNoInteractions(service);
+  }
 }

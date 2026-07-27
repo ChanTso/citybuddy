@@ -52,12 +52,14 @@ public final class ActionController {
   @PostMapping("/internal/tools/actions/prepare")
   public ResponseEntity<PendingActionView> prepare(
       @RequestHeader(value = "Authorization", required = false) String authorization,
-      @RequestHeader("X-Support-Session-Id") String supportSession,
-      @RequestHeader("X-Agent-Trace-Id") String traceId,
-      @RequestHeader("X-Agent-Turn-Id") String turnId,
+      @RequestHeader(value = "X-Support-Session-Id", required = false) String supportSession,
+      @RequestHeader(value = "X-Agent-Trace-Id", required = false) String traceId,
+      @RequestHeader(value = "X-Agent-Turn-Id", required = false) String turnId,
       @RequestHeader(value = "X-Eval-Sandbox-Id", required = false) String evalSandbox,
       HttpServletRequest request) {
+    requireSupportSession(supportSession);
     OboAuthorizer.OboPrincipal principal = authorize(authorization, supportSession, evalSandbox);
+    requireCorrelation(traceId, turnId);
     PendingActionView result =
         service.prepare(
             context(principal, supportSession, traceId, turnId), parsePrepare(parseJson(request)));
@@ -68,13 +70,15 @@ public final class ActionController {
   @PostMapping("/internal/tools/actions/{pendingActionId}/confirm")
   public ActionReceiptView confirm(
       @RequestHeader(value = "Authorization", required = false) String authorization,
-      @RequestHeader("X-Support-Session-Id") String supportSession,
-      @RequestHeader("X-Agent-Trace-Id") String traceId,
-      @RequestHeader("X-Agent-Turn-Id") String turnId,
+      @RequestHeader(value = "X-Support-Session-Id", required = false) String supportSession,
+      @RequestHeader(value = "X-Agent-Trace-Id", required = false) String traceId,
+      @RequestHeader(value = "X-Agent-Turn-Id", required = false) String turnId,
       @RequestHeader(value = "X-Eval-Sandbox-Id", required = false) String evalSandbox,
       @PathVariable String pendingActionId,
       HttpServletRequest request) {
+    requireSupportSession(supportSession);
     OboAuthorizer.OboPrincipal principal = authorize(authorization, supportSession, evalSandbox);
+    requireCorrelation(traceId, turnId);
     JsonNode body = parseJson(request);
     if (body != null && (!body.isObject() || !body.isEmpty())) {
       throw validation("Confirm body must be empty");
@@ -88,6 +92,18 @@ public final class ActionController {
         bearer(authorization),
         new OboAuthorizer.AuthorizationRequest(
             properties.requiredScope(), null, supportSession, null, null, evalSandbox));
+  }
+
+  private static void requireSupportSession(String supportSession) {
+    if (supportSession == null || supportSession.isBlank()) {
+      throw new OboAuthorizationException("Missing OBO support session");
+    }
+  }
+
+  private static void requireCorrelation(String traceId, String turnId) {
+    if (traceId == null || turnId == null) {
+      throw validation("Action correlation headers are required");
+    }
   }
 
   private ActionRequestContext context(

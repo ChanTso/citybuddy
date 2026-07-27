@@ -130,6 +130,7 @@ public class ActionRepository {
         FROM commerce_outbox
         WHERE aggregate_id = ?
         ORDER BY aggregate_version, event_id
+        LIMIT 4
         FOR UPDATE
         """,
         (result, row) ->

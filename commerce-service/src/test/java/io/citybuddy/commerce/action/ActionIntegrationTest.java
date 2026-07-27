@@ -307,6 +307,21 @@ class ActionIntegrationTest {
             duplicateOutbox.receipt().refundId());
     assertReplayIntegrityFailure(duplicateOutbox);
 
+    ConfirmedAction boundedOutbox = confirmAction("action-outbox-bound", 700, 200);
+    for (int version = 4; version <= 131; version++) {
+      corruptionJdbc()
+          .update(
+              """
+              INSERT INTO commerce_outbox
+                (event_id, aggregate_type, aggregate_id, aggregate_version, event_type, payload)
+              VALUES (?, 'CORRUPTED', ?, ?, 'CORRUPTED', JSON_OBJECT())
+              """,
+              UUID.randomUUID().toString(),
+              boundedOutbox.receipt().refundId(),
+              version);
+    }
+    assertReplayIntegrityFailure(boundedOutbox);
+
     ConfirmedAction missingCallback = confirmAction("action-callback-missing", 600, 200);
     assertThat(
             corruptionJdbc()
