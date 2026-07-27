@@ -2,6 +2,7 @@ package io.citybuddy.commerce.action;
 
 import io.citybuddy.commerce.action.ActionRepository.ActionIntegrityException;
 import io.citybuddy.commerce.action.ActionRepository.ActionReceiptRecord;
+import io.citybuddy.commerce.action.ActionRepository.ActionUniqueConflict;
 import io.citybuddy.commerce.action.ActionRepository.PendingActionRecord;
 import io.citybuddy.commerce.action.ActionRepository.RefundOutboxRecord;
 import io.citybuddy.commerce.evaluation.EvaluationRejectionReason;
@@ -64,10 +65,18 @@ public final class ActionService {
           ActionTransactions.Entry.PREPARE_INITIAL_MUTATION,
           () -> prepareOnce(validContext, validCommand, argumentHash, actionKey));
     } catch (RuntimeException failure) {
-      if (failure instanceof DuplicateKeyException
+      ActionUniqueConflict uniqueConflict =
+          failure instanceof ActionUniqueConflict conflict ? conflict : null;
+      if (uniqueConflict != null
+          || failure instanceof DuplicateKeyException
           || ActionTransactions.isMySqlContention(failure)) {
         Optional<PendingActionView> observed =
-            observePreparedWithinBound(validContext, validCommand, argumentHash, actionKey);
+            observePreparedWithinBound(
+                validContext,
+                validCommand,
+                argumentHash,
+                actionKey,
+                uniqueConflict == null ? null : uniqueConflict.pending());
         if (observed.isPresent()) {
           return observed.orElseThrow();
         }
@@ -85,10 +94,16 @@ public final class ActionService {
           ActionTransactions.Entry.CONFIRM_INITIAL_MUTATION,
           () -> confirmOnce(validContext, pendingActionId));
     } catch (RuntimeException failure) {
-      if (failure instanceof DuplicateKeyException
+      ActionUniqueConflict uniqueConflict =
+          failure instanceof ActionUniqueConflict conflict ? conflict : null;
+      if (uniqueConflict != null
+          || failure instanceof DuplicateKeyException
           || ActionTransactions.isMySqlContention(failure)) {
         Optional<ActionReceiptView> observed =
-            observeReceiptWithinBound(validContext, pendingActionId);
+            observeReceiptWithinBound(
+                validContext,
+                pendingActionId,
+                uniqueConflict == null ? null : uniqueConflict.receipt());
         if (observed.isPresent()) {
           return observed.orElseThrow();
         }
@@ -260,17 +275,37 @@ public final class ActionService {
   }
 
   private Optional<PendingActionView> observePreparedWithinBound(
-      ValidatedContext context, ValidatedCommand command, String argumentHash, String actionKey) {
+      ValidatedContext context,
+      ValidatedCommand command,
+      String argumentHash,
+      String actionKey,
+      PendingActionRecord attempted) {
     for (int attempt = 1; attempt <= transactions.maximumObservationAttempts(); attempt++) {
       try {
         return transactions.observe(
             ActionTransactions.Entry.PREPARE_TRUTH_OBSERVATION,
             () -> {
-              PendingActionRecord pending =
+              PendingActionRecord byTurn =
                   actions
                       .findPendingByTurnForUpdate(
                           context.userSubject(), context.supportSessionId(), context.turnId())
                       .orElse(null);
+              PendingActionRecord byActionKey =
+                  actions.findPendingByActionKeyForUpdate(actionKey).orElse(null);
+              PendingActionRecord byAttemptedId =
+                  attempted == null
+                      ? null
+                      : actions.findPendingByIdForUpdate(attempted.pendingActionId()).orElse(null);
+              if (byActionKey != null && byTurn == null) {
+                throw integrityFailure(
+                    "PendingAction idempotency key belongs to a contradictory durable row");
+              }
+              if (byAttemptedId != null && byTurn == null && byActionKey == null) {
+                throw integrityFailure(
+                    "PendingAction identifier belongs to a contradictory durable row");
+              }
+              PendingActionRecord pending =
+                  onePendingCandidate(onePendingCandidate(byTurn, byActionKey), byAttemptedId);
               if (pending == null) {
                 return Optional.empty();
               }
@@ -321,7 +356,7 @@ public final class ActionService {
   }
 
   private Optional<ActionReceiptView> observeReceiptWithinBound(
-      ValidatedContext context, String pendingActionId) {
+      ValidatedContext context, String pendingActionId, ActionReceiptRecord attempted) {
     for (int attempt = 1; attempt <= transactions.maximumObservationAttempts(); attempt++) {
       try {
         return transactions.observe(
@@ -335,8 +370,25 @@ public final class ActionService {
               requireConfirmVisibility(pending, context);
               requirePendingIntegrity(pending);
               requireConfirmIntent(pending, context);
-              ActionReceiptRecord receipt =
+              String receiptKey =
+                  ActionCanonical.hash("ACTION_RECEIPT", pending.actionIdempotencyKey());
+              ActionReceiptRecord byPending =
                   actions.findReceiptByPending(pendingActionId).orElse(null);
+              ActionReceiptRecord byActionKey =
+                  actions.findReceiptByActionKey(receiptKey).orElse(null);
+              ActionReceiptRecord byAttemptedId =
+                  attempted == null
+                      ? null
+                      : actions.findReceiptById(attempted.receiptId()).orElse(null);
+              ActionReceiptRecord byRefund =
+                  attempted == null
+                      ? null
+                      : actions.findReceiptByRefund(attempted.refundId()).orElse(null);
+              ActionReceiptRecord receipt =
+                  oneReceiptCandidate(
+                      oneReceiptCandidate(
+                          oneReceiptCandidate(byPending, byActionKey), byAttemptedId),
+                      byRefund);
               if (receipt == null) {
                 if ("CONSUMED".equals(pending.state())) {
                   throw integrityFailure("Consumed PendingAction has no ActionReceipt");
@@ -355,6 +407,28 @@ public final class ActionService {
       }
     }
     return Optional.empty();
+  }
+
+  private static PendingActionRecord onePendingCandidate(
+      PendingActionRecord left, PendingActionRecord right) {
+    if (left == null) {
+      return right;
+    }
+    if (right == null || left.pendingActionId().equals(right.pendingActionId())) {
+      return left;
+    }
+    throw integrityFailure("PendingAction unique locators resolve to contradictory durable rows");
+  }
+
+  private static ActionReceiptRecord oneReceiptCandidate(
+      ActionReceiptRecord left, ActionReceiptRecord right) {
+    if (left == null) {
+      return right;
+    }
+    if (right == null || left.receiptId().equals(right.receiptId())) {
+      return left;
+    }
+    throw integrityFailure("ActionReceipt unique locators resolve to contradictory durable rows");
   }
 
   private ActionReceiptView validateReceipt(

@@ -283,6 +283,112 @@ class ActionIntegrationTest {
   }
 
   @Test
+  void alternativeUniqueLocatorsCannotHideContradictoryActionTruth() {
+    PaidFixture preparePaid = seedPaidStandard(700, "action-alternative-pending-key");
+    String orphanTurn = UUID.randomUUID().toString();
+    ActionRequestContext orphanContext =
+        new ActionRequestContext(USER, SESSION, "trace-orphan-pending", orphanTurn, null, SCOPE);
+    PendingActionView orphan =
+        actions.prepare(
+            orphanContext,
+            new PrepareActionCommand("REFUND_REQUEST", preparePaid.orderId(), 200L, "AUD"));
+    String requestedTurn = UUID.randomUUID().toString();
+    ActionRequestContext requestedContext =
+        new ActionRequestContext(
+            USER, SESSION, "trace-requested-pending", requestedTurn, null, SCOPE);
+    String requestedArgumentHash =
+        ActionCanonical.hash("REFUND_REQUEST", preparePaid.orderId(), "200", "AUD");
+    String requestedActionKey =
+        ActionCanonical.hash(USER, SESSION, requestedTurn, "REFUND_REQUEST", requestedArgumentHash);
+    assertThat(
+            corruptionJdbc()
+                .update(
+                    "UPDATE pending_action SET action_idempotency_key = ? "
+                        + "WHERE pending_action_id = ?",
+                    requestedActionKey,
+                    orphan.pendingActionId()))
+        .isOne();
+
+    assertThatThrownBy(
+            () ->
+                actions.prepare(
+                    requestedContext,
+                    new PrepareActionCommand("REFUND_REQUEST", preparePaid.orderId(), 200L, "AUD")))
+        .isInstanceOfSatisfying(
+            ActionException.class,
+            exception -> {
+              assertThat(exception.status()).isEqualTo(409);
+              assertThat(exception.reason())
+                  .isEqualTo(ActionRejectionReason.ACTION_DURABLE_TRUTH_INCONSISTENT);
+            });
+    assertThat(
+            jdbc.queryForObject(
+                "SELECT COUNT(*) FROM pending_action WHERE user_subject = ? "
+                    + "AND support_session_id = ? AND turn_id = ?",
+                Long.class,
+                USER,
+                SESSION,
+                requestedTurn))
+        .isZero();
+
+    PaidFixture receiptPaid = seedPaidStandard(800, "action-alternative-receipt-key");
+    String receiptTurn = UUID.randomUUID().toString();
+    ActionRequestContext receiptContext =
+        new ActionRequestContext(
+            USER, SESSION, "trace-alternative-receipt", receiptTurn, null, SCOPE);
+    PendingActionView pending =
+        actions.prepare(
+            receiptContext,
+            new PrepareActionCommand("REFUND_REQUEST", receiptPaid.orderId(), 300L, "AUD"));
+    String actionKey =
+        jdbc.queryForObject(
+            "SELECT action_idempotency_key FROM pending_action WHERE pending_action_id = ?",
+            String.class,
+            pending.pendingActionId());
+    String receiptKey = ActionCanonical.hash("ACTION_RECEIPT", actionKey);
+    Instant orphanCommittedAt = Instant.now().minusSeconds(1);
+    assertThat(
+            corruptionJdbc()
+                .update(
+                    """
+                    INSERT INTO action_receipt
+                      (receipt_id, receipt_idempotency_key, pending_action_id, action_type,
+                       argument_hash, result_hash, user_subject, support_session_id, trace_id,
+                       turn_id, sandbox_id, order_id, payment_attempt_id, refund_id,
+                       resulting_resource_version, result_state, amount_minor, currency,
+                       outbox_event_id, outbox_created_at, committed_at)
+                    VALUES (?, ?, ?, 'REFUND_REQUEST', ?, ?, ?, ?, ?, ?, NULL, ?, ?, ?, 1,
+                            'REQUESTED', 300, 'AUD', ?, ?, ?)
+                    """,
+                    UUID.randomUUID().toString(),
+                    receiptKey,
+                    UUID.randomUUID().toString(),
+                    "a".repeat(64),
+                    "b".repeat(64),
+                    USER,
+                    SESSION,
+                    "trace-orphan-receipt",
+                    UUID.randomUUID().toString(),
+                    receiptPaid.orderId(),
+                    receiptPaid.attemptId(),
+                    UUID.randomUUID().toString(),
+                    UUID.randomUUID().toString(),
+                    Timestamp.from(orphanCommittedAt),
+                    Timestamp.from(orphanCommittedAt)))
+        .isOne();
+
+    assertThatThrownBy(() -> actions.confirm(receiptContext, pending.pendingActionId()))
+        .isInstanceOfSatisfying(
+            ActionException.class,
+            exception -> {
+              assertThat(exception.status()).isEqualTo(409);
+              assertThat(exception.reason())
+                  .isEqualTo(ActionRejectionReason.ACTION_DURABLE_TRUTH_INCONSISTENT);
+            });
+    assertPreparedWithoutEffects(pending.pendingActionId(), receiptPaid.orderId());
+  }
+
+  @Test
   void receiptReplayAcceptsLegalRefundProgressAndRejectsMissingDuplicateOrContradictoryClosure() {
     ConfirmedAction progressed = confirmAction("action-progressed", 800, 300);
     refunds.markProcessing(progressed.receipt().refundId());

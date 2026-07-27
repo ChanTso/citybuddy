@@ -3,12 +3,14 @@ package io.citybuddy.commerce.action;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.when;
 
+import io.citybuddy.commerce.action.ActionRepository.ActionReceiptRecord;
 import io.citybuddy.commerce.action.ActionRepository.PendingActionRecord;
 import io.citybuddy.commerce.evaluation.EvaluationSandboxAccess;
 import io.citybuddy.commerce.refund.RefundService;
@@ -17,6 +19,7 @@ import java.time.Clock;
 import java.time.Duration;
 import java.time.Instant;
 import java.util.Optional;
+import java.util.UUID;
 import java.util.function.Supplier;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -240,6 +243,70 @@ class ActionConcurrencyTest {
               assertThat(exception.status()).isEqualTo(429);
               assertThat(exception.reason())
                   .isEqualTo(ActionRejectionReason.ACTION_CONCURRENCY_OBSERVATION_INDETERMINATE);
+            });
+    verifyNoInteractions(refunds);
+  }
+
+  @Test
+  void prepareDuplicateEnumeratesTheAlternativeActionKeyFace() {
+    doThrow(new DuplicateKeyException("controlled duplicate"))
+        .when(transactions)
+        .mutate(eq(ActionTransactions.Entry.PREPARE_INITIAL_MUTATION), any());
+    when(transactions.maximumObservationAttempts()).thenReturn(1);
+    when(transactions.observe(eq(ActionTransactions.Entry.PREPARE_TRUTH_OBSERVATION), any()))
+        .thenAnswer(
+            invocation -> {
+              @SuppressWarnings("unchecked")
+              Supplier<Optional<PendingActionView>> work = invocation.getArgument(1);
+              return work.get();
+            });
+    PendingActionRecord contradictory = mock(PendingActionRecord.class);
+    when(repository.findPendingByActionKeyForUpdate(anyString()))
+        .thenReturn(Optional.of(contradictory));
+
+    assertThatThrownBy(
+            () ->
+                service.prepare(
+                    context(),
+                    new PrepareActionCommand(
+                        "REFUND_REQUEST", "00000000-0000-0000-0000-000000000123", 500L, "AUD")))
+        .isInstanceOfSatisfying(
+            ActionException.class,
+            exception -> {
+              assertThat(exception.status()).isEqualTo(409);
+              assertThat(exception.reason())
+                  .isEqualTo(ActionRejectionReason.ACTION_DURABLE_TRUTH_INCONSISTENT);
+            });
+    verifyNoInteractions(refunds);
+  }
+
+  @Test
+  void confirmDuplicateEnumeratesTheAlternativeReceiptKeyFace() {
+    doThrow(new DuplicateKeyException("controlled duplicate"))
+        .when(transactions)
+        .mutate(eq(ActionTransactions.Entry.CONFIRM_INITIAL_MUTATION), any());
+    when(transactions.maximumObservationAttempts()).thenReturn(1);
+    when(transactions.observe(eq(ActionTransactions.Entry.CONFIRM_TRUTH_OBSERVATION), any()))
+        .thenAnswer(
+            invocation -> {
+              @SuppressWarnings("unchecked")
+              Supplier<Optional<ActionReceiptView>> work = invocation.getArgument(1);
+              return work.get();
+            });
+    PendingActionRecord pending = prepared();
+    when(repository.findPendingByIdForUpdate(ACTION)).thenReturn(Optional.of(pending));
+    ActionReceiptRecord contradictory = mock(ActionReceiptRecord.class);
+    when(contradictory.receiptId()).thenReturn(UUID.randomUUID().toString());
+    when(contradictory.pendingActionId()).thenReturn(UUID.randomUUID().toString());
+    when(repository.findReceiptByActionKey(anyString())).thenReturn(Optional.of(contradictory));
+
+    assertThatThrownBy(() -> service.confirm(context(), ACTION))
+        .isInstanceOfSatisfying(
+            ActionException.class,
+            exception -> {
+              assertThat(exception.status()).isEqualTo(409);
+              assertThat(exception.reason())
+                  .isEqualTo(ActionRejectionReason.ACTION_DURABLE_TRUTH_INCONSISTENT);
             });
     verifyNoInteractions(refunds);
   }

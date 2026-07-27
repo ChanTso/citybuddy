@@ -6,6 +6,7 @@ import java.sql.Timestamp;
 import java.time.Instant;
 import java.util.List;
 import java.util.Optional;
+import org.springframework.dao.DuplicateKeyException;
 import org.springframework.jdbc.core.JdbcTemplate;
 
 public class ActionRepository {
@@ -37,35 +38,48 @@ public class ActionRepository {
         pendingActionId);
   }
 
+  public Optional<PendingActionRecord> findPendingByActionKeyForUpdate(
+      String actionIdempotencyKey) {
+    return queryPending(
+        "SELECT "
+            + pendingColumns()
+            + " FROM pending_action WHERE action_idempotency_key = ? LIMIT 2 FOR UPDATE",
+        actionIdempotencyKey);
+  }
+
   public void insertPending(PendingActionRecord action) {
-    jdbc.update(
-        """
-        INSERT INTO pending_action
-          (pending_action_id, action_idempotency_key, pending_hash, action_type, argument_hash,
-           user_subject, support_session_id, trace_id, turn_id, required_scope, sandbox_id,
-           order_id, order_kind, payment_attempt_id, target_order_version, amount_minor,
-           currency, expires_at, created_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        """,
-        action.pendingActionId(),
-        action.actionIdempotencyKey(),
-        action.pendingHash(),
-        action.actionType(),
-        action.argumentHash(),
-        action.userSubject(),
-        action.supportSessionId(),
-        action.traceId(),
-        action.turnId(),
-        action.requiredScope(),
-        action.sandboxId(),
-        action.orderId(),
-        action.orderKind(),
-        action.paymentAttemptId(),
-        action.targetOrderVersion(),
-        action.amountMinor(),
-        action.currency(),
-        Timestamp.from(action.expiresAt()),
-        Timestamp.from(action.createdAt()));
+    try {
+      jdbc.update(
+          """
+          INSERT INTO pending_action
+            (pending_action_id, action_idempotency_key, pending_hash, action_type, argument_hash,
+             user_subject, support_session_id, trace_id, turn_id, required_scope, sandbox_id,
+             order_id, order_kind, payment_attempt_id, target_order_version, amount_minor,
+             currency, expires_at, created_at)
+          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+          """,
+          action.pendingActionId(),
+          action.actionIdempotencyKey(),
+          action.pendingHash(),
+          action.actionType(),
+          action.argumentHash(),
+          action.userSubject(),
+          action.supportSessionId(),
+          action.traceId(),
+          action.turnId(),
+          action.requiredScope(),
+          action.sandboxId(),
+          action.orderId(),
+          action.orderKind(),
+          action.paymentAttemptId(),
+          action.targetOrderVersion(),
+          action.amountMinor(),
+          action.currency(),
+          Timestamp.from(action.expiresAt()),
+          Timestamp.from(action.createdAt()));
+    } catch (DuplicateKeyException failure) {
+      throw ActionUniqueConflict.forPending(action, failure);
+    }
   }
 
   public void consume(PendingActionRecord action, Instant committedAt) {
@@ -88,37 +102,61 @@ public class ActionRepository {
         pendingActionId);
   }
 
+  public Optional<ActionReceiptRecord> findReceiptById(String receiptId) {
+    return queryReceipt(
+        "SELECT " + receiptColumns() + " FROM action_receipt WHERE receipt_id = ? LIMIT 2",
+        receiptId);
+  }
+
+  public Optional<ActionReceiptRecord> findReceiptByActionKey(String receiptIdempotencyKey) {
+    return queryReceipt(
+        "SELECT "
+            + receiptColumns()
+            + " FROM action_receipt WHERE receipt_idempotency_key = ? LIMIT 2",
+        receiptIdempotencyKey);
+  }
+
+  public Optional<ActionReceiptRecord> findReceiptByRefund(String refundId) {
+    return queryReceipt(
+        "SELECT " + receiptColumns() + " FROM action_receipt WHERE refund_id = ? LIMIT 2",
+        refundId);
+  }
+
   public void insertReceipt(ActionReceiptRecord receipt) {
-    jdbc.update(
-        """
-        INSERT INTO action_receipt
-          (receipt_id, receipt_idempotency_key, pending_action_id, action_type,
-           argument_hash, result_hash, user_subject, support_session_id, trace_id, turn_id,
-           sandbox_id, order_id, payment_attempt_id, refund_id, resulting_resource_version,
-           result_state, amount_minor, currency, outbox_event_id, outbox_created_at, committed_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        """,
-        receipt.receiptId(),
-        receipt.receiptIdempotencyKey(),
-        receipt.pendingActionId(),
-        receipt.actionType(),
-        receipt.argumentHash(),
-        receipt.resultHash(),
-        receipt.userSubject(),
-        receipt.supportSessionId(),
-        receipt.traceId(),
-        receipt.turnId(),
-        receipt.sandboxId(),
-        receipt.orderId(),
-        receipt.paymentAttemptId(),
-        receipt.refundId(),
-        receipt.resultingResourceVersion(),
-        receipt.resultState(),
-        receipt.amountMinor(),
-        receipt.currency(),
-        receipt.outboxEventId(),
-        Timestamp.from(receipt.outboxCreatedAt()),
-        Timestamp.from(receipt.committedAt()));
+    try {
+      jdbc.update(
+          """
+          INSERT INTO action_receipt
+            (receipt_id, receipt_idempotency_key, pending_action_id, action_type,
+             argument_hash, result_hash, user_subject, support_session_id, trace_id, turn_id,
+             sandbox_id, order_id, payment_attempt_id, refund_id, resulting_resource_version,
+             result_state, amount_minor, currency, outbox_event_id, outbox_created_at, committed_at)
+          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+          """,
+          receipt.receiptId(),
+          receipt.receiptIdempotencyKey(),
+          receipt.pendingActionId(),
+          receipt.actionType(),
+          receipt.argumentHash(),
+          receipt.resultHash(),
+          receipt.userSubject(),
+          receipt.supportSessionId(),
+          receipt.traceId(),
+          receipt.turnId(),
+          receipt.sandboxId(),
+          receipt.orderId(),
+          receipt.paymentAttemptId(),
+          receipt.refundId(),
+          receipt.resultingResourceVersion(),
+          receipt.resultState(),
+          receipt.amountMinor(),
+          receipt.currency(),
+          receipt.outboxEventId(),
+          Timestamp.from(receipt.outboxCreatedAt()),
+          Timestamp.from(receipt.committedAt()));
+    } catch (DuplicateKeyException failure) {
+      throw ActionUniqueConflict.forReceipt(receipt, failure);
+    }
   }
 
   public List<RefundOutboxRecord> findRefundOutboxByAggregateForUpdate(String refundId) {
@@ -315,6 +353,36 @@ public class ActionRepository {
 
     ActionIntegrityException(String message, Throwable cause) {
       super(message, cause);
+    }
+  }
+
+  static final class ActionUniqueConflict extends RuntimeException {
+    private final PendingActionRecord pending;
+    private final ActionReceiptRecord receipt;
+
+    private ActionUniqueConflict(
+        PendingActionRecord pending, ActionReceiptRecord receipt, DuplicateKeyException cause) {
+      super("Action unique constraint rejected a durable write", cause);
+      this.pending = pending;
+      this.receipt = receipt;
+    }
+
+    static ActionUniqueConflict forPending(
+        PendingActionRecord pending, DuplicateKeyException cause) {
+      return new ActionUniqueConflict(pending, null, cause);
+    }
+
+    static ActionUniqueConflict forReceipt(
+        ActionReceiptRecord receipt, DuplicateKeyException cause) {
+      return new ActionUniqueConflict(null, receipt, cause);
+    }
+
+    PendingActionRecord pending() {
+      return pending;
+    }
+
+    ActionReceiptRecord receipt() {
+      return receipt;
     }
   }
 }
