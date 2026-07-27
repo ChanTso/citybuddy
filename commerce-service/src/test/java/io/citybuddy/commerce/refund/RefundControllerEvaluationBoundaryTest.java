@@ -7,6 +7,7 @@ import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
 
 import io.citybuddy.commerce.evaluation.EvaluationDirectTokenFixture;
+import java.time.Duration;
 import org.junit.jupiter.api.Test;
 import org.springframework.http.MediaType;
 import org.springframework.test.web.servlet.MockMvc;
@@ -19,7 +20,11 @@ class RefundControllerEvaluationBoundaryTest {
     RefundService service = mock(RefundService.class);
     MockMvc http =
         MockMvcBuilders.standaloneSetup(
-                new RefundController(identity.authorizer(), new RefundProperties(null), service))
+                new RefundController(
+                    identity.authorizer(),
+                    new RefundProperties(null, 0, 0, Duration.ZERO),
+                    service,
+                    new RefundRequestParser(new com.fasterxml.jackson.databind.ObjectMapper())))
             .setControllerAdvice(new RefundExceptionHandler())
             .build();
 

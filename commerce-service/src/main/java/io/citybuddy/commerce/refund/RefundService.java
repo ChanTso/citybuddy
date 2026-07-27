@@ -1,5 +1,7 @@
 package io.citybuddy.commerce.refund;
 
+import io.citybuddy.commerce.payment.CommittedPaymentIntegrityException;
+import io.citybuddy.commerce.payment.CommittedPaymentTruthResolver;
 import io.citybuddy.commerce.payment.MockPaymentRepository;
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
@@ -8,11 +10,12 @@ import java.util.ArrayList;
 import java.util.HashSet;
 import java.util.HexFormat;
 import java.util.List;
+import java.util.Optional;
 import java.util.Set;
 import java.util.UUID;
+import java.util.function.Predicate;
 import java.util.regex.Pattern;
 import org.springframework.dao.DuplicateKeyException;
-import org.springframework.transaction.support.TransactionTemplate;
 
 public final class RefundService {
   private static final Pattern IDEMPOTENCY = Pattern.compile("[A-Za-z0-9._:-]{1,128}");
@@ -22,16 +25,18 @@ public final class RefundService {
 
   private final RefundRepository refunds;
   private final MockPaymentRepository payments;
-  private final TransactionTemplate transactions;
+  private final CommittedPaymentTruthResolver paymentTruth;
+  private final RefundTransactions transactions;
   private final Clock clock;
 
   public RefundService(
       RefundRepository refunds,
       MockPaymentRepository payments,
-      TransactionTemplate transactions,
+      RefundTransactions transactions,
       Clock clock) {
     this.refunds = refunds;
     this.payments = payments;
+    this.paymentTruth = new CommittedPaymentTruthResolver(payments);
     this.transactions = transactions;
     this.clock = clock;
   }
@@ -44,10 +49,15 @@ public final class RefundService {
     RefundRequest valid = requireRequest(request);
     String intentHash = hash(orderId + "\n" + valid.amountMinor() + "\n" + valid.currency());
     try {
-      return execute(() -> requestOnce(userSubject, orderId, idempotencyKey, valid, intentHash));
-    } catch (DuplicateKeyException exception) {
-      return execute(
-          () -> replayAfterConcurrentRequest(userSubject, orderId, idempotencyKey, intentHash));
+      return transactions.mutate(
+          RefundTransactions.Entry.DIRECT_INITIAL_MUTATION,
+          () -> requestOnce(userSubject, orderId, idempotencyKey, valid, intentHash));
+    } catch (RuntimeException failure) {
+      if (!isDirectCompetition(failure)) {
+        throw failure;
+      }
+      return recoverRequestAfterCompetition(
+          userSubject, orderId, idempotencyKey, valid, intentHash);
     }
   }
 
@@ -63,12 +73,32 @@ public final class RefundService {
 
   public RefundResult markProcessing(String refundId) {
     requireUuid(refundId, "Refund id is invalid");
-    return execute(() -> markProcessingOnce(refundId));
+    try {
+      return transactions.mutate(
+          RefundTransactions.Entry.MARK_PROCESSING_MUTATION, () -> markProcessingOnce(refundId));
+    } catch (RuntimeException failure) {
+      return recoverLifecycle(
+          failure,
+          refundId,
+          RefundTransactions.Entry.MARK_PROCESSING_OBSERVATION,
+          refund -> Set.of("PROCESSING", "SUCCEEDED", "FAILED").contains(refund.state()),
+          null);
+    }
   }
 
   public RefundResult succeed(String refundId) {
     requireUuid(refundId, "Refund id is invalid");
-    return execute(() -> succeedOnce(refundId));
+    try {
+      return transactions.mutate(
+          RefundTransactions.Entry.SUCCEED_MUTATION, () -> succeedOnce(refundId));
+    } catch (RuntimeException failure) {
+      return recoverLifecycle(
+          failure,
+          refundId,
+          RefundTransactions.Entry.SUCCEED_OBSERVATION,
+          refund -> "SUCCEEDED".equals(refund.state()),
+          null);
+    }
   }
 
   public RefundResult fail(String refundId, String failureCode) {
@@ -76,12 +106,206 @@ public final class RefundService {
     if (failureCode == null || !FAILURE_CODE.matcher(failureCode).matches()) {
       throw validation("Refund failure code is invalid");
     }
-    return execute(() -> failOnce(refundId, failureCode));
+    try {
+      return transactions.mutate(
+          RefundTransactions.Entry.FAIL_MUTATION, () -> failOnce(refundId, failureCode));
+    } catch (RuntimeException failure) {
+      return recoverLifecycle(
+          failure,
+          refundId,
+          RefundTransactions.Entry.FAIL_OBSERVATION,
+          refund -> "FAILED".equals(refund.state()) && failureCode.equals(refund.failureCode()),
+          failureCode);
+    }
   }
 
   public RefundReconciliationResult reconcile(String refundId) {
     requireUuid(refundId, "Refund id is invalid");
-    return execute(() -> reconcileOnce(refundId));
+    try {
+      return transactions.mutate(
+          RefundTransactions.Entry.RECONCILE_MUTATION, () -> reconcileLocked(refundId, true));
+    } catch (RuntimeException failure) {
+      if (!RefundTransactions.isMySqlContention(failure)) {
+        throw failure;
+      }
+      Optional<RefundReconciliationResult> observed = observeReconciliationWithinBound(refundId);
+      if (observed != null && observed.isPresent()) {
+        return observed.get();
+      }
+      throw new RefundIndeterminateException(
+          "Refund reconciliation truth remains indeterminate", failure);
+    }
+  }
+
+  private RefundResult recoverRequestAfterCompetition(
+      String userSubject,
+      String orderId,
+      String idempotencyKey,
+      RefundRequest request,
+      String intentHash) {
+    RequestObservation observation =
+        observeRequestWithinBound(userSubject, orderId, idempotencyKey, request, intentHash);
+    if (observation.state() == RequestObservationState.FOUND) {
+      return observation.requireResult();
+    }
+    if (observation.state() != RequestObservationState.CONFIRMED_ABSENT) {
+      throw refundConcurrencyIndeterminate();
+    }
+    try {
+      return transactions.mutate(
+          RefundTransactions.Entry.DIRECT_FINAL_MUTATION,
+          () -> requestOnce(userSubject, orderId, idempotencyKey, request, intentHash));
+    } catch (RuntimeException failure) {
+      if (!isDirectCompetition(failure)) {
+        throw failure;
+      }
+      RequestObservation finalObservation =
+          observeRequestOnce(userSubject, orderId, idempotencyKey, request, intentHash);
+      if (finalObservation.state() == RequestObservationState.FOUND) {
+        return finalObservation.requireResult();
+      }
+      throw refundConcurrencyIndeterminate();
+    }
+  }
+
+  private RequestObservation observeRequestWithinBound(
+      String userSubject,
+      String orderId,
+      String idempotencyKey,
+      RefundRequest request,
+      String intentHash) {
+    for (int attempt = 1; attempt <= transactions.maximumObservationAttempts(); attempt++) {
+      try {
+        return transactions.observe(
+            RefundTransactions.Entry.DIRECT_TRUTH_OBSERVATION,
+            () -> observeRequestTruth(userSubject, orderId, idempotencyKey, request, intentHash));
+      } catch (RuntimeException failure) {
+        if (!RefundTransactions.isMySqlContention(failure)) {
+          throw failure;
+        }
+        if (attempt < transactions.maximumObservationAttempts() && !transactions.pause(attempt)) {
+          break;
+        }
+      }
+    }
+    return RequestObservation.indeterminate();
+  }
+
+  private RequestObservation observeRequestOnce(
+      String userSubject,
+      String orderId,
+      String idempotencyKey,
+      RefundRequest request,
+      String intentHash) {
+    try {
+      return transactions.observe(
+          RefundTransactions.Entry.DIRECT_FINAL_OBSERVATION,
+          () -> observeRequestTruth(userSubject, orderId, idempotencyKey, request, intentHash));
+    } catch (RuntimeException failure) {
+      if (!RefundTransactions.isMySqlContention(failure)) {
+        throw failure;
+      }
+      return RequestObservation.indeterminate();
+    }
+  }
+
+  private RequestObservation observeRequestTruth(
+      String userSubject,
+      String orderId,
+      String idempotencyKey,
+      RefundRequest request,
+      String intentHash) {
+    RefundTarget target = resolveRefundTarget(userSubject, orderId, request);
+    RefundRepository.RefundRecord existing =
+        refunds.findByRequestForUpdate(userSubject, orderId, idempotencyKey).orElse(null);
+    if (existing == null) {
+      requireCapacity(target.payment().attempt(), request.amountMinor());
+      return RequestObservation.absent();
+    }
+    requireIntent(existing.intentHash(), intentHash);
+    requireRefundIdentity(existing, target.payment());
+    requireStateSpecificTruth(existing, target.payment());
+    return RequestObservation.found(result(existing, true));
+  }
+
+  private RefundResult recoverLifecycle(
+      RuntimeException failure,
+      String refundId,
+      RefundTransactions.Entry observationEntry,
+      Predicate<RefundRepository.RefundRecord> completed,
+      String expectedFailureCode) {
+    if (!RefundTransactions.isMySqlContention(failure)) {
+      throw failure;
+    }
+    ValidatedLifecycleTruth observed =
+        observeLifecycleWithinBound(refundId, observationEntry, completed, expectedFailureCode);
+    if (observed != null && observed.completedResult().isPresent()) {
+      return observed.completedResult().orElseThrow();
+    }
+    throw new RefundIndeterminateException("Refund lifecycle truth remains indeterminate", failure);
+  }
+
+  private ValidatedLifecycleTruth observeLifecycleWithinBound(
+      String refundId,
+      RefundTransactions.Entry observationEntry,
+      Predicate<RefundRepository.RefundRecord> completed,
+      String expectedFailureCode) {
+    for (int attempt = 1; attempt <= transactions.maximumObservationAttempts(); attempt++) {
+      try {
+        return transactions.observe(
+            observationEntry,
+            () ->
+                observeLifecycleTruth(refundId, observationEntry, completed, expectedFailureCode));
+      } catch (RuntimeException failure) {
+        if (!RefundTransactions.isMySqlContention(failure)) {
+          throw failure;
+        }
+        if (attempt < transactions.maximumObservationAttempts() && !transactions.pause(attempt)) {
+          break;
+        }
+      }
+    }
+    return null;
+  }
+
+  /**
+   * Performs every locking read and validation before returning the immutable observation value.
+   * Callers must not perform a second repository read after this transaction completes.
+   */
+  private ValidatedLifecycleTruth observeLifecycleTruth(
+      String refundId,
+      RefundTransactions.Entry observationEntry,
+      Predicate<RefundRepository.RefundRecord> completed,
+      String expectedFailureCode) {
+    LockedRefund locked = lockRefund(refundId);
+    RefundRepository.RefundRecord refund = locked.refund();
+    requireStateSpecificTruth(refund, locked.payment());
+    if (!completed.test(refund)) {
+      return new ValidatedLifecycleTruth(observationEntry, Optional.empty());
+    }
+    if (observationEntry == RefundTransactions.Entry.FAIL_OBSERVATION
+        && !expectedFailureCode.equals(refund.failureCode())) {
+      throw businessConflict("Failed refund reason conflicts with its existing result");
+    }
+    return new ValidatedLifecycleTruth(observationEntry, Optional.of(result(refund, true)));
+  }
+
+  private Optional<RefundReconciliationResult> observeReconciliationWithinBound(String refundId) {
+    for (int attempt = 1; attempt <= transactions.maximumObservationAttempts(); attempt++) {
+      try {
+        return transactions.observe(
+            RefundTransactions.Entry.RECONCILE_OBSERVATION,
+            () -> Optional.ofNullable(reconcileLocked(refundId, false)));
+      } catch (RuntimeException failure) {
+        if (!RefundTransactions.isMySqlContention(failure)) {
+          throw failure;
+        }
+        if (attempt < transactions.maximumObservationAttempts() && !transactions.pause(attempt)) {
+          break;
+        }
+      }
+    }
+    return null;
   }
 
   private RefundResult requestOnce(
@@ -90,45 +314,19 @@ public final class RefundService {
       String idempotencyKey,
       RefundRequest request,
       String intentHash) {
-    MockPaymentRepository.OrderTruth identified =
-        refunds
-            .findOrder(orderId)
-            .orElseThrow(() -> notFound("Refund order is missing or not owned"));
-    if (!userSubject.equals(identified.userSubject())) {
-      throw notFound("Refund order is missing or not owned");
-    }
-
-    MockPaymentRepository.AttemptRecord attempt =
-        payments
-            .findAttemptByOrderForUpdate(identified.orderKind(), orderId)
-            .orElseThrow(() -> conflict("Order has no eligible successful payment"));
-    MockPaymentRepository.OrderTruth order = requireLockedOrder(attempt);
-    if (!userSubject.equals(order.userSubject())) {
-      throw notFound("Refund order is missing or not owned");
-    }
+    RefundTarget target = resolveRefundTarget(userSubject, orderId, request);
+    MockPaymentRepository.AttemptRecord attempt = target.payment().attempt();
+    MockPaymentRepository.OrderTruth order = target.payment().order();
 
     RefundRepository.RefundRecord existing =
         refunds.findByRequestForUpdate(userSubject, orderId, idempotencyKey).orElse(null);
     if (existing != null) {
       requireIntent(existing.intentHash(), intentHash);
+      requireRefundIdentity(existing, target.payment());
+      requireStateSpecificTruth(existing, target.payment());
       return result(existing, true);
     }
-    requireEligiblePayment(attempt, order);
-    if (!attempt.currency().equals(request.currency())) {
-      throw conflict("Refund request conflicts with authoritative payment currency");
-    }
-
-    long reserved = refunds.reservedAmount(attempt.attemptId());
-    long remaining;
-    try {
-      remaining = Math.subtractExact(attempt.amountMinor(), reserved);
-    } catch (ArithmeticException exception) {
-      throw new IllegalStateException("Refund reservation total is corrupted", exception);
-    }
-    if (request.amountMinor() > remaining) {
-      throw conflict(remaining == 0 ? "Payment is fully refunded" : "Refund exceeds paid amount");
-    }
-
+    requireCapacity(attempt, request.amountMinor());
     RefundRepository.RefundRecord created =
         RefundRepository.RefundRecord.requested(
             UUID.randomUUID().toString(),
@@ -146,28 +344,56 @@ public final class RefundService {
     return result(created, false);
   }
 
-  private RefundResult replayAfterConcurrentRequest(
-      String userSubject, String orderId, String idempotencyKey, String intentHash) {
-    RefundRepository.RefundRecord existing =
-        refunds
-            .findByRequestForUpdate(userSubject, orderId, idempotencyKey)
-            .orElseThrow(() -> conflict("Refund identity conflicts with a concurrent request"));
-    requireIntent(existing.intentHash(), intentHash);
-    return result(existing, true);
+  private RefundTarget resolveRefundTarget(
+      String userSubject, String orderId, RefundRequest request) {
+    CommittedPaymentTruthResolver.CommittedPaymentTruth committed;
+    try {
+      committed =
+          paymentTruth
+              .resolveByOrderLocked(
+                  CommittedPaymentTruthResolver.CommittedPaymentCaller.DIRECT_REFUND_ELIGIBILITY,
+                  orderId,
+                  userSubject)
+              .orElse(null);
+    } catch (CommittedPaymentIntegrityException exception) {
+      throw durableConflict("Order has no eligible successful payment");
+    }
+    if (committed == null) {
+      throw notFound("Refund order is missing or not owned");
+    }
+    if (!committed.attempt().currency().equals(request.currency())) {
+      throw businessConflict("Refund request conflicts with authoritative payment currency");
+    }
+    return new RefundTarget(committed);
+  }
+
+  private void requireCapacity(
+      MockPaymentRepository.AttemptRecord attempt, long requestedAmountMinor) {
+    long reserved = refunds.reservedAmount(attempt.attemptId());
+    long remaining;
+    try {
+      remaining = Math.subtractExact(attempt.amountMinor(), reserved);
+    } catch (ArithmeticException exception) {
+      throw durableConflict("Refund reservation total is corrupted");
+    }
+    if (requestedAmountMinor > remaining) {
+      throw businessConflict(
+          remaining == 0 ? "Payment is fully refunded" : "Refund exceeds paid amount");
+    }
   }
 
   private RefundResult markProcessingOnce(String refundId) {
     LockedRefund locked = lockRefund(refundId);
     RefundRepository.RefundRecord refund = locked.refund();
+    requireStateSpecificTruth(refund, locked.payment());
     if ("PROCESSING".equals(refund.state())
         || "SUCCEEDED".equals(refund.state())
         || "FAILED".equals(refund.state())) {
       return result(refund, true);
     }
     if (!"REQUESTED".equals(refund.state()) || refund.stateVersion() != 1) {
-      throw conflict("Refund cannot enter processing from its current state");
+      throw businessConflict("Refund cannot enter processing from its current state");
     }
-    requireEligiblePayment(locked.attempt(), locked.order());
     refunds.markProcessing(refund, clock.instant());
     RefundRepository.RefundRecord processing = requireRefund(refundId);
     refunds.insertOutbox(processing, "REFUND_PROCESSING", 2);
@@ -177,17 +403,16 @@ public final class RefundService {
   private RefundResult succeedOnce(String refundId) {
     LockedRefund locked = lockRefund(refundId);
     RefundRepository.RefundRecord refund = locked.refund();
+    requireStateSpecificTruth(refund, locked.payment());
     if ("SUCCEEDED".equals(refund.state())) {
-      requireSuccessfulRefundTruth(refund, locked.attempt(), locked.order());
       return result(refund, true);
     }
     if (!"PROCESSING".equals(refund.state()) || refund.stateVersion() != 2) {
-      throw conflict("Refund cannot succeed from its current state");
+      throw businessConflict("Refund cannot succeed from its current state");
     }
-    requireEligiblePayment(locked.attempt(), locked.order());
     refunds.markSucceeded(refund, clock.instant());
-    refunds.addRefundedAmount(locked.attempt(), refund.requestedAmountMinor());
-    refunds.insertRefundMovement(refund, locked.order());
+    refunds.addRefundedAmount(locked.payment().attempt(), refund.requestedAmountMinor());
+    refunds.insertRefundMovement(refund, locked.payment().order());
     RefundRepository.RefundRecord succeeded = requireRefund(refundId);
     refunds.insertOutbox(succeeded, "REFUND_SUCCEEDED", 3);
     return result(succeeded, false);
@@ -196,17 +421,18 @@ public final class RefundService {
   private RefundResult failOnce(String refundId, String failureCode) {
     LockedRefund locked = lockRefund(refundId);
     RefundRepository.RefundRecord refund = locked.refund();
+    requireStateSpecificTruth(refund, locked.payment());
     if ("FAILED".equals(refund.state())) {
       if (!failureCode.equals(refund.failureCode())) {
-        throw conflict("Failed refund reason conflicts with its existing result");
+        throw businessConflict("Failed refund reason conflicts with its existing result");
       }
       return result(refund, true);
     }
     if ("SUCCEEDED".equals(refund.state())) {
-      throw conflict("Succeeded refund cannot fail");
+      throw businessConflict("Succeeded refund cannot fail");
     }
     if (!"PROCESSING".equals(refund.state()) || refund.stateVersion() != 2) {
-      throw conflict("Refund cannot fail from its current state");
+      throw businessConflict("Refund cannot fail from its current state");
     }
     refunds.markFailed(refund, failureCode, clock.instant());
     RefundRepository.RefundRecord failed = requireRefund(refundId);
@@ -214,38 +440,26 @@ public final class RefundService {
     return result(failed, false);
   }
 
-  private RefundReconciliationResult reconcileOnce(String refundId) {
-    LockedRefund locked = lockRefundForReconciliation(refundId);
+  private RefundReconciliationResult reconcileLocked(String refundId, boolean allowConvergence) {
+    BasicLockedRefund locked = lockRefundForReconciliation(refundId);
     MockPaymentRepository.AttemptRecord attempt = locked.attempt();
     MockPaymentRepository.OrderTruth order = locked.order();
     List<RefundRepository.RefundRecord> all = refunds.findByAttemptForUpdate(attempt.attemptId());
     List<String> contradictions = new ArrayList<>();
 
-    if (!attempt.orderKind().equals(order.orderKind())
-        || !attempt.orderId().equals(order.orderId())
-        || !attempt.userSubject().equals(order.userSubject())
-        || attempt.amountMinor() != order.amountMinor()
-        || !attempt.currency().equals(order.currency())) {
-      contradictions.add("PAYMENT_ORDER_MISMATCH");
+    try {
+      CommittedPaymentTruthResolver.CommittedPaymentTruth committed =
+          paymentTruth.resolveLocked(
+              CommittedPaymentTruthResolver.CommittedPaymentCaller.REFUND_RECONCILIATION, attempt);
+      if (!committed.order().equals(order)) {
+        contradictions.add("PAYMENT_ORDER_MISMATCH");
+      }
+    } catch (CommittedPaymentIntegrityException exception) {
+      addPaymentClosureContradiction(attempt, contradictions);
     }
-    if (!"SUCCEEDED".equals(attempt.state())
-        || attempt.stateVersion() != 2
-        || !"PAID".equals(order.status())
-        || order.stateVersion() != 2) {
-      contradictions.add("PAYMENT_NOT_DURABLY_SUCCEEDED");
+    if (!locked.refund().paymentAttemptId().equals(attempt.attemptId())) {
+      contradictions.add("REFUND_IDENTITY_MISMATCH:" + locked.refund().refundId());
     }
-    if (!hasMatchingCallback(attempt)) {
-      contradictions.add("PAYMENT_CALLBACK_MISSING");
-    }
-    RefundRepository.MovementRecord paymentMovement =
-        refunds.findMovement("mock-payment:" + attempt.attemptId()).orElse(null);
-    if (!matchesPaymentMovement(paymentMovement, attempt, order)) {
-      contradictions.add("PAYMENT_LEDGER_MISMATCH");
-    }
-    if (refunds.hasMovement(order.orderId(), "SECKILL_UNPAID_CANCEL")) {
-      contradictions.add("PAID_ORDER_HAS_TIMEOUT_RESTORATION");
-    }
-
     long succeededTotal = 0;
     Set<String> expectedMovementKeys = new HashSet<>();
     for (RefundRepository.RefundRecord refund : all) {
@@ -289,6 +503,9 @@ public final class RefundService {
           contradictions);
     }
     if (attempt.refundedAmountMinor() != succeededTotal) {
+      if (!allowConvergence) {
+        return null;
+      }
       refunds.convergeRefundedAmount(attempt, succeededTotal);
       return new RefundReconciliationResult(
           attempt.attemptId(),
@@ -306,79 +523,87 @@ public final class RefundService {
   }
 
   private LockedRefund lockRefund(String refundId) {
-    LockedRefund locked = lockRefundForReconciliation(refundId);
-    if (!matchesRefundIdentity(locked.refund(), locked.attempt(), locked.order())) {
-      throw new IllegalStateException("Refund conflicts with payment or order truth");
-    }
-    return locked;
-  }
-
-  private LockedRefund lockRefundForReconciliation(String refundId) {
     RefundRepository.RefundRecord identified =
         refunds.findById(refundId).orElseThrow(() -> notFound("Refund is missing"));
     MockPaymentRepository.AttemptRecord attempt =
         payments
             .findAttemptByIdForUpdate(identified.paymentAttemptId())
-            .orElseThrow(() -> new IllegalStateException("Refund payment truth is missing"));
-    MockPaymentRepository.OrderTruth order = requireLockedOrder(attempt);
+            .orElseThrow(() -> durableConflict("Refund payment truth is missing"));
+    CommittedPaymentTruthResolver.CommittedPaymentTruth committed;
+    try {
+      committed =
+          paymentTruth.resolveLocked(
+              CommittedPaymentTruthResolver.CommittedPaymentCaller.REFUND_LIFECYCLE, attempt);
+    } catch (CommittedPaymentIntegrityException exception) {
+      throw durableConflict("Order has no eligible successful payment");
+    }
     RefundRepository.RefundRecord refund = requireRefund(refundId);
-    return new LockedRefund(refund, attempt, order);
+    if (!refund.paymentAttemptId().equals(identified.paymentAttemptId())
+        || !matchesRefundIdentity(refund, committed.attempt(), committed.order())) {
+      throw durableConflict("Refund conflicts with payment or order truth");
+    }
+    return new LockedRefund(refund, committed);
   }
 
-  private MockPaymentRepository.OrderTruth requireLockedOrder(
-      MockPaymentRepository.AttemptRecord attempt) {
-    return payments
-        .findOrderForUpdate(attempt.orderId())
-        .orElseThrow(() -> new IllegalStateException("Refund order truth is missing"));
+  private BasicLockedRefund lockRefundForReconciliation(String refundId) {
+    RefundRepository.RefundRecord identified =
+        refunds.findById(refundId).orElseThrow(() -> notFound("Refund is missing"));
+    MockPaymentRepository.AttemptRecord attempt =
+        payments
+            .findAttemptByIdForUpdate(identified.paymentAttemptId())
+            .orElseThrow(() -> durableConflict("Refund payment truth is missing"));
+    MockPaymentRepository.OrderTruth order =
+        payments
+            .findOrderForUpdate(attempt.orderId())
+            .orElseThrow(() -> durableConflict("Refund order truth is missing"));
+    RefundRepository.RefundRecord refund = requireRefund(refundId);
+    return new BasicLockedRefund(refund, attempt, order);
+  }
+
+  private void addPaymentClosureContradiction(
+      MockPaymentRepository.AttemptRecord attempt, List<String> contradictions) {
+    try {
+      if (payments.findCallbackByAttempt(attempt.attemptId()).isEmpty()) {
+        contradictions.add("PAYMENT_CALLBACK_MISSING");
+        return;
+      }
+    } catch (IllegalStateException ignored) {
+      // Non-unique or malformed callback truth remains a generic closure contradiction.
+    }
+    contradictions.add("PAYMENT_CLOSURE_INCONSISTENT");
   }
 
   private RefundRepository.RefundRecord requireRefund(String refundId) {
     return refunds
         .findByIdForUpdate(refundId)
-        .orElseThrow(() -> new IllegalStateException("Refund truth disappeared"));
+        .orElseThrow(() -> durableConflict("Refund truth disappeared"));
   }
 
-  private void requireSuccessfulRefundTruth(
+  private void requireRefundIdentity(
       RefundRepository.RefundRecord refund,
-      MockPaymentRepository.AttemptRecord attempt,
-      MockPaymentRepository.OrderTruth order) {
-    requireEligiblePayment(attempt, order);
+      CommittedPaymentTruthResolver.CommittedPaymentTruth payment) {
+    if (!matchesRefundIdentity(refund, payment.attempt(), payment.order())) {
+      throw durableConflict("Refund durable truth is inconsistent");
+    }
+  }
+
+  private void requireStateSpecificTruth(
+      RefundRepository.RefundRecord refund,
+      CommittedPaymentTruthResolver.CommittedPaymentTruth payment) {
+    requireRefundIdentity(refund, payment);
     RefundRepository.MovementRecord movement =
         refunds.findMovement(RefundRepository.refundEventKey(refund.refundId())).orElse(null);
-    if (!matchesRefundMovement(movement, refund, order)
-        || attempt.refundedAmountMinor() < refund.refundedAmountMinor()) {
-      throw new IllegalStateException("Succeeded refund truth is incomplete");
+    if ("SUCCEEDED".equals(refund.state())) {
+      if (!matchesRefundMovement(movement, refund, payment.order())
+          || payment.attempt().refundedAmountMinor() < refund.refundedAmountMinor()) {
+        throw durableConflict("Succeeded refund truth is incomplete");
+      }
+    } else if (movement != null) {
+      throw durableConflict("Non-successful refund has a refund ledger movement");
     }
-  }
-
-  private void requireEligiblePayment(
-      MockPaymentRepository.AttemptRecord attempt, MockPaymentRepository.OrderTruth order) {
-    if (!attempt.orderKind().equals(order.orderKind())
-        || !attempt.orderId().equals(order.orderId())
-        || !attempt.userSubject().equals(order.userSubject())
-        || attempt.amountMinor() != order.amountMinor()
-        || !attempt.currency().equals(order.currency())) {
-      throw new IllegalStateException("Payment conflicts with refund order truth");
+    if ("FAILED".equals(refund.state()) && refund.failureCode() == null) {
+      throw durableConflict("Failed refund truth is incomplete");
     }
-    if (!"SUCCEEDED".equals(attempt.state())
-        || attempt.stateVersion() != 2
-        || !"PAID".equals(order.status())
-        || order.stateVersion() != 2
-        || !hasMatchingCallback(attempt)
-        || !matchesPaymentMovement(
-            refunds.findMovement("mock-payment:" + attempt.attemptId()).orElse(null),
-            attempt,
-            order)) {
-      throw conflict("Order has no eligible successful payment");
-    }
-  }
-
-  private boolean hasMatchingCallback(MockPaymentRepository.AttemptRecord attempt) {
-    MockPaymentRepository.CallbackRecord callback =
-        payments.findCallbackByAttempt(attempt.attemptId()).orElse(null);
-    return callback != null
-        && callback.attemptId().equals(attempt.attemptId())
-        && callback.callbackCorrelationId().equals(attempt.callbackCorrelationId());
   }
 
   private static boolean matchesRefundIdentity(
@@ -391,22 +616,6 @@ public final class RefundService {
         && refund.userSubject().equals(order.userSubject())
         && refund.eligibleAmountMinor() == attempt.amountMinor()
         && refund.currency().equals(attempt.currency());
-  }
-
-  private static boolean matchesPaymentMovement(
-      RefundRepository.MovementRecord movement,
-      MockPaymentRepository.AttemptRecord attempt,
-      MockPaymentRepository.OrderTruth order) {
-    return movement != null
-        && movement.movementType().equals(order.orderKind() + "_PAYMENT")
-        && movement.orderId().equals(order.orderId())
-        && movement.productId().equals(order.productId())
-        && java.util.Objects.equals(movement.reservationId(), order.reservationId())
-        && java.util.Objects.equals(movement.activityId(), order.activityId())
-        && movement.inventoryDelta() == 0
-        && movement.activityQuotaDelta() == 0
-        && movement.amountMinor() == attempt.amountMinor()
-        && movement.currency().equals(attempt.currency());
   }
 
   private static boolean matchesRefundMovement(
@@ -425,12 +634,9 @@ public final class RefundService {
         && movement.currency().equals(refund.currency());
   }
 
-  private <T> T execute(java.util.function.Supplier<T> work) {
-    T result = transactions.execute(status -> work.get());
-    if (result == null) {
-      throw new IllegalStateException("Refund transaction returned no result");
-    }
-    return result;
+  private static boolean isDirectCompetition(RuntimeException failure) {
+    return failure instanceof DuplicateKeyException
+        || RefundTransactions.isMySqlContention(failure);
   }
 
   private static RefundRequest requireRequest(RefundRequest request) {
@@ -469,7 +675,11 @@ public final class RefundService {
 
   private static void requireIntent(String existing, String supplied) {
     if (!existing.equals(supplied)) {
-      throw conflict("Refund idempotency intent conflicts");
+      throw new RefundException(
+          409,
+          "CONFLICT",
+          RefundRejectionReason.REFUND_IDEMPOTENCY_INTENT_CONFLICT,
+          "Refund idempotency intent conflicts");
     }
   }
 
@@ -503,15 +713,66 @@ public final class RefundService {
   }
 
   private static RefundException notFound(String message) {
-    return new RefundException(404, "NOT_FOUND", message);
+    return new RefundException(
+        404, "NOT_FOUND", RefundRejectionReason.REFUND_CONCEALED_NOT_FOUND, message);
   }
 
-  private static RefundException conflict(String message) {
-    return new RefundException(409, "CONFLICT", message);
+  private static RefundException businessConflict(String message) {
+    return new RefundException(
+        409, "CONFLICT", RefundRejectionReason.REFUND_BUSINESS_CONFLICT, message);
   }
+
+  private static RefundException durableConflict(String message) {
+    return new RefundException(
+        409, "CONFLICT", RefundRejectionReason.REFUND_DURABLE_TRUTH_INCONSISTENT, message);
+  }
+
+  private static RefundException refundConcurrencyIndeterminate() {
+    return new RefundException(
+        429,
+        "INDETERMINATE",
+        RefundRejectionReason.REFUND_CONCURRENCY_OBSERVATION_INDETERMINATE,
+        "Refund truth is indeterminate; retry the same request");
+  }
+
+  private record RefundTarget(CommittedPaymentTruthResolver.CommittedPaymentTruth payment) {}
 
   private record LockedRefund(
       RefundRepository.RefundRecord refund,
+      CommittedPaymentTruthResolver.CommittedPaymentTruth payment) {}
+
+  private record BasicLockedRefund(
+      RefundRepository.RefundRecord refund,
       MockPaymentRepository.AttemptRecord attempt,
       MockPaymentRepository.OrderTruth order) {}
+
+  private enum RequestObservationState {
+    FOUND,
+    CONFIRMED_ABSENT,
+    INDETERMINATE
+  }
+
+  private record RequestObservation(RequestObservationState state, RefundResult result) {
+    static RequestObservation found(RefundResult result) {
+      return new RequestObservation(RequestObservationState.FOUND, result);
+    }
+
+    static RequestObservation absent() {
+      return new RequestObservation(RequestObservationState.CONFIRMED_ABSENT, null);
+    }
+
+    static RequestObservation indeterminate() {
+      return new RequestObservation(RequestObservationState.INDETERMINATE, null);
+    }
+
+    RefundResult requireResult() {
+      if (state != RequestObservationState.FOUND || result == null) {
+        throw new IllegalStateException("Refund observation has no committed result");
+      }
+      return result;
+    }
+  }
+
+  private record ValidatedLifecycleTruth(
+      RefundTransactions.Entry entry, Optional<RefundResult> completedResult) {}
 }

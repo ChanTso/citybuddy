@@ -28,6 +28,7 @@ def test_catalog_contract_exposes_only_authenticated_published_reads() -> None:
         "/api/products/{productId}",
         "/api/orders",
         "/api/orders/{orderId}/mock-payment",
+        "/api/orders/{orderId}/refunds",
         "/api/seckill/activities/{activityId}/reservations",
         "/api/reservations/{reservationId}",
         "/internal/tools/catalog.product.get",
@@ -197,6 +198,51 @@ def test_order_result_and_rejection_expose_safe_deterministic_evidence() -> None
         "CONCURRENCY_EXHAUSTED",
         "DEPENDENCY_UNAVAILABLE",
     }
+
+
+def test_direct_refund_contract_is_closed_bounded_and_status_exact() -> None:
+    contract = load_contract()
+    operation = contract["paths"]["/api/orders/{orderId}/refunds"]["post"]
+
+    assert operation["security"] == [{"directUserBearer": []}]
+    assert {item["name"] for item in operation["parameters"]} == {
+        "orderId",
+        "Idempotency-Key",
+    }
+    assert set(operation["responses"]) == {
+        "200",
+        "201",
+        "400",
+        "401",
+        "403",
+        "404",
+        "409",
+        "429",
+        "503",
+    }
+    request = contract["components"]["schemas"]["RefundRequest"]
+    result = contract["components"]["schemas"]["RefundResult"]
+    error = contract["components"]["schemas"]["RefundError"]
+    assert request["additionalProperties"] is False
+    assert set(request["required"]) == {"amountMinor", "currency"}
+    assert set(request["properties"]) == {"amountMinor", "currency"}
+    assert result["additionalProperties"] is False
+    assert "userSubject" not in result["properties"]
+    assert error["additionalProperties"] is False
+    assert set(error["required"]) == {"category", "message"}
+    assert set(error["properties"]["category"]["enum"]) == {
+        "VALIDATION",
+        "AUTHENTICATION",
+        "AUTHORIZATION",
+        "NOT_FOUND",
+        "CONFLICT",
+        "INDETERMINATE",
+        "UNAVAILABLE",
+    }
+    assert error["properties"]["message"]["maxLength"] == 160
+    serialized = json.dumps(error)
+    for forbidden in ["reason", "sql", "lock", "table", "retry"]:
+        assert forbidden not in serialized.lower()
 
 
 def test_seckill_contract_is_owner_derived_idempotent_and_status_explicit() -> None:
