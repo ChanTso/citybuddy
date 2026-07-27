@@ -7,10 +7,10 @@ import subprocess
 from pathlib import Path
 
 import pytest
-import yaml
-from yaml.constructor import ConstructorError
-from yaml.nodes import MappingNode
-from yaml.tokens import AliasToken, AnchorToken
+import yaml  # type: ignore[import-untyped]
+from yaml.constructor import ConstructorError  # type: ignore[import-untyped]
+from yaml.nodes import MappingNode  # type: ignore[import-untyped]
+from yaml.tokens import AliasToken, AnchorToken  # type: ignore[import-untyped]
 
 ROOT = Path(__file__).parents[1]
 CREDENTIAL_NAMES = (
@@ -65,7 +65,7 @@ INVALID_INTEGRATION_TIMEOUT_CASES = (
 )
 
 
-class StrictWorkflowLoader(yaml.SafeLoader):
+class StrictWorkflowLoader(yaml.SafeLoader):  # type: ignore[misc]
     def construct_mapping(
         self,
         node: yaml.Node,
@@ -191,10 +191,7 @@ def invalid_integration_timeout_workflows(workflow: str) -> dict[str, str]:
     job_timeout_in_strategy = replace_once(
         workflow,
         job_timeout + "    strategy:\n",
-        (
-            "    strategy:\n"
-            "      timeout-minutes: ${{ matrix.timeout_minutes }}\n"
-        ),
+        ("    strategy:\n      timeout-minutes: ${{ matrix.timeout_minutes }}\n"),
     )
     job_timeout_in_steps = replace_once(
         without_job_timeout,
@@ -247,10 +244,7 @@ def invalid_integration_timeout_workflows(workflow: str) -> dict[str, str]:
             runtime_entry,
             runtime_entry.replace(
                 "            timeout_minutes: 30\n",
-                (
-                    "            timeout_minutes: 30\n"
-                    "            timeout_minutes: 30\n"
-                ),
+                ("            timeout_minutes: 30\n            timeout_minutes: 30\n"),
             ),
         ),
         "boolean-timeout": replace_once(
@@ -261,19 +255,13 @@ def invalid_integration_timeout_workflows(workflow: str) -> dict[str, str]:
         "job-timeout-in-metadata": replace_once(
             workflow,
             job_timeout,
-            (
-                "    metadata:\n"
-                "      timeout-minutes: ${{ matrix.timeout_minutes }}\n"
-            ),
+            ("    metadata:\n      timeout-minutes: ${{ matrix.timeout_minutes }}\n"),
         ),
         "job-timeout-in-strategy": job_timeout_in_strategy,
         "job-timeout-in-env": replace_once(
             workflow,
             job_timeout,
-            (
-                "    env:\n"
-                "      timeout-minutes: ${{ matrix.timeout_minutes }}\n"
-            ),
+            ("    env:\n      timeout-minutes: ${{ matrix.timeout_minutes }}\n"),
         ),
         "job-timeout-in-steps": job_timeout_in_steps,
         "job-timeout-fixed": replace_once(
@@ -584,9 +572,7 @@ def test_local_ci_order_and_parallel_workflow_cover_every_required_target() -> N
     )
     assert aggregate_target is not None
     aggregate_commands = aggregate_target.group(1)
-    positions = [
-        aggregate_commands.index(target) for target in REQUIRED_INTEGRATION_TARGETS
-    ]
+    positions = [aggregate_commands.index(target) for target in REQUIRED_INTEGRATION_TARGETS]
     assert positions == sorted(positions)
     assert "ci: java-ci python-ci web-ci repo-ci test-integration" in makefile
     assert "setup: setup-java setup-python setup-web setup-repo" in makefile
