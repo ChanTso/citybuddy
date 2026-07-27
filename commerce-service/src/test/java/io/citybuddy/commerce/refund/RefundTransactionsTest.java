@@ -5,6 +5,7 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.Mockito.mock;
 
 import io.citybuddy.commerce.mysql.BoundedMySqlTransactions;
+import io.citybuddy.commerce.mysql.MySqlSessionPolicyRestorationException;
 import java.sql.SQLException;
 import java.time.Duration;
 import java.util.Set;
@@ -60,6 +61,15 @@ class RefundTransactionsTest {
                         0,
                         new SQLException("lock timeout", "HY000", 1205)))))
         .isTrue();
+    assertThat(
+            RefundTransactions.isMySqlContention(
+                new CannotAcquireLockException(
+                    "outer Spring wrapper",
+                    new MySqlSessionPolicyRestorationException(
+                        new CannotAcquireLockException(
+                            "restore failed",
+                            new SQLException("restore lock timeout", "HY000", 1205))))))
+        .isFalse();
     assertThat(RefundTransactions.isMySqlContention(mysqlLockFailure(1040))).isFalse();
     assertThat(
             RefundTransactions.isMySqlContention(

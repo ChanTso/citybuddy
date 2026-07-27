@@ -44,7 +44,11 @@ public final class BoundedMySqlTransactions {
               } finally {
                 // A failed restore must abort the transaction instead of returning a pooled session
                 // whose policy no longer matches the pool's prior state.
-                jdbc.execute("SET SESSION innodb_lock_wait_timeout = " + previous);
+                try {
+                  jdbc.execute("SET SESSION innodb_lock_wait_timeout = " + previous);
+                } catch (RuntimeException restorationFailure) {
+                  throw new MySqlSessionPolicyRestorationException(restorationFailure);
+                }
               }
             });
     if (result == null) {

@@ -6,9 +6,12 @@ import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.when;
 
+import io.citybuddy.commerce.mysql.MySqlSessionPolicyRestorationException;
 import io.citybuddy.commerce.payment.MockPaymentRepository;
 import java.sql.SQLException;
 import java.time.Clock;
@@ -90,6 +93,22 @@ class RefundConcurrencyTest {
         .mutate(eq(RefundTransactions.Entry.DIRECT_INITIAL_MUTATION), any());
     assertThatThrownBy(() -> service.request(USER, ORDER_ID, "refund-unclassified", REQUEST))
         .isSameAs(unclassified);
+  }
+
+  @Test
+  void sessionPolicyRestorationFailureNeverEntersContentionRecovery() {
+    MySqlSessionPolicyRestorationException restoration =
+        new MySqlSessionPolicyRestorationException(mysqlFailure(1205));
+    doThrow(restoration)
+        .when(transactions)
+        .mutate(eq(RefundTransactions.Entry.DIRECT_INITIAL_MUTATION), any());
+
+    assertThatThrownBy(() -> service.request(USER, ORDER_ID, "refund-restore-failure", REQUEST))
+        .isSameAs(restoration);
+    verify(transactions, never())
+        .observe(eq(RefundTransactions.Entry.DIRECT_TRUTH_OBSERVATION), any());
+    verify(transactions, never()).mutate(eq(RefundTransactions.Entry.DIRECT_FINAL_MUTATION), any());
+    verifyNoInteractions(refunds, payments);
   }
 
   @Test

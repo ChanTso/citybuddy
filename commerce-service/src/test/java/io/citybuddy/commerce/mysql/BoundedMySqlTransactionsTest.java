@@ -8,10 +8,12 @@ import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.when;
 
+import java.sql.SQLException;
+import java.util.concurrent.atomic.AtomicBoolean;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
 import org.mockito.InOrder;
-import org.springframework.dao.DataAccessResourceFailureException;
+import org.springframework.dao.CannotAcquireLockException;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.transaction.TransactionStatus;
 import org.springframework.transaction.support.TransactionCallback;
@@ -52,17 +54,29 @@ class BoundedMySqlTransactionsTest {
   void restorationFailureIsVisibleAndCannotReturnAContaminatedSuccess() {
     JdbcTemplate jdbc = mock(JdbcTemplate.class);
     TransactionTemplate template = activeTransactionTemplate();
+    AtomicBoolean workCompleted = new AtomicBoolean();
     when(jdbc.queryForObject("SELECT @@SESSION.innodb_lock_wait_timeout", Long.class))
         .thenReturn(50L);
     org.mockito.Mockito.doNothing()
-        .doThrow(new DataAccessResourceFailureException("controlled restore failure"))
+        .doThrow(
+            new CannotAcquireLockException(
+                "controlled restore failure",
+                new SQLException("restore lock timeout", "HY000", 1205)))
         .when(jdbc)
         .execute(any(String.class));
     BoundedMySqlTransactions transactions = new BoundedMySqlTransactions(jdbc, template, 1);
 
-    assertThatThrownBy(() -> transactions.execute(() -> "observed"))
-        .isInstanceOf(DataAccessResourceFailureException.class)
-        .hasMessageContaining("restore");
+    assertThatThrownBy(
+            () ->
+                transactions.execute(
+                    () -> {
+                      workCompleted.set(true);
+                      return "observed";
+                    }))
+        .isInstanceOf(MySqlSessionPolicyRestorationException.class)
+        .hasMessageContaining("restoration failed")
+        .hasRootCauseInstanceOf(SQLException.class);
+    assertThat(workCompleted).isTrue();
   }
 
   @Test

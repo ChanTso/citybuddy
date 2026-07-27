@@ -1,6 +1,7 @@
 package io.citybuddy.commerce.refund;
 
 import io.citybuddy.commerce.mysql.BoundedMySqlTransactions;
+import io.citybuddy.commerce.mysql.MySqlSessionPolicyRestorationException;
 import java.sql.SQLException;
 import java.time.Duration;
 import java.util.Set;
@@ -46,6 +47,13 @@ final class RefundTransactions {
 
   static boolean isMySqlContention(Throwable failure) {
     Throwable current = failure;
+    while (current != null) {
+      if (current instanceof MySqlSessionPolicyRestorationException) {
+        return false;
+      }
+      current = current.getCause();
+    }
+    current = failure;
     while (current != null) {
       if (current instanceof SQLException sql
           && (sql.getErrorCode() == 1205 || sql.getErrorCode() == 1213)) {

@@ -4,11 +4,14 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 import io.citybuddy.commerce.identity.IdentityVerificationUnavailableException;
+import io.citybuddy.commerce.mysql.MySqlSessionPolicyRestorationException;
+import java.sql.SQLException;
 import java.util.Map;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
 import org.springframework.boot.test.system.CapturedOutput;
 import org.springframework.boot.test.system.OutputCaptureExtension;
+import org.springframework.dao.CannotAcquireLockException;
 import org.springframework.dao.DataAccessResourceFailureException;
 
 @ExtendWith(OutputCaptureExtension.class)
@@ -61,6 +64,12 @@ class RefundRejectionAttributionTest {
         handler.handleUnavailable(
             new IdentityVerificationUnavailableException(
                 new IllegalStateException("private JWKS detail")));
+    var restorationResponse =
+        handler.handleUnavailable(
+            new MySqlSessionPolicyRestorationException(
+                new CannotAcquireLockException(
+                    "private restore detail",
+                    new SQLException("private restore SQL", "HY000", 1205))));
 
     assertThat(response.getStatusCode().value()).isEqualTo(503);
     assertThat(response.getBody())
@@ -69,10 +78,14 @@ class RefundRejectionAttributionTest {
         .doesNotContainKey("reason");
     assertThat(identityResponse.getStatusCode().value()).isEqualTo(503);
     assertThat(identityResponse.getBody()).isEqualTo(response.getBody());
+    assertThat(restorationResponse.getStatusCode().value()).isEqualTo(503);
+    assertThat(restorationResponse.getBody()).isEqualTo(response.getBody());
     assertThat(output)
         .contains("reason_code=REFUND_DEPENDENCY_UNAVAILABLE")
         .doesNotContain("private persistence detail")
-        .doesNotContain("private JWKS detail");
+        .doesNotContain("private JWKS detail")
+        .doesNotContain("private restore detail")
+        .doesNotContain("private restore SQL");
   }
 
   @Test
