@@ -46,6 +46,12 @@ request. A later semantic diff change requires the checklist to be executed and 
   same failed resource state. Prove restoration with a real single-connection pool by borrowing the
   physical session again after the failure and comparing the original value; a mocked `finally`
   call or a disposable non-pooled connection is not cleanup evidence.
+  Preserve cleanup-failure provenance before scanning nested technical causes. A session-policy
+  restoration failure may wrap the original work failure, including a MySQL 1205/1213; the owning
+  boundary must classify the restoration producer first so a contaminated pooled session cannot be
+  returned as ordinary contention, replay, conflict, or success. Prove the work result is discarded,
+  no recovery observation or final mutation runs, and the closed dependency-unavailable attribution
+  remains server-only.
   Only a positively identified database resource or transaction-acquisition failure may use the
   unavailable response. Exercise found, confirmed-absent recovery, indeterminate-then-found,
   persistently indeterminate, conflicting intent, and real dependency unavailability independently.
