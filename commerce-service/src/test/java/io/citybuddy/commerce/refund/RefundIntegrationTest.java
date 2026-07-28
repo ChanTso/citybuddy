@@ -1319,6 +1319,20 @@ class RefundIntegrationTest {
   }
 
   @Test
+  void contradictoryAndOverflowingReservationAggregatesAreDurableIntegrityConflicts() {
+    PaidFixture contradictory = seedPaidStandard(1000, "refund-aggregate-contradiction");
+    insertRawRequestedRefund(contradictory, "refund-aggregate-contradiction-a", 1000, 600);
+    insertRawRequestedRefund(contradictory, "refund-aggregate-contradiction-b", 1000, 600);
+    assertReservationAggregateConflict(contradictory, "refund-aggregate-contradiction-request");
+
+    PaidFixture overflowing = seedPaidStandard(1000, "refund-aggregate-overflow");
+    insertRawRequestedRefund(
+        overflowing, "refund-aggregate-overflow-a", Long.MAX_VALUE, Long.MAX_VALUE);
+    insertRawRequestedRefund(overflowing, "refund-aggregate-overflow-b", 1, 1);
+    assertReservationAggregateConflict(overflowing, "refund-aggregate-overflow-request");
+  }
+
+  @Test
   void databaseRejectsInvalidRefundAmountsAndStateShapes() {
     assertThatThrownBy(
             () ->
@@ -1375,6 +1389,45 @@ class RefundIntegrationTest {
             "SUCCEEDED");
     payments.callback(callbackKey, callback);
     return new PaidFixture(orderId, attempt.attemptId(), productId, callbackKey, callback);
+  }
+
+  private void insertRawRequestedRefund(
+      PaidFixture paid, String idempotencyKey, long eligibleAmount, long requestedAmount) {
+    jdbc.update(
+        """
+        INSERT INTO mock_refund
+          (refund_id, user_subject, order_id, order_kind, payment_attempt_id,
+           request_idempotency_key, intent_hash, eligible_amount_minor,
+           requested_amount_minor, currency)
+        VALUES (?, ?, ?, 'STANDARD', ?, ?, REPEAT('0', 64), ?, ?, 'AUD')
+        """,
+        UUID.randomUUID().toString(),
+        USER,
+        paid.orderId(),
+        paid.attemptId(),
+        idempotencyKey,
+        eligibleAmount,
+        requestedAmount);
+  }
+
+  private void assertReservationAggregateConflict(PaidFixture paid, String idempotencyKey) {
+    long refundsBefore = refundCount(paid.orderId());
+    long outboxBefore = jdbc.queryForObject("SELECT COUNT(*) FROM commerce_outbox", Long.class);
+    assertThatThrownBy(
+            () ->
+                refunds.request(
+                    USER, paid.orderId(), idempotencyKey, new RefundRequest(1L, "AUD", null)))
+        .isInstanceOfSatisfying(
+            RefundException.class,
+            exception -> {
+              assertThat(exception.status()).isEqualTo(409);
+              assertThat(exception.category()).isEqualTo("CONFLICT");
+              assertThat(exception.reason())
+                  .isEqualTo(RefundRejectionReason.REFUND_DURABLE_TRUTH_INCONSISTENT);
+            });
+    assertThat(refundCount(paid.orderId())).isEqualTo(refundsBefore);
+    assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM commerce_outbox", Long.class))
+        .isEqualTo(outboxBefore);
   }
 
   private String seedStandardOrder(String user, long amount, String suffix) {

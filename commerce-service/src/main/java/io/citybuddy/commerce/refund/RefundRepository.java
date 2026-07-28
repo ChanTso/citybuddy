@@ -137,7 +137,11 @@ public class RefundRepository {
             attemptId);
     long total = 0;
     for (long amount : amounts) {
-      total = Math.addExact(total, amount);
+      try {
+        total = Math.addExact(total, amount);
+      } catch (ArithmeticException exception) {
+        throw new RefundIntegrityException("Refund reservation aggregate is corrupted", exception);
+      }
     }
     return total;
   }
@@ -405,6 +409,10 @@ public class RefundRepository {
   public static final class RefundIntegrityException extends IllegalStateException {
     public RefundIntegrityException(String message) {
       super(message);
+    }
+
+    public RefundIntegrityException(String message, Throwable cause) {
+      super(message, cause);
     }
   }
 

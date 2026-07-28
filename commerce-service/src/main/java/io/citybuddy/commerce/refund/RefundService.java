@@ -459,7 +459,15 @@ public final class RefundService {
 
   private void requireCapacity(
       MockPaymentRepository.AttemptRecord attempt, long requestedAmountMinor) {
-    long reserved = refunds.reservedAmount(attempt.attemptId());
+    long reserved;
+    try {
+      reserved = refunds.reservedAmount(attempt.attemptId());
+    } catch (RefundRepository.RefundIntegrityException exception) {
+      throw durableConflict("Refund reservation total is corrupted");
+    }
+    if (reserved < 0 || reserved > attempt.amountMinor()) {
+      throw durableConflict("Refund reservation total is corrupted");
+    }
     long remaining;
     try {
       remaining = Math.subtractExact(attempt.amountMinor(), reserved);
