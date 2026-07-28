@@ -180,6 +180,24 @@ def action_argument_commitment(
     return hashlib.sha256(material.encode("utf-8")).hexdigest()
 
 
+def canonical_action_timestamp(value: datetime) -> str:
+    if value.tzinfo is None or value.utcoffset() is None:
+        raise ValueError("Action timestamp must be timezone-aware")
+    return value.astimezone(UTC).isoformat(timespec="microseconds").replace("+00:00", "Z")
+
+
+def parse_canonical_action_timestamp(value: object) -> datetime:
+    if not isinstance(value, str) or len(value) != 27:
+        raise ValueError("Action timestamp must be a bounded canonical string")
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError as exception:
+        raise ValueError("Action timestamp must be ISO-8601") from exception
+    if canonical_action_timestamp(parsed) != value:
+        raise ValueError("Action timestamp must use canonical UTC microseconds")
+    return parsed.astimezone(UTC)
+
+
 @dataclass(frozen=True)
 class PendingActionReference:
     pending_action_id: str

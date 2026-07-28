@@ -453,6 +453,7 @@ start_auth() {
 start_commerce() {
   local profile="$1"
   local auth_base="$2"
+  local action_pending_ttl="${3:-15m}"
   local -a profile_argument=()
   local -a payment_arguments=()
   local log_offset
@@ -472,7 +473,7 @@ start_commerce() {
       --citybuddy.refund.observation-backoff=25ms
       --citybuddy.actions.enabled=true
       --citybuddy.actions.required-scope=refund:create
-      --citybuddy.actions.pending-ttl=15m
+      --citybuddy.actions.pending-ttl="$action_pending_ttl"
       --citybuddy.actions.lock-wait-timeout-seconds=1
       --citybuddy.actions.maximum-observation-attempts=2
       --citybuddy.actions.observation-backoff=25ms
@@ -3748,11 +3749,34 @@ assert_equal 0 \
     "SELECT COUNT(*) FROM action_receipt WHERE pending_action_id = '$agent_decline_pending_id'")" \
   "decline integrity rejection creates no authoritative receipt"
 
+stop_process agent_pid "$agent_pid"
+stop_process commerce_pid "$commerce_pid"
+start_commerce evaluation "http://127.0.0.1:$auth_port" 1m
+start_agent true
+
 prepare_agent_action_case cb121-expiry
 agent_expiry_session="$prepared_case_session"
 agent_expiry_pending_id="$prepared_case_pending_id"
-mysql_query root "$root_password" cs_db \
-  "UPDATE pending_action_reference SET expires_at = DATE_SUB(CURRENT_TIMESTAMP(6), INTERVAL 1 SECOND) WHERE pending_action_id = '$agent_expiry_pending_id'"
+agent_expiry_prepared_trace="$(mysql_query agent_app "$agent_app_password" cs_db \
+  "SELECT trace_id FROM support_turn WHERE session_id = '$agent_expiry_session' AND correlation_key = 'cb121-expiry-prepare'")"
+agent_expiry_event_timestamp="$(mysql_query agent_app "$agent_app_password" cs_db \
+  "SELECT JSON_UNQUOTE(JSON_EXTRACT(payload_json, '$.expiresAt')) FROM support_event WHERE turn_id = (SELECT turn_id FROM support_turn WHERE trace_id = '$agent_expiry_prepared_trace') AND event_type = 'ACTION_PREPARED'")"
+assert_equal \
+  "$(mysql_query agent_app "$agent_app_password" cs_db \
+    "SELECT DATE_FORMAT(expires_at, '%Y-%m-%dT%H:%i:%s.%fZ') FROM pending_action_reference WHERE pending_action_id = '$agent_expiry_pending_id'")" \
+  "$agent_expiry_event_timestamp" \
+  "prepared action expiry is immutably anchored by the preparation event"
+agent_expiry_elapsed=false
+for _ in {1..75}; do
+  if [[ "$(mysql_query agent_app "$agent_app_password" cs_db \
+    "SELECT expires_at <= CURRENT_TIMESTAMP(6) FROM pending_action_reference WHERE pending_action_id = '$agent_expiry_pending_id'")" == 1 ]]; then
+    agent_expiry_elapsed=true
+    break
+  fi
+  sleep 1
+done
+assert_equal true "$agent_expiry_elapsed" \
+  "the configured one-minute PendingAction reaches its real expiry within the bounded fixture"
 assert_status 200 "an expired local reference resolves without commerce execution" \
   --request POST "http://127.0.0.1:$agent_port/api/chat" \
   --header "Authorization: Bearer $payment_token" \
@@ -3806,6 +3830,73 @@ assert_equal 0 \
     "SELECT COUNT(*) FROM action_receipt WHERE pending_action_id = '$agent_expiry_pending_id'")" \
   "expiry integrity rejection creates no authoritative receipt"
 
+assert_agent_expiry_corruption() {
+  local case_name="$1"
+  local expiry_expression="$2"
+  local label="$3"
+  prepare_agent_action_case "$case_name"
+  local session_id="$prepared_case_session"
+  local pending_action_id="$prepared_case_pending_id"
+  local prepared_trace
+  local original_expiry
+  prepared_trace="$(mysql_query agent_app "$agent_app_password" cs_db \
+    "SELECT trace_id FROM support_turn WHERE session_id = '$session_id' AND correlation_key = '$case_name-prepare'")"
+  original_expiry="$(mysql_query agent_app "$agent_app_password" cs_db \
+    "SELECT DATE_FORMAT(expires_at, '%Y-%m-%d %H:%i:%s.%f') FROM pending_action_reference WHERE pending_action_id = '$pending_action_id'")"
+  mysql_query root "$root_password" cs_db \
+    "UPDATE pending_action_reference SET expires_at = $expiry_expression WHERE pending_action_id = '$pending_action_id'"
+  assert_agent_status_reason 409 agent_request_rejected \
+    CONVERSATION_ACTION_DURABLE_TRUTH_INCONSISTENT "Conversation evidence conflict" \
+    "$label is rejected by the public conversation boundary" \
+    --request POST "http://127.0.0.1:$agent_port/api/chat" \
+    --header "Authorization: Bearer $payment_token" \
+    --header 'X-Eval-Sandbox-Id: sandbox-payment' \
+    --header "X-Session-Id: $session_id" \
+    --header "Idempotency-Key: $case_name-resolution" \
+    --header 'Content-Type: application/json' \
+    --data '{"message":"later"}'
+  assert_agent_status_reason 409 evaluation_request_rejected \
+    EVALUATION_ACTION_DURABLE_TRUTH_INCONSISTENT "Evidence unavailable" \
+    "$label is rejected by evaluation action-truth reconciliation" \
+    --request GET "http://127.0.0.1:$agent_port/api/eval/evidence/$prepared_trace" \
+    --user "evaluation-manager:$management_password" \
+    --header 'X-Eval-Sandbox-Id: sandbox-payment'
+  assert_equal 'PENDING:0:0:0' \
+    "$(mysql_query agent_app "$agent_app_password" cs_db \
+      "SELECT CONCAT((SELECT state FROM pending_action_reference WHERE pending_action_id = '$pending_action_id'), ':', (SELECT COUNT(*) FROM action_receipt_projection WHERE pending_action_id = '$pending_action_id'), ':', (SELECT COUNT(*) FROM support_event WHERE session_id = '$session_id' AND event_type = 'ACTION_RECEIPT'), ':', (SELECT COUNT(*) FROM support_turn WHERE session_id = '$session_id' AND outcome IN ('action_expired', 'action_completed')))")" \
+    "$label creates zero projection, receipt, expiry, or completion effects"
+  assert_equal 0 \
+    "$(mysql_query commerce_app "$commerce_app_password" commerce_db \
+      "SELECT COUNT(*) FROM action_receipt WHERE pending_action_id = '$pending_action_id'")" \
+    "$label does not execute commerce"
+  mysql_query root "$root_password" cs_db \
+    "UPDATE pending_action_reference SET expires_at = '$original_expiry' WHERE pending_action_id = '$pending_action_id'"
+  assert_status 200 "$label recovery restores evaluation evidence" \
+    --request GET "http://127.0.0.1:$agent_port/api/eval/evidence/$prepared_trace" \
+    --user "evaluation-manager:$management_password" \
+    --header 'X-Eval-Sandbox-Id: sandbox-payment'
+  assert_status 200 "$label recovery restores exact prepare replay" \
+    --request POST "http://127.0.0.1:$agent_port/api/chat" \
+    --header "Authorization: Bearer $payment_token" \
+    --header 'X-Eval-Sandbox-Id: sandbox-payment' \
+    --header "X-Session-Id: $session_id" \
+    --header "Idempotency-Key: $case_name-prepare" \
+    --header 'Content-Type: application/json' \
+    --data '{"message":"action-prepare-small"}'
+}
+
+assert_agent_expiry_corruption cb121-expiry-past \
+  'DATE_SUB(CURRENT_TIMESTAMP(6), INTERVAL 1 SECOND)' \
+  "past PendingAction expiry corruption"
+assert_agent_expiry_corruption cb121-expiry-future \
+  'DATE_ADD(CURRENT_TIMESTAMP(6), INTERVAL 1 DAY)' \
+  "future PendingAction expiry corruption"
+
+stop_process agent_pid "$agent_pid"
+stop_process commerce_pid "$commerce_pid"
+start_commerce evaluation "http://127.0.0.1:$auth_port"
+start_agent true
+
 prepare_agent_action_case cb121-action action-prepare
 agent_action_session="$prepared_case_session"
 agent_pending_id="$prepared_case_pending_id"
@@ -3828,6 +3919,8 @@ assert_status 200 "prepared action evaluation is anchored to its durable referen
   --header 'X-Eval-Sandbox-Id: sandbox-payment'
 agent_argument_commitment="$(mysql_query agent_app "$agent_app_password" cs_db \
   "SELECT argument_commitment FROM pending_action_reference WHERE pending_action_id = '$agent_pending_id'")"
+agent_prepared_expires_at="$(mysql_query agent_app "$agent_app_password" cs_db \
+  "SELECT JSON_UNQUOTE(JSON_EXTRACT(payload_json, '$.expiresAt')) FROM support_event WHERE turn_id = (SELECT turn_id FROM support_turn WHERE trace_id = '$agent_prepare_trace') AND event_type = 'ACTION_PREPARED'")"
 mysql_query root "$root_password" cs_db \
   "UPDATE support_event SET payload_json = JSON_QUOTE('malformed') WHERE turn_id = (SELECT turn_id FROM support_turn WHERE trace_id = '$agent_prepare_trace') AND event_type = 'ACTION_PREPARED'"
 assert_agent_status_reason 409 evaluation_request_rejected \
@@ -3837,7 +3930,7 @@ assert_agent_status_reason 409 evaluation_request_rejected \
   --user "evaluation-manager:$management_password" \
   --header 'X-Eval-Sandbox-Id: sandbox-payment'
 mysql_query root "$root_password" cs_db \
-  "UPDATE support_event SET payload_json = JSON_OBJECT('pendingActionId', '$agent_pending_id', 'actionType', 'REFUND_REQUEST', 'argumentCommitment', '$agent_argument_commitment') WHERE turn_id = (SELECT turn_id FROM support_turn WHERE trace_id = '$agent_prepare_trace') AND event_type = 'ACTION_PREPARED'"
+  "UPDATE support_event SET payload_json = JSON_OBJECT('pendingActionId', '$agent_pending_id', 'actionType', 'REFUND_REQUEST', 'argumentCommitment', '$agent_argument_commitment', 'expiresAt', '$agent_prepared_expires_at') WHERE turn_id = (SELECT turn_id FROM support_turn WHERE trace_id = '$agent_prepare_trace') AND event_type = 'ACTION_PREPARED'"
 assert_status 200 "restored ACTION_PREPARED payload restores action evidence" \
   --request GET "http://127.0.0.1:$agent_port/api/eval/evidence/$agent_prepare_trace" \
   --user "evaluation-manager:$management_password" \

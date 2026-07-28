@@ -18,6 +18,8 @@ from .actions import (
     PendingActionReference,
     StoredActionReceipt,
     action_argument_commitment,
+    canonical_action_timestamp,
+    parse_canonical_action_timestamp,
     strict_json_object,
 )
 from .agent_control import AgentEvent
@@ -701,6 +703,7 @@ class MysqlConversationStore:
                         "pendingActionId": pending_action.pending_action_id,
                         "actionType": pending_action.action_type,
                         "argumentCommitment": pending_action.argument_commitment,
+                        "expiresAt": canonical_action_timestamp(pending_action.expires_at),
                     }:
                         raise RuntimeError("PendingAction reference and preparation event disagree")
                     if pending_action is not None:
@@ -1497,11 +1500,20 @@ class MysqlConversationStore:
             raise ConversationIntegrityError(
                 "PendingAction preparation event is invalid"
             ) from exception
+        try:
+            prepared_expiry = parse_canonical_action_timestamp(
+                payload.get("expiresAt") if isinstance(payload, dict) else None
+            )
+        except ValueError as exception:
+            raise ConversationIntegrityError(
+                "PendingAction preparation event expiry is invalid"
+            ) from exception
         if payload != {
             "pendingActionId": reference.pending_action_id,
             "actionType": reference.action_type,
             "argumentCommitment": reference.argument_commitment,
-        }:
+            "expiresAt": canonical_action_timestamp(prepared_expiry),
+        } or prepared_expiry != reference.expires_at.astimezone(UTC):
             raise ConversationIntegrityError("PendingAction preparation event is inconsistent")
         cursor.execute(
             "SELECT confirmation_turn_id, confirmation_trace_id "

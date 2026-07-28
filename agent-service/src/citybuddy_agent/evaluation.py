@@ -9,7 +9,13 @@ from typing import Literal, Protocol, cast
 import pymysql
 from pydantic import AwareDatetime, BaseModel, ConfigDict, Field
 
-from .actions import ActionReceiptPayload, action_argument_commitment, strict_json_object
+from .actions import (
+    ActionReceiptPayload,
+    action_argument_commitment,
+    canonical_action_timestamp,
+    parse_canonical_action_timestamp,
+    strict_json_object,
+)
 
 MAX_EVIDENCE_EVENTS = 48
 MAX_FEEDBACK_RECORDS = 8
@@ -449,8 +455,12 @@ class MysqlEvaluationEvidenceStore:
             pending_action_id = payload.get("pendingActionId")
             action_type = payload.get("actionType")
             commitment = payload.get("argumentCommitment")
+            try:
+                parse_canonical_action_timestamp(payload.get("expiresAt"))
+            except ValueError:
+                raise EvaluationEvidenceInvalid from None
             if (
-                set(payload) != {"pendingActionId", "actionType", "argumentCommitment"}
+                set(payload) != {"pendingActionId", "actionType", "argumentCommitment", "expiresAt"}
                 or not self._canonical_uuid(pending_action_id)
                 or action_type != "REFUND_REQUEST"
                 or not self._commitment(commitment)
@@ -750,11 +760,22 @@ class MysqlEvaluationEvidenceStore:
             (pending[1],),
         )
         prepared_rows = cursor.fetchall()
-        if len(prepared_rows) != 1 or self._payload(prepared_rows[0][0]) != {
+        if len(prepared_rows) != 1:
+            raise EvaluationEvidenceInvalid
+        prepared_payload = self._payload(prepared_rows[0][0])
+        try:
+            prepared_expiry = parse_canonical_action_timestamp(prepared_payload.get("expiresAt"))
+        except ValueError:
+            raise EvaluationEvidenceInvalid from None
+        persisted_expiry = pending[13]
+        if persisted_expiry.tzinfo is None:
+            persisted_expiry = persisted_expiry.replace(tzinfo=UTC)
+        if prepared_payload != {
             "pendingActionId": str(pending[0]),
             "actionType": str(pending[7]),
             "argumentCommitment": str(pending[8]),
-        }:
+            "expiresAt": canonical_action_timestamp(prepared_expiry),
+        } or prepared_expiry != persisted_expiry.astimezone(UTC):
             raise EvaluationEvidenceInvalid
         cursor.execute(
             "SELECT pending_action_id FROM action_receipt_projection "

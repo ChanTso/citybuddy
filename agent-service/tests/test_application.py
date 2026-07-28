@@ -16,6 +16,7 @@ from citybuddy_agent.actions import (
     PendingActionReference,
     StoredActionReceipt,
     action_argument_commitment,
+    canonical_action_timestamp,
 )
 from citybuddy_agent.agent_control import (
     AgentEvent,
@@ -453,6 +454,7 @@ class PendingAgent(AgentRunner):
                         "pendingActionId": self.pending.pending_action_id,
                         "actionType": self.pending.action_type,
                         "argumentCommitment": self.pending.argument_commitment,
+                        "expiresAt": canonical_action_timestamp(self.pending.expires_at),
                     },
                 ),
             ),
@@ -758,12 +760,14 @@ def test_resolved_action_replay_and_evaluation_require_the_pending_projection(
     order_id = "00000000-0000-0000-0000-000000000040"
     commitment = action_argument_commitment("REFUND_REQUEST", order_id, 400, "CNY")
     now = datetime.now(UTC)
+    expires_at = now + timedelta(minutes=5)
     event_payload = json.dumps({"pendingActionId": pending_action_id, "outcome": event_outcome})
     prepared_payload = json.dumps(
         {
             "pendingActionId": pending_action_id,
             "actionType": "REFUND_REQUEST",
             "argumentCommitment": commitment,
+            "expiresAt": canonical_action_timestamp(expires_at),
         }
     )
     pending_row = (
@@ -780,7 +784,7 @@ def test_resolved_action_replay_and_evaluation_require_the_pending_projection(
         400,
         "CNY",
         state,
-        now + timedelta(minutes=5),
+        expires_at,
         now,
         None,
         None,
@@ -865,6 +869,79 @@ def test_resolved_action_replay_and_evaluation_require_the_pending_projection(
             subject="user-1",
             sandbox_id="sandbox-1",
             outcome=terminal_outcome,
+        )
+
+
+def test_pending_action_expiry_requires_exact_prepared_event_anchor() -> None:
+    pending_action_id = "00000000-0000-0000-0000-000000000121"
+    source_turn_id = "00000000-0000-0000-0000-000000000122"
+    source_trace_id = "00000000-0000-0000-0000-000000000123"
+    conversation_id = "00000000-0000-0000-0000-000000000124"
+    order_id = "00000000-0000-0000-0000-000000000040"
+    commitment = action_argument_commitment("REFUND_REQUEST", order_id, 400, "CNY")
+    expires_at = datetime(2026, 7, 28, 4, 0, 0, 123456, tzinfo=UTC)
+    pending_row = (
+        pending_action_id,
+        source_turn_id,
+        source_trace_id,
+        conversation_id,
+        "session-1",
+        "user-1",
+        "sandbox-1",
+        "REFUND_REQUEST",
+        commitment,
+        order_id,
+        400,
+        "CNY",
+        "PENDING",
+        expires_at,
+        None,
+        None,
+        None,
+    )
+    damaged_payload = json.dumps(
+        {
+            "pendingActionId": pending_action_id,
+            "actionType": "REFUND_REQUEST",
+            "argumentCommitment": commitment,
+            "expiresAt": canonical_action_timestamp(expires_at + timedelta(seconds=1)),
+        }
+    )
+
+    with pytest.raises(ConversationIntegrityError, match="preparation event is inconsistent"):
+        MysqlConversationStore._load_pending_action_for_turn(
+            ScriptedCursor([[pending_row], [(damaged_payload,)]]),  # type: ignore[arg-type]
+            turn_id=source_turn_id,
+            trace_id=source_trace_id,
+            conversation_id=conversation_id,
+            session_id="session-1",
+            subject="user-1",
+            sandbox_id="sandbox-1",
+        )
+
+    evaluation_cursor = ScriptedCursor(
+        [
+            [
+                (
+                    source_trace_id,
+                    conversation_id,
+                    "session-1",
+                    "user-1",
+                    "COMPLETED",
+                    "action_pending",
+                )
+            ],
+            [(damaged_payload,)],
+        ]
+    )
+    with pytest.raises(EvaluationEvidenceInvalid):
+        MysqlEvaluationEvidenceStore._validate_pending_truth_row(
+            object.__new__(MysqlEvaluationEvidenceStore),
+            evaluation_cursor,  # type: ignore[arg-type]
+            pending=pending_row,
+            session_id="session-1",
+            subject="user-1",
+            sandbox_id="sandbox-1",
         )
 
 

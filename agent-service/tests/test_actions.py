@@ -10,7 +10,9 @@ from citybuddy_agent.actions import (
     ConfirmationDecision,
     PendingActionPayload,
     bounded_http_post,
+    canonical_action_timestamp,
     confirmation_decision,
+    parse_canonical_action_timestamp,
     strict_json_object,
 )
 from pydantic import ValidationError
@@ -72,6 +74,21 @@ def receipt_document() -> dict[str, object]:
 )
 def test_confirmation_grammar_is_closed(message: str, expected: ConfirmationDecision) -> None:
     assert confirmation_decision(message) is expected
+
+
+def test_action_timestamp_round_trip_is_canonical_and_bounded() -> None:
+    timestamp = datetime(2026, 7, 28, 4, 0, 0, 123456, tzinfo=UTC)
+    encoded = canonical_action_timestamp(timestamp)
+    assert encoded == "2026-07-28T04:00:00.123456Z"
+    assert parse_canonical_action_timestamp(encoded) == timestamp
+    for invalid in (
+        "2026-07-28T04:00:00Z",
+        "2026-07-28T04:00:00.123456+00:00",
+        "2026-07-28T14:00:00.123456+10:00",
+        True,
+    ):
+        with pytest.raises(ValueError):
+            parse_canonical_action_timestamp(invalid)
 
 
 def test_strict_action_decoder_rejects_duplicate_unknown_and_unbounded_values() -> None:

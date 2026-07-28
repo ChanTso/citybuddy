@@ -21,6 +21,7 @@ from .actions import (
     RefundActionArguments,
     action_argument_commitment,
     bounded_http_post,
+    canonical_action_timestamp,
     strict_json_object,
 )
 from .faq_cache import FaqCache
@@ -1075,6 +1076,9 @@ class BoundedAgent:
                                 "pendingActionId": result.pending_action.pending_action_id,
                                 "actionType": result.pending_action.action_type,
                                 "argumentCommitment": result.pending_action.argument_commitment,
+                                "expiresAt": canonical_action_timestamp(
+                                    result.pending_action.expires_at
+                                ),
                             },
                         )
                     )
