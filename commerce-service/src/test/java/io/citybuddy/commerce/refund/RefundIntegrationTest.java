@@ -1319,7 +1319,7 @@ class RefundIntegrationTest {
   }
 
   @Test
-  void contradictoryAndOverflowingReservationAggregatesAreDurableIntegrityConflicts() {
+  void contradictoryOverflowingAndLargeReservationAggregatesAreDurableIntegrityConflicts() {
     PaidFixture contradictory = seedPaidStandard(1000, "refund-aggregate-contradiction");
     insertRawRequestedRefund(contradictory, "refund-aggregate-contradiction-a", 1000, 600);
     insertRawRequestedRefund(contradictory, "refund-aggregate-contradiction-b", 1000, 600);
@@ -1330,6 +1330,12 @@ class RefundIntegrationTest {
         overflowing, "refund-aggregate-overflow-a", Long.MAX_VALUE, Long.MAX_VALUE);
     insertRawRequestedRefund(overflowing, "refund-aggregate-overflow-b", 1, 1);
     assertReservationAggregateConflict(overflowing, "refund-aggregate-overflow-request");
+
+    PaidFixture large = seedPaidStandard(1000, "refund-aggregate-large");
+    for (int index = 0; index < 1025; index++) {
+      insertRawRequestedRefund(large, "refund-aggregate-large-" + index, 1000, 1);
+    }
+    assertReservationAggregateConflict(large, "refund-aggregate-large-request");
   }
 
   @Test

@@ -3,6 +3,7 @@ package io.citybuddy.commerce.refund;
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import io.citybuddy.commerce.payment.MockPaymentRepository;
+import java.math.BigDecimal;
 import java.sql.Timestamp;
 import java.time.Instant;
 import java.util.List;
@@ -123,27 +124,21 @@ public class RefundRepository {
   }
 
   public long reservedAmount(String attemptId) {
-    List<Long> amounts =
-        jdbc.query(
+    BigDecimal total =
+        jdbc.queryForObject(
             """
-            SELECT requested_amount_minor
+            SELECT COALESCE(SUM(requested_amount_minor), 0)
             FROM mock_refund
             WHERE payment_attempt_id = ?
               AND state IN ('REQUESTED', 'PROCESSING', 'SUCCEEDED')
-            ORDER BY created_at, refund_id
-            FOR UPDATE
             """,
-            (result, row) -> result.getLong("requested_amount_minor"),
+            BigDecimal.class,
             attemptId);
-    long total = 0;
-    for (long amount : amounts) {
-      try {
-        total = Math.addExact(total, amount);
-      } catch (ArithmeticException exception) {
-        throw new RefundIntegrityException("Refund reservation aggregate is corrupted", exception);
-      }
+    try {
+      return total == null ? 0 : total.longValueExact();
+    } catch (ArithmeticException exception) {
+      throw new RefundIntegrityException("Refund reservation aggregate is corrupted", exception);
     }
-    return total;
   }
 
   public void insertRefund(RefundRecord refund) {
