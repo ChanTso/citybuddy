@@ -325,3 +325,10 @@ This file records only factual pitfalls supported by merged pull-request, commit
 - 根因：业务恢复与 JDBC session 清理拥有不同的 producer 语义，但异常树中“最深 vendor code”被错误当成唯一根因。`finally` 中发生不等于清理成功；若 restoration provenance 没有优先级，可能污染连接池的失败会被嵌套的旧竞争码遮蔽。
 - 解决：中立 executor 在真实事务连接上保存、设置并恢复 `innodb_lock_wait_timeout`，退款专用边界覆盖 direct、processing、success、failure、reconciliation 全部顶层入口。1205/1213 必须先让原事务异常退出并回滚，再在新的 bounded transaction 中完成锁定读取和完整验证；direct refund 最多一次 confirmed-absence final mutation，内部生命周期返回 typed indeterminate。恢复失败使用专用资源失败类型，竞争分类器在扫描 SQLException vendor code 前先拒绝该 provenance；确定性测试证明已完成的 work 结果被丢弃、不启动 observation/final mutation，并固定归因到 server-only dependency-unavailable。真实 MySQL 1205/1213、全回滚、零部分 refund/ledger/Outbox、PendingAction 未消费、ActionReceipt 不重复以及单连接池跨借用 session policy 恢复全部通过。
 - 结论：异常根因分类不能只寻找最深技术码；当外层 producer 表示资源清理或 session policy 恢复失败时，它必须优先于被包裹的旧业务/竞争异常。否则 cleanup failure 会被误作可恢复竞争并把可能受污染的连接静默归还。`docs/REVIEW_CHECKLIST.md` 已加入该 recurring defect class。
+
+## CB-118 — Commerce PendingAction and atomic ActionReceipt transaction
+
+- 现象：Action 确认已经把 PendingAction 消费、退款写入、Outbox 与 ActionReceipt 放进一个事务，但复核发现退款容量读取仍把所有 active refund 金额先物化成 `List<Long>`；此外，两个各自 schema 合法的既有退款若合计超过已支付金额会被误作新请求的业务 eligibility conflict，而总和溢出 `long` 会逃逸成 500。
+- 根因：实现只在聚合完成后分类结果，没有同时验证聚合输入代表的 durable truth 是否成立，也没有把“有界”施加在数据库获取边界。于是内容完整性损坏既可能被降格为普通业务拒绝，也可能在到达分类逻辑前因无界物化或算术溢出失败。
+- 解决：退款 repository 以数据库单行精确 `DECIMAL SUM` 取代 active-row 列表，并以 `longValueExact()` 把域外总和提升为专用 `RefundIntegrityException`；service 在计算本次可退款余额前先把负数、超过已支付总额与溢出统一归因到 `REFUND_DURABLE_TRUTH_INCONSISTENT`。真实 MySQL 回归分别构造 600+600、`Long.MAX_VALUE + 1` 与 1,025 条独立 active refund，均固定返回 attributed 409，且 refund/Outbox 计数不变；完整 Action 原子事务、并发、响应丢失与回放证据保持通过。
+- 结论：聚合值也属于持久真值，必须先验证其完整性再用于业务资格判定；“结果集合最终很小”不能证明获取有界，边界必须在数据库查询阶段收敛为固定大小。本次属于现有 “Bounds apply before materialization” 与 attributable fault classification 清单项，没有新增 recurring defect class。

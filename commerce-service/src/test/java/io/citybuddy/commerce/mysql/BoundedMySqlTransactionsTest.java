@@ -9,6 +9,7 @@ import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.when;
 
 import java.sql.SQLException;
+import java.util.Optional;
 import java.util.concurrent.atomic.AtomicBoolean;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
@@ -48,6 +49,18 @@ class BoundedMySqlTransactionsTest {
     ordered.verify(jdbc).execute("SET SESSION innodb_lock_wait_timeout = 2");
     ordered.verify(work).run();
     ordered.verify(jdbc).execute("SET SESSION innodb_lock_wait_timeout = 50");
+  }
+
+  @Test
+  void explicitEmptyObservationIsAValidNonNullTransactionResult() {
+    JdbcTemplate jdbc = mock(JdbcTemplate.class);
+    TransactionTemplate template = activeTransactionTemplate();
+    when(jdbc.queryForObject("SELECT @@SESSION.innodb_lock_wait_timeout", Long.class))
+        .thenReturn(50L);
+    BoundedMySqlTransactions transactions = new BoundedMySqlTransactions(jdbc, template, 2);
+
+    Optional<String> observation = transactions.execute(Optional::empty);
+    assertThat(observation).isEmpty();
   }
 
   @Test

@@ -16,6 +16,7 @@ import java.util.UUID;
 import java.util.function.Predicate;
 import java.util.regex.Pattern;
 import org.springframework.dao.DuplicateKeyException;
+import org.springframework.transaction.support.TransactionSynchronizationManager;
 
 public final class RefundService {
   private static final Pattern IDEMPOTENCY = Pattern.compile("[A-Za-z0-9._:-]{1,128}");
@@ -51,7 +52,7 @@ public final class RefundService {
     try {
       return transactions.mutate(
           RefundTransactions.Entry.DIRECT_INITIAL_MUTATION,
-          () -> requestOnce(userSubject, orderId, idempotencyKey, valid, intentHash));
+          () -> requestOnce(userSubject, orderId, idempotencyKey, valid, intentHash).refund());
     } catch (RuntimeException failure) {
       if (!isDirectCompetition(failure)) {
         throw failure;
@@ -59,6 +60,84 @@ public final class RefundService {
       return recoverRequestAfterCompetition(
           userSubject, orderId, idempotencyKey, valid, intentHash);
     }
+  }
+
+  /**
+   * Resolves and locks the complete refund target in the caller's already-active transaction.
+   *
+   * <p>This method deliberately owns no retry or transaction boundary. MySQL 1205/1213 must leave
+   * the enclosing Action transaction so that its rollback completes before Action recovery begins.
+   */
+  public ActionTarget prepareActionInCurrentTransaction(
+      String userSubject, String orderId, RefundRequest request, String sandboxId) {
+    requireCurrentTransaction();
+    requireText(userSubject, 128, "Validated refund owner is missing");
+    requireUuid(orderId, "Refund order id is invalid");
+    RefundRequest valid = requireRequest(request);
+    RefundTarget target = resolveRefundTarget(userSubject, orderId, valid);
+    requireActionSandbox(target.payment(), sandboxId);
+    requireCapacity(target.payment().attempt(), valid.amountMinor());
+    return new ActionTarget(target.payment().order(), target.payment().attempt());
+  }
+
+  /**
+   * Creates the refund and its Outbox row inside the caller's current Action transaction.
+   *
+   * <p>No contention is consumed here. The enclosing transaction must roll back before any
+   * re-observation occurs.
+   */
+  public ActionMutation requestActionInCurrentTransaction(
+      String userSubject,
+      String orderId,
+      String idempotencyKey,
+      RefundRequest request,
+      String sandboxId) {
+    requireCurrentTransaction();
+    requireText(userSubject, 128, "Validated refund owner is missing");
+    requireUuid(orderId, "Refund order id is invalid");
+    requireIdempotency(idempotencyKey);
+    RefundRequest valid = requireRequest(request);
+    String intentHash = hash(orderId + "\n" + valid.amountMinor() + "\n" + valid.currency());
+    RefundTarget target = resolveRefundTarget(userSubject, orderId, valid);
+    requireActionSandbox(target.payment(), sandboxId);
+    RefundMutation mutation =
+        requestOnceWithTarget(
+            userSubject, orderId, idempotencyKey, valid, intentHash, target.payment());
+    return new ActionMutation(mutation.refund(), mutation.outbox());
+  }
+
+  /**
+   * Reconciles the complete Action refund truth while retaining the caller's Action transaction.
+   */
+  public ActionReplayTruth validateActionReplayInCurrentTransaction(
+      String userSubject,
+      String orderId,
+      String idempotencyKey,
+      RefundRequest request,
+      String expectedRefundId,
+      String sandboxId) {
+    requireCurrentTransaction();
+    requireText(userSubject, 128, "Validated refund owner is missing");
+    requireUuid(orderId, "Refund order id is invalid");
+    requireUuid(expectedRefundId, "Refund id is invalid");
+    requireIdempotency(idempotencyKey);
+    RefundRequest valid = requireRequest(request);
+    String intentHash = hash(orderId + "\n" + valid.amountMinor() + "\n" + valid.currency());
+    RefundTarget target = resolveRefundTarget(userSubject, orderId, valid);
+    requireActionSandbox(target.payment(), sandboxId);
+    RefundRepository.RefundRecord existing =
+        refunds
+            .findByRequestForUpdate(userSubject, orderId, idempotencyKey)
+            .orElseThrow(() -> durableConflict("Action refund truth is missing"));
+    requireIntent(existing.intentHash(), intentHash);
+    if (!expectedRefundId.equals(existing.refundId())) {
+      throw durableConflict("Action refund identity conflicts with its receipt");
+    }
+    requireRefundIdentity(existing, target.payment());
+    requireStateSpecificTruth(existing, target.payment());
+    return new ActionReplayTruth(
+        result(existing, true),
+        new ActionTarget(target.payment().order(), target.payment().attempt()));
   }
 
   public RefundResult status(String userSubject, String refundId) {
@@ -154,7 +233,7 @@ public final class RefundService {
     try {
       return transactions.mutate(
           RefundTransactions.Entry.DIRECT_FINAL_MUTATION,
-          () -> requestOnce(userSubject, orderId, idempotencyKey, request, intentHash));
+          () -> requestOnce(userSubject, orderId, idempotencyKey, request, intentHash).refund());
     } catch (RuntimeException failure) {
       if (!isDirectCompetition(failure)) {
         throw failure;
@@ -308,23 +387,34 @@ public final class RefundService {
     return null;
   }
 
-  private RefundResult requestOnce(
+  private RefundMutation requestOnce(
       String userSubject,
       String orderId,
       String idempotencyKey,
       RefundRequest request,
       String intentHash) {
     RefundTarget target = resolveRefundTarget(userSubject, orderId, request);
-    MockPaymentRepository.AttemptRecord attempt = target.payment().attempt();
-    MockPaymentRepository.OrderTruth order = target.payment().order();
+    return requestOnceWithTarget(
+        userSubject, orderId, idempotencyKey, request, intentHash, target.payment());
+  }
+
+  private RefundMutation requestOnceWithTarget(
+      String userSubject,
+      String orderId,
+      String idempotencyKey,
+      RefundRequest request,
+      String intentHash,
+      CommittedPaymentTruthResolver.CommittedPaymentTruth payment) {
+    MockPaymentRepository.AttemptRecord attempt = payment.attempt();
+    MockPaymentRepository.OrderTruth order = payment.order();
 
     RefundRepository.RefundRecord existing =
         refunds.findByRequestForUpdate(userSubject, orderId, idempotencyKey).orElse(null);
     if (existing != null) {
       requireIntent(existing.intentHash(), intentHash);
-      requireRefundIdentity(existing, target.payment());
-      requireStateSpecificTruth(existing, target.payment());
-      return result(existing, true);
+      requireRefundIdentity(existing, payment);
+      requireStateSpecificTruth(existing, payment);
+      return new RefundMutation(result(existing, true), null);
     }
     requireCapacity(attempt, request.amountMinor());
     RefundRepository.RefundRecord created =
@@ -340,8 +430,8 @@ public final class RefundService {
             request.amountMinor(),
             request.currency());
     refunds.insertRefund(created);
-    refunds.insertOutbox(created, "REFUND_REQUESTED", 1);
-    return result(created, false);
+    RefundRepository.OutboxIdentity outbox = refunds.insertOutbox(created, "REFUND_REQUESTED", 1);
+    return new RefundMutation(result(created, false), outbox);
   }
 
   private RefundTarget resolveRefundTarget(
@@ -369,7 +459,15 @@ public final class RefundService {
 
   private void requireCapacity(
       MockPaymentRepository.AttemptRecord attempt, long requestedAmountMinor) {
-    long reserved = refunds.reservedAmount(attempt.attemptId());
+    long reserved;
+    try {
+      reserved = refunds.reservedAmount(attempt.attemptId());
+    } catch (RefundRepository.RefundIntegrityException exception) {
+      throw durableConflict("Refund reservation total is corrupted");
+    }
+    if (reserved < 0 || reserved > attempt.amountMinor()) {
+      throw durableConflict("Refund reservation total is corrupted");
+    }
     long remaining;
     try {
       remaining = Math.subtractExact(attempt.amountMinor(), reserved);
@@ -618,6 +716,20 @@ public final class RefundService {
         && refund.currency().equals(attempt.currency());
   }
 
+  private static void requireCurrentTransaction() {
+    if (!TransactionSynchronizationManager.isActualTransactionActive()) {
+      throw new IllegalStateException("Action refund work requires an active transaction");
+    }
+  }
+
+  private static void requireActionSandbox(
+      CommittedPaymentTruthResolver.CommittedPaymentTruth payment, String sandboxId) {
+    if (!java.util.Objects.equals(payment.order().sandboxId(), sandboxId)
+        || !java.util.Objects.equals(payment.attempt().sandboxId(), sandboxId)) {
+      throw durableConflict("Action refund sandbox truth is inconsistent");
+    }
+  }
+
   private static boolean matchesRefundMovement(
       RefundRepository.MovementRecord movement,
       RefundRepository.RefundRecord refund,
@@ -736,6 +848,15 @@ public final class RefundService {
   }
 
   private record RefundTarget(CommittedPaymentTruthResolver.CommittedPaymentTruth payment) {}
+
+  private record RefundMutation(RefundResult refund, RefundRepository.OutboxIdentity outbox) {}
+
+  public record ActionTarget(
+      MockPaymentRepository.OrderTruth order, MockPaymentRepository.AttemptRecord attempt) {}
+
+  public record ActionMutation(RefundResult refund, RefundRepository.OutboxIdentity outbox) {}
+
+  public record ActionReplayTruth(RefundResult refund, ActionTarget target) {}
 
   private record LockedRefund(
       RefundRepository.RefundRecord refund,

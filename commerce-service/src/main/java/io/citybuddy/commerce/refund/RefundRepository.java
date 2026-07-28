@@ -3,6 +3,7 @@ package io.citybuddy.commerce.refund;
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import io.citybuddy.commerce.payment.MockPaymentRepository;
+import java.math.BigDecimal;
 import java.sql.Timestamp;
 import java.time.Instant;
 import java.util.List;
@@ -79,7 +80,7 @@ public class RefundRepository {
                     result.getLong("state_version")),
             orderId);
     if (standard.size() + seckill.size() > 1) {
-      throw new IllegalStateException("Refund order identifier is ambiguous");
+      throw new RefundIntegrityException("Refund order identifier is ambiguous");
     }
     return standard.isEmpty() ? seckill.stream().findFirst() : standard.stream().findFirst();
   }
@@ -123,23 +124,21 @@ public class RefundRepository {
   }
 
   public long reservedAmount(String attemptId) {
-    List<Long> amounts =
-        jdbc.query(
+    BigDecimal total =
+        jdbc.queryForObject(
             """
-            SELECT requested_amount_minor
+            SELECT COALESCE(SUM(requested_amount_minor), 0)
             FROM mock_refund
             WHERE payment_attempt_id = ?
               AND state IN ('REQUESTED', 'PROCESSING', 'SUCCEEDED')
-            ORDER BY created_at, refund_id
-            FOR UPDATE
             """,
-            (result, row) -> result.getLong("requested_amount_minor"),
+            BigDecimal.class,
             attemptId);
-    long total = 0;
-    for (long amount : amounts) {
-      total = Math.addExact(total, amount);
+    try {
+      return total == null ? 0 : total.longValueExact();
+    } catch (ArithmeticException exception) {
+      throw new RefundIntegrityException("Refund reservation aggregate is corrupted", exception);
     }
-    return total;
   }
 
   public void insertRefund(RefundRecord refund) {
@@ -283,7 +282,7 @@ public class RefundRepository {
                     result.getString("payment_currency")),
             businessEventKey);
     if (rows.size() > 1) {
-      throw new IllegalStateException("Ledger business event uniqueness is corrupted");
+      throw new RefundIntegrityException("Ledger business event uniqueness is corrupted");
     }
     return rows.stream().findFirst();
   }
@@ -330,7 +329,7 @@ public class RefundRepository {
     return !rows.isEmpty();
   }
 
-  public void insertOutbox(RefundRecord refund, String eventType, long version) {
+  public OutboxIdentity insertOutbox(RefundRecord refund, String eventType, long version) {
     String eventId = UUID.randomUUID().toString();
     Map<String, Object> event =
         Map.of(
@@ -352,12 +351,13 @@ public class RefundRepository {
         version,
         eventType,
         json(event));
+    return new OutboxIdentity(eventId);
   }
 
   private Optional<RefundRecord> queryRefund(String sql, Object... arguments) {
     List<RefundRecord> rows = jdbc.query(sql, RefundRepository::mapRefund, arguments);
     if (rows.size() > 1) {
-      throw new IllegalStateException("Refund uniqueness is corrupted");
+      throw new RefundIntegrityException("Refund uniqueness is corrupted");
     }
     return rows.stream().findFirst();
   }
@@ -397,7 +397,17 @@ public class RefundRepository {
 
   private static void requireOne(int changed, String message) {
     if (changed != 1) {
-      throw new IllegalStateException(message);
+      throw new RefundIntegrityException(message);
+    }
+  }
+
+  public static final class RefundIntegrityException extends IllegalStateException {
+    public RefundIntegrityException(String message) {
+      super(message);
+    }
+
+    public RefundIntegrityException(String message, Throwable cause) {
+      super(message, cause);
     }
   }
 
@@ -460,4 +470,6 @@ public class RefundRepository {
       long activityQuotaDelta,
       long amountMinor,
       String currency) {}
+
+  public record OutboxIdentity(String eventId) {}
 }

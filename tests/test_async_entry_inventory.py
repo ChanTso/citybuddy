@@ -309,15 +309,23 @@ def test_inventory_closes_all_runtime_rocketmq_builders_and_outbox_readers() -> 
         casefold=True,
     )
     assert outbox_readers == {
+        "commerce-service/src/main/java/io/citybuddy/commerce/action/ActionRepository.java",
         "commerce-service/src/main/java/io/citybuddy/commerce/catalog/ProductRepository.java",
         "commerce-service/src/main/java/io/citybuddy/commerce/faq/FaqRepository.java",
     }
+    action_query = source(
+        "commerce-service/src/main/java/io/citybuddy/commerce/action/ActionRepository.java"
+    )
     product_query = source(
         "commerce-service/src/main/java/io/citybuddy/commerce/catalog/ProductRepository.java"
     )
     faq_query = source(
         "commerce-service/src/main/java/io/citybuddy/commerce/faq/FaqRepository.java"
     )
+    assert action_query.casefold().count("from commerce_outbox") == 1
+    assert "WHERE aggregate_id = ?" in action_query
+    assert "WHERE aggregate_type" not in action_query
+    assert "WHERE event_type" not in action_query
     assert product_query.casefold().count("from commerce_outbox") == 1
     assert "event_type = 'PRODUCT_PUBLICATION_CHANGED'" in product_query
     assert faq_query.casefold().count("from commerce_outbox") == 3

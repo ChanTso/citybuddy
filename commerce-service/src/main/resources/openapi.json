@@ -290,6 +290,52 @@
         }
       }
     },
+    "/internal/tools/actions/prepare": {
+      "post": {
+        "operationId": "prepareSensitiveAction",
+        "security": [{"agentOboBearer": []}],
+        "parameters": [
+          {"name": "X-Support-Session-Id", "in": "header", "required": true, "schema": {"type": "string", "minLength": 1, "maxLength": 64}},
+          {"name": "X-Agent-Trace-Id", "in": "header", "required": true, "schema": {"type": "string", "minLength": 1, "maxLength": 64, "pattern": "^[A-Za-z0-9._:-]+$"}},
+          {"name": "X-Agent-Turn-Id", "in": "header", "required": true, "schema": {"type": "string", "format": "uuid"}},
+          {"name": "X-Eval-Sandbox-Id", "in": "header", "required": false, "schema": {"type": "string", "minLength": 1, "maxLength": 64, "pattern": "^[A-Za-z0-9._:-]+$"}}
+        ],
+        "requestBody": {"required": true, "content": {"application/json": {"schema": {"$ref": "#/components/schemas/PrepareActionRequest"}}}},
+        "responses": {
+          "200": {"description": "Exact canonical PendingAction replay", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/PendingAction"}}}},
+          "201": {"description": "One bounded PendingAction prepared", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/PendingAction"}}}},
+          "400": {"description": "Malformed, unbounded, or unsupported action", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/ActionError"}}}},
+          "403": {"description": "Invalid Agent OBO identity, scope, session, or evaluation sandbox", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/ActionForbidden"}}}},
+          "404": {"description": "Missing or non-owned refund target", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/ActionError"}}}},
+          "409": {"description": "Changed intent, ineligible target, or durable-integrity conflict", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/ActionError"}}}},
+          "429": {"description": "Bounded PendingAction truth observation remains indeterminate", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/ActionError"}}}},
+          "503": {"description": "Authoritative identity, sandbox, payment, refund, or Action truth unavailable", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/ActionUnavailable"}}}}
+        }
+      }
+    },
+    "/internal/tools/actions/{pendingActionId}/confirm": {
+      "post": {
+        "operationId": "confirmSensitiveAction",
+        "security": [{"agentOboBearer": []}],
+        "parameters": [
+          {"name": "pendingActionId", "in": "path", "required": true, "schema": {"type": "string", "format": "uuid"}},
+          {"name": "X-Support-Session-Id", "in": "header", "required": true, "schema": {"type": "string", "minLength": 1, "maxLength": 64}},
+          {"name": "X-Agent-Trace-Id", "in": "header", "required": true, "schema": {"type": "string", "minLength": 1, "maxLength": 64, "pattern": "^[A-Za-z0-9._:-]+$"}},
+          {"name": "X-Agent-Turn-Id", "in": "header", "required": true, "schema": {"type": "string", "format": "uuid"}},
+          {"name": "X-Eval-Sandbox-Id", "in": "header", "required": false, "schema": {"type": "string", "minLength": 1, "maxLength": 64, "pattern": "^[A-Za-z0-9._:-]+$"}}
+        ],
+        "requestBody": {"required": false, "content": {"application/json": {"schema": {"type": "object", "additionalProperties": false, "maxProperties": 0}}}},
+        "responses": {
+          "200": {"description": "One atomic ActionReceipt result or exact durable replay", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/ActionReceipt"}}}},
+          "400": {"description": "Malformed confirmation identifier or non-empty body", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/ActionError"}}}},
+          "403": {"description": "Invalid Agent OBO identity, scope, session, or evaluation sandbox", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/ActionForbidden"}}}},
+          "404": {"description": "Missing or non-owned PendingAction", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/ActionError"}}}},
+          "409": {"description": "Expired, stale, conflicting, consumed-without-receipt, or otherwise inconsistent truth", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/ActionError"}}}},
+          "429": {"description": "Bounded ActionReceipt truth observation remains indeterminate", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/ActionError"}}}},
+          "503": {"description": "Authoritative identity, sandbox, payment, refund, or Action truth unavailable", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/ActionUnavailable"}}}}
+        }
+      }
+    },
     "/api/orders": {
       "post": {
         "operationId": "createStandardOrder",
@@ -696,6 +742,93 @@
           "category": {"type": "string", "enum": ["VALIDATION", "AUTHENTICATION", "AUTHORIZATION", "NOT_FOUND", "CONFLICT", "INDETERMINATE", "UNAVAILABLE"]},
           "message": {"type": "string", "minLength": 1, "maxLength": 160}
         }
+      },
+      "PrepareActionRequest": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["actionType", "arguments"],
+        "properties": {
+          "actionType": {"type": "string", "const": "REFUND_REQUEST"},
+          "arguments": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["orderId", "amountMinor", "currency"],
+            "properties": {
+              "orderId": {"type": "string", "format": "uuid"},
+              "amountMinor": {"type": "integer", "minimum": 1},
+              "currency": {"type": "string", "pattern": "^[A-Z]{3}$"}
+            }
+          }
+        }
+      },
+      "PendingAction": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["pendingActionId", "actionType", "orderId", "amountMinor", "currency", "state", "expiresAt", "replayed"],
+        "properties": {
+          "pendingActionId": {"type": "string", "format": "uuid"},
+          "actionType": {"type": "string", "const": "REFUND_REQUEST"},
+          "orderId": {"type": "string", "format": "uuid"},
+          "amountMinor": {"type": "integer", "minimum": 1},
+          "currency": {"type": "string", "pattern": "^[A-Z]{3}$"},
+          "state": {"type": "string", "enum": ["PREPARED", "CONSUMED"]},
+          "expiresAt": {"type": "string", "format": "date-time"},
+          "replayed": {"type": "boolean"}
+        }
+      },
+      "ActionReceipt": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["receiptId", "pendingActionId", "actionType", "status", "orderId", "refundId", "resourceVersion", "amountMinor", "currency", "committedAt", "replayed"],
+        "properties": {
+          "receiptId": {"type": "string", "format": "uuid"},
+          "pendingActionId": {"type": "string", "format": "uuid"},
+          "actionType": {"type": "string", "const": "REFUND_REQUEST"},
+          "status": {"type": "string", "const": "REQUESTED"},
+          "orderId": {"type": "string", "format": "uuid"},
+          "refundId": {"type": "string", "format": "uuid"},
+          "resourceVersion": {"type": "integer", "const": 1},
+          "amountMinor": {"type": "integer", "minimum": 1},
+          "currency": {"type": "string", "pattern": "^[A-Z]{3}$"},
+          "committedAt": {"type": "string", "format": "date-time"},
+          "replayed": {"type": "boolean"}
+        }
+      },
+      "ActionError": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["category", "message"],
+        "properties": {
+          "category": {"type": "string", "enum": ["VALIDATION", "NOT_FOUND", "CONFLICT", "INCONSISTENT_DURABLE_STATE", "INDETERMINATE", "DEPENDENCY_UNAVAILABLE"]},
+          "message": {"type": "string", "minLength": 1, "maxLength": 160}
+        }
+      },
+      "ActionForbidden": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["error"],
+        "properties": {
+          "error": {"type": "string", "const": "Forbidden"}
+        }
+      },
+      "ActionUnavailable": {
+        "oneOf": [
+          {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["error"],
+            "properties": {"error": {"type": "string", "const": "Service unavailable"}}
+          },
+          {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["category", "message"],
+            "properties": {
+              "category": {"type": "string", "const": "DEPENDENCY_UNAVAILABLE"},
+              "message": {"type": "string", "minLength": 1, "maxLength": 160}
+            }
+          }
+        ]
       },
       "Product": {
         "type": "object",
