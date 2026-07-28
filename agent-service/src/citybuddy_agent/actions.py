@@ -9,12 +9,30 @@ import uuid
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from enum import Enum
-from typing import Literal
+from typing import Any, Literal
 
+import httpx
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 MAX_ACTION_RESPONSE_BYTES = 4096
 ACTION_SCOPE = "refund:create"
+
+
+@dataclass(frozen=True)
+class BoundedHttpResponse:
+    status_code: int
+    content: bytes
+
+
+def bounded_http_post(url: str, **kwargs: Any) -> BoundedHttpResponse:
+    """Read an untrusted action-boundary response with a pre-materialization cap."""
+    with httpx.stream("POST", url, **kwargs) as response:
+        content = bytearray()
+        for chunk in response.iter_bytes():
+            if len(content) + len(chunk) > MAX_ACTION_RESPONSE_BYTES:
+                raise ValueError("Action response is oversized")
+            content.extend(chunk)
+        return BoundedHttpResponse(response.status_code, bytes(content))
 
 
 def _duplicate_rejecting_object(pairs: list[tuple[str, object]]) -> dict[str, object]:

@@ -1,4 +1,5 @@
 import json
+from contextlib import contextmanager
 from typing import Any
 
 import httpx
@@ -18,8 +19,18 @@ from citybuddy_agent.agent_control import (
     ProviderRoute,
     RuleRouter,
     ToolAdapter,
+    ToolBoundaryFailure,
 )
 from fastapi import HTTPException
+
+
+def streamed(callback: Any) -> Any:
+    @contextmanager
+    def stream(method: str, url: str, **kwargs: Any) -> Any:
+        assert method == "POST"
+        yield callback(url, **kwargs)
+
+    return stream
 
 
 def plan() -> Any:
@@ -470,7 +481,7 @@ def test_sensitive_prepare_uses_fixed_endpoint_scope_and_server_correlation(
             },
         )
 
-    monkeypatch.setattr(httpx, "post", post)
+    monkeypatch.setattr(httpx, "stream", streamed(post))
     obo = RecordingObo()
     result = ToolAdapter("https://commerce.test", obo).execute(
         name=REFUND_PREPARE_SPEC.name,
@@ -532,8 +543,8 @@ def test_sensitive_prepare_rejects_self_consistent_but_substituted_response_inte
     response_payload[field] = value
     monkeypatch.setattr(
         httpx,
-        "post",
-        lambda *args, **kwargs: httpx.Response(201, json=response_payload),
+        "stream",
+        streamed(lambda *args, **kwargs: httpx.Response(201, json=response_payload)),
     )
 
     with pytest.raises(RuntimeError, match="contradicts the requested intent"):
@@ -554,3 +565,105 @@ def test_sensitive_prepare_rejects_self_consistent_but_substituted_response_inte
             budget=AttemptBudget(4, []),
             events=[],
         )
+
+
+def test_sensitive_prepare_keeps_identity_unavailability_out_of_terminal_denial() -> None:
+    class UnavailableIdentity:
+        def exchange(self, *args: object, **kwargs: object) -> str:
+            del args, kwargs
+            raise HTTPException(status_code=503, detail="Identity exchange unavailable")
+
+    events: list[AgentEvent] = []
+    with pytest.raises(ToolBoundaryFailure) as unavailable:
+        ToolAdapter("https://commerce.test", UnavailableIdentity()).execute(
+            name=REFUND_PREPARE_SPEC.name,
+            serialized_arguments=json.dumps(
+                {
+                    "orderId": "00000000-0000-0000-0000-000000000040",
+                    "amountMinor": 400,
+                    "currency": "CNY",
+                }
+            ),
+            direct_token="direct",
+            subject="user-1",
+            session_id="session-1",
+            trace_id="trace-1",
+            turn_id="00000000-0000-0000-0000-000000000121",
+            budget=AttemptBudget(4, []),
+            events=events,
+        )
+    assert unavailable.value.status_code == 503
+    assert unavailable.value.reason == "identity_unavailable"
+    assert not any(event.event_type == "TOOL_DENIED" for event in events)
+
+
+@pytest.mark.parametrize(
+    ("status", "reason"),
+    [
+        (408, "commerce_timeout"),
+        (429, "commerce_indeterminate"),
+        (503, "commerce_unavailable"),
+    ],
+)
+def test_sensitive_prepare_keeps_retryable_commerce_failures_out_of_policy_denial(
+    status: int,
+    reason: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        httpx,
+        "stream",
+        streamed(lambda *args, **kwargs: httpx.Response(status)),
+    )
+    events: list[AgentEvent] = []
+    with pytest.raises(ToolBoundaryFailure) as unavailable:
+        ToolAdapter("https://commerce.test", RecordingObo()).execute(
+            name=REFUND_PREPARE_SPEC.name,
+            serialized_arguments=json.dumps(
+                {
+                    "orderId": "00000000-0000-0000-0000-000000000040",
+                    "amountMinor": 400,
+                    "currency": "CNY",
+                }
+            ),
+            direct_token="direct",
+            subject="user-1",
+            session_id="session-1",
+            trace_id="trace-1",
+            turn_id="00000000-0000-0000-0000-000000000121",
+            budget=AttemptBudget(4, []),
+            events=events,
+        )
+    assert unavailable.value.status_code == 503
+    assert unavailable.value.reason == reason
+    assert not any(event.event_type == "TOOL_DENIED" for event in events)
+
+
+def test_sensitive_prepare_malformed_response_has_fixed_bounded_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        httpx,
+        "stream",
+        streamed(lambda *args, **kwargs: httpx.Response(201, content=b'{"x":1,"x":2}')),
+    )
+    with pytest.raises(ToolBoundaryFailure) as malformed:
+        ToolAdapter("https://commerce.test", RecordingObo()).execute(
+            name=REFUND_PREPARE_SPEC.name,
+            serialized_arguments=json.dumps(
+                {
+                    "orderId": "00000000-0000-0000-0000-000000000040",
+                    "amountMinor": 400,
+                    "currency": "CNY",
+                }
+            ),
+            direct_token="direct",
+            subject="user-1",
+            session_id="session-1",
+            trace_id="trace-1",
+            turn_id="00000000-0000-0000-0000-000000000121",
+            budget=AttemptBudget(4, []),
+            events=[],
+        )
+    assert malformed.value.status_code == 502
+    assert malformed.value.reason == "invalid_commerce_response"

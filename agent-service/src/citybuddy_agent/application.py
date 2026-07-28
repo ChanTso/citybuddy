@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import secrets
 import time
 import uuid
@@ -23,6 +24,7 @@ from .actions import (
     ActionReceiptPayload,
     ConfirmationDecision,
     PendingActionReference,
+    bounded_http_post,
     confirmation_decision,
     strict_json_object,
 )
@@ -38,8 +40,10 @@ from .agent_control import (
     ProviderRoute,
     RuleRouter,
     ToolAdapter,
+    ToolBoundaryFailure,
 )
 from .conversation import (
+    ConversationIntegrityError,
     ConversationOwnershipError,
     ConversationResult,
     ConversationStore,
@@ -49,6 +53,7 @@ from .conversation import (
     TurnInProgressError,
 )
 from .evaluation import (
+    ActionEvidenceIntegrityError,
     EvaluationEvidenceInvalid,
     EvaluationEvidenceNotFound,
     EvaluationEvidenceResponse,
@@ -71,6 +76,7 @@ CHAT_PERMISSION = "support:chat"
 DIRECT_TOKEN_TYPE = "direct_user"
 EVALUATION_DIRECT_TOKEN_TYPE = "eval_direct_user"
 MAX_EVALUATION_AUTHORIZATION_LENGTH = 1024
+LOGGER = logging.getLogger(__name__)
 
 
 class AgentSettings(BaseModel):
@@ -396,25 +402,32 @@ class OboClient:
         headers = {"X-User-Authorization": f"Bearer {direct_token}"}
         if sandbox_id is not None:
             headers["X-Eval-Sandbox-Id"] = sandbox_id
-        response = httpx.post(
-            self._settings.auth_exchange_url,
-            auth=(self._settings.service_client_id, self._settings.service_client_secret),
-            headers=headers,
-            json={
-                "sessionId": session_id,
-                "userSubject": subject,
-                "scope": scope,
-            },
-            timeout=3.0,
-        )
+        try:
+            response = bounded_http_post(
+                self._settings.auth_exchange_url,
+                auth=(self._settings.service_client_id, self._settings.service_client_secret),
+                headers=headers,
+                json={
+                    "sessionId": session_id,
+                    "userSubject": subject,
+                    "scope": scope,
+                },
+                timeout=3.0,
+            )
+        except ValueError as exception:
+            raise HTTPException(
+                status_code=503, detail="Identity exchange unavailable"
+            ) from exception
         if response.status_code in {401, 403}:
             raise HTTPException(status_code=403, detail="Forbidden")
         if response.status_code != 200:
-            raise HTTPException(status_code=502, detail="Identity exchange rejected")
+            raise HTTPException(status_code=503, detail="Identity exchange unavailable")
         try:
-            payload = response.json()
-        except ValueError as exception:
-            raise HTTPException(status_code=502, detail="Identity exchange rejected") from exception
+            payload = strict_json_object(response.content)
+        except (TypeError, ValueError) as exception:
+            raise HTTPException(
+                status_code=503, detail="Identity exchange unavailable"
+            ) from exception
         token = payload.get("accessToken") if isinstance(payload, dict) else None
         if not isinstance(token, str) or not token:
             raise HTTPException(status_code=502, detail="Identity exchange rejected")
@@ -448,8 +461,9 @@ class HttpActionConfirmationBoundary:
             try:
                 budget.charge("identity_http", ACTION_SCOPE)
             except AttemptBudgetExhausted as exception:
-                raise HTTPException(
+                raise ToolBoundaryFailure(
                     status_code=503,
+                    reason="action_confirmation_indeterminate",
                     detail=(
                         "Action confirmation indeterminate"
                         if indeterminate
@@ -464,16 +478,28 @@ class HttpActionConfirmationBoundary:
                     ACTION_SCOPE,
                     pending.sandbox_id,
                 )
-            except HTTPException:
-                raise
+            except HTTPException as exception:
+                if exception.status_code in {401, 403}:
+                    raise ToolBoundaryFailure(
+                        status_code=403,
+                        reason="action_confirmation_identity_denied",
+                        detail="Forbidden",
+                    ) from exception
+                raise ToolBoundaryFailure(
+                    status_code=503,
+                    reason="action_confirmation_identity_unavailable",
+                    detail="Action confirmation indeterminate",
+                ) from exception
             except (httpx.TimeoutException, httpx.NetworkError):
                 indeterminate = True
                 continue
             try:
                 budget.charge("tool_http", "actions.refund.confirm")
             except AttemptBudgetExhausted as exception:
-                raise HTTPException(
-                    status_code=503, detail="Action confirmation attempt budget exhausted"
+                raise ToolBoundaryFailure(
+                    status_code=503,
+                    reason="action_confirmation_indeterminate",
+                    detail="Action confirmation attempt budget exhausted",
                 ) from exception
             headers = {
                 "Authorization": f"Bearer {obo}",
@@ -484,7 +510,7 @@ class HttpActionConfirmationBoundary:
             if pending.sandbox_id is not None:
                 headers["X-Eval-Sandbox-Id"] = pending.sandbox_id
             try:
-                response = httpx.post(
+                response = bounded_http_post(
                     f"{self._base_url}/internal/tools/actions/{pending.pending_action_id}/confirm",
                     headers=headers,
                     timeout=3.0,
@@ -492,14 +518,22 @@ class HttpActionConfirmationBoundary:
             except (httpx.TimeoutException, httpx.NetworkError):
                 indeterminate = True
                 continue
+            except ValueError as exception:
+                raise ToolBoundaryFailure(
+                    status_code=502,
+                    reason="invalid_action_confirmation_response",
+                    detail="Invalid action confirmation response",
+                ) from exception
             if response.status_code == 200:
                 try:
                     receipt = ActionReceiptPayload.model_validate(
                         strict_json_object(response.content)
                     )
                 except (ValueError, TypeError) as exception:
-                    raise HTTPException(
-                        status_code=502, detail="Invalid action confirmation response"
+                    raise ToolBoundaryFailure(
+                        status_code=502,
+                        reason="invalid_action_confirmation_response",
+                        detail="Invalid action confirmation response",
                     ) from exception
                 if (
                     receipt.pending_action_id != pending.pending_action_id
@@ -509,14 +543,24 @@ class HttpActionConfirmationBoundary:
                     or receipt.currency != pending.currency
                     or receipt.argument_commitment != pending.argument_commitment
                 ):
-                    raise HTTPException(
-                        status_code=502, detail="Invalid action confirmation response"
+                    raise ToolBoundaryFailure(
+                        status_code=502,
+                        reason="invalid_action_confirmation_response",
+                        detail="Invalid action confirmation response",
                     )
                 return receipt
             if response.status_code in {401, 403, 404}:
-                raise HTTPException(status_code=403, detail="Forbidden")
+                raise ToolBoundaryFailure(
+                    status_code=403,
+                    reason="action_confirmation_denied",
+                    detail="Forbidden",
+                )
             if response.status_code in {400, 409, 422}:
-                raise HTTPException(status_code=409, detail="Action confirmation rejected")
+                raise ToolBoundaryFailure(
+                    status_code=409,
+                    reason="action_confirmation_rejected",
+                    detail="Action confirmation rejected",
+                )
             if response.status_code in {408, 429, 502, 503, 504}:
                 indeterminate = True
                 continue
@@ -776,6 +820,15 @@ def create_app(
                 retrieval_decision=agent_result.retrieval_decision,
                 pending_action=agent_result.pending_action,
             )
+        except ToolBoundaryFailure as exception:
+            resolved_conversations.fail_turn(
+                start=start,
+                failure_code=exception.reason,
+                events=tuple(action_events),
+            )
+            raise HTTPException(
+                status_code=exception.status_code, detail=exception.detail
+            ) from exception
         except Exception:
             resolved_conversations.fail_turn(
                 start=start,
@@ -820,6 +873,13 @@ def create_app(
             raise HTTPException(status_code=403, detail="Forbidden") from exception
         except CorrelationConflictError as exception:
             raise HTTPException(status_code=409, detail="Idempotency conflict") from exception
+        except ConversationIntegrityError as exception:
+            LOGGER.warning(
+                "agent_request_rejected reason_code=CONVERSATION_ACTION_DURABLE_TRUTH_INCONSISTENT"
+            )
+            raise HTTPException(
+                status_code=409, detail="Conversation evidence conflict"
+            ) from exception
         except TurnInProgressError as exception:
             raise HTTPException(status_code=409, detail="Turn in progress") from exception
         except TurnFailedError as exception:
@@ -874,6 +934,13 @@ def create_app(
             raise HTTPException(status_code=403, detail="Forbidden") from exception
         except CorrelationConflictError as exception:
             raise HTTPException(status_code=409, detail="Idempotency conflict") from exception
+        except ConversationIntegrityError as exception:
+            LOGGER.warning(
+                "agent_request_rejected reason_code=CONVERSATION_ACTION_DURABLE_TRUTH_INCONSISTENT"
+            )
+            raise HTTPException(
+                status_code=409, detail="Conversation evidence conflict"
+            ) from exception
         except TurnInProgressError as exception:
             raise HTTPException(status_code=409, detail="Turn in progress") from exception
         except TurnFailedError as exception:
@@ -958,6 +1025,12 @@ def create_app(
                 return resolved_evidence.load(str(trace_id), x_eval_sandbox_id)
             except EvaluationEvidenceNotFound as exception:
                 raise HTTPException(status_code=404, detail="Evidence not found") from exception
+            except ActionEvidenceIntegrityError as exception:
+                LOGGER.warning(
+                    "evaluation_request_rejected "
+                    "reason_code=EVALUATION_ACTION_DURABLE_TRUTH_INCONSISTENT"
+                )
+                raise HTTPException(status_code=409, detail="Evidence unavailable") from exception
             except EvaluationEvidenceInvalid as exception:
                 raise HTTPException(status_code=409, detail="Evidence unavailable") from exception
             except pymysql.MySQLError as exception:

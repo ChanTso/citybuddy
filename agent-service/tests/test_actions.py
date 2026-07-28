@@ -1,15 +1,30 @@
 import json
+from collections.abc import Iterator
+from contextlib import contextmanager
 from datetime import UTC, datetime, timedelta
 
+import httpx
 import pytest
 from citybuddy_agent.actions import (
     ActionReceiptPayload,
     ConfirmationDecision,
     PendingActionPayload,
+    bounded_http_post,
     confirmation_decision,
     strict_json_object,
 )
 from pydantic import ValidationError
+
+
+class CountingStream(httpx.SyncByteStream):
+    def __init__(self, chunks: tuple[bytes, ...]) -> None:
+        self.chunks = chunks
+        self.yielded = 0
+
+    def __iter__(self) -> Iterator[bytes]:
+        for chunk in self.chunks:
+            self.yielded += 1
+            yield chunk
 
 
 def pending_document() -> dict[str, object]:
@@ -78,6 +93,29 @@ def test_strict_action_decoder_rejects_duplicate_unknown_and_unbounded_values() 
     receipt["amountMinor"] = True
     with pytest.raises(ValidationError):
         ActionReceiptPayload.model_validate(strict_json_object(json.dumps(receipt).encode()))
+
+
+def test_action_response_bound_stops_stream_before_full_materialization(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source = CountingStream((b"a" * 2048, b"b" * 2049, b"never-read"))
+
+    @contextmanager
+    def stream(method: str, url: str, **kwargs: object) -> Iterator[httpx.Response]:
+        del kwargs
+        assert method == "POST"
+        assert url == "https://commerce.test/action"
+        yield httpx.Response(
+            200,
+            request=httpx.Request("POST", url),
+            stream=source,
+        )
+
+    monkeypatch.setattr(httpx, "stream", stream)
+
+    with pytest.raises(ValueError, match="oversized"):
+        bounded_http_post("https://commerce.test/action", timeout=1.0)
+    assert source.yielded == 2
 
 
 @pytest.mark.parametrize(

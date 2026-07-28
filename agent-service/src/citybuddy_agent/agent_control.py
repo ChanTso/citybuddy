@@ -16,9 +16,11 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from .actions import (
     ACTION_SCOPE,
+    BoundedHttpResponse,
     PendingActionPayload,
     RefundActionArguments,
     action_argument_commitment,
+    bounded_http_post,
     strict_json_object,
 )
 from .faq_cache import FaqCache
@@ -97,6 +99,16 @@ class ProviderFailure(Exception):
 
 class CircuitOpen(Exception):
     """The selected provider circuit is not currently admitting work."""
+
+
+class ToolBoundaryFailure(Exception):
+    """A non-terminal sensitive-tool boundary fault with a bounded public classification."""
+
+    def __init__(self, *, status_code: int, reason: str, detail: str) -> None:
+        super().__init__(detail)
+        self.status_code = status_code
+        self.reason = reason
+        self.detail = detail
 
 
 @dataclass
@@ -746,10 +758,24 @@ class ToolAdapter:
                 obo = self._obo.exchange(direct_token, subject, session_id, spec.scope)
             else:
                 obo = self._obo.exchange(direct_token, subject, session_id, spec.scope, sandbox_id)
-        except HTTPException:
-            return self._deny(name, "identity_denied", events)
+        except HTTPException as exception:
+            if exception.status_code in {401, 403}:
+                return self._deny(name, "identity_denied", events)
+            if spec is not REFUND_PREPARE_SPEC:
+                return self._deny(name, "identity_denied", events)
+            raise ToolBoundaryFailure(
+                status_code=503,
+                reason="identity_unavailable",
+                detail="Identity exchange unavailable",
+            ) from exception
         except (httpx.TimeoutException, httpx.NetworkError):
-            return self._deny(name, "identity_unavailable", events)
+            if spec is not REFUND_PREPARE_SPEC:
+                return self._deny(name, "identity_unavailable", events)
+            raise ToolBoundaryFailure(
+                status_code=503,
+                reason="identity_unavailable",
+                detail="Identity exchange unavailable",
+            ) from None
         budget.charge("tool_http", name)
         try:
             headers = {
@@ -785,25 +811,82 @@ class ToolAdapter:
                 }
             else:
                 request_body = arguments.model_dump(by_alias=True)
-            response = httpx.post(
-                f"{self._base_url}{endpoint}",
-                headers=headers,
-                json=request_body,
-                timeout=spec.timeout_seconds,
-            )
+            response: BoundedHttpResponse | httpx.Response
+            if spec is REFUND_PREPARE_SPEC:
+                response = bounded_http_post(
+                    f"{self._base_url}{endpoint}",
+                    headers=headers,
+                    json=request_body,
+                    timeout=spec.timeout_seconds,
+                )
+            else:
+                response = httpx.post(
+                    f"{self._base_url}{endpoint}",
+                    headers=headers,
+                    json=request_body,
+                    timeout=spec.timeout_seconds,
+                )
         except httpx.TimeoutException:
-            return self._deny(name, "timeout", events)
+            if spec is not REFUND_PREPARE_SPEC:
+                return self._deny(name, "timeout", events)
+            raise ToolBoundaryFailure(
+                status_code=503,
+                reason="commerce_timeout",
+                detail="Commerce tool unavailable",
+            ) from None
         except httpx.NetworkError:
-            return self._deny(name, "tool_unavailable", events)
-        if response.status_code in {400, 401, 403, 404, 408, 409, 422, 429, 503, 504}:
+            if spec is not REFUND_PREPARE_SPEC:
+                return self._deny(name, "tool_unavailable", events)
+            raise ToolBoundaryFailure(
+                status_code=503,
+                reason="commerce_unavailable",
+                detail="Commerce tool unavailable",
+            ) from None
+        except ValueError as exception:
+            if spec is not REFUND_PREPARE_SPEC:
+                raise
+            raise ToolBoundaryFailure(
+                status_code=502,
+                reason="invalid_commerce_response",
+                detail="Invalid commerce tool response",
+            ) from exception
+        if response.status_code in {400, 401, 403, 404, 409, 422}:
             return self._deny(name, "policy_denied", events)
+        if response.status_code in {408, 504}:
+            if spec is not REFUND_PREPARE_SPEC:
+                return self._deny(name, "policy_denied", events)
+            raise ToolBoundaryFailure(
+                status_code=503,
+                reason="commerce_timeout",
+                detail="Commerce tool unavailable",
+            )
+        if response.status_code == 429:
+            if spec is not REFUND_PREPARE_SPEC:
+                return self._deny(name, "policy_denied", events)
+            raise ToolBoundaryFailure(
+                status_code=503,
+                reason="commerce_indeterminate",
+                detail="Commerce tool unavailable",
+            )
+        if response.status_code in {502, 503}:
+            if spec is not REFUND_PREPARE_SPEC:
+                return self._deny(name, "policy_denied", events)
+            raise ToolBoundaryFailure(
+                status_code=503,
+                reason="commerce_unavailable",
+                detail="Commerce tool unavailable",
+            )
         expected_statuses = {200, 201} if spec is REFUND_PREPARE_SPEC else {200}
         if response.status_code not in expected_statuses:
             raise RuntimeError("Unexpected commerce tool failure")
         try:
             bounded = spec.output_schema.model_validate(strict_json_object(response.content))
         except (ValidationError, ValueError, TypeError) as exception:
-            raise RuntimeError("Invalid commerce tool response") from exception
+            raise ToolBoundaryFailure(
+                status_code=502,
+                reason="invalid_commerce_response",
+                detail="Invalid commerce tool response",
+            ) from exception
         if spec is REFUND_PREPARE_SPEC:
             if not isinstance(arguments, RefundActionArguments) or not isinstance(
                 bounded, PendingActionPayload
@@ -972,6 +1055,7 @@ class BoundedAgent:
                         AgentEvent(
                             "ACTION_PREPARED",
                             {
+                                "pendingActionId": result.pending_action.pending_action_id,
                                 "actionType": result.pending_action.action_type,
                                 "argumentCommitment": result.pending_action.argument_commitment,
                             },

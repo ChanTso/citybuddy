@@ -2,13 +2,14 @@
 
 from __future__ import annotations
 
-import json
 import uuid
 from datetime import UTC, datetime
 from typing import Literal, Protocol, cast
 
 import pymysql
 from pydantic import AwareDatetime, BaseModel, ConfigDict, Field
+
+from .actions import ActionReceiptPayload, action_argument_commitment, strict_json_object
 
 MAX_EVIDENCE_EVENTS = 48
 MAX_FEEDBACK_RECORDS = 8
@@ -92,6 +93,10 @@ class EvaluationEvidenceNotFound(Exception):
 
 class EvaluationEvidenceInvalid(Exception):
     """Persisted evidence is incomplete, conflicting, or outside the safe schema."""
+
+
+class ActionEvidenceIntegrityError(EvaluationEvidenceInvalid):
+    """Agent action evidence disagrees with its durable projection."""
 
 
 class EvidenceEventResponse(BaseModel):
@@ -179,7 +184,8 @@ class MysqlEvaluationEvidenceStore:
                     cursor.execute(
                         "SELECT turn_record.trace_id, turn_record.turn_id, "
                         "turn_record.session_id, turn_record.user_subject, "
-                        "turn_record.state, turn_record.outcome "
+                        "turn_record.state, turn_record.outcome, "
+                        "turn_record.conversation_id "
                         "FROM support_turn turn_record "
                         "JOIN support_conversation conversation "
                         "ON conversation.conversation_id = turn_record.conversation_id "
@@ -205,6 +211,20 @@ class MysqlEvaluationEvidenceStore:
                         subject=str(turn[3]),
                         terminal_outcome=terminal_outcome,
                     )
+                    try:
+                        self._validate_action_truth(
+                            cursor,
+                            turn_id=str(turn[1]),
+                            trace_id=str(turn[0]),
+                            conversation_id=str(turn[6]),
+                            session_id=str(turn[2]),
+                            subject=str(turn[3]),
+                            sandbox_id=sandbox_id,
+                            terminal_outcome=terminal_outcome,
+                            events=events,
+                        )
+                    except EvaluationEvidenceInvalid as exception:
+                        raise ActionEvidenceIntegrityError from exception
                     retrieval = self._load_retrieval(
                         cursor,
                         trace_id=trace_id,
@@ -318,8 +338,8 @@ class MysqlEvaluationEvidenceStore:
     @staticmethod
     def _payload(value: object) -> dict[str, object]:
         try:
-            decoded = json.loads(value) if isinstance(value, str) else value
-        except json.JSONDecodeError as exception:
+            decoded = strict_json_object(value.encode("utf-8")) if isinstance(value, str) else value
+        except (UnicodeError, ValueError) as exception:
             raise EvaluationEvidenceInvalid from exception
         if not isinstance(decoded, dict):
             raise EvaluationEvidenceInvalid
@@ -392,26 +412,43 @@ class MysqlEvaluationEvidenceStore:
             outcome = str(decision_outcome)
             reference = str(index_version)
         elif event_type == "ACTION_PREPARED":
+            pending_action_id = payload.get("pendingActionId")
             action_type = payload.get("actionType")
             commitment = payload.get("argumentCommitment")
-            if action_type != "REFUND_REQUEST" or not self._commitment(commitment):
+            if (
+                set(payload) != {"pendingActionId", "actionType", "argumentCommitment"}
+                or not self._canonical_uuid(pending_action_id)
+                or action_type != "REFUND_REQUEST"
+                or not self._commitment(commitment)
+            ):
                 raise EvaluationEvidenceInvalid
             outcome = "prepared"
             reference = str(commitment)
         elif event_type == "ACTION_DECLINED":
-            if payload != {"outcome": "declined"}:
+            if (
+                set(payload) != {"pendingActionId", "outcome"}
+                or not self._canonical_uuid(payload.get("pendingActionId"))
+                or payload.get("outcome") != "declined"
+            ):
                 raise EvaluationEvidenceInvalid
             outcome = "declined"
         elif event_type == "ACTION_EXPIRED":
-            if payload != {"outcome": "expired"}:
+            if (
+                set(payload) != {"pendingActionId", "outcome"}
+                or not self._canonical_uuid(payload.get("pendingActionId"))
+                or payload.get("outcome") != "expired"
+            ):
                 raise EvaluationEvidenceInvalid
             outcome = "expired"
         elif event_type == "ACTION_RECEIPT":
             receipt_id = payload.get("receiptId")
+            pending_action_id = payload.get("pendingActionId")
             status = payload.get("status")
             commitment = payload.get("receiptCommitment")
             if (
-                not self._canonical_uuid(receipt_id)
+                set(payload) != {"receiptId", "pendingActionId", "status", "receiptCommitment"}
+                or not self._canonical_uuid(receipt_id)
+                or not self._canonical_uuid(pending_action_id)
                 or status != "REQUESTED"
                 or not self._commitment(commitment)
             ):
@@ -438,6 +475,349 @@ class MysqlEvaluationEvidenceStore:
             attempt_limit=attempt_limit,
             occurred_at=occurred_at,
         )
+
+    def _validate_action_truth(
+        self,
+        cursor: pymysql.cursors.Cursor,
+        *,
+        turn_id: str,
+        trace_id: str,
+        conversation_id: str,
+        session_id: str,
+        subject: str,
+        sandbox_id: str,
+        terminal_outcome: TerminalOutcome,
+        events: tuple[EvidenceEventResponse, ...],
+    ) -> None:
+        cursor.execute(
+            "SELECT pending_action_id, source_turn_id, source_trace_id, conversation_id, "
+            "session_id, user_subject, sandbox_id, action_type, argument_commitment, "
+            "order_id, amount_minor, currency, state, expires_at, resolved_at "
+            "FROM pending_action_reference WHERE source_turn_id = %s LIMIT 2",
+            (turn_id,),
+        )
+        pending_rows = cursor.fetchall()
+        prepared_events = [event for event in events if event.event_kind == "ACTION_PREPARED"]
+        resolution_events = [
+            event for event in events if event.event_kind in {"ACTION_DECLINED", "ACTION_EXPIRED"}
+        ]
+        if terminal_outcome == "action_pending":
+            if len(pending_rows) != 1 or len(prepared_events) != 1:
+                raise EvaluationEvidenceInvalid
+            pending = pending_rows[0]
+            self._validate_pending_truth_row(
+                cursor,
+                pending=pending,
+                session_id=session_id,
+                subject=subject,
+                sandbox_id=sandbox_id,
+            )
+            if (
+                tuple(pending[1:7])
+                != (turn_id, trace_id, conversation_id, session_id, subject, sandbox_id)
+                or prepared_events[0].outcome != "prepared"
+                or prepared_events[0].reference != pending[8]
+            ):
+                raise EvaluationEvidenceInvalid
+        elif terminal_outcome in {"action_declined", "action_expired"}:
+            if pending_rows or prepared_events or len(resolution_events) != 1:
+                raise EvaluationEvidenceInvalid
+            event_type, expected_state, expected_outcome = {
+                "action_declined": ("ACTION_DECLINED", "DECLINED", "declined"),
+                "action_expired": ("ACTION_EXPIRED", "EXPIRED", "expired"),
+            }[terminal_outcome]
+            cursor.execute(
+                "SELECT payload_json FROM support_event "
+                "WHERE turn_id = %s AND event_type = %s LIMIT 2",
+                (turn_id, event_type),
+            )
+            event_rows = cursor.fetchall()
+            if len(event_rows) != 1:
+                raise EvaluationEvidenceInvalid
+            payload = self._payload(event_rows[0][0])
+            pending_action_id = payload.get("pendingActionId")
+            if (
+                payload != {"pendingActionId": pending_action_id, "outcome": expected_outcome}
+                or not self._canonical_uuid(pending_action_id)
+                or resolution_events[0].outcome != expected_outcome
+            ):
+                raise EvaluationEvidenceInvalid
+            cursor.execute(
+                "SELECT pending_action_id, source_turn_id, source_trace_id, conversation_id, "
+                "session_id, user_subject, sandbox_id, action_type, argument_commitment, "
+                "order_id, amount_minor, currency, state, expires_at, resolved_at "
+                "FROM pending_action_reference WHERE pending_action_id = %s LIMIT 2",
+                (pending_action_id,),
+            )
+            resolved_rows = cursor.fetchall()
+            if len(resolved_rows) != 1 or resolved_rows[0][12] != expected_state:
+                raise EvaluationEvidenceInvalid
+            self._validate_pending_truth_row(
+                cursor,
+                pending=resolved_rows[0],
+                session_id=session_id,
+                subject=subject,
+                sandbox_id=sandbox_id,
+            )
+            cursor.execute(
+                "SELECT turn_id, event_type FROM support_event "
+                "WHERE event_type IN ('ACTION_DECLINED', 'ACTION_EXPIRED') "
+                "AND JSON_UNQUOTE(JSON_EXTRACT(payload_json, '$.pendingActionId')) = %s LIMIT 2",
+                (pending_action_id,),
+            )
+            reverse_rows = cursor.fetchall()
+            if len(reverse_rows) != 1 or tuple(reverse_rows[0]) != (turn_id, event_type):
+                raise EvaluationEvidenceInvalid
+        elif pending_rows or prepared_events or resolution_events:
+            raise EvaluationEvidenceInvalid
+
+        receipt_events = [event for event in events if event.event_kind == "ACTION_RECEIPT"]
+        if terminal_outcome != "action_completed":
+            cursor.execute(
+                "SELECT receipt_id FROM action_receipt_projection "
+                "WHERE confirmation_turn_id = %s LIMIT 2",
+                (turn_id,),
+            )
+            if cursor.fetchall() or receipt_events:
+                raise EvaluationEvidenceInvalid
+            return
+        if len(receipt_events) != 1:
+            raise EvaluationEvidenceInvalid
+        cursor.execute(
+            "SELECT payload_json FROM support_event "
+            "WHERE turn_id = %s AND event_type = 'ACTION_RECEIPT' LIMIT 2",
+            (turn_id,),
+        )
+        receipt_rows = cursor.fetchall()
+        if len(receipt_rows) != 1:
+            raise EvaluationEvidenceInvalid
+        receipt_payload = self._payload(receipt_rows[0][0])
+        receipt_id = receipt_payload.get("receiptId")
+        pending_action_id = receipt_payload.get("pendingActionId")
+        if not self._canonical_uuid(receipt_id) or not self._canonical_uuid(pending_action_id):
+            raise EvaluationEvidenceInvalid
+        receipt, projection = self._load_valid_receipt_projection(
+            cursor,
+            pending_action_id=str(pending_action_id),
+            session_id=session_id,
+            subject=subject,
+            sandbox_id=sandbox_id,
+        )
+        if (
+            receipt.receipt_id != receipt_id
+            or receipt_events[0].outcome != receipt.status
+            or receipt_events[0].reference != receipt.receipt_id
+            or (
+                projection[3] == turn_id
+                and (projection[4] != trace_id or receipt_events[0].sequence != projection[18])
+            )
+        ):
+            raise EvaluationEvidenceInvalid
+        if receipt_payload != {
+            "receiptId": receipt.receipt_id,
+            "pendingActionId": receipt.pending_action_id,
+            "status": receipt.status,
+            "receiptCommitment": receipt.receipt_commitment,
+        }:
+            raise EvaluationEvidenceInvalid
+        cursor.execute(
+            "SELECT pending_action_id, source_turn_id, source_trace_id, conversation_id, "
+            "session_id, user_subject, sandbox_id, action_type, argument_commitment, "
+            "order_id, amount_minor, currency, state, expires_at, resolved_at "
+            "FROM pending_action_reference WHERE pending_action_id = %s LIMIT 2",
+            (receipt.pending_action_id,),
+        )
+        owner_rows = cursor.fetchall()
+        if len(owner_rows) != 1:
+            raise EvaluationEvidenceInvalid
+        owner = owner_rows[0]
+        self._validate_pending_truth_row(
+            cursor,
+            pending=owner,
+            session_id=session_id,
+            subject=subject,
+            sandbox_id=sandbox_id,
+        )
+        if (
+            owner[7] != receipt.action_type
+            or owner[8] != receipt.argument_commitment
+            or tuple(owner[9:12]) != (receipt.order_id, receipt.amount_minor, receipt.currency)
+            or owner[12] != "CONFIRMED"
+            or projection[2] != owner[1]
+        ):
+            raise EvaluationEvidenceInvalid
+
+    def _validate_pending_truth_row(
+        self,
+        cursor: pymysql.cursors.Cursor,
+        *,
+        pending: tuple[object, ...],
+        session_id: str,
+        subject: str,
+        sandbox_id: str,
+    ) -> None:
+        if (
+            len(pending) != 15
+            or not self._canonical_uuid(pending[0])
+            or tuple(pending[4:7]) != (session_id, subject, sandbox_id)
+            or pending[7] != "REFUND_REQUEST"
+            or not isinstance(pending[8], str)
+            or not isinstance(pending[9], str)
+            or type(pending[10]) is not int
+            or not isinstance(pending[11], str)
+            or pending[12] not in {"PENDING", "DECLINED", "EXPIRED", "CONFIRMED"}
+            or (pending[12] == "PENDING") != (pending[14] is None)
+            or not isinstance(pending[13], datetime)
+        ):
+            raise EvaluationEvidenceInvalid
+        try:
+            commitment = action_argument_commitment(
+                str(pending[7]),
+                pending[9],
+                pending[10],
+                pending[11],
+            )
+        except (TypeError, ValueError):
+            raise EvaluationEvidenceInvalid from None
+        if pending[8] != commitment:
+            raise EvaluationEvidenceInvalid
+        cursor.execute(
+            "SELECT trace_id, conversation_id, session_id, user_subject, state, outcome "
+            "FROM support_turn WHERE turn_id = %s LIMIT 2",
+            (pending[1],),
+        )
+        source_rows = cursor.fetchall()
+        if len(source_rows) != 1 or tuple(source_rows[0]) != (
+            pending[2],
+            pending[3],
+            session_id,
+            subject,
+            "COMPLETED",
+            "action_pending",
+        ):
+            raise EvaluationEvidenceInvalid
+        cursor.execute(
+            "SELECT payload_json FROM support_event "
+            "WHERE turn_id = %s AND event_type = 'ACTION_PREPARED' LIMIT 2",
+            (pending[1],),
+        )
+        prepared_rows = cursor.fetchall()
+        if len(prepared_rows) != 1 or self._payload(prepared_rows[0][0]) != {
+            "pendingActionId": str(pending[0]),
+            "actionType": str(pending[7]),
+            "argumentCommitment": str(pending[8]),
+        }:
+            raise EvaluationEvidenceInvalid
+        cursor.execute(
+            "SELECT pending_action_id FROM action_receipt_projection "
+            "WHERE pending_action_id = %s LIMIT 2",
+            (pending[0],),
+        )
+        projection_rows = cursor.fetchall()
+        if pending[12] == "CONFIRMED":
+            if len(projection_rows) != 1:
+                raise EvaluationEvidenceInvalid
+            receipt, projection = self._load_valid_receipt_projection(
+                cursor,
+                pending_action_id=str(pending[0]),
+                session_id=session_id,
+                subject=subject,
+                sandbox_id=sandbox_id,
+            )
+            if (
+                projection[2] != pending[1]
+                or receipt.action_type != pending[7]
+                or receipt.argument_commitment != pending[8]
+                or tuple((receipt.order_id, receipt.amount_minor, receipt.currency))
+                != tuple(pending[9:12])
+            ):
+                raise EvaluationEvidenceInvalid
+        elif projection_rows:
+            raise EvaluationEvidenceInvalid
+
+    def _load_valid_receipt_projection(
+        self,
+        cursor: pymysql.cursors.Cursor,
+        *,
+        pending_action_id: str,
+        session_id: str,
+        subject: str,
+        sandbox_id: str,
+    ) -> tuple[ActionReceiptPayload, tuple[object, ...]]:
+        cursor.execute(
+            "SELECT receipt_id, pending_action_id, source_turn_id, confirmation_turn_id, "
+            "confirmation_trace_id, session_id, user_subject, sandbox_id, action_type, "
+            "argument_commitment, status, order_id, refund_id, resource_version, amount_minor, "
+            "currency, committed_at, receipt_commitment, published_event_sequence "
+            "FROM action_receipt_projection WHERE pending_action_id = %s LIMIT 2",
+            (pending_action_id,),
+        )
+        projection_rows = cursor.fetchall()
+        if len(projection_rows) != 1:
+            raise EvaluationEvidenceInvalid
+        projection = projection_rows[0]
+        committed_at = projection[16]
+        if not isinstance(committed_at, datetime):
+            raise EvaluationEvidenceInvalid
+        if committed_at.tzinfo is None:
+            committed_at = committed_at.replace(tzinfo=UTC)
+        try:
+            receipt = ActionReceiptPayload.model_validate(
+                {
+                    "receiptId": str(projection[0]),
+                    "pendingActionId": str(projection[1]),
+                    "actionType": str(projection[8]),
+                    "status": str(projection[10]),
+                    "orderId": str(projection[11]),
+                    "refundId": str(projection[12]),
+                    "resourceVersion": int(projection[13]),
+                    "amountMinor": int(projection[14]),
+                    "currency": str(projection[15]),
+                    "committedAt": committed_at,
+                    "replayed": True,
+                }
+            )
+        except (TypeError, ValueError):
+            raise EvaluationEvidenceInvalid from None
+        if (
+            tuple(projection[5:8]) != (session_id, subject, sandbox_id)
+            or projection[9] != receipt.argument_commitment
+            or projection[17] != receipt.receipt_commitment
+        ):
+            raise EvaluationEvidenceInvalid
+        cursor.execute(
+            "SELECT trace_id, session_id, user_subject, state, outcome "
+            "FROM support_turn WHERE turn_id = %s LIMIT 2",
+            (projection[3],),
+        )
+        confirmation_rows = cursor.fetchall()
+        if len(confirmation_rows) != 1 or tuple(confirmation_rows[0]) != (
+            projection[4],
+            session_id,
+            subject,
+            "COMPLETED",
+            "action_completed",
+        ):
+            raise EvaluationEvidenceInvalid
+        cursor.execute(
+            "SELECT sequence, payload_json FROM support_event "
+            "WHERE turn_id = %s AND event_type = 'ACTION_RECEIPT' LIMIT 2",
+            (projection[3],),
+        )
+        event_rows = cursor.fetchall()
+        if (
+            len(event_rows) != 1
+            or event_rows[0][0] != projection[18]
+            or self._payload(event_rows[0][1])
+            != {
+                "receiptId": receipt.receipt_id,
+                "pendingActionId": receipt.pending_action_id,
+                "status": receipt.status,
+                "receiptCommitment": receipt.receipt_commitment,
+            }
+        ):
+            raise EvaluationEvidenceInvalid
+        return receipt, projection
 
     @staticmethod
     def _canonical_uuid(value: object) -> bool:

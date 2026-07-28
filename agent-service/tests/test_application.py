@@ -2,6 +2,7 @@ import base64
 import json
 import time
 from collections.abc import Mapping
+from contextlib import contextmanager
 from datetime import UTC, datetime, timedelta
 from typing import Any, Literal
 
@@ -14,8 +15,15 @@ from citybuddy_agent.actions import (
     PendingActionPayload,
     PendingActionReference,
     StoredActionReceipt,
+    action_argument_commitment,
 )
-from citybuddy_agent.agent_control import AgentEvent, AgentRunner, AgentRunResult, AttemptBudget
+from citybuddy_agent.agent_control import (
+    AgentEvent,
+    AgentRunner,
+    AgentRunResult,
+    AttemptBudget,
+    ToolBoundaryFailure,
+)
 from citybuddy_agent.application import (
     ActionConfirmationBoundary,
     AgentSettings,
@@ -27,13 +35,16 @@ from citybuddy_agent.application import (
     create_app,
 )
 from citybuddy_agent.conversation import (
+    ConversationIntegrityError,
     ConversationOwnershipError,
     ConversationResult,
     ConversationStore,
     CorrelationConflictError,
+    MysqlConversationStore,
     TurnStart,
 )
 from citybuddy_agent.evaluation import (
+    ActionEvidenceIntegrityError,
     EvaluationEvidenceInvalid,
     EvaluationEvidenceNotFound,
     EvaluationEvidenceResponse,
@@ -51,6 +62,15 @@ from citybuddy_agent.retrieval import RetrievalDecision
 from cryptography.hazmat.primitives.asymmetric import rsa
 from fastapi import HTTPException
 from fastapi.testclient import TestClient
+
+
+def streamed(callback: Any) -> Any:
+    @contextmanager
+    def stream(method: str, url: str, **kwargs: Any) -> Any:
+        assert method == "POST"
+        yield callback(url, **kwargs)
+
+    return stream
 
 
 class CountingJwksSource:
@@ -346,6 +366,7 @@ class PendingAgent(AgentRunner):
                 AgentEvent(
                     "ACTION_PREPARED",
                     {
+                        "pendingActionId": self.pending.pending_action_id,
                         "actionType": self.pending.action_type,
                         "argumentCommitment": self.pending.argument_commitment,
                     },
@@ -428,6 +449,8 @@ class MemoryEvidenceStore(EvaluationEvidenceStore):
             raise EvaluationEvidenceNotFound
         if self.mode == "invalid":
             raise EvaluationEvidenceInvalid
+        if self.mode == "action_invalid":
+            raise ActionEvidenceIntegrityError
         now = datetime(2026, 7, 18, 12, 0, tzinfo=UTC)
         return EvaluationEvidenceResponse(
             schema_version="agent-evidence-v1",
@@ -502,6 +525,308 @@ def test_evaluation_evidence_normalizes_mysql_timestamps_to_utc() -> None:
 
     assert normalized.isoformat() == "2026-07-18T12:00:00+00:00"
     assert normalized.tzinfo is UTC
+
+
+class ScriptedCursor:
+    def __init__(self, results: list[list[tuple[object, ...]]]) -> None:
+        self.results = results
+        self.current: list[tuple[object, ...]] = []
+
+    def execute(self, query: str, arguments: object) -> None:
+        del query, arguments
+        self.current = self.results.pop(0)
+
+    def fetchall(self) -> list[tuple[object, ...]]:
+        return self.current
+
+
+def test_evaluation_action_truth_rejects_missing_pending_and_receipt_projections() -> None:
+    store = object.__new__(MysqlEvaluationEvidenceStore)
+    now = datetime.now(UTC)
+    prepared = EvidenceEventResponse(
+        sequence=2,
+        event_kind="ACTION_PREPARED",
+        outcome="prepared",
+        reference=action_argument_commitment(
+            "REFUND_REQUEST",
+            "00000000-0000-0000-0000-000000000040",
+            400,
+            "CNY",
+        ),
+        occurred_at=now,
+    )
+    receipt = EvidenceEventResponse(
+        sequence=2,
+        event_kind="ACTION_RECEIPT",
+        outcome="REQUESTED",
+        reference="00000000-0000-0000-0000-000000000122",
+        occurred_at=now,
+    )
+
+    with pytest.raises(EvaluationEvidenceInvalid):
+        store._validate_action_truth(
+            ScriptedCursor([[]]),  # type: ignore[arg-type]
+            turn_id="00000000-0000-0000-0000-000000000121",
+            trace_id="00000000-0000-0000-0000-000000000125",
+            conversation_id="00000000-0000-0000-0000-000000000126",
+            session_id="session-1",
+            subject="user-1",
+            sandbox_id="sandbox-1",
+            terminal_outcome="action_pending",
+            events=(prepared,),
+        )
+    with pytest.raises(EvaluationEvidenceInvalid):
+        store._validate_action_truth(
+            ScriptedCursor([[], []]),  # type: ignore[arg-type]
+            turn_id="00000000-0000-0000-0000-000000000127",
+            trace_id="00000000-0000-0000-0000-000000000128",
+            conversation_id="00000000-0000-0000-0000-000000000126",
+            session_id="session-1",
+            subject="user-1",
+            sandbox_id="sandbox-1",
+            terminal_outcome="action_completed",
+            events=(receipt,),
+        )
+
+
+def test_mysql_complete_turn_rejects_action_completed_before_commit() -> None:
+    class Cursor:
+        rowcount = 1
+
+        def __enter__(self) -> Any:
+            return self
+
+        def __exit__(self, *args: object) -> None:
+            del args
+
+        def execute(self, query: str, arguments: object) -> None:
+            del query, arguments
+
+        def fetchone(self) -> tuple[object, ...]:
+            return ("session-1", "user-1", "PROCESSING", "trace-1", True)
+
+    class Connection:
+        def __init__(self) -> None:
+            self.commits = 0
+            self.rollbacks = 0
+
+        def __enter__(self) -> Any:
+            return self
+
+        def __exit__(self, *args: object) -> None:
+            del args
+
+        def cursor(self) -> Any:
+            return Cursor()
+
+        def commit(self) -> None:
+            self.commits += 1
+
+        def rollback(self) -> None:
+            self.rollbacks += 1
+
+    connection = Connection()
+    store = object.__new__(MysqlConversationStore)
+    store._connect = lambda: connection  # type: ignore[assignment,method-assign,return-value]
+
+    with pytest.raises(RuntimeError, match="requires the receipt transaction"):
+        store.complete_turn(
+            start=TurnStart("conversation-1", "trace-1", "turn-1"),
+            response_text="invalid",
+            outcome="action_completed",
+            events=(),
+        )
+    assert connection.commits == 0
+    assert connection.rollbacks == 1
+
+
+def test_conversation_replay_rejects_missing_pending_projection() -> None:
+    with pytest.raises(ConversationIntegrityError, match="cardinality"):
+        MysqlConversationStore._load_pending_action_for_turn(
+            ScriptedCursor([[]]),  # type: ignore[arg-type]
+            turn_id="00000000-0000-0000-0000-000000000121",
+            trace_id="00000000-0000-0000-0000-000000000125",
+            conversation_id="00000000-0000-0000-0000-000000000126",
+            session_id="session-1",
+            subject="user-1",
+            sandbox_id="sandbox-1",
+        )
+
+
+@pytest.mark.parametrize(
+    ("terminal_outcome", "event_type", "state", "event_outcome"),
+    [
+        ("action_declined", "ACTION_DECLINED", "DECLINED", "declined"),
+        ("action_expired", "ACTION_EXPIRED", "EXPIRED", "expired"),
+    ],
+)
+def test_resolved_action_replay_and_evaluation_require_the_pending_projection(
+    terminal_outcome: str,
+    event_type: str,
+    state: str,
+    event_outcome: str,
+) -> None:
+    pending_action_id = "00000000-0000-0000-0000-000000000121"
+    source_turn_id = "00000000-0000-0000-0000-000000000122"
+    source_trace_id = "00000000-0000-0000-0000-000000000123"
+    conversation_id = "00000000-0000-0000-0000-000000000124"
+    resolution_turn_id = "00000000-0000-0000-0000-000000000125"
+    order_id = "00000000-0000-0000-0000-000000000040"
+    commitment = action_argument_commitment("REFUND_REQUEST", order_id, 400, "CNY")
+    now = datetime.now(UTC)
+    event_payload = json.dumps({"pendingActionId": pending_action_id, "outcome": event_outcome})
+    prepared_payload = json.dumps(
+        {
+            "pendingActionId": pending_action_id,
+            "actionType": "REFUND_REQUEST",
+            "argumentCommitment": commitment,
+        }
+    )
+    pending_row = (
+        pending_action_id,
+        source_turn_id,
+        source_trace_id,
+        conversation_id,
+        "session-1",
+        "user-1",
+        "sandbox-1",
+        "REFUND_REQUEST",
+        commitment,
+        order_id,
+        400,
+        "CNY",
+        state,
+        now + timedelta(minutes=5),
+        now,
+    )
+
+    conversation_cursor = ScriptedCursor(
+        [
+            [(event_payload,)],
+            [
+                (
+                    source_turn_id,
+                    source_trace_id,
+                    conversation_id,
+                    "session-1",
+                    "user-1",
+                    "sandbox-1",
+                    state,
+                    now,
+                )
+            ],
+            [pending_row],
+            [(prepared_payload,)],
+            [],
+            [(resolution_turn_id, event_type)],
+        ]
+    )
+    MysqlConversationStore._validate_resolved_action_turn(
+        conversation_cursor,  # type: ignore[arg-type]
+        turn_id=resolution_turn_id,
+        session_id="session-1",
+        subject="user-1",
+        sandbox_id="sandbox-1",
+        outcome=terminal_outcome,
+    )
+
+    resolution_event = EvidenceEventResponse(
+        sequence=2,
+        event_kind=event_type,  # type: ignore[arg-type]
+        outcome=event_outcome,
+        occurred_at=now,
+    )
+    evaluation_cursor = ScriptedCursor(
+        [
+            [],
+            [(event_payload,)],
+            [pending_row],
+            [
+                (
+                    source_trace_id,
+                    conversation_id,
+                    "session-1",
+                    "user-1",
+                    "COMPLETED",
+                    "action_pending",
+                )
+            ],
+            [(prepared_payload,)],
+            [],
+            [(resolution_turn_id, event_type)],
+            [],
+        ]
+    )
+    MysqlEvaluationEvidenceStore._validate_action_truth(
+        object.__new__(MysqlEvaluationEvidenceStore),
+        evaluation_cursor,  # type: ignore[arg-type]
+        turn_id=resolution_turn_id,
+        trace_id="00000000-0000-0000-0000-000000000126",
+        conversation_id=conversation_id,
+        session_id="session-1",
+        subject="user-1",
+        sandbox_id="sandbox-1",
+        terminal_outcome=terminal_outcome,  # type: ignore[arg-type]
+        events=(resolution_event,),
+    )
+
+    missing_projection = ScriptedCursor([[(event_payload,)], []])
+    with pytest.raises(ConversationIntegrityError, match="cardinality"):
+        MysqlConversationStore._validate_resolved_action_turn(
+            missing_projection,  # type: ignore[arg-type]
+            turn_id=resolution_turn_id,
+            session_id="session-1",
+            subject="user-1",
+            sandbox_id="sandbox-1",
+            outcome=terminal_outcome,
+        )
+
+
+def test_receipt_replay_requires_the_committed_pending_projection() -> None:
+    now = datetime.now(UTC)
+    receipt = ActionReceiptPayload.model_validate(
+        {
+            "receiptId": "00000000-0000-0000-0000-000000000121",
+            "pendingActionId": "00000000-0000-0000-0000-000000000122",
+            "actionType": "REFUND_REQUEST",
+            "status": "REQUESTED",
+            "orderId": "00000000-0000-0000-0000-000000000040",
+            "refundId": "00000000-0000-0000-0000-000000000123",
+            "resourceVersion": 1,
+            "amountMinor": 400,
+            "currency": "CNY",
+            "committedAt": now,
+            "replayed": True,
+        }
+    )
+    stored = StoredActionReceipt(
+        receipt,
+        "00000000-0000-0000-0000-000000000124",
+        "00000000-0000-0000-0000-000000000125",
+    )
+    cursor = ScriptedCursor(
+        [
+            [
+                (
+                    "00000000-0000-0000-0000-000000000126",
+                    "00000000-0000-0000-0000-000000000127",
+                    "session-1",
+                    "user-1",
+                    "COMPLETED",
+                    "action_pending",
+                )
+            ],
+            [],
+        ]
+    )
+    with pytest.raises(ConversationIntegrityError, match="cardinality"):
+        MysqlConversationStore._validate_receipt_pending_truth(
+            cursor,  # type: ignore[arg-type]
+            stored=stored,
+            session_id="session-1",
+            subject="user-1",
+            sandbox_id="sandbox-1",
+        )
 
 
 def settings() -> AgentSettings:
@@ -663,7 +988,9 @@ def test_evaluation_evidence_route_is_profile_bound_and_independently_authentica
     }
 
 
-def test_evaluation_evidence_rejects_invalid_input_and_conceals_association_failures() -> None:
+def test_evaluation_evidence_rejects_invalid_input_and_conceals_association_failures(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
     trace_id = "00000000-0000-0000-0000-000000000001"
     evidence = MemoryEvidenceStore()
     client = TestClient(
@@ -697,6 +1024,12 @@ def test_evaluation_evidence_rejects_invalid_input_and_conceals_association_fail
     invalid = client.get(f"/api/eval/evidence/{trace_id}", headers=headers)
     assert invalid.status_code == 409
     assert invalid.json() == {"detail": "Evidence unavailable"}
+
+    evidence.mode = "action_invalid"
+    action_invalid = client.get(f"/api/eval/evidence/{trace_id}", headers=headers)
+    assert action_invalid.status_code == 409
+    assert action_invalid.json() == {"detail": "Evidence unavailable"}
+    assert "reason_code=EVALUATION_ACTION_DURABLE_TRUTH_INCONSISTENT" in caplog.text
 
 
 def key_fixture(kid: str) -> tuple[rsa.RSAPrivateKey, dict[str, Any]]:
@@ -947,7 +1280,7 @@ def test_obo_client_rechecks_owner_and_server_allowlist(
         requests.append(kwargs)
         return httpx.Response(200, json={"accessToken": "signed-obo"})
 
-    monkeypatch.setattr(httpx, "post", exchange_response)
+    monkeypatch.setattr(httpx, "stream", streamed(exchange_response))
 
     assert (
         client.exchange("direct-token", principal.subject, session_id, "catalog:read")
@@ -986,7 +1319,7 @@ def test_evaluation_obo_preserves_exact_sandbox_header(
         requests.append(kwargs)
         return httpx.Response(200, json={"accessToken": "signed-eval-obo"})
 
-    monkeypatch.setattr(httpx, "post", exchange_response)
+    monkeypatch.setattr(httpx, "stream", streamed(exchange_response))
 
     assert (
         client.exchange(
@@ -1021,15 +1354,15 @@ def test_obo_client_rejects_malformed_exchange_response(
     client = OboClient(settings(), sessions)
     monkeypatch.setattr(
         httpx,
-        "post",
-        lambda *args, **kwargs: httpx.Response(200, content=b"{"),
+        "stream",
+        streamed(lambda *args, **kwargs: httpx.Response(200, content=b"{")),
     )
 
     with pytest.raises(HTTPException) as malformed:
         client.exchange("direct-token", "user-123", session_id, "catalog:read")
 
-    assert malformed.value.status_code == 502
-    assert malformed.value.detail == "Identity exchange rejected"
+    assert malformed.value.status_code == 503
+    assert malformed.value.detail == "Identity exchange unavailable"
 
 
 def test_chat_persists_server_owned_result_and_replays_same_intent() -> None:
@@ -1531,7 +1864,7 @@ def test_confirmation_requeries_the_fixed_result_with_the_shared_attempt_budget(
             raise httpx.ReadTimeout("response lost after commerce commit")
         return httpx.Response(200, json=receipt.model_dump(by_alias=True, mode="json"))
 
-    monkeypatch.setattr(httpx, "post", post)
+    monkeypatch.setattr(httpx, "stream", streamed(post))
     obo = FreshObo()
     events: list[AgentEvent] = []
     budget = AttemptBudget(4, events)
@@ -1601,11 +1934,11 @@ def test_confirmation_rejects_every_contradictory_pending_identity(
 
     monkeypatch.setattr(
         httpx,
-        "post",
-        lambda *args, **kwargs: httpx.Response(200, json=response),
+        "stream",
+        streamed(lambda *args, **kwargs: httpx.Response(200, json=response)),
     )
 
-    with pytest.raises(HTTPException) as rejected:
+    with pytest.raises(ToolBoundaryFailure) as rejected:
         HttpActionConfirmationBoundary("https://commerce.test", FixedObo()).confirm(
             direct_token="direct",
             pending=pending,
@@ -1613,6 +1946,7 @@ def test_confirmation_rejects_every_contradictory_pending_identity(
         )
     assert rejected.value.status_code == 502
     assert rejected.value.detail == "Invalid action confirmation response"
+    assert rejected.value.reason == "invalid_action_confirmation_response"
 
 
 def test_expired_pending_action_is_a_distinct_terminal_without_commerce() -> None:
@@ -1987,3 +2321,106 @@ def test_feedback_is_owner_scoped_append_only_and_idempotent() -> None:
         ).status_code
         == 401
     )
+
+
+@pytest.mark.parametrize(
+    ("status", "reason"),
+    [
+        (502, "invalid_commerce_response"),
+        (503, "identity_unavailable"),
+        (503, "commerce_timeout"),
+        (503, "commerce_indeterminate"),
+        (503, "commerce_unavailable"),
+    ],
+)
+def test_chat_maps_sensitive_tool_faults_without_terminal_denial(
+    status: int,
+    reason: str,
+) -> None:
+    class FailingAgent:
+        def run(self, **kwargs: object) -> AgentRunResult:
+            del kwargs
+            raise ToolBoundaryFailure(
+                status_code=status,
+                reason=reason,
+                detail=(
+                    "Invalid commerce tool response"
+                    if status == 502
+                    else "Commerce tool unavailable"
+                ),
+            )
+
+    private, public_jwk = key_fixture("current-key")
+    sessions = MemorySessionStore()
+    session_id = sessions.create("user-123")
+    conversations = MemoryConversationStore(sessions)
+    client = TestClient(
+        create_app(
+            settings(),
+            validator=DirectJwtValidator(settings(), CountingJwksSource([public_jwk])),
+            sessions=sessions,
+            conversations=conversations,
+            agent=FailingAgent(),
+        )
+    )
+
+    response = client.post(
+        "/api/chat",
+        headers={
+            "Authorization": f"Bearer {direct_token(private, 'current-key')}",
+            "X-Session-Id": session_id,
+            "Idempotency-Key": f"tool-fault-{reason}",
+        },
+        json={"message": "refund my order"},
+    )
+
+    assert response.status_code == status
+    assert response.json() == {
+        "detail": (
+            "Invalid commerce tool response" if status == 502 else "Commerce tool unavailable"
+        )
+    }
+    assert conversations.failures[-1][1] == reason
+
+
+def test_chat_attributes_action_durable_truth_conflict_without_public_detail(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    class IntegrityConversationStore(MemoryConversationStore):
+        def replay_turn(
+            self,
+            *,
+            session_id: str,
+            subject: str,
+            sandbox_id: str | None,
+            correlation_key: str,
+            message: str,
+        ) -> ConversationResult | None:
+            del session_id, subject, sandbox_id, correlation_key, message
+            raise ConversationIntegrityError("damaged action projection")
+
+    private, public_jwk = key_fixture("current-key")
+    sessions = MemorySessionStore()
+    session_id = sessions.create("user-123")
+    response = TestClient(
+        create_app(
+            settings(),
+            validator=DirectJwtValidator(settings(), CountingJwksSource([public_jwk])),
+            sessions=sessions,
+            conversations=IntegrityConversationStore(sessions),
+            agent=MemoryAgent(),
+        )
+    ).post(
+        "/api/chat",
+        headers={
+            "Authorization": f"Bearer {direct_token(private, 'current-key')}",
+            "X-Session-Id": session_id,
+            "Idempotency-Key": "damaged-action",
+        },
+        json={"message": "confirm refund"},
+    )
+
+    assert response.status_code == 409
+    assert response.json() == {"detail": "Conversation evidence conflict"}
+    assert "reason_code=CONVERSATION_ACTION_DURABLE_TRUTH_INCONSISTENT" in caplog.text
+    assert "damaged action projection" not in response.text

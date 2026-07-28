@@ -17,6 +17,8 @@ from .actions import (
     PendingActionPayload,
     PendingActionReference,
     StoredActionReceipt,
+    action_argument_commitment,
+    strict_json_object,
 )
 from .agent_control import AgentEvent
 from .retrieval import RetrievalDecision, RetrievalEvidence
@@ -67,6 +69,10 @@ class TurnInProgressError(Exception):
 
 class TurnFailedError(Exception):
     """The durable turn previously ended in a non-permissive internal failure."""
+
+
+class ConversationIntegrityError(RuntimeError):
+    """Stored conversation/action evidence is incomplete or contradictory."""
 
 
 class ConversationStore(Protocol):
@@ -209,6 +215,38 @@ class MysqlConversationStore:
                 return None
             if row[3] is None or row[5] is None:
                 raise RuntimeError("Durable replay is not terminal")
+            if row[5] == "action_pending":
+                self._load_pending_action_for_turn(
+                    cursor,
+                    turn_id=str(row[1]),
+                    trace_id=str(row[0]),
+                    conversation_id=str(row[6]),
+                    session_id=session_id,
+                    subject=subject,
+                    sandbox_id=sandbox_id,
+                )
+            elif row[5] in {"action_declined", "action_expired"}:
+                self._validate_resolved_action_turn(
+                    cursor,
+                    turn_id=str(row[1]),
+                    session_id=session_id,
+                    subject=subject,
+                    sandbox_id=sandbox_id,
+                    outcome=str(row[5]),
+                )
+            action_receipt = self._load_action_receipt(cursor, str(row[1]))
+            if (row[5] == "action_completed") != (action_receipt is not None):
+                raise ConversationIntegrityError(
+                    "ActionReceipt projection and terminal outcome disagree"
+                )
+            if action_receipt is not None:
+                self._validate_receipt_pending_truth(
+                    cursor,
+                    stored=action_receipt,
+                    session_id=session_id,
+                    subject=subject,
+                    sandbox_id=sandbox_id,
+                )
             return ConversationResult(
                 str(row[6]),
                 str(row[0]),
@@ -216,7 +254,7 @@ class MysqlConversationStore:
                 str(row[3]),
                 str(row[5]),
                 self._load_retrieval_evidence(cursor, str(row[1])),
-                self._load_action_receipt(cursor, str(row[1])),
+                action_receipt,
             )
 
     def _begin_turn_once(
@@ -297,6 +335,37 @@ class MysqlConversationStore:
                             raise RuntimeError("Durable replay is not terminal")
                         retrieval_evidence = self._load_retrieval_evidence(cursor, str(existing[1]))
                         action_receipt = self._load_action_receipt(cursor, str(existing[1]))
+                        if (existing[5] == "action_completed") != (action_receipt is not None):
+                            raise ConversationIntegrityError(
+                                "ActionReceipt projection and terminal outcome disagree"
+                            )
+                        if existing[5] == "action_pending":
+                            self._load_pending_action_for_turn(
+                                cursor,
+                                turn_id=str(existing[1]),
+                                trace_id=str(existing[0]),
+                                conversation_id=conversation_id,
+                                session_id=session_id,
+                                subject=subject,
+                                sandbox_id=sandbox_id,
+                            )
+                        elif existing[5] in {"action_declined", "action_expired"}:
+                            self._validate_resolved_action_turn(
+                                cursor,
+                                turn_id=str(existing[1]),
+                                session_id=session_id,
+                                subject=subject,
+                                sandbox_id=sandbox_id,
+                                outcome=str(existing[5]),
+                            )
+                        if action_receipt is not None:
+                            self._validate_receipt_pending_truth(
+                                cursor,
+                                stored=action_receipt,
+                                session_id=session_id,
+                                subject=subject,
+                                sandbox_id=sandbox_id,
+                            )
                         result = ConversationResult(
                             conversation_id,
                             str(existing[0]),
@@ -404,6 +473,24 @@ class MysqlConversationStore:
                         )
                     if (outcome == "action_pending") != (pending_action is not None):
                         raise RuntimeError("Action pending outcome and reference disagree")
+                    if outcome == "action_completed":
+                        raise RuntimeError(
+                            "Action completed outcome requires the receipt transaction"
+                        )
+                    prepared_events = [
+                        event for event in events if event.event_type == "ACTION_PREPARED"
+                    ]
+                    if pending_action is None:
+                        if prepared_events:
+                            raise RuntimeError(
+                                "Action preparation event has no PendingAction reference"
+                            )
+                    elif len(prepared_events) != 1 or prepared_events[0].payload != {
+                        "pendingActionId": pending_action.pending_action_id,
+                        "actionType": pending_action.action_type,
+                        "argumentCommitment": pending_action.argument_commitment,
+                    }:
+                        raise RuntimeError("PendingAction reference and preparation event disagree")
                     if pending_action is not None:
                         cursor.execute(
                             "INSERT INTO pending_action_reference "
@@ -472,41 +559,26 @@ class MysqlConversationStore:
     ) -> PendingActionReference | None:
         with self._connect() as connection, connection.cursor() as cursor:
             cursor.execute(
-                "SELECT pending_action_id, source_turn_id, source_trace_id, conversation_id, "
-                "session_id, user_subject, sandbox_id, action_type, argument_commitment, "
-                "order_id, amount_minor, currency, expires_at "
-                "FROM pending_action_reference "
-                "WHERE session_id = %s AND user_subject = %s AND state = 'PENDING' "
-                "ORDER BY created_at DESC, pending_action_id DESC LIMIT 2",
+                "SELECT turn_id, trace_id, conversation_id FROM support_turn "
+                "WHERE session_id = %s AND user_subject = %s AND outcome = 'action_pending' "
+                "ORDER BY turn_sequence DESC LIMIT 1",
                 (session_id, subject),
             )
-            rows = cursor.fetchall()
-        matching = [row for row in rows if row[6] == sandbox_id]
-        if not matching:
+            turn = cursor.fetchone()
+            if turn is None:
+                return None
+            pending, state = self._load_pending_action_for_turn(
+                cursor,
+                turn_id=str(turn[0]),
+                trace_id=str(turn[1]),
+                conversation_id=str(turn[2]),
+                session_id=session_id,
+                subject=subject,
+                sandbox_id=sandbox_id,
+            )
+        if state != "PENDING":
             return None
-        if len(matching) != 1 or len(rows) != 1:
-            raise RuntimeError("PendingAction reference cardinality is inconsistent")
-        row = matching[0]
-        expires_at = row[12]
-        if not isinstance(expires_at, datetime):
-            raise RuntimeError("PendingAction expiry is invalid")
-        if expires_at.tzinfo is None:
-            expires_at = expires_at.replace(tzinfo=UTC)
-        return PendingActionReference(
-            pending_action_id=str(row[0]),
-            source_turn_id=str(row[1]),
-            source_trace_id=str(row[2]),
-            conversation_id=str(row[3]),
-            session_id=str(row[4]),
-            user_subject=str(row[5]),
-            sandbox_id=cast(str | None, row[6]),
-            action_type=str(row[7]),
-            argument_commitment=str(row[8]),
-            order_id=str(row[9]),
-            amount_minor=int(row[10]),
-            currency=str(row[11]),
-            expires_at=expires_at,
-        )
+        return pending
 
     def complete_action_decline(
         self,
@@ -534,7 +606,13 @@ class MysqlConversationStore:
                         session_id=str(turn[0]),
                         subject=str(turn[1]),
                         sequence=2,
-                        event=AgentEvent("ACTION_DECLINED", {"outcome": "declined"}),
+                        event=AgentEvent(
+                            "ACTION_DECLINED",
+                            {
+                                "pendingActionId": pending.pending_action_id,
+                                "outcome": "declined",
+                            },
+                        ),
                     )
                     self._finish_turn(
                         cursor,
@@ -582,7 +660,13 @@ class MysqlConversationStore:
                         session_id=str(turn[0]),
                         subject=str(turn[1]),
                         sequence=2,
-                        event=AgentEvent("ACTION_EXPIRED", {"outcome": "expired"}),
+                        event=AgentEvent(
+                            "ACTION_EXPIRED",
+                            {
+                                "pendingActionId": pending.pending_action_id,
+                                "outcome": "expired",
+                            },
+                        ),
                     )
                     self._finish_turn(
                         cursor,
@@ -707,6 +791,7 @@ class MysqlConversationStore:
                             "ACTION_RECEIPT",
                             {
                                 "receiptId": receipt.receipt_id,
+                                "pendingActionId": receipt.pending_action_id,
                                 "status": receipt.status,
                                 "receiptCommitment": receipt.receipt_commitment,
                             },
@@ -998,6 +1083,122 @@ class MysqlConversationStore:
             for row in rows
         )
 
+    @classmethod
+    def _load_pending_action_for_turn(
+        cls,
+        cursor: pymysql.cursors.Cursor,
+        *,
+        turn_id: str,
+        trace_id: str,
+        conversation_id: str,
+        session_id: str,
+        subject: str,
+        sandbox_id: str | None,
+    ) -> tuple[PendingActionReference, str]:
+        cursor.execute(
+            "SELECT pending_action_id, source_turn_id, source_trace_id, conversation_id, "
+            "session_id, user_subject, sandbox_id, action_type, argument_commitment, "
+            "order_id, amount_minor, currency, state, expires_at, resolved_at "
+            "FROM pending_action_reference WHERE source_turn_id = %s LIMIT 2",
+            (turn_id,),
+        )
+        rows = cursor.fetchall()
+        if len(rows) != 1:
+            raise ConversationIntegrityError("PendingAction reference cardinality is inconsistent")
+        row = rows[0]
+        if tuple(row[1:7]) != (
+            turn_id,
+            trace_id,
+            conversation_id,
+            session_id,
+            subject,
+            sandbox_id,
+        ):
+            raise ConversationIntegrityError("PendingAction reference ownership is inconsistent")
+        state = str(row[12])
+        if state not in {"PENDING", "DECLINED", "EXPIRED", "CONFIRMED"}:
+            raise ConversationIntegrityError("PendingAction reference state is inconsistent")
+        expires_at = row[13]
+        if not isinstance(expires_at, datetime):
+            raise ConversationIntegrityError("PendingAction expiry is invalid")
+        if expires_at.tzinfo is None:
+            expires_at = expires_at.replace(tzinfo=UTC)
+        resolved_at = row[14]
+        if (state == "PENDING") != (resolved_at is None):
+            raise ConversationIntegrityError("PendingAction resolution is inconsistent")
+        try:
+            pending_action_id = str(row[0])
+            if str(uuid.UUID(pending_action_id)) != pending_action_id:
+                raise ValueError("PendingAction identity is not canonical")
+            reference = PendingActionReference(
+                pending_action_id=pending_action_id,
+                source_turn_id=turn_id,
+                source_trace_id=trace_id,
+                conversation_id=conversation_id,
+                session_id=session_id,
+                user_subject=subject,
+                sandbox_id=sandbox_id,
+                action_type=str(row[7]),
+                argument_commitment=str(row[8]),
+                order_id=str(row[9]),
+                amount_minor=int(row[10]),
+                currency=str(row[11]),
+                expires_at=expires_at,
+            )
+        except (TypeError, ValueError) as exception:
+            raise ConversationIntegrityError(
+                "PendingAction reference content is invalid"
+            ) from exception
+        if (
+            reference.action_type != "REFUND_REQUEST"
+            or reference.argument_commitment
+            != action_argument_commitment(
+                reference.action_type,
+                reference.order_id,
+                reference.amount_minor,
+                reference.currency,
+            )
+        ):
+            raise ConversationIntegrityError("PendingAction commitment is inconsistent")
+        cursor.execute(
+            "SELECT payload_json FROM support_event "
+            "WHERE turn_id = %s AND event_type = 'ACTION_PREPARED' LIMIT 2",
+            (turn_id,),
+        )
+        event_rows = cursor.fetchall()
+        if len(event_rows) != 1:
+            raise ConversationIntegrityError(
+                "PendingAction preparation event cardinality is inconsistent"
+            )
+        try:
+            payload = strict_json_object(str(event_rows[0][0]).encode("utf-8"))
+        except (UnicodeError, ValueError) as exception:
+            raise ConversationIntegrityError(
+                "PendingAction preparation event is invalid"
+            ) from exception
+        if payload != {
+            "pendingActionId": reference.pending_action_id,
+            "actionType": reference.action_type,
+            "argumentCommitment": reference.argument_commitment,
+        }:
+            raise ConversationIntegrityError("PendingAction preparation event is inconsistent")
+        cursor.execute(
+            "SELECT confirmation_turn_id FROM action_receipt_projection "
+            "WHERE pending_action_id = %s LIMIT 2",
+            (reference.pending_action_id,),
+        )
+        projection_rows = cursor.fetchall()
+        if state == "CONFIRMED":
+            if len(projection_rows) != 1:
+                raise ConversationIntegrityError(
+                    "Confirmed PendingAction projection is inconsistent"
+                )
+            if cls._load_action_receipt(cursor, str(projection_rows[0][0])) is None:
+                raise ConversationIntegrityError("Confirmed PendingAction has no ActionReceipt")
+        elif projection_rows:
+            raise ConversationIntegrityError("Unconfirmed PendingAction has an ActionReceipt")
+        return reference, state
+
     @staticmethod
     def _load_action_receipt(
         cursor: pymysql.cursors.Cursor, turn_id: str
@@ -1020,44 +1221,171 @@ class MysqlConversationStore:
         if not rows:
             return None
         if len(rows) != 1:
-            raise RuntimeError("ActionReceipt projection cardinality is inconsistent")
+            raise ConversationIntegrityError("ActionReceipt projection cardinality is inconsistent")
         row = rows[0]
         committed_at = row[9]
         if not isinstance(committed_at, datetime):
-            raise RuntimeError("ActionReceipt committed timestamp is invalid")
+            raise ConversationIntegrityError("ActionReceipt committed timestamp is invalid")
         if committed_at.tzinfo is None:
             committed_at = committed_at.replace(tzinfo=UTC)
-        receipt = ActionReceiptPayload.model_validate(
-            {
-                "receiptId": str(row[0]),
-                "pendingActionId": str(row[1]),
-                "actionType": str(row[2]),
-                "status": str(row[3]),
-                "orderId": str(row[4]),
-                "refundId": str(row[5]),
-                "resourceVersion": int(row[6]),
-                "amountMinor": int(row[7]),
-                "currency": str(row[8]),
-                "committedAt": committed_at,
-                "replayed": True,
-            }
-        )
         try:
-            event_payload = json.loads(str(row[14]))
-        except (json.JSONDecodeError, TypeError) as exception:
-            raise RuntimeError("ActionReceipt event payload is invalid") from exception
+            receipt = ActionReceiptPayload.model_validate(
+                {
+                    "receiptId": str(row[0]),
+                    "pendingActionId": str(row[1]),
+                    "actionType": str(row[2]),
+                    "status": str(row[3]),
+                    "orderId": str(row[4]),
+                    "refundId": str(row[5]),
+                    "resourceVersion": int(row[6]),
+                    "amountMinor": int(row[7]),
+                    "currency": str(row[8]),
+                    "committedAt": committed_at,
+                    "replayed": True,
+                }
+            )
+        except (TypeError, ValueError) as exception:
+            raise ConversationIntegrityError(
+                "ActionReceipt projection content is invalid"
+            ) from exception
+        try:
+            event_payload = strict_json_object(str(row[14]).encode("utf-8"))
+        except (UnicodeError, ValueError) as exception:
+            raise ConversationIntegrityError(
+                "ActionReceipt event payload is invalid"
+            ) from exception
         if (
             row[12] != receipt.argument_commitment
             or row[13] != receipt.receipt_commitment
             or event_payload
             != {
                 "receiptId": receipt.receipt_id,
+                "pendingActionId": receipt.pending_action_id,
                 "status": receipt.status,
                 "receiptCommitment": receipt.receipt_commitment,
             }
         ):
-            raise RuntimeError("ActionReceipt projection commitment is inconsistent")
+            raise ConversationIntegrityError("ActionReceipt projection commitment is inconsistent")
         return StoredActionReceipt(receipt, str(row[10]), str(row[11]))
+
+    @classmethod
+    def _validate_receipt_pending_truth(
+        cls,
+        cursor: pymysql.cursors.Cursor,
+        *,
+        stored: StoredActionReceipt,
+        session_id: str,
+        subject: str,
+        sandbox_id: str | None,
+    ) -> None:
+        cursor.execute(
+            "SELECT trace_id, conversation_id, session_id, user_subject, state, outcome "
+            "FROM support_turn WHERE turn_id = %s LIMIT 2",
+            (stored.source_turn_id,),
+        )
+        source_rows = cursor.fetchall()
+        if len(source_rows) != 1:
+            raise ConversationIntegrityError(
+                "ActionReceipt source turn cardinality is inconsistent"
+            )
+        source = source_rows[0]
+        if tuple(source[2:]) != (session_id, subject, "COMPLETED", "action_pending"):
+            raise ConversationIntegrityError("ActionReceipt source turn is inconsistent")
+        pending, state = cls._load_pending_action_for_turn(
+            cursor,
+            turn_id=stored.source_turn_id,
+            trace_id=str(source[0]),
+            conversation_id=str(source[1]),
+            session_id=session_id,
+            subject=subject,
+            sandbox_id=sandbox_id,
+        )
+        receipt = stored.receipt
+        if (
+            state != "CONFIRMED"
+            or pending.pending_action_id != receipt.pending_action_id
+            or pending.action_type != receipt.action_type
+            or pending.argument_commitment != receipt.argument_commitment
+            or pending.order_id != receipt.order_id
+            or pending.amount_minor != receipt.amount_minor
+            or pending.currency != receipt.currency
+        ):
+            raise ConversationIntegrityError("ActionReceipt and PendingAction truth disagree")
+
+    @classmethod
+    def _validate_resolved_action_turn(
+        cls,
+        cursor: pymysql.cursors.Cursor,
+        *,
+        turn_id: str,
+        session_id: str,
+        subject: str,
+        sandbox_id: str | None,
+        outcome: str,
+    ) -> None:
+        event_type, state, event_outcome = {
+            "action_declined": ("ACTION_DECLINED", "DECLINED", "declined"),
+            "action_expired": ("ACTION_EXPIRED", "EXPIRED", "expired"),
+        }[outcome]
+        cursor.execute(
+            "SELECT payload_json FROM support_event WHERE turn_id = %s AND event_type = %s LIMIT 2",
+            (turn_id, event_type),
+        )
+        event_rows = cursor.fetchall()
+        if len(event_rows) != 1:
+            raise ConversationIntegrityError("Resolved action event cardinality is inconsistent")
+        try:
+            payload = strict_json_object(str(event_rows[0][0]).encode("utf-8"))
+        except (UnicodeError, ValueError) as exception:
+            raise ConversationIntegrityError("Resolved action event is invalid") from exception
+        if not isinstance(payload, dict):
+            raise ConversationIntegrityError("Resolved action event is invalid")
+        pending_action_id = payload.get("pendingActionId")
+        if payload != {
+            "pendingActionId": pending_action_id,
+            "outcome": event_outcome,
+        } or not isinstance(pending_action_id, str):
+            raise ConversationIntegrityError("Resolved action event is inconsistent")
+        try:
+            if str(uuid.UUID(pending_action_id)) != pending_action_id:
+                raise ValueError
+        except ValueError as exception:
+            raise ConversationIntegrityError("Resolved action identity is invalid") from exception
+        cursor.execute(
+            "SELECT source_turn_id, source_trace_id, conversation_id, session_id, "
+            "user_subject, sandbox_id, state, resolved_at "
+            "FROM pending_action_reference WHERE pending_action_id = %s LIMIT 2",
+            (pending_action_id,),
+        )
+        pending_rows = cursor.fetchall()
+        if len(pending_rows) != 1:
+            raise ConversationIntegrityError("Resolved PendingAction cardinality is inconsistent")
+        pending_row = pending_rows[0]
+        if (
+            tuple(pending_row[3:7]) != (session_id, subject, sandbox_id, state)
+            or pending_row[7] is None
+        ):
+            raise ConversationIntegrityError("Resolved PendingAction is inconsistent")
+        pending, loaded_state = cls._load_pending_action_for_turn(
+            cursor,
+            turn_id=str(pending_row[0]),
+            trace_id=str(pending_row[1]),
+            conversation_id=str(pending_row[2]),
+            session_id=session_id,
+            subject=subject,
+            sandbox_id=sandbox_id,
+        )
+        if pending.pending_action_id != pending_action_id or loaded_state != state:
+            raise ConversationIntegrityError("Resolved action event and PendingAction disagree")
+        cursor.execute(
+            "SELECT turn_id, event_type FROM support_event "
+            "WHERE event_type IN ('ACTION_DECLINED', 'ACTION_EXPIRED') "
+            "AND JSON_UNQUOTE(JSON_EXTRACT(payload_json, '$.pendingActionId')) = %s LIMIT 2",
+            (pending_action_id,),
+        )
+        resolution_rows = cursor.fetchall()
+        if len(resolution_rows) != 1 or tuple(resolution_rows[0]) != (turn_id, event_type):
+            raise ConversationIntegrityError("Resolved action event identity is not unique")
 
     @classmethod
     def _load_action_receipt_by_pending(
@@ -1070,10 +1398,12 @@ class MysqlConversationStore:
         )
         rows = cursor.fetchall()
         if len(rows) != 1:
-            raise RuntimeError("ActionReceipt projection cardinality is inconsistent")
+            raise ConversationIntegrityError("ActionReceipt projection cardinality is inconsistent")
         receipt = cls._load_action_receipt(cursor, str(rows[0][0]))
         if receipt is None:
-            raise RuntimeError("Confirmed PendingAction has no published ActionReceipt")
+            raise ConversationIntegrityError(
+                "Confirmed PendingAction has no published ActionReceipt"
+            )
         return receipt
 
     def _connect(self) -> pymysql.Connection[pymysql.cursors.Cursor]:
