@@ -70,7 +70,7 @@ expected=(
   "GRANT SELECT, INSERT ON cs_db.support_feedback TO 'agent_app'@'%';"
   "GRANT SELECT, INSERT ON cs_db.retrieval_decision TO 'agent_app'@'%';"
   "GRANT SELECT, INSERT ON cs_db.retrieval_evidence TO 'agent_app'@'%';"
-  "GRANT SELECT, INSERT, UPDATE (state, resolved_at) ON cs_db.pending_action_reference TO 'agent_app'@'%';"
+  "GRANT SELECT, INSERT, UPDATE (state, confirmation_turn_id, confirmation_trace_id, resolved_at) ON cs_db.pending_action_reference TO 'agent_app'@'%';"
   "GRANT SELECT, INSERT ON cs_db.action_receipt_projection TO 'agent_app'@'%';"
   "GRANT SELECT, INSERT, UPDATE ON commerce_db.auth_eval_test_principal TO 'auth_app'@'%';"
   "GRANT SELECT, INSERT, UPDATE ON commerce_db.eval_sandbox TO 'commerce_app'@'%';"

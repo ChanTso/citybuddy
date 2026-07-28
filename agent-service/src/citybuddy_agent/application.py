@@ -43,6 +43,7 @@ from .agent_control import (
     ToolBoundaryFailure,
 )
 from .conversation import (
+    ActionArbitrationConflictError,
     ConversationIntegrityError,
     ConversationOwnershipError,
     ConversationResult,
@@ -463,7 +464,7 @@ class HttpActionConfirmationBoundary:
             except AttemptBudgetExhausted as exception:
                 raise ToolBoundaryFailure(
                     status_code=503,
-                    reason="action_confirmation_indeterminate",
+                    reason="ACTION_CONFIRMATION_INDETERMINATE",
                     detail=(
                         "Action confirmation indeterminate"
                         if indeterminate
@@ -482,23 +483,26 @@ class HttpActionConfirmationBoundary:
                 if exception.status_code in {401, 403}:
                     raise ToolBoundaryFailure(
                         status_code=403,
-                        reason="action_confirmation_identity_denied",
+                        reason="ACTION_CONFIRMATION_IDENTITY_DENIED",
                         detail="Forbidden",
                     ) from exception
                 raise ToolBoundaryFailure(
                     status_code=503,
-                    reason="action_confirmation_identity_unavailable",
+                    reason="ACTION_CONFIRMATION_IDENTITY_UNAVAILABLE",
                     detail="Action confirmation indeterminate",
                 ) from exception
-            except (httpx.TimeoutException, httpx.NetworkError):
-                indeterminate = True
-                continue
+            except (httpx.TimeoutException, httpx.NetworkError) as exception:
+                raise ToolBoundaryFailure(
+                    status_code=503,
+                    reason="ACTION_CONFIRMATION_IDENTITY_UNAVAILABLE",
+                    detail="Action confirmation indeterminate",
+                ) from exception
             try:
                 budget.charge("tool_http", "actions.refund.confirm")
             except AttemptBudgetExhausted as exception:
                 raise ToolBoundaryFailure(
                     status_code=503,
-                    reason="action_confirmation_indeterminate",
+                    reason="ACTION_CONFIRMATION_INDETERMINATE",
                     detail="Action confirmation attempt budget exhausted",
                 ) from exception
             headers = {
@@ -521,7 +525,7 @@ class HttpActionConfirmationBoundary:
             except ValueError as exception:
                 raise ToolBoundaryFailure(
                     status_code=502,
-                    reason="invalid_action_confirmation_response",
+                    reason="ACTION_CONFIRMATION_RESPONSE_INVALID",
                     detail="Invalid action confirmation response",
                 ) from exception
             if response.status_code == 200:
@@ -532,7 +536,7 @@ class HttpActionConfirmationBoundary:
                 except (ValueError, TypeError) as exception:
                     raise ToolBoundaryFailure(
                         status_code=502,
-                        reason="invalid_action_confirmation_response",
+                        reason="ACTION_CONFIRMATION_RESPONSE_INVALID",
                         detail="Invalid action confirmation response",
                     ) from exception
                 if (
@@ -545,20 +549,20 @@ class HttpActionConfirmationBoundary:
                 ):
                     raise ToolBoundaryFailure(
                         status_code=502,
-                        reason="invalid_action_confirmation_response",
+                        reason="ACTION_CONFIRMATION_RESPONSE_INVALID",
                         detail="Invalid action confirmation response",
                     )
                 return receipt
             if response.status_code in {401, 403, 404}:
                 raise ToolBoundaryFailure(
                     status_code=403,
-                    reason="action_confirmation_denied",
+                    reason="ACTION_CONFIRMATION_DENIED",
                     detail="Forbidden",
                 )
             if response.status_code in {400, 409, 422}:
                 raise ToolBoundaryFailure(
                     status_code=409,
-                    reason="action_confirmation_rejected",
+                    reason="ACTION_CONFIRMATION_REJECTED",
                     detail="Action confirmation rejected",
                 )
             if response.status_code in {408, 429, 502, 503, 504}:
@@ -734,24 +738,51 @@ def create_app(
         )
         if replay is not None:
             return replay
-        pending = resolved_conversations.current_pending_action(
+        current_action = resolved_conversations.current_action_reference(
             session_id=session_id,
             subject=principal.subject,
             sandbox_id=principal.sandbox_id,
         )
-        pending_decision = confirmation_decision(request.message) if pending is not None else None
+        pending_decision = confirmation_decision(request.message)
+        pending = (
+            current_action.reference
+            if current_action is not None and current_action.state in {"PENDING", "CONFIRMING"}
+            else None
+        )
+        if (
+            current_action is not None
+            and current_action.state == "CONFIRMING"
+            and pending_decision is not ConfirmationDecision.CONFIRM
+        ):
+            raise ActionArbitrationConflictError
+        if (
+            current_action is not None
+            and current_action.state in {"DECLINED", "EXPIRED", "CONFIRMED"}
+            and pending_decision in {ConfirmationDecision.CONFIRM, ConfirmationDecision.DECLINE}
+        ):
+            raise ActionArbitrationConflictError
         # A confirmation may be recovering a commerce commit whose response or local
         # projection was lost. The fixed CB-118 result boundary owns that decision and
         # resolves committed truth before mutable sandbox liveness or copied expiry.
         if pending_decision is not ConfirmationDecision.CONFIRM:
             require_liveness(principal, token)
-        start = resolved_conversations.begin_turn(
-            session_id=session_id,
-            subject=principal.subject,
-            sandbox_id=principal.sandbox_id,
-            correlation_key=correlation_key,
-            message=request.message,
-        )
+        if pending is not None and pending_decision is ConfirmationDecision.CONFIRM:
+            start = resolved_conversations.begin_or_resume_confirmation_turn(
+                session_id=session_id,
+                subject=principal.subject,
+                sandbox_id=principal.sandbox_id,
+                correlation_key=correlation_key,
+                message=request.message,
+                pending=pending,
+            )
+        else:
+            start = resolved_conversations.begin_turn(
+                session_id=session_id,
+                subject=principal.subject,
+                sandbox_id=principal.sandbox_id,
+                correlation_key=correlation_key,
+                message=request.message,
+            )
         if start.replay is not None:
             return start.replay
         action_events: list[AgentEvent] = []
@@ -821,20 +852,49 @@ def create_app(
                 pending_action=agent_result.pending_action,
             )
         except ToolBoundaryFailure as exception:
-            resolved_conversations.fail_turn(
-                start=start,
-                failure_code=exception.reason,
-                events=tuple(action_events),
+            LOGGER.warning(
+                "agent_request_rejected reason_code=%s",
+                exception.reason,
             )
+            if start.confirmation_pending_id is None:
+                resolved_conversations.fail_turn(
+                    start=start,
+                    failure_code=exception.reason,
+                    events=tuple(action_events),
+                )
             raise HTTPException(
                 status_code=exception.status_code, detail=exception.detail
             ) from exception
-        except Exception:
+        except ActionArbitrationConflictError:
+            if start.confirmation_pending_id is None:
+                resolved_conversations.fail_turn(
+                    start=start,
+                    failure_code="ACTION_CONFIRMATION_ARBITRATION_CONFLICT",
+                    events=tuple(action_events),
+                )
+            raise
+        except pymysql.MySQLError as exception:
+            if start.confirmation_pending_id is not None:
+                LOGGER.warning(
+                    "agent_request_rejected "
+                    "reason_code=ACTION_CONFIRMATION_LOCAL_PERSISTENCE_UNAVAILABLE"
+                )
+                raise HTTPException(
+                    status_code=503, detail="Action confirmation indeterminate"
+                ) from exception
             resolved_conversations.fail_turn(
                 start=start,
                 failure_code="agent_execution_failed",
                 events=tuple(action_events),
             )
+            raise
+        except Exception:
+            if start.confirmation_pending_id is None:
+                resolved_conversations.fail_turn(
+                    start=start,
+                    failure_code="agent_execution_failed",
+                    events=tuple(action_events),
+                )
             raise
 
     @app.post("/api/sessions", response_model=SessionResponse, status_code=201)
@@ -873,6 +933,13 @@ def create_app(
             raise HTTPException(status_code=403, detail="Forbidden") from exception
         except CorrelationConflictError as exception:
             raise HTTPException(status_code=409, detail="Idempotency conflict") from exception
+        except ActionArbitrationConflictError as exception:
+            LOGGER.warning(
+                "agent_request_rejected reason_code=ACTION_CONFIRMATION_ARBITRATION_CONFLICT"
+            )
+            raise HTTPException(
+                status_code=409, detail="Action confirmation conflict"
+            ) from exception
         except ConversationIntegrityError as exception:
             LOGGER.warning(
                 "agent_request_rejected reason_code=CONVERSATION_ACTION_DURABLE_TRUTH_INCONSISTENT"
@@ -934,6 +1001,13 @@ def create_app(
             raise HTTPException(status_code=403, detail="Forbidden") from exception
         except CorrelationConflictError as exception:
             raise HTTPException(status_code=409, detail="Idempotency conflict") from exception
+        except ActionArbitrationConflictError as exception:
+            LOGGER.warning(
+                "agent_request_rejected reason_code=ACTION_CONFIRMATION_ARBITRATION_CONFLICT"
+            )
+            raise HTTPException(
+                status_code=409, detail="Action confirmation conflict"
+            ) from exception
         except ConversationIntegrityError as exception:
             LOGGER.warning(
                 "agent_request_rejected reason_code=CONVERSATION_ACTION_DURABLE_TRUTH_INCONSISTENT"

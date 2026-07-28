@@ -258,13 +258,14 @@ def test_action_projection_schema_is_single_pending_atomic_and_least_privileged(
     )
 
     assert "GENERATED ALWAYS AS" in migration
-    assert "CASE WHEN state = 'PENDING' THEN session_id ELSE NULL END" in migration
+    assert "CASE WHEN state IN ('PENDING', 'CONFIRMING') THEN session_id ELSE NULL END" in migration
     assert "UNIQUE KEY uq_pending_action_reference_active_session" in migration
     assert "UNIQUE KEY uq_action_receipt_projection_pending" in migration
     assert "UNIQUE KEY uq_action_receipt_projection_confirmation_turn" in migration
     assert "published_event_sequence INT UNSIGNED NOT NULL" in migration
     assert (
-        "GRANT SELECT, INSERT, UPDATE (state, resolved_at) "
+        "GRANT SELECT, INSERT, UPDATE (state, confirmation_turn_id, "
+        "confirmation_trace_id, resolved_at) "
         "ON cs_db.pending_action_reference TO 'agent_app'@'%';" in grants
     )
     assert "GRANT SELECT, INSERT ON cs_db.action_receipt_projection TO 'agent_app'@'%';" in grants

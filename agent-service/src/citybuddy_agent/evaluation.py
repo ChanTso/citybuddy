@@ -203,15 +203,20 @@ class MysqlEvaluationEvidenceStore:
                         raise EvaluationEvidenceNotFound
                     turn = turns[0]
                     terminal_outcome = self._terminal_outcome(turn[4], turn[5])
-                    events = self._load_events(
+                    action_root = self._turn_has_action_root(
                         cursor,
-                        trace_id=trace_id,
                         turn_id=str(turn[1]),
-                        session_id=str(turn[2]),
-                        subject=str(turn[3]),
                         terminal_outcome=terminal_outcome,
                     )
                     try:
+                        events = self._load_events(
+                            cursor,
+                            trace_id=trace_id,
+                            turn_id=str(turn[1]),
+                            session_id=str(turn[2]),
+                            subject=str(turn[3]),
+                            terminal_outcome=terminal_outcome,
+                        )
                         self._validate_action_truth(
                             cursor,
                             turn_id=str(turn[1]),
@@ -224,7 +229,9 @@ class MysqlEvaluationEvidenceStore:
                             events=events,
                         )
                     except EvaluationEvidenceInvalid as exception:
-                        raise ActionEvidenceIntegrityError from exception
+                        if action_root:
+                            raise ActionEvidenceIntegrityError from exception
+                        raise
                     retrieval = self._load_retrieval(
                         cursor,
                         trace_id=trace_id,
@@ -253,6 +260,33 @@ class MysqlEvaluationEvidenceStore:
             retrieval=retrieval,
             feedback=feedback,
         )
+
+    @staticmethod
+    def _turn_has_action_root(
+        cursor: pymysql.cursors.Cursor,
+        *,
+        turn_id: str,
+        terminal_outcome: TerminalOutcome,
+    ) -> bool:
+        if terminal_outcome in {
+            "action_pending",
+            "action_declined",
+            "action_expired",
+            "action_completed",
+        }:
+            return True
+        cursor.execute(
+            "SELECT pending_action_id FROM pending_action_reference "
+            "WHERE source_turn_id = %s OR confirmation_turn_id = %s LIMIT 2",
+            (turn_id, turn_id),
+        )
+        pending_roots = cursor.fetchall()
+        cursor.execute(
+            "SELECT receipt_id FROM action_receipt_projection "
+            "WHERE confirmation_turn_id = %s LIMIT 2",
+            (turn_id,),
+        )
+        return bool(pending_roots or cursor.fetchall())
 
     @staticmethod
     def _terminal_outcome(state: object, outcome: object) -> TerminalOutcome:
@@ -492,7 +526,8 @@ class MysqlEvaluationEvidenceStore:
         cursor.execute(
             "SELECT pending_action_id, source_turn_id, source_trace_id, conversation_id, "
             "session_id, user_subject, sandbox_id, action_type, argument_commitment, "
-            "order_id, amount_minor, currency, state, expires_at, resolved_at "
+            "order_id, amount_minor, currency, state, expires_at, resolved_at, "
+            "confirmation_turn_id, confirmation_trace_id "
             "FROM pending_action_reference WHERE source_turn_id = %s LIMIT 2",
             (turn_id,),
         )
@@ -545,7 +580,8 @@ class MysqlEvaluationEvidenceStore:
             cursor.execute(
                 "SELECT pending_action_id, source_turn_id, source_trace_id, conversation_id, "
                 "session_id, user_subject, sandbox_id, action_type, argument_commitment, "
-                "order_id, amount_minor, currency, state, expires_at, resolved_at "
+                "order_id, amount_minor, currency, state, expires_at, resolved_at, "
+                "confirmation_turn_id, confirmation_trace_id "
                 "FROM pending_action_reference WHERE pending_action_id = %s LIMIT 2",
                 (pending_action_id,),
             )
@@ -623,7 +659,8 @@ class MysqlEvaluationEvidenceStore:
         cursor.execute(
             "SELECT pending_action_id, source_turn_id, source_trace_id, conversation_id, "
             "session_id, user_subject, sandbox_id, action_type, argument_commitment, "
-            "order_id, amount_minor, currency, state, expires_at, resolved_at "
+            "order_id, amount_minor, currency, state, expires_at, resolved_at, "
+            "confirmation_turn_id, confirmation_trace_id "
             "FROM pending_action_reference WHERE pending_action_id = %s LIMIT 2",
             (receipt.pending_action_id,),
         )
@@ -643,6 +680,7 @@ class MysqlEvaluationEvidenceStore:
             or owner[8] != receipt.argument_commitment
             or tuple(owner[9:12]) != (receipt.order_id, receipt.amount_minor, receipt.currency)
             or owner[12] != "CONFIRMED"
+            or tuple(owner[15:17]) != tuple(projection[3:5])
             or projection[2] != owner[1]
         ):
             raise EvaluationEvidenceInvalid
@@ -657,7 +695,7 @@ class MysqlEvaluationEvidenceStore:
         sandbox_id: str,
     ) -> None:
         if (
-            len(pending) != 15
+            len(pending) != 17
             or not self._canonical_uuid(pending[0])
             or tuple(pending[4:7]) != (session_id, subject, sandbox_id)
             or pending[7] != "REFUND_REQUEST"
@@ -665,9 +703,19 @@ class MysqlEvaluationEvidenceStore:
             or not isinstance(pending[9], str)
             or type(pending[10]) is not int
             or not isinstance(pending[11], str)
-            or pending[12] not in {"PENDING", "DECLINED", "EXPIRED", "CONFIRMED"}
-            or (pending[12] == "PENDING") != (pending[14] is None)
+            or pending[12] not in {"PENDING", "CONFIRMING", "DECLINED", "EXPIRED", "CONFIRMED"}
+            or (pending[12] in {"PENDING", "CONFIRMING"}) != (pending[14] is None)
             or not isinstance(pending[13], datetime)
+        ):
+            raise EvaluationEvidenceInvalid
+        confirmation_binding = tuple(pending[15:17])
+        if (
+            pending[12] == "PENDING"
+            and confirmation_binding != (None, None)
+            or pending[12] in {"CONFIRMING", "CONFIRMED"}
+            and not all(isinstance(value, str) for value in confirmation_binding)
+            or pending[12] in {"DECLINED", "EXPIRED"}
+            and confirmation_binding != (None, None)
         ):
             raise EvaluationEvidenceInvalid
         try:
@@ -726,6 +774,7 @@ class MysqlEvaluationEvidenceStore:
             )
             if (
                 projection[2] != pending[1]
+                or tuple(projection[3:5]) != confirmation_binding
                 or receipt.action_type != pending[7]
                 or receipt.argument_commitment != pending[8]
                 or tuple((receipt.order_id, receipt.amount_minor, receipt.currency))
@@ -734,6 +783,20 @@ class MysqlEvaluationEvidenceStore:
                 raise EvaluationEvidenceInvalid
         elif projection_rows:
             raise EvaluationEvidenceInvalid
+        if pending[12] == "CONFIRMING":
+            cursor.execute(
+                "SELECT trace_id, session_id, user_subject, state "
+                "FROM support_turn WHERE turn_id = %s LIMIT 2",
+                (confirmation_binding[0],),
+            )
+            confirmation_rows = cursor.fetchall()
+            if len(confirmation_rows) != 1 or tuple(confirmation_rows[0]) != (
+                confirmation_binding[1],
+                session_id,
+                subject,
+                "PROCESSING",
+            ):
+                raise EvaluationEvidenceInvalid
 
     def _load_valid_receipt_projection(
         self,

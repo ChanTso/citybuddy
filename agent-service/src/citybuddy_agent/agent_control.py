@@ -880,7 +880,20 @@ class ToolAdapter:
         if response.status_code not in expected_statuses:
             raise RuntimeError("Unexpected commerce tool failure")
         try:
-            bounded = spec.output_schema.model_validate(strict_json_object(response.content))
+            response_document = strict_json_object(response.content)
+            if (
+                spec is REFUND_PREPARE_SPEC
+                and isinstance(response_document, dict)
+                and response_document.get("state") != "PREPARED"
+            ):
+                raise ToolBoundaryFailure(
+                    status_code=409,
+                    reason="ACTION_PREPARATION_DURABLE_TRUTH_INCONSISTENT",
+                    detail="Action preparation conflict",
+                )
+            bounded = spec.output_schema.model_validate(response_document)
+        except ToolBoundaryFailure:
+            raise
         except (ValidationError, ValueError, TypeError) as exception:
             raise ToolBoundaryFailure(
                 status_code=502,
@@ -904,7 +917,11 @@ class ToolAdapter:
                     arguments.currency,
                 )
             ):
-                raise RuntimeError("Commerce PendingAction contradicts the requested intent")
+                raise ToolBoundaryFailure(
+                    status_code=409,
+                    reason="ACTION_PREPARATION_DURABLE_TRUTH_INCONSISTENT",
+                    detail="Action preparation conflict",
+                )
         model_view = bounded.model_dump(by_alias=True)
         events.append(AgentEvent("TOOL_LIFECYCLE", {"tool": name, "state": "succeeded"}))
         return ToolResult(

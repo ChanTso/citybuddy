@@ -547,7 +547,7 @@ def test_sensitive_prepare_rejects_self_consistent_but_substituted_response_inte
         streamed(lambda *args, **kwargs: httpx.Response(201, json=response_payload)),
     )
 
-    with pytest.raises(RuntimeError, match="contradicts the requested intent"):
+    with pytest.raises(ToolBoundaryFailure) as inconsistent:
         ToolAdapter("https://commerce.test", RecordingObo()).execute(
             name=REFUND_PREPARE_SPEC.name,
             serialized_arguments=json.dumps(
@@ -565,6 +565,54 @@ def test_sensitive_prepare_rejects_self_consistent_but_substituted_response_inte
             budget=AttemptBudget(4, []),
             events=[],
         )
+    assert inconsistent.value.status_code == 409
+    assert inconsistent.value.reason == "ACTION_PREPARATION_DURABLE_TRUTH_INCONSISTENT"
+    assert inconsistent.value.detail == "Action preparation conflict"
+
+
+def test_sensitive_prepare_rejects_consumed_truth_as_integrity_conflict(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        httpx,
+        "stream",
+        streamed(
+            lambda *args, **kwargs: httpx.Response(
+                200,
+                json={
+                    "pendingActionId": "00000000-0000-0000-0000-000000000121",
+                    "actionType": "REFUND_REQUEST",
+                    "orderId": "00000000-0000-0000-0000-000000000040",
+                    "amountMinor": 400,
+                    "currency": "CNY",
+                    "state": "CONSUMED",
+                    "expiresAt": "2026-07-28T04:00:00Z",
+                    "replayed": True,
+                },
+            )
+        ),
+    )
+
+    with pytest.raises(ToolBoundaryFailure) as inconsistent:
+        ToolAdapter("https://commerce.test", RecordingObo()).execute(
+            name=REFUND_PREPARE_SPEC.name,
+            serialized_arguments=json.dumps(
+                {
+                    "orderId": "00000000-0000-0000-0000-000000000040",
+                    "amountMinor": 400,
+                    "currency": "CNY",
+                }
+            ),
+            direct_token="direct",
+            subject="user-1",
+            session_id="session-1",
+            trace_id="trace-1",
+            turn_id="00000000-0000-0000-0000-000000000121",
+            budget=AttemptBudget(4, []),
+            events=[],
+        )
+    assert inconsistent.value.status_code == 409
+    assert inconsistent.value.reason == "ACTION_PREPARATION_DURABLE_TRUTH_INCONSISTENT"
 
 
 def test_sensitive_prepare_keeps_identity_unavailability_out_of_terminal_denial() -> None:

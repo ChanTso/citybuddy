@@ -53,6 +53,16 @@ class TurnStart:
     trace_id: str
     turn_id: str
     replay: ConversationResult | None = None
+    confirmation_pending_id: str | None = None
+
+
+ActionReferenceState = Literal["PENDING", "CONFIRMING", "DECLINED", "EXPIRED", "CONFIRMED"]
+
+
+@dataclass(frozen=True)
+class ActionReferenceSnapshot:
+    reference: PendingActionReference
+    state: ActionReferenceState
 
 
 class ConversationOwnershipError(Exception):
@@ -73,6 +83,10 @@ class TurnFailedError(Exception):
 
 class ConversationIntegrityError(RuntimeError):
     """Stored conversation/action evidence is incomplete or contradictory."""
+
+
+class ActionArbitrationConflictError(Exception):
+    """A confirmation, decline, or expiry lost the durable local arbitration."""
 
 
 class ConversationStore(Protocol):
@@ -96,6 +110,17 @@ class ConversationStore(Protocol):
         message: str,
     ) -> TurnStart: ...
 
+    def begin_or_resume_confirmation_turn(
+        self,
+        *,
+        session_id: str,
+        subject: str,
+        sandbox_id: str | None,
+        correlation_key: str,
+        message: str,
+        pending: PendingActionReference,
+    ) -> TurnStart: ...
+
     def complete_turn(
         self,
         *,
@@ -110,6 +135,10 @@ class ConversationStore(Protocol):
     def current_pending_action(
         self, *, session_id: str, subject: str, sandbox_id: str | None
     ) -> PendingActionReference | None: ...
+
+    def current_action_reference(
+        self, *, session_id: str, subject: str, sandbox_id: str | None
+    ) -> ActionReferenceSnapshot | None: ...
 
     def complete_action_decline(
         self,
@@ -179,6 +208,189 @@ class MysqlConversationStore:
                     raise
                 time.sleep(0.05)
         raise RuntimeError("Bounded turn wait did not terminate")
+
+    def begin_or_resume_confirmation_turn(
+        self,
+        *,
+        session_id: str,
+        subject: str,
+        sandbox_id: str | None,
+        correlation_key: str,
+        message: str,
+        pending: PendingActionReference,
+    ) -> TurnStart:
+        fingerprint = hashlib.sha256(message.encode("utf-8")).hexdigest()
+        completed_identity: tuple[str, str, str] | None = None
+        claimed: TurnStart | None = None
+        with self._connect() as connection:
+            try:
+                with connection.cursor() as cursor:
+                    cursor.execute(
+                        "SELECT conversation_id, user_subject, state, next_turn_sequence "
+                        "FROM support_conversation WHERE session_id = %s FOR UPDATE",
+                        (session_id,),
+                    )
+                    conversation = cursor.fetchone()
+                    if (
+                        conversation is None
+                        or conversation[1] != subject
+                        or conversation[2] != "ACTIVE"
+                    ):
+                        raise ConversationOwnershipError
+                    conversation_id = str(conversation[0])
+                    cursor.execute(
+                        "SELECT user_subject, sandbox_id FROM support_session "
+                        "WHERE session_id = %s",
+                        (session_id,),
+                    )
+                    session = cursor.fetchone()
+                    if session is None or tuple(session) != (subject, sandbox_id):
+                        raise ConversationOwnershipError
+                    cursor.execute(
+                        "SELECT trace_id, turn_id, conversation_id, user_subject, "
+                        "request_fingerprint, state "
+                        "FROM support_turn WHERE session_id = %s AND correlation_key = %s "
+                        "FOR UPDATE",
+                        (session_id, correlation_key),
+                    )
+                    existing = cursor.fetchone()
+                    cursor.execute(
+                        "SELECT source_turn_id, source_trace_id, conversation_id, session_id, "
+                        "user_subject, sandbox_id, action_type, argument_commitment, order_id, "
+                        "amount_minor, currency, state, expires_at, confirmation_turn_id, "
+                        "confirmation_trace_id "
+                        "FROM pending_action_reference WHERE pending_action_id = %s FOR UPDATE",
+                        (pending.pending_action_id,),
+                    )
+                    owner = cursor.fetchone()
+                    if owner is None or tuple(owner[:11]) != (
+                        pending.source_turn_id,
+                        pending.source_trace_id,
+                        pending.conversation_id,
+                        pending.session_id,
+                        pending.user_subject,
+                        pending.sandbox_id,
+                        pending.action_type,
+                        pending.argument_commitment,
+                        pending.order_id,
+                        pending.amount_minor,
+                        pending.currency,
+                    ):
+                        raise ConversationIntegrityError(
+                            "PendingAction confirmation owner is inconsistent"
+                        )
+                    if not isinstance(owner[12], datetime):
+                        raise ConversationIntegrityError("PendingAction expiry is invalid")
+                    if existing is not None:
+                        if (
+                            existing[2] != conversation_id
+                            or existing[3] != subject
+                            or existing[4] != fingerprint
+                        ):
+                            raise CorrelationConflictError
+                        if existing[5] == "COMPLETED":
+                            completed_identity = (
+                                conversation_id,
+                                str(existing[0]),
+                                str(existing[1]),
+                            )
+                        elif (
+                            existing[5] == "PROCESSING"
+                            and owner[11] == "CONFIRMING"
+                            and tuple(owner[13:15]) == (str(existing[1]), str(existing[0]))
+                        ):
+                            cursor.execute(
+                                "UPDATE support_turn SET processing_deadline_at = "
+                                "DATE_ADD(CURRENT_TIMESTAMP(6), INTERVAL %s MICROSECOND) "
+                                "WHERE turn_id = %s AND state = 'PROCESSING'",
+                                (self._processing_timeout_microseconds, existing[1]),
+                            )
+                            claimed = TurnStart(
+                                conversation_id,
+                                str(existing[0]),
+                                str(existing[1]),
+                                confirmation_pending_id=pending.pending_action_id,
+                            )
+                        else:
+                            raise ConversationIntegrityError(
+                                "Confirmation turn and PendingAction binding disagree"
+                            )
+                    else:
+                        if owner[11] != "PENDING" or owner[13] is not None or owner[14] is not None:
+                            raise ActionArbitrationConflictError
+                        turn_sequence = int(conversation[3]) + 1
+                        trace_id = str(uuid.uuid4())
+                        turn_id = str(uuid.uuid4())
+                        cursor.execute(
+                            "UPDATE support_conversation SET next_turn_sequence = %s "
+                            "WHERE conversation_id = %s",
+                            (turn_sequence, conversation_id),
+                        )
+                        cursor.execute(
+                            "INSERT INTO support_turn "
+                            "(turn_id, conversation_id, session_id, user_subject, trace_id, "
+                            "turn_sequence, correlation_key, request_fingerprint, input_text, "
+                            "state, processing_deadline_at) "
+                            "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, 'PROCESSING', "
+                            "DATE_ADD(CURRENT_TIMESTAMP(6), INTERVAL %s MICROSECOND))",
+                            (
+                                turn_id,
+                                conversation_id,
+                                session_id,
+                                subject,
+                                trace_id,
+                                turn_sequence,
+                                correlation_key,
+                                fingerprint,
+                                message,
+                                self._processing_timeout_microseconds,
+                            ),
+                        )
+                        start = TurnStart(
+                            conversation_id,
+                            trace_id,
+                            turn_id,
+                            confirmation_pending_id=pending.pending_action_id,
+                        )
+                        self._insert_event(
+                            cursor,
+                            start=start,
+                            session_id=session_id,
+                            subject=subject,
+                            sequence=1,
+                            event=AgentEvent("USER_INPUT", {"accepted": True}),
+                        )
+                        cursor.execute(
+                            "UPDATE pending_action_reference SET state = 'CONFIRMING', "
+                            "confirmation_turn_id = %s, confirmation_trace_id = %s "
+                            "WHERE pending_action_id = %s AND state = 'PENDING' "
+                            "AND confirmation_turn_id IS NULL "
+                            "AND confirmation_trace_id IS NULL",
+                            (turn_id, trace_id, pending.pending_action_id),
+                        )
+                        if cursor.rowcount != 1:
+                            raise ActionArbitrationConflictError
+                        claimed = start
+                connection.commit()
+            except Exception:
+                connection.rollback()
+                raise
+        if completed_identity is not None:
+            replay = self.replay_turn(
+                session_id=session_id,
+                subject=subject,
+                sandbox_id=sandbox_id,
+                correlation_key=correlation_key,
+                message=message,
+            )
+            if replay is None:
+                raise ConversationIntegrityError(
+                    "Completed confirmation turn has no replayable result"
+                )
+            return TurnStart(*completed_identity, replay=replay)
+        if claimed is None:
+            raise RuntimeError("Confirmation claim did not produce a durable turn")
+        return claimed
 
     def replay_turn(
         self,
@@ -557,6 +769,18 @@ class MysqlConversationStore:
     def current_pending_action(
         self, *, session_id: str, subject: str, sandbox_id: str | None
     ) -> PendingActionReference | None:
+        current = self.current_action_reference(
+            session_id=session_id,
+            subject=subject,
+            sandbox_id=sandbox_id,
+        )
+        if current is None or current.state not in {"PENDING", "CONFIRMING"}:
+            return None
+        return current.reference
+
+    def current_action_reference(
+        self, *, session_id: str, subject: str, sandbox_id: str | None
+    ) -> ActionReferenceSnapshot | None:
         with self._connect() as connection, connection.cursor() as cursor:
             cursor.execute(
                 "SELECT turn_id, trace_id, conversation_id FROM support_turn "
@@ -567,7 +791,7 @@ class MysqlConversationStore:
             turn = cursor.fetchone()
             if turn is None:
                 return None
-            pending, state = self._load_pending_action_for_turn(
+            reference, state = self._load_pending_action_for_turn(
                 cursor,
                 turn_id=str(turn[0]),
                 trace_id=str(turn[1]),
@@ -576,9 +800,7 @@ class MysqlConversationStore:
                 subject=subject,
                 sandbox_id=sandbox_id,
             )
-        if state != "PENDING":
-            return None
-        return pending
+        return ActionReferenceSnapshot(reference, cast(ActionReferenceState, state))
 
     def complete_action_decline(
         self,
@@ -591,7 +813,9 @@ class MysqlConversationStore:
             try:
                 with connection.cursor() as cursor:
                     turn = self._lock_executable_turn(cursor, start)
-                    self._lock_matching_pending(cursor, pending)
+                    pending_state = self._lock_matching_pending(cursor, pending)
+                    if pending_state != "PENDING":
+                        raise ActionArbitrationConflictError
                     cursor.execute(
                         "UPDATE pending_action_reference SET state = 'DECLINED', "
                         "resolved_at = CURRENT_TIMESTAMP(6) "
@@ -645,7 +869,11 @@ class MysqlConversationStore:
             try:
                 with connection.cursor() as cursor:
                     turn = self._lock_executable_turn(cursor, start)
-                    self._lock_matching_pending(cursor, pending, require_expired=True)
+                    pending_state = self._lock_matching_pending(
+                        cursor, pending, require_expired=True
+                    )
+                    if pending_state != "PENDING":
+                        raise ActionArbitrationConflictError
                     cursor.execute(
                         "UPDATE pending_action_reference SET state = 'EXPIRED', "
                         "resolved_at = CURRENT_TIMESTAMP(6) "
@@ -705,17 +933,68 @@ class MysqlConversationStore:
             or receipt.currency != pending.currency
             or receipt.argument_commitment != pending.argument_commitment
         ):
-            raise RuntimeError("Commerce receipt contradicts the stored PendingAction")
+            raise ConversationIntegrityError(
+                "Commerce receipt contradicts the stored PendingAction"
+            )
         stored = StoredActionReceipt(receipt, pending.source_turn_id, start.turn_id)
         with self._connect() as connection:
             try:
                 with connection.cursor() as cursor:
-                    turn = self._lock_executable_turn(cursor, start)
+                    cursor.execute(
+                        "SELECT session_id, user_subject, state, trace_id, "
+                        "processing_deadline_at > CURRENT_TIMESTAMP(6), outcome, response_text "
+                        "FROM support_turn WHERE turn_id = %s FOR UPDATE",
+                        (start.turn_id,),
+                    )
+                    turn_row = cursor.fetchone()
+                    if (
+                        turn_row is None
+                        or turn_row[3] != start.trace_id
+                        or turn_row[0] != pending.session_id
+                        or turn_row[1] != pending.user_subject
+                    ):
+                        raise ConversationIntegrityError(
+                            "Confirmation turn identity is inconsistent"
+                        )
+                    if turn_row[2] == "COMPLETED":
+                        if turn_row[5] != "action_completed" or not isinstance(turn_row[6], str):
+                            raise ConversationIntegrityError(
+                                "Completed confirmation turn is inconsistent"
+                            )
+                        existing = self._load_action_receipt_by_pending(
+                            cursor, pending.pending_action_id
+                        )
+                        self._validate_receipt_pending_truth(
+                            cursor,
+                            stored=existing,
+                            session_id=pending.session_id,
+                            subject=pending.user_subject,
+                            sandbox_id=pending.sandbox_id,
+                        )
+                        if existing.receipt.receipt_commitment != receipt.receipt_commitment:
+                            raise ConversationIntegrityError(
+                                "Concurrent ActionReceipt replay contradicts stored truth"
+                            )
+                        connection.commit()
+                        return ConversationResult(
+                            start.conversation_id,
+                            start.trace_id,
+                            start.turn_id,
+                            str(turn_row[6]),
+                            "action_completed",
+                            action_receipt=existing,
+                        )
+                    if turn_row[2] != "PROCESSING" or not turn_row[4]:
+                        raise ConversationIntegrityError("Confirmation turn is not recoverable")
+                    turn = cast(tuple[object, ...], turn_row[:5])
                     pending_state = self._lock_matching_pending(
-                        cursor, pending, allow_confirmed=True
+                        cursor,
+                        pending,
+                        confirmation_turn_id=start.turn_id,
+                        confirmation_trace_id=start.trace_id,
                     )
                     receipt_sequence = 2 + len(events)
-                    if pending_state == "PENDING":
+                    if pending_state == "CONFIRMING":
                         cursor.execute(
                             "INSERT INTO action_receipt_projection "
                             "(receipt_id, pending_action_id, source_turn_id, confirmation_turn_id, "
@@ -750,26 +1029,22 @@ class MysqlConversationStore:
                         cursor.execute(
                             "UPDATE pending_action_reference SET state = 'CONFIRMED', "
                             "resolved_at = CURRENT_TIMESTAMP(6) "
-                            "WHERE pending_action_id = %s AND state = 'PENDING'",
-                            (pending.pending_action_id,),
+                            "WHERE pending_action_id = %s AND state = 'CONFIRMING' "
+                            "AND confirmation_turn_id = %s AND confirmation_trace_id = %s",
+                            (pending.pending_action_id, start.turn_id, start.trace_id),
                         )
                         if cursor.rowcount != 1:
-                            raise RuntimeError(
+                            raise ConversationIntegrityError(
                                 "PendingAction confirmation lost its state transition"
                             )
-                    else:
-                        existing = self._load_action_receipt_by_pending(
-                            cursor, pending.pending_action_id
+                    elif pending_state == "CONFIRMED":
+                        raise ConversationIntegrityError(
+                            "Confirmed PendingAction has a non-terminal confirmation turn"
                         )
-                        if (
-                            existing.receipt.receipt_id != receipt.receipt_id
-                            or existing.receipt.pending_action_id != receipt.pending_action_id
-                            or existing.receipt.receipt_commitment != receipt.receipt_commitment
-                        ):
-                            raise RuntimeError(
-                                "Concurrent ActionReceipt replay contradicts stored truth"
-                            )
-                        stored = existing
+                    else:
+                        raise ConversationIntegrityError(
+                            "ActionReceipt requires a claimed PendingAction"
+                        )
                     sequence = 2
                     for event in events:
                         self._insert_event(
@@ -887,18 +1162,20 @@ class MysqlConversationStore:
         pending: PendingActionReference,
         *,
         require_expired: bool = False,
-        allow_confirmed: bool = False,
+        confirmation_turn_id: str | None = None,
+        confirmation_trace_id: str | None = None,
     ) -> str:
         cursor.execute(
             "SELECT source_turn_id, source_trace_id, conversation_id, session_id, "
             "user_subject, sandbox_id, action_type, argument_commitment, order_id, "
-            "amount_minor, currency, state, expires_at "
+            "amount_minor, currency, state, expires_at, confirmation_turn_id, "
+            "confirmation_trace_id, resolved_at "
             "FROM pending_action_reference WHERE pending_action_id = %s FOR UPDATE",
             (pending.pending_action_id,),
         )
         row = cursor.fetchone()
         if row is None:
-            raise RuntimeError("PendingAction reference disappeared")
+            raise ConversationIntegrityError("PendingAction reference disappeared")
         expected = (
             pending.source_turn_id,
             pending.source_trace_id,
@@ -912,21 +1189,51 @@ class MysqlConversationStore:
             pending.amount_minor,
             pending.currency,
         )
-        allowed_states = {"PENDING", "CONFIRMED"} if allow_confirmed else {"PENDING"}
-        if tuple(row[:11]) != expected or row[11] not in allowed_states:
-            raise RuntimeError("PendingAction reference is inconsistent")
+        if tuple(row[:11]) != expected or row[11] not in {
+            "PENDING",
+            "CONFIRMING",
+            "DECLINED",
+            "EXPIRED",
+            "CONFIRMED",
+        }:
+            raise ConversationIntegrityError("PendingAction reference is inconsistent")
         state = str(row[11])
         expires_at = row[12]
         if not isinstance(expires_at, datetime):
-            raise RuntimeError("PendingAction expiry is invalid")
+            raise ConversationIntegrityError("PendingAction expiry is invalid")
         aware_expiry = expires_at.replace(tzinfo=UTC) if expires_at.tzinfo is None else expires_at
         expired = aware_expiry <= datetime.now(UTC)
-        if state == "CONFIRMED":
+        confirmation_binding = tuple(row[13:15])
+        resolved_at = row[15]
+        if (
+            state == "PENDING"
+            and (confirmation_binding != (None, None) or resolved_at is not None)
+            or state == "CONFIRMING"
+            and (
+                not all(isinstance(value, str) for value in confirmation_binding)
+                or resolved_at is not None
+            )
+            or state == "CONFIRMED"
+            and (
+                not all(isinstance(value, str) for value in confirmation_binding)
+                or resolved_at is None
+            )
+            or state in {"DECLINED", "EXPIRED"}
+            and (confirmation_binding != (None, None) or resolved_at is None)
+        ):
+            raise ConversationIntegrityError("PendingAction arbitration state is inconsistent")
+        if (
+            state in {"CONFIRMING", "CONFIRMED"}
+            and confirmation_turn_id is not None
+            and confirmation_binding != (confirmation_turn_id, confirmation_trace_id)
+        ):
+            raise ActionArbitrationConflictError
+        if state != "PENDING":
             return state
         if require_expired and not expired:
-            raise RuntimeError("PendingAction reference has not expired")
+            raise ActionArbitrationConflictError
         if not require_expired and expired:
-            raise RuntimeError("PendingAction reference is expired")
+            raise ActionArbitrationConflictError
         return state
 
     @classmethod
@@ -1098,7 +1405,8 @@ class MysqlConversationStore:
         cursor.execute(
             "SELECT pending_action_id, source_turn_id, source_trace_id, conversation_id, "
             "session_id, user_subject, sandbox_id, action_type, argument_commitment, "
-            "order_id, amount_minor, currency, state, expires_at, resolved_at "
+            "order_id, amount_minor, currency, state, expires_at, resolved_at, "
+            "confirmation_turn_id, confirmation_trace_id "
             "FROM pending_action_reference WHERE source_turn_id = %s LIMIT 2",
             (turn_id,),
         )
@@ -1116,7 +1424,7 @@ class MysqlConversationStore:
         ):
             raise ConversationIntegrityError("PendingAction reference ownership is inconsistent")
         state = str(row[12])
-        if state not in {"PENDING", "DECLINED", "EXPIRED", "CONFIRMED"}:
+        if state not in {"PENDING", "CONFIRMING", "DECLINED", "EXPIRED", "CONFIRMED"}:
             raise ConversationIntegrityError("PendingAction reference state is inconsistent")
         expires_at = row[13]
         if not isinstance(expires_at, datetime):
@@ -1124,8 +1432,21 @@ class MysqlConversationStore:
         if expires_at.tzinfo is None:
             expires_at = expires_at.replace(tzinfo=UTC)
         resolved_at = row[14]
-        if (state == "PENDING") != (resolved_at is None):
+        if (state in {"PENDING", "CONFIRMING"}) != (resolved_at is None):
             raise ConversationIntegrityError("PendingAction resolution is inconsistent")
+        confirmation_binding = tuple(row[15:17])
+        if (
+            state == "PENDING"
+            and confirmation_binding != (None, None)
+            or state in {"CONFIRMING", "CONFIRMED"}
+            and (
+                not all(isinstance(value, str) for value in confirmation_binding)
+                or not all(str(uuid.UUID(str(value))) == value for value in confirmation_binding)
+            )
+            or state in {"DECLINED", "EXPIRED"}
+            and confirmation_binding != (None, None)
+        ):
+            raise ConversationIntegrityError("PendingAction confirmation binding is inconsistent")
         try:
             pending_action_id = str(row[0])
             if str(uuid.UUID(pending_action_id)) != pending_action_id:
@@ -1183,7 +1504,8 @@ class MysqlConversationStore:
         }:
             raise ConversationIntegrityError("PendingAction preparation event is inconsistent")
         cursor.execute(
-            "SELECT confirmation_turn_id FROM action_receipt_projection "
+            "SELECT confirmation_turn_id, confirmation_trace_id "
+            "FROM action_receipt_projection "
             "WHERE pending_action_id = %s LIMIT 2",
             (reference.pending_action_id,),
         )
@@ -1193,10 +1515,30 @@ class MysqlConversationStore:
                 raise ConversationIntegrityError(
                     "Confirmed PendingAction projection is inconsistent"
                 )
-            if cls._load_action_receipt(cursor, str(projection_rows[0][0])) is None:
+            if (
+                tuple(projection_rows[0]) != confirmation_binding
+                or cls._load_action_receipt(cursor, str(projection_rows[0][0])) is None
+            ):
                 raise ConversationIntegrityError("Confirmed PendingAction has no ActionReceipt")
         elif projection_rows:
             raise ConversationIntegrityError("Unconfirmed PendingAction has an ActionReceipt")
+        if state == "CONFIRMING":
+            cursor.execute(
+                "SELECT trace_id, conversation_id, session_id, user_subject, state "
+                "FROM support_turn WHERE turn_id = %s LIMIT 2",
+                (confirmation_binding[0],),
+            )
+            confirmation_rows = cursor.fetchall()
+            if len(confirmation_rows) != 1 or tuple(confirmation_rows[0]) != (
+                confirmation_binding[1],
+                conversation_id,
+                session_id,
+                subject,
+                "PROCESSING",
+            ):
+                raise ConversationIntegrityError(
+                    "Confirming PendingAction turn binding is inconsistent"
+                )
         return reference, state
 
     @staticmethod

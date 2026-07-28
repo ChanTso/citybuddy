@@ -286,6 +286,43 @@ assert_agent_status_reason() {
   echo "Verified HTTP $expected with reason $reason: $label"
 }
 
+assert_agent_status_without_reason() {
+  local expected="$1"
+  local producer="$2"
+  local forbidden_reason="$3"
+  local public_detail="$4"
+  local label="$5"
+  shift 5
+  local status
+  local agent_log_start
+  local request_logs
+  local forbidden_count
+  agent_log_start="$(wc -l <"$tmp_dir/agent.log")"
+  status="$(request_status "$tmp_dir/http-response.json" "$@")"
+  request_logs="$(
+    tail -n "+$((agent_log_start + 1))" "$tmp_dir/agent.log" \
+      | grep "$producer" || true
+  )"
+  if [[ "$status" != "$expected" ]]; then
+    echo "Unexpected HTTP status for $label: $status" >&2
+    cat "$tmp_dir/http-response.json" >&2
+    printf '%s\n' "$request_logs" >&2
+    exit 1
+  fi
+  assert_equal "$public_detail" \
+    "$(uv run python scripts/read_json_field.py "$tmp_dir/http-response.json" detail)" \
+    "$label exposes only its fixed public response"
+  forbidden_count="$(
+    printf '%s\n' "$request_logs" | grep -c "reason_code=$forbidden_reason" || true
+  )"
+  assert_equal 0 "$forbidden_count" "$label does not use the forbidden attribution"
+  if grep -Fq "$forbidden_reason" "$tmp_dir/http-response.json"; then
+    echo "$label leaked a server-only attribution." >&2
+    exit 1
+  fi
+  echo "Verified HTTP $expected without reason $forbidden_reason: $label"
+}
+
 report_audit_unavailability_misclassification() {
   local label="$1"
   local status_file="$2"
@@ -3634,6 +3671,7 @@ start_agent true
 
 prepare_agent_action_case() {
   local case_name="$1"
+  local scenario="${2:-action-prepare-small}"
   assert_status 201 "$case_name session binds the payment subject and sandbox" \
     --request POST "http://127.0.0.1:$agent_port/api/sessions" \
     --header "Authorization: Bearer $payment_token" \
@@ -3649,7 +3687,7 @@ prepare_agent_action_case() {
     --header "X-Session-Id: $prepared_case_session" \
     --header "Idempotency-Key: $case_name-prepare" \
     --header 'Content-Type: application/json' \
-    --data '{"message":"action-prepare"}'
+    --data "{\"message\":\"$scenario\"}"
   prepared_case_pending_id="$(mysql_query agent_app "$agent_app_password" cs_db \
     "SELECT pending_action_id FROM pending_action_reference WHERE session_id = '$prepared_case_session' AND state = 'PENDING'")"
 }
@@ -3671,6 +3709,16 @@ assert_status 200 "decline evaluation is anchored to the resolved PendingAction"
   --request GET "http://127.0.0.1:$agent_port/api/eval/evidence/$agent_decline_trace" \
   --user "evaluation-manager:$management_password" \
   --header 'X-Eval-Sandbox-Id: sandbox-payment'
+mysql_query root "$root_password" cs_db \
+  "UPDATE support_event SET payload_json = JSON_OBJECT('pendingActionId', '00000000-0000-0000-0000-000000000999', 'outcome', 'declined') WHERE turn_id = (SELECT turn_id FROM support_turn WHERE trace_id = '$agent_decline_trace') AND event_type = 'ACTION_DECLINED'"
+assert_agent_status_reason 409 evaluation_request_rejected \
+  EVALUATION_ACTION_DURABLE_TRUTH_INCONSISTENT "Evidence unavailable" \
+  "decline evaluation attributes a damaged ACTION_DECLINED identity to action truth" \
+  --request GET "http://127.0.0.1:$agent_port/api/eval/evidence/$agent_decline_trace" \
+  --user "evaluation-manager:$management_password" \
+  --header 'X-Eval-Sandbox-Id: sandbox-payment'
+mysql_query root "$root_password" cs_db \
+  "UPDATE support_event SET payload_json = JSON_OBJECT('pendingActionId', '$agent_decline_pending_id', 'outcome', 'declined') WHERE turn_id = (SELECT turn_id FROM support_turn WHERE trace_id = '$agent_decline_trace') AND event_type = 'ACTION_DECLINED'"
 mysql_query root "$root_password" cs_db \
   "UPDATE pending_action_reference SET state = 'EXPIRED' WHERE pending_action_id = '$agent_decline_pending_id'"
 assert_agent_status_reason 409 evaluation_request_rejected \
@@ -3710,15 +3758,25 @@ assert_status 200 "an expired local reference resolves without commerce executio
   --header "Authorization: Bearer $payment_token" \
   --header 'X-Eval-Sandbox-Id: sandbox-payment' \
   --header "X-Session-Id: $agent_expiry_session" \
-  --header 'Idempotency-Key: cb121-expiry-resolve' \
+  --header 'Idempotency-Key: expiry' \
   --header 'Content-Type: application/json' \
   --data '{"message":"later"}'
 agent_expiry_trace="$(mysql_query agent_app "$agent_app_password" cs_db \
-  "SELECT trace_id FROM support_turn WHERE session_id = '$agent_expiry_session' AND correlation_key = 'cb121-expiry-resolve'")"
+  "SELECT trace_id FROM support_turn WHERE session_id = '$agent_expiry_session' AND correlation_key = 'expiry'")"
 assert_status 200 "expiry evaluation is anchored to the resolved PendingAction" \
   --request GET "http://127.0.0.1:$agent_port/api/eval/evidence/$agent_expiry_trace" \
   --user "evaluation-manager:$management_password" \
   --header 'X-Eval-Sandbox-Id: sandbox-payment'
+mysql_query root "$root_password" cs_db \
+  "UPDATE support_event SET payload_json = JSON_OBJECT('pendingActionId', '00000000-0000-0000-0000-000000000999', 'outcome', 'expired') WHERE turn_id = (SELECT turn_id FROM support_turn WHERE trace_id = '$agent_expiry_trace') AND event_type = 'ACTION_EXPIRED'"
+assert_agent_status_reason 409 evaluation_request_rejected \
+  EVALUATION_ACTION_DURABLE_TRUTH_INCONSISTENT "Evidence unavailable" \
+  "expiry evaluation attributes a damaged ACTION_EXPIRED identity to action truth" \
+  --request GET "http://127.0.0.1:$agent_port/api/eval/evidence/$agent_expiry_trace" \
+  --user "evaluation-manager:$management_password" \
+  --header 'X-Eval-Sandbox-Id: sandbox-payment'
+mysql_query root "$root_password" cs_db \
+  "UPDATE support_event SET payload_json = JSON_OBJECT('pendingActionId', '$agent_expiry_pending_id', 'outcome', 'expired') WHERE turn_id = (SELECT turn_id FROM support_turn WHERE trace_id = '$agent_expiry_trace') AND event_type = 'ACTION_EXPIRED'"
 mysql_query root "$root_password" cs_db \
   "UPDATE pending_action_reference SET state = 'DECLINED' WHERE pending_action_id = '$agent_expiry_pending_id'"
 assert_agent_status_reason 409 evaluation_request_rejected \
@@ -3734,7 +3792,7 @@ assert_agent_status_reason 409 agent_request_rejected \
   --header "Authorization: Bearer $payment_token" \
   --header 'X-Eval-Sandbox-Id: sandbox-payment' \
   --header "X-Session-Id: $agent_expiry_session" \
-  --header 'Idempotency-Key: cb121-expiry-resolve' \
+  --header 'Idempotency-Key: expiry' \
   --header 'Content-Type: application/json' \
   --data '{"message":"later"}'
 mysql_query root "$root_password" cs_db \
@@ -3748,22 +3806,9 @@ assert_equal 0 \
     "SELECT COUNT(*) FROM action_receipt WHERE pending_action_id = '$agent_expiry_pending_id'")" \
   "expiry integrity rejection creates no authoritative receipt"
 
-assert_status 201 "agent action session binds the payment subject and sandbox" \
-  --request POST "http://127.0.0.1:$agent_port/api/sessions" \
-  --header "Authorization: Bearer $payment_token" \
-  --header 'X-Eval-Sandbox-Id: sandbox-payment' \
-  --header 'Content-Type: application/json' \
-  --data '{}'
-agent_action_session="$(uv run python scripts/read_json_field.py \
-  "$tmp_dir/http-response.json" sessionId)"
-assert_status 200 "agent prepares one bounded refund action without executing it" \
-  --request POST "http://127.0.0.1:$agent_port/api/chat" \
-  --header "Authorization: Bearer $payment_token" \
-  --header 'X-Eval-Sandbox-Id: sandbox-payment' \
-  --header "X-Session-Id: $agent_action_session" \
-  --header 'Idempotency-Key: cb121-action-prepare' \
-  --header 'Content-Type: application/json' \
-  --data '{"message":"action-prepare"}'
+prepare_agent_action_case cb121-action action-prepare
+agent_action_session="$prepared_case_session"
+agent_pending_id="$prepared_case_pending_id"
 assert_equal action_pending \
   "$(uv run python scripts/read_json_field.py "$tmp_dir/http-response.json" outcome)" \
   "agent preparation publishes only the pending outcome"
@@ -3771,8 +3816,6 @@ if jq -e 'has("actionReceipt")' "$tmp_dir/http-response.json" >/dev/null; then
   echo "Pending action response exposed an ActionReceipt." >&2
   exit 1
 fi
-agent_pending_id="$(mysql_query agent_app "$agent_app_password" cs_db \
-  "SELECT pending_action_id FROM pending_action_reference WHERE session_id = '$agent_action_session' AND state = 'PENDING'")"
 agent_prepare_trace="$(mysql_query agent_app "$agent_app_password" cs_db \
   "SELECT trace_id FROM support_turn WHERE session_id = '$agent_action_session' AND correlation_key = 'cb121-action-prepare'")"
 assert_equal '1:0:0' \
@@ -3780,6 +3823,22 @@ assert_equal '1:0:0' \
     "SELECT CONCAT((SELECT COUNT(*) FROM pending_action_reference WHERE pending_action_id = '$agent_pending_id' AND state = 'PENDING'), ':', (SELECT COUNT(*) FROM action_receipt_projection WHERE pending_action_id = '$agent_pending_id'), ':', (SELECT COUNT(*) FROM support_event WHERE event_type = 'ACTION_RECEIPT' AND session_id = '$agent_action_session'))")" \
     "prepared action has one reference and no local or public receipt"
 assert_status 200 "prepared action evaluation is anchored to its durable reference" \
+  --request GET "http://127.0.0.1:$agent_port/api/eval/evidence/$agent_prepare_trace" \
+  --user "evaluation-manager:$management_password" \
+  --header 'X-Eval-Sandbox-Id: sandbox-payment'
+agent_argument_commitment="$(mysql_query agent_app "$agent_app_password" cs_db \
+  "SELECT argument_commitment FROM pending_action_reference WHERE pending_action_id = '$agent_pending_id'")"
+mysql_query root "$root_password" cs_db \
+  "UPDATE support_event SET payload_json = JSON_QUOTE('malformed') WHERE turn_id = (SELECT turn_id FROM support_turn WHERE trace_id = '$agent_prepare_trace') AND event_type = 'ACTION_PREPARED'"
+assert_agent_status_reason 409 evaluation_request_rejected \
+  EVALUATION_ACTION_DURABLE_TRUTH_INCONSISTENT "Evidence unavailable" \
+  "evaluation attributes malformed ACTION_PREPARED evidence to action truth" \
+  --request GET "http://127.0.0.1:$agent_port/api/eval/evidence/$agent_prepare_trace" \
+  --user "evaluation-manager:$management_password" \
+  --header 'X-Eval-Sandbox-Id: sandbox-payment'
+mysql_query root "$root_password" cs_db \
+  "UPDATE support_event SET payload_json = JSON_OBJECT('pendingActionId', '$agent_pending_id', 'actionType', 'REFUND_REQUEST', 'argumentCommitment', '$agent_argument_commitment') WHERE turn_id = (SELECT turn_id FROM support_turn WHERE trace_id = '$agent_prepare_trace') AND event_type = 'ACTION_PREPARED'"
+assert_status 200 "restored ACTION_PREPARED payload restores action evidence" \
   --request GET "http://127.0.0.1:$agent_port/api/eval/evidence/$agent_prepare_trace" \
   --user "evaluation-manager:$management_password" \
   --header 'X-Eval-Sandbox-Id: sandbox-payment'
@@ -3832,23 +3891,54 @@ assert_status 200 "restored PendingAction identity restores evaluation evidence"
   --user "evaluation-manager:$management_password" \
   --header 'X-Eval-Sandbox-Id: sandbox-payment'
 
-assert_agent_action_projection_rolled_back() {
+assert_agent_confirmation_checkpoint() {
   local label="$1"
-  assert_equal 'PENDING:0:0' \
+  assert_equal 'CONFIRMING:1:PROCESSING:0:0:0' \
     "$(mysql_query agent_app "$agent_app_password" cs_db \
-      "SELECT CONCAT((SELECT state FROM pending_action_reference WHERE pending_action_id = '$agent_pending_id'), ':', (SELECT COUNT(*) FROM action_receipt_projection WHERE pending_action_id = '$agent_pending_id'), ':', (SELECT COUNT(*) FROM support_event WHERE event_type = 'ACTION_RECEIPT' AND session_id = '$agent_action_session'))")" \
-    "$label rolls back the complete local projection transaction"
+      "SELECT CONCAT(p.state, ':', p.confirmation_turn_id IS NOT NULL, ':', t.state, ':', (SELECT COUNT(*) FROM action_receipt_projection WHERE pending_action_id = p.pending_action_id), ':', (SELECT COUNT(*) FROM support_event WHERE event_type = 'ACTION_RECEIPT' AND turn_id = t.turn_id), ':', (SELECT COUNT(*) FROM support_turn WHERE turn_id = t.turn_id AND outcome = 'action_completed')) FROM pending_action_reference p JOIN support_turn t ON t.turn_id = p.confirmation_turn_id AND t.trace_id = p.confirmation_trace_id WHERE p.pending_action_id = '$agent_pending_id'")" \
+    "$label preserves one recoverable confirmation claim and rolls back all local receipt truth"
 }
 
-confirm_agent_action_503() {
-  local key="$1"
-  local label="$2"
-  assert_status 503 "$label" \
+assert_agent_confirmation_arbitration() {
+  local label="$1"
+  assert_agent_status_reason 409 agent_request_rejected \
+    ACTION_CONFIRMATION_ARBITRATION_CONFLICT "Action confirmation conflict" \
+    "$label prevents decline from overtaking the confirmation claim" \
     --request POST "http://127.0.0.1:$agent_port/api/chat" \
     --header "Authorization: Bearer $payment_token" \
     --header 'X-Eval-Sandbox-Id: sandbox-payment' \
     --header "X-Session-Id: $agent_action_session" \
-    --header "Idempotency-Key: $key" \
+    --header "Idempotency-Key: $agent_confirmation_key-decline" \
+    --header 'Content-Type: application/json' \
+    --data '{"message":"decline"}'
+  assert_agent_status_reason 409 agent_request_rejected \
+    ACTION_CONFIRMATION_ARBITRATION_CONFLICT "Action confirmation conflict" \
+    "$label prevents expiry from overtaking the confirmation claim" \
+    --request POST "http://127.0.0.1:$agent_port/api/chat" \
+    --header "Authorization: Bearer $payment_token" \
+    --header 'X-Eval-Sandbox-Id: sandbox-payment' \
+    --header "X-Session-Id: $agent_action_session" \
+    --header "Idempotency-Key: $agent_confirmation_key-expiry" \
+    --header 'Content-Type: application/json' \
+    --data '{"message":"later"}'
+}
+
+assert_agent_confirmation_recoverable() {
+  local label="$1"
+  assert_agent_confirmation_checkpoint "$label"
+  assert_agent_confirmation_arbitration "$label"
+}
+
+confirm_agent_action_503() {
+  local label="$1"
+  assert_agent_status_reason 503 agent_request_rejected \
+    ACTION_CONFIRMATION_LOCAL_PERSISTENCE_UNAVAILABLE \
+    "Action confirmation indeterminate" "$label" \
+    --request POST "http://127.0.0.1:$agent_port/api/chat" \
+    --header "Authorization: Bearer $payment_token" \
+    --header 'X-Eval-Sandbox-Id: sandbox-payment' \
+    --header "X-Session-Id: $agent_action_session" \
+    --header "Idempotency-Key: $agent_confirmation_key" \
     --header 'Content-Type: application/json' \
     --data '{"message":"confirm refund"}'
   if jq -e 'has("actionReceipt")' "$tmp_dir/http-response.json" >/dev/null; then
@@ -3857,153 +3947,189 @@ confirm_agent_action_503() {
   fi
 }
 
+recover_agent_action() {
+  local label="$1"
+  assert_status 200 "$label recovers the same durable confirmation turn" \
+    --request POST "http://127.0.0.1:$agent_port/api/chat" \
+    --header "Authorization: Bearer $payment_token" \
+    --header 'X-Eval-Sandbox-Id: sandbox-payment' \
+    --header "X-Session-Id: $agent_action_session" \
+    --header "Idempotency-Key: $agent_confirmation_key" \
+    --header 'Content-Type: application/json' \
+    --data '{"message":"confirm refund"}'
+  agent_receipt_id="$(
+    jq -er '.actionReceipt.receiptId | select(type == "string" and length > 0)' \
+      "$tmp_dir/http-response.json"
+  )"
+  agent_refund_id="$(mysql_query commerce_app "$commerce_app_password" commerce_db \
+    "SELECT refund_id FROM action_receipt WHERE pending_action_id = '$agent_pending_id'")"
+  assert_equal 'CONFIRMED:1:1:1' \
+    "$(mysql_query agent_app "$agent_app_password" cs_db \
+      "SELECT CONCAT((SELECT state FROM pending_action_reference WHERE pending_action_id = '$agent_pending_id'), ':', (SELECT COUNT(*) FROM action_receipt_projection WHERE pending_action_id = '$agent_pending_id' AND receipt_id = '$agent_receipt_id'), ':', (SELECT COUNT(*) FROM support_event WHERE event_type = 'ACTION_RECEIPT' AND session_id = '$agent_action_session'), ':', (SELECT COUNT(*) FROM support_turn WHERE session_id = '$agent_action_session' AND outcome = 'action_completed'))")" \
+    "$label commits one projection, receipt event, and terminal confirmation turn"
+  assert_equal '1:1:1' \
+    "$(mysql_query commerce_app "$commerce_app_password" commerce_db \
+      "SELECT CONCAT((SELECT COUNT(*) FROM action_receipt WHERE pending_action_id = '$agent_pending_id'), ':', (SELECT COUNT(*) FROM mock_refund WHERE refund_id = '$agent_refund_id'), ':', (SELECT COUNT(*) FROM commerce_outbox WHERE aggregate_type = 'REFUND' AND aggregate_id = '$agent_refund_id' AND event_type = 'REFUND_REQUESTED'))")" \
+    "$label preserves one commerce receipt/refund/Outbox closure"
+}
+
+agent_confirmation_key=cb121-projection-insert-failure
 mysql_query root "$root_password" cs_db \
   "REVOKE INSERT ON cs_db.action_receipt_projection FROM 'agent_app'@'%'"
-confirm_agent_action_503 cb121-projection-insert-failure \
-  "receipt projection insert failure is bounded and non-successful"
+confirm_agent_action_503 "receipt projection insert failure is bounded and non-successful"
 mysql_query root "$root_password" '' \
   "GRANT INSERT ON cs_db.action_receipt_projection TO 'agent_app'@'%'"
-assert_agent_action_projection_rolled_back "projection insert failure"
-agent_receipt_id="$(mysql_query commerce_app "$commerce_app_password" commerce_db \
-  "SELECT receipt_id FROM action_receipt WHERE pending_action_id = '$agent_pending_id'")"
-agent_refund_id="$(mysql_query commerce_app "$commerce_app_password" commerce_db \
-  "SELECT refund_id FROM action_receipt WHERE pending_action_id = '$agent_pending_id'")"
-assert_equal '1:1:1' \
-  "$(mysql_query commerce_app "$commerce_app_password" commerce_db \
-    "SELECT CONCAT((SELECT COUNT(*) FROM action_receipt WHERE pending_action_id = '$agent_pending_id'), ':', (SELECT COUNT(*) FROM mock_refund WHERE refund_id = '$agent_refund_id'), ':', (SELECT COUNT(*) FROM commerce_outbox WHERE aggregate_type = 'REFUND' AND aggregate_id = '$agent_refund_id' AND event_type = 'REFUND_REQUESTED'))")" \
-  "commerce ActionReceipt remains the one authoritative commit after local loss"
+assert_agent_confirmation_recoverable "projection insert failure"
 
-mysql_query root "$root_password" cs_db \
-  "REVOKE UPDATE (state, resolved_at) ON cs_db.pending_action_reference FROM 'agent_app'@'%'"
-confirm_agent_action_503 cb121-pending-update-failure \
-  "pending reference transition failure is bounded and non-successful"
-mysql_query root "$root_password" '' \
-  "GRANT UPDATE (state, resolved_at) ON cs_db.pending_action_reference TO 'agent_app'@'%'"
-assert_agent_action_projection_rolled_back "pending reference transition failure"
-
-mysql_query root "$root_password" cs_db \
-  "REVOKE INSERT ON cs_db.support_event FROM 'agent_app'@'%'"
-confirm_agent_action_503 cb121-receipt-event-failure \
-  "receipt evidence insert failure is bounded and non-successful"
-mysql_query root "$root_password" '' \
-  "GRANT INSERT ON cs_db.support_event TO 'agent_app'@'%'"
-assert_agent_action_projection_rolled_back "receipt evidence insert failure"
-
-mysql_query root "$root_password" cs_db \
-  "REVOKE UPDATE ON cs_db.support_turn FROM 'agent_app'@'%'"
-confirm_agent_action_503 cb121-turn-commit-failure \
-  "turn commit failure is bounded and non-successful"
-mysql_query root "$root_password" '' \
-  "GRANT UPDATE ON cs_db.support_turn TO 'agent_app'@'%'"
-assert_agent_action_projection_rolled_back "turn commit failure"
-assert_equal '1:1:1' \
-  "$(mysql_query commerce_app "$commerce_app_password" commerce_db \
-    "SELECT CONCAT((SELECT COUNT(*) FROM action_receipt WHERE pending_action_id = '$agent_pending_id'), ':', (SELECT COUNT(*) FROM mock_refund WHERE refund_id = '$agent_refund_id'), ':', (SELECT COUNT(*) FROM commerce_outbox WHERE aggregate_type = 'REFUND' AND aggregate_id = '$agent_refund_id' AND event_type = 'REFUND_REQUESTED'))")" \
-  "all local failures preserve one commerce receipt/refund/Outbox closure"
-
-stop_process agent_pid "$agent_pid"
-start_agent true
-# Hold the agent-owned pending row so both recovery requests have read the same PENDING
-# reference and reach the local projection transaction before either can publish it.
-mysql --protocol=TCP --host=127.0.0.1 --port="$MYSQL_PORT" \
-  --user=root --password="$root_password" --database=cs_db --batch --skip-column-names \
-  --execute="START TRANSACTION; SELECT pending_action_id FROM pending_action_reference WHERE pending_action_id = '$agent_pending_id' FOR UPDATE; SELECT GET_LOCK('cb121_pending_projection_lock', 0); SELECT SLEEP(60); ROLLBACK;" \
-  >"$tmp_dir/cb121-pending-lock.log" 2>&1 &
-agent_pending_lock_pid=$!
-wait_for_mysql_value 1 \
-  "SELECT IF(IS_USED_LOCK('cb121_pending_projection_lock') IS NULL, 0, 1)" \
-  "CB-121 controlled pending projection lock is held"
+# Two simultaneous requests with the same key can only recover the one claimed turn.
 agent_recovery_pids=()
 for recovery_index in 1 2; do
   (
     request_status "$tmp_dir/cb121-recovery-$recovery_index.response" \
-      --request POST "http://127.0.0.1:$agent_port/api/chat/stream" \
+      --request POST "http://127.0.0.1:$agent_port/api/chat" \
       --header "Authorization: Bearer $payment_token" \
       --header 'X-Eval-Sandbox-Id: sandbox-payment' \
       --header "X-Session-Id: $agent_action_session" \
-      --header "Idempotency-Key: cb121-action-recovery-$recovery_index" \
+      --header "Idempotency-Key: $agent_confirmation_key" \
       --header 'Content-Type: application/json' \
       --data '{"message":"confirm refund"}' \
       >"$tmp_dir/cb121-recovery-$recovery_index.status"
   ) &
   agent_recovery_pids+=("$!")
 done
-wait_for_mysql_value 2 \
-  "SELECT COUNT(*) FROM information_schema.processlist WHERE USER = 'agent_app' AND DB = 'cs_db' AND INFO LIKE 'SELECT source_turn_id, source_trace_id, conversation_id, session_id,%FOR UPDATE'" \
-  "both restarted Agent confirmations reached the same local PendingAction lock"
-agent_pending_lock_connection_id="$(mysql_query root "$root_password" commerce_db \
-  "SELECT IS_USED_LOCK('cb121_pending_projection_lock')")"
-if [[ ! "$agent_pending_lock_connection_id" =~ ^[0-9]+$ ]]; then
-  echo "CB-121 controlled pending projection lock lost its owning connection." >&2
-  exit 1
-fi
-mysql_query root "$root_password" commerce_db \
-  "KILL CONNECTION $agent_pending_lock_connection_id" || true
-kill "$agent_pending_lock_pid" >/dev/null 2>&1 || true
-wait "$agent_pending_lock_pid" >/dev/null 2>&1 || true
 for recovery_pid in "${agent_recovery_pids[@]}"; do
   wait "$recovery_pid"
 done
 for recovery_index in 1 2; do
   assert_equal 200 "$(cat "$tmp_dir/cb121-recovery-$recovery_index.status")" \
-    "concurrent restarted Agent recovery $recovery_index re-queries committed Action truth"
-  assert_equal 1 \
-    "$(grep -c '^event: action_receipt$' "$tmp_dir/cb121-recovery-$recovery_index.response")" \
-    "concurrent recovery $recovery_index emits one receipt event"
-  assert_equal 1 \
-    "$(grep -c '^event: done$' "$tmp_dir/cb121-recovery-$recovery_index.response")" \
-    "concurrent recovery $recovery_index emits one terminal event"
-  receipt_event_line="$(grep -n '^event: action_receipt$' \
-    "$tmp_dir/cb121-recovery-$recovery_index.response" | cut -d: -f1)"
-  token_event_line="$(grep -n '^event: token$' \
-    "$tmp_dir/cb121-recovery-$recovery_index.response" | cut -d: -f1)"
-  if ((receipt_event_line >= token_event_line)); then
-    echo "Concurrent Action receipt was not emitted before explanation prose." >&2
-    exit 1
-  fi
-  grep -Fq "\"receiptId\":\"$agent_receipt_id\",\"status\":\"REQUESTED\"" \
-    "$tmp_dir/cb121-recovery-$recovery_index.response"
+    "same-key concurrent recovery $recovery_index returns the durable result"
 done
-assert_equal 'CONFIRMED:1:2' \
+agent_receipt_id="$(
+  jq -er '.actionReceipt.receiptId | select(type == "string" and length > 0)' \
+    "$tmp_dir/cb121-recovery-1.response"
+)"
+second_recovery_receipt_id="$(
+  jq -er '.actionReceipt.receiptId | select(type == "string" and length > 0)' \
+    "$tmp_dir/cb121-recovery-2.response"
+)"
+assert_equal "$agent_receipt_id" "$second_recovery_receipt_id" \
+  "same-key concurrent recoveries return the same receipt identity"
+agent_refund_id="$(mysql_query commerce_app "$commerce_app_password" commerce_db \
+  "SELECT refund_id FROM action_receipt WHERE pending_action_id = '$agent_pending_id'")"
+assert_equal 'CONFIRMED:1:1:1' \
   "$(mysql_query agent_app "$agent_app_password" cs_db \
-    "SELECT CONCAT((SELECT state FROM pending_action_reference WHERE pending_action_id = '$agent_pending_id'), ':', (SELECT COUNT(*) FROM action_receipt_projection WHERE pending_action_id = '$agent_pending_id' AND receipt_id = '$agent_receipt_id'), ':', (SELECT COUNT(*) FROM support_event WHERE event_type = 'ACTION_RECEIPT' AND session_id = '$agent_action_session'))")" \
-  "concurrent recovery commits one immutable projection and one receipt event per turn"
-assert_status 200 "same confirmation turn replays without another commerce execution" \
-  --request POST "http://127.0.0.1:$agent_port/api/chat/stream" \
-  --header "Authorization: Bearer $payment_token" \
-  --header 'X-Eval-Sandbox-Id: sandbox-payment' \
-  --header "X-Session-Id: $agent_action_session" \
-  --header 'Idempotency-Key: cb121-action-recovery-1' \
-  --header 'Content-Type: application/json' \
-  --data '{"message":"confirm refund"}'
-assert_equal 1 "$(grep -c '^event: action_receipt$' "$tmp_dir/http-response.json")" \
-  "same-turn replay emits exactly one stored receipt"
+    "SELECT CONCAT((SELECT state FROM pending_action_reference WHERE pending_action_id = '$agent_pending_id'), ':', (SELECT COUNT(*) FROM action_receipt_projection WHERE pending_action_id = '$agent_pending_id'), ':', (SELECT COUNT(*) FROM support_event WHERE event_type = 'ACTION_RECEIPT' AND session_id = '$agent_action_session'), ':', (SELECT COUNT(*) FROM support_turn WHERE session_id = '$agent_action_session' AND outcome = 'action_completed'))")" \
+  "same-key concurrent recovery publishes one complete local receipt truth"
 assert_equal '1:1:1' \
   "$(mysql_query commerce_app "$commerce_app_password" commerce_db \
     "SELECT CONCAT((SELECT COUNT(*) FROM action_receipt WHERE pending_action_id = '$agent_pending_id'), ':', (SELECT COUNT(*) FROM mock_refund WHERE refund_id = '$agent_refund_id'), ':', (SELECT COUNT(*) FROM commerce_outbox WHERE aggregate_type = 'REFUND' AND aggregate_id = '$agent_refund_id' AND event_type = 'REFUND_REQUESTED'))")" \
-  "same-turn replay never re-executes commerce"
-agent_recovery_trace_1="$(mysql_query agent_app "$agent_app_password" cs_db \
-  "SELECT trace_id FROM support_turn WHERE session_id = '$agent_action_session' AND correlation_key = 'cb121-action-recovery-1'")"
-agent_recovery_trace_2="$(mysql_query agent_app "$agent_app_password" cs_db \
-  "SELECT trace_id FROM support_turn WHERE session_id = '$agent_action_session' AND correlation_key = 'cb121-action-recovery-2'")"
-for recovery_trace in "$agent_recovery_trace_1" "$agent_recovery_trace_2"; do
-  assert_status 200 "completed action evaluation is anchored to its receipt projection" \
-    --request GET "http://127.0.0.1:$agent_port/api/eval/evidence/$recovery_trace" \
-    --user "evaluation-manager:$management_password" \
-    --header 'X-Eval-Sandbox-Id: sandbox-payment'
-done
+  "same-key concurrent recovery never duplicates commerce mutation"
+agent_recovery_trace="$(mysql_query agent_app "$agent_app_password" cs_db \
+  "SELECT trace_id FROM support_turn WHERE session_id = '$agent_action_session' AND correlation_key = '$agent_confirmation_key'")"
+projection_failure_session="$agent_action_session"
+projection_failure_pending_id="$agent_pending_id"
+projection_failure_confirmation_key="$agent_confirmation_key"
+projection_failure_receipt_id="$agent_receipt_id"
+projection_failure_refund_id="$agent_refund_id"
+projection_failure_trace="$agent_recovery_trace"
+
+prepare_agent_action_case cb121-pending-update action-prepare-small
+agent_action_session="$prepared_case_session"
+agent_pending_id="$prepared_case_pending_id"
+agent_confirmation_key=cb121-pending-update-failure
+mysql_query root "$root_password" cs_db \
+  "CREATE TRIGGER cb121_reject_pending_confirm BEFORE UPDATE ON pending_action_reference FOR EACH ROW SET NEW.state = IF(NEW.state = 'CONFIRMED', 'INVALID', NEW.state)"
+confirm_agent_action_503 "pending reference transition failure is bounded and non-successful"
+mysql_query root "$root_password" cs_db "DROP TRIGGER cb121_reject_pending_confirm"
+assert_agent_confirmation_recoverable "pending reference transition failure"
+recover_agent_action "pending reference transition failure"
+
+prepare_agent_action_case cb121-receipt-event action-prepare-small
+agent_action_session="$prepared_case_session"
+agent_pending_id="$prepared_case_pending_id"
+agent_confirmation_key=cb121-receipt-event-failure
+mysql_query root "$root_password" cs_db \
+  "CREATE TRIGGER cb121_reject_receipt_event BEFORE INSERT ON support_event FOR EACH ROW SET NEW.sequence = IF(NEW.event_type = 'ACTION_RECEIPT', 0, NEW.sequence)"
+confirm_agent_action_503 "receipt evidence insert failure is bounded and non-successful"
+mysql_query root "$root_password" cs_db "DROP TRIGGER cb121_reject_receipt_event"
+assert_agent_confirmation_recoverable "receipt evidence insert failure"
+recover_agent_action "receipt evidence insert failure"
+
+prepare_agent_action_case cb121-turn-commit action-prepare-small
+agent_action_session="$prepared_case_session"
+agent_pending_id="$prepared_case_pending_id"
+agent_confirmation_key=cb121-turn-commit-failure
+mysql_query root "$root_password" cs_db \
+  "CREATE TRIGGER cb121_reject_turn_commit BEFORE UPDATE ON support_turn FOR EACH ROW SET NEW.outcome = IF(NEW.outcome = 'action_completed', 'invalid', NEW.outcome)"
+confirm_agent_action_503 "turn commit failure is bounded and non-successful"
+mysql_query root "$root_password" cs_db "DROP TRIGGER cb121_reject_turn_commit"
+assert_agent_confirmation_recoverable "turn commit failure"
+recover_agent_action "turn commit failure"
+
+agent_action_session="$projection_failure_session"
+agent_pending_id="$projection_failure_pending_id"
+agent_confirmation_key="$projection_failure_confirmation_key"
+agent_receipt_id="$projection_failure_receipt_id"
+agent_refund_id="$projection_failure_refund_id"
+agent_recovery_trace="$projection_failure_trace"
+assert_status 200 "completed action evaluation is anchored to its receipt projection" \
+  --request GET "http://127.0.0.1:$agent_port/api/eval/evidence/$agent_recovery_trace" \
+  --user "evaluation-manager:$management_password" \
+  --header 'X-Eval-Sandbox-Id: sandbox-payment'
+
+agent_receipt_event_id="$(mysql_query agent_app "$agent_app_password" cs_db \
+  "SELECT event_id FROM support_event WHERE trace_id = '$agent_recovery_trace' AND event_type = 'ACTION_RECEIPT'")"
+agent_receipt_event_sequence="$(mysql_query agent_app "$agent_app_password" cs_db \
+  "SELECT sequence FROM support_event WHERE event_id = '$agent_receipt_event_id'")"
+agent_receipt_status="$(mysql_query agent_app "$agent_app_password" cs_db \
+  "SELECT status FROM action_receipt_projection WHERE receipt_id = '$agent_receipt_id'")"
+agent_receipt_commitment="$(mysql_query agent_app "$agent_app_password" cs_db \
+  "SELECT receipt_commitment FROM action_receipt_projection WHERE receipt_id = '$agent_receipt_id'")"
+mysql_query root "$root_password" cs_db \
+  "UPDATE support_event SET payload_json = JSON_QUOTE('malformed') WHERE event_id = '$agent_receipt_event_id'"
+assert_agent_status_reason 409 evaluation_request_rejected \
+  EVALUATION_ACTION_DURABLE_TRUTH_INCONSISTENT "Evidence unavailable" \
+  "evaluation attributes malformed ACTION_RECEIPT evidence to action truth" \
+  --request GET "http://127.0.0.1:$agent_port/api/eval/evidence/$agent_recovery_trace" \
+  --user "evaluation-manager:$management_password" \
+  --header 'X-Eval-Sandbox-Id: sandbox-payment'
+mysql_query root "$root_password" cs_db \
+  "UPDATE support_event SET payload_json = JSON_OBJECT('receiptId', '$agent_receipt_id', 'pendingActionId', '$agent_pending_id', 'status', '$agent_receipt_status', 'receiptCommitment', '$agent_receipt_commitment') WHERE event_id = '$agent_receipt_event_id'"
+mysql_query root "$root_password" cs_db \
+  "DELETE FROM support_event WHERE event_id = '$agent_receipt_event_id'"
+assert_agent_status_reason 409 evaluation_request_rejected \
+  EVALUATION_ACTION_DURABLE_TRUTH_INCONSISTENT "Evidence unavailable" \
+  "evaluation attributes a missing ACTION_RECEIPT event to action truth" \
+  --request GET "http://127.0.0.1:$agent_port/api/eval/evidence/$agent_recovery_trace" \
+  --user "evaluation-manager:$management_password" \
+  --header 'X-Eval-Sandbox-Id: sandbox-payment'
+mysql_query root "$root_password" cs_db \
+  "INSERT INTO support_event (event_id, turn_id, trace_id, session_id, user_subject, sequence, event_type, payload_json) SELECT '$agent_receipt_event_id', turn_id, trace_id, session_id, user_subject, $agent_receipt_event_sequence, 'ACTION_RECEIPT', JSON_OBJECT('receiptId', '$agent_receipt_id', 'pendingActionId', '$agent_pending_id', 'status', '$agent_receipt_status', 'receiptCommitment', '$agent_receipt_commitment') FROM support_turn WHERE trace_id = '$agent_recovery_trace'"
+duplicate_receipt_event_id="$(uuidgen | tr '[:upper:]' '[:lower:]')"
+mysql_query root "$root_password" cs_db \
+  "INSERT INTO support_event (event_id, turn_id, trace_id, session_id, user_subject, sequence, event_type, payload_json) SELECT '$duplicate_receipt_event_id', turn_id, trace_id, session_id, user_subject, (SELECT MAX(sequence) + 1 FROM support_event existing WHERE existing.turn_id = support_turn.turn_id), 'ACTION_RECEIPT', JSON_OBJECT('receiptId', '$agent_receipt_id', 'pendingActionId', '$agent_pending_id', 'status', '$agent_receipt_status', 'receiptCommitment', '$agent_receipt_commitment') FROM support_turn WHERE trace_id = '$agent_recovery_trace'"
+assert_agent_status_reason 409 evaluation_request_rejected \
+  EVALUATION_ACTION_DURABLE_TRUTH_INCONSISTENT "Evidence unavailable" \
+  "evaluation attributes duplicate ACTION_RECEIPT evidence to action truth" \
+  --request GET "http://127.0.0.1:$agent_port/api/eval/evidence/$agent_recovery_trace" \
+  --user "evaluation-manager:$management_password" \
+  --header 'X-Eval-Sandbox-Id: sandbox-payment'
+mysql_query root "$root_password" cs_db \
+  "DELETE FROM support_event WHERE event_id = '$duplicate_receipt_event_id'"
+assert_status 200 "restored ACTION_RECEIPT cardinality restores action evidence" \
+  --request GET "http://127.0.0.1:$agent_port/api/eval/evidence/$agent_recovery_trace" \
+  --user "evaluation-manager:$management_password" \
+  --header 'X-Eval-Sandbox-Id: sandbox-payment'
 
 tampered_agent_receipt_id='00000000-0000-0000-0000-000000000992'
 mysql_query root "$root_password" cs_db \
   "UPDATE action_receipt_projection SET receipt_id = '$tampered_agent_receipt_id' WHERE receipt_id = '$agent_receipt_id'"
-for recovery_trace in "$agent_recovery_trace_1" "$agent_recovery_trace_2"; do
-  assert_agent_status_reason 409 evaluation_request_rejected \
-    EVALUATION_ACTION_DURABLE_TRUTH_INCONSISTENT "Evidence unavailable" \
-    "evaluation rejects a receipt event whose projection identity is missing" \
-    --request GET "http://127.0.0.1:$agent_port/api/eval/evidence/$recovery_trace" \
-    --user "evaluation-manager:$management_password" \
-    --header 'X-Eval-Sandbox-Id: sandbox-payment'
-done
+assert_agent_status_reason 409 evaluation_request_rejected \
+  EVALUATION_ACTION_DURABLE_TRUTH_INCONSISTENT "Evidence unavailable" \
+  "evaluation rejects a receipt event whose projection identity is missing" \
+  --request GET "http://127.0.0.1:$agent_port/api/eval/evidence/$agent_recovery_trace" \
+  --user "evaluation-manager:$management_password" \
+  --header 'X-Eval-Sandbox-Id: sandbox-payment'
 assert_agent_status_reason 409 agent_request_rejected \
   CONVERSATION_ACTION_DURABLE_TRUTH_INCONSISTENT "Conversation evidence conflict" \
   "same-turn replay rejects a missing receipt projection identity" \
@@ -4011,36 +4137,84 @@ assert_agent_status_reason 409 agent_request_rejected \
   --header "Authorization: Bearer $payment_token" \
   --header 'X-Eval-Sandbox-Id: sandbox-payment' \
   --header "X-Session-Id: $agent_action_session" \
-  --header 'Idempotency-Key: cb121-action-recovery-1' \
+  --header "Idempotency-Key: $agent_confirmation_key" \
   --header 'Content-Type: application/json' \
   --data '{"message":"confirm refund"}'
 mysql_query root "$root_password" cs_db \
   "UPDATE action_receipt_projection SET receipt_id = '$agent_receipt_id' WHERE receipt_id = '$tampered_agent_receipt_id'"
 
-agent_receipt_commitment="$(mysql_query agent_app "$agent_app_password" cs_db \
-  "SELECT receipt_commitment FROM action_receipt_projection WHERE receipt_id = '$agent_receipt_id'")"
 mysql_query root "$root_password" cs_db \
   "UPDATE action_receipt_projection SET receipt_commitment = REPEAT('0', 64) WHERE receipt_id = '$agent_receipt_id'"
-for recovery_trace in "$agent_recovery_trace_1" "$agent_recovery_trace_2"; do
-  assert_agent_status_reason 409 evaluation_request_rejected \
-    EVALUATION_ACTION_DURABLE_TRUTH_INCONSISTENT "Evidence unavailable" \
-    "evaluation rejects changed receipt projection content" \
-    --request GET "http://127.0.0.1:$agent_port/api/eval/evidence/$recovery_trace" \
-    --user "evaluation-manager:$management_password" \
-    --header 'X-Eval-Sandbox-Id: sandbox-payment'
-done
+assert_agent_status_reason 409 evaluation_request_rejected \
+  EVALUATION_ACTION_DURABLE_TRUTH_INCONSISTENT "Evidence unavailable" \
+  "evaluation rejects changed receipt projection content" \
+  --request GET "http://127.0.0.1:$agent_port/api/eval/evidence/$agent_recovery_trace" \
+  --user "evaluation-manager:$management_password" \
+  --header 'X-Eval-Sandbox-Id: sandbox-payment'
 mysql_query root "$root_password" cs_db \
   "UPDATE action_receipt_projection SET receipt_commitment = '$agent_receipt_commitment' WHERE receipt_id = '$agent_receipt_id'"
-for recovery_trace in "$agent_recovery_trace_1" "$agent_recovery_trace_2"; do
-  assert_status 200 "restored receipt projection restores evaluation evidence" \
-    --request GET "http://127.0.0.1:$agent_port/api/eval/evidence/$recovery_trace" \
-    --user "evaluation-manager:$management_password" \
-    --header 'X-Eval-Sandbox-Id: sandbox-payment'
-done
+assert_status 200 "restored receipt projection restores evaluation evidence" \
+  --request GET "http://127.0.0.1:$agent_port/api/eval/evidence/$agent_recovery_trace" \
+  --user "evaluation-manager:$management_password" \
+  --header 'X-Eval-Sandbox-Id: sandbox-payment'
 assert_equal '1:1:1' \
   "$(mysql_query commerce_app "$commerce_app_password" commerce_db \
     "SELECT CONCAT((SELECT COUNT(*) FROM action_receipt WHERE pending_action_id = '$agent_pending_id'), ':', (SELECT COUNT(*) FROM mock_refund WHERE refund_id = '$agent_refund_id'), ':', (SELECT COUNT(*) FROM commerce_outbox WHERE aggregate_type = 'REFUND' AND aggregate_id = '$agent_refund_id' AND event_type = 'REFUND_REQUESTED'))")" \
   "local projection consistency faults create no commerce side effects"
+
+prepare_agent_action_case cb121-auth-unavailable action-prepare-small
+agent_action_session="$prepared_case_session"
+agent_pending_id="$prepared_case_pending_id"
+agent_confirmation_key=cb121-auth-unavailable-confirm
+stop_process auth_pid "$auth_pid"
+assert_agent_status_reason 503 agent_request_rejected \
+  ACTION_CONFIRMATION_IDENTITY_UNAVAILABLE "Action confirmation indeterminate" \
+  "real identity outage is attributed after the durable confirmation claim" \
+  --request POST "http://127.0.0.1:$agent_port/api/chat" \
+  --header "Authorization: Bearer $payment_token" \
+  --header 'X-Eval-Sandbox-Id: sandbox-payment' \
+  --header "X-Session-Id: $agent_action_session" \
+  --header "Idempotency-Key: $agent_confirmation_key" \
+  --header 'Content-Type: application/json' \
+  --data '{"message":"confirm refund"}'
+assert_agent_confirmation_checkpoint "real identity outage"
+assert_equal '0:0:0:0' \
+  "$(mysql_query commerce_app "$commerce_app_password" commerce_db \
+    "SELECT CONCAT((SELECT COUNT(*) FROM action_receipt WHERE pending_action_id = '$agent_pending_id'), ':', (SELECT COUNT(*) FROM mock_refund WHERE request_idempotency_key = CONCAT('action:', '$agent_pending_id')), ':', (SELECT COUNT(*) FROM commerce_outbox WHERE aggregate_type = 'REFUND' AND aggregate_id IN (SELECT refund_id FROM mock_refund WHERE request_idempotency_key = CONCAT('action:', '$agent_pending_id'))), ':', (SELECT COUNT(*) FROM pending_action WHERE pending_action_id = '$agent_pending_id' AND state = 'CONSUMED'))")" \
+  "identity outage creates no commerce receipt, refund, Outbox, or consumed action"
+start_auth evaluation
+stop_process commerce_pid "$commerce_pid"
+start_commerce evaluation "http://127.0.0.1:$auth_port"
+stop_process agent_pid "$agent_pid"
+start_agent true
+assert_agent_confirmation_arbitration "restored identity boundary"
+recover_agent_action "identity outage"
+
+prepare_agent_action_case cb121-commerce-unavailable action-prepare-small
+agent_action_session="$prepared_case_session"
+agent_pending_id="$prepared_case_pending_id"
+agent_confirmation_key=cb121-commerce-unavailable-confirm
+stop_process commerce_pid "$commerce_pid"
+assert_agent_status_reason 503 agent_request_rejected \
+  ACTION_CONFIRMATION_INDETERMINATE "Action confirmation indeterminate" \
+  "real commerce outage remains indeterminate after successful OBO" \
+  --request POST "http://127.0.0.1:$agent_port/api/chat" \
+  --header "Authorization: Bearer $payment_token" \
+  --header 'X-Eval-Sandbox-Id: sandbox-payment' \
+  --header "X-Session-Id: $agent_action_session" \
+  --header "Idempotency-Key: $agent_confirmation_key" \
+  --header 'Content-Type: application/json' \
+  --data '{"message":"confirm refund"}'
+assert_agent_confirmation_checkpoint "real commerce outage"
+assert_equal '0:0:0:0' \
+  "$(mysql_query commerce_app "$commerce_app_password" commerce_db \
+    "SELECT CONCAT((SELECT COUNT(*) FROM action_receipt WHERE pending_action_id = '$agent_pending_id'), ':', (SELECT COUNT(*) FROM mock_refund WHERE request_idempotency_key = CONCAT('action:', '$agent_pending_id')), ':', (SELECT COUNT(*) FROM commerce_outbox WHERE aggregate_type = 'REFUND' AND aggregate_id IN (SELECT refund_id FROM mock_refund WHERE request_idempotency_key = CONCAT('action:', '$agent_pending_id'))), ':', (SELECT COUNT(*) FROM pending_action WHERE pending_action_id = '$agent_pending_id' AND state = 'CONSUMED'))")" \
+  "commerce outage creates no receipt, refund, Outbox, or consumed action"
+start_commerce evaluation "http://127.0.0.1:$auth_port"
+stop_process agent_pid "$agent_pid"
+start_agent true
+assert_agent_confirmation_arbitration "restored commerce boundary"
+recover_agent_action "commerce outage"
 
 action_session='action-payment-session'
 action_trace='action-payment-trace'
@@ -4565,7 +4739,9 @@ curl --silent --show-error "http://127.0.0.1:$proxy_port/fixture/counts" >"$tmp_
 cmp "$tmp_dir/model-counts-before-evidence.json" "$tmp_dir/model-counts-after-evidence.json"
 mysql_query root "$root_password" cs_db \
   "UPDATE support_event SET payload_json = JSON_SET(payload_json, '$.outcome', 'provider_denied') WHERE trace_id = '$trace_id' AND event_type = 'AGENT_OUTCOME'"
-assert_status 409 "agent evidence rejects a terminal outcome conflicting with turn truth" \
+assert_agent_status_without_reason 409 evaluation_request_rejected \
+  EVALUATION_ACTION_DURABLE_TRUTH_INCONSISTENT "Evidence unavailable" \
+  "non-action event damage remains generic and cannot satisfy action attribution" \
   --request GET "http://127.0.0.1:$agent_port/api/eval/evidence/$trace_id" \
   --user "evaluation-manager:$management_password" \
   --header 'X-Eval-Sandbox-Id: sandbox-main'

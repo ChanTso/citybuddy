@@ -80,7 +80,7 @@ class PendingActionPayload(BaseModel):
     order_id: str = Field(alias="orderId", min_length=36, max_length=36)
     amount_minor: int = Field(alias="amountMinor", ge=1)
     currency: str = Field(pattern=r"^[A-Z]{3}$")
-    state: Literal["PREPARED", "CONSUMED"]
+    state: Literal["PREPARED"]
     expires_at: datetime = Field(alias="expiresAt")
     replayed: bool
 

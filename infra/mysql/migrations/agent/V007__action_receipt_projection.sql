@@ -83,9 +83,11 @@ CREATE TABLE pending_action_reference (
   amount_minor BIGINT UNSIGNED NOT NULL,
   currency CHAR(3) NOT NULL,
   state VARCHAR(16) NOT NULL,
+  confirmation_turn_id CHAR(36) NULL,
+  confirmation_trace_id CHAR(36) NULL,
   active_session_id VARCHAR(64)
     GENERATED ALWAYS AS (
-      CASE WHEN state = 'PENDING' THEN session_id ELSE NULL END
+      CASE WHEN state IN ('PENDING', 'CONFIRMING') THEN session_id ELSE NULL END
     ) STORED,
   expires_at TIMESTAMP(6) NOT NULL,
   created_at TIMESTAMP(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6),
@@ -102,6 +104,9 @@ CREATE TABLE pending_action_reference (
   CONSTRAINT fk_pending_action_reference_turn
     FOREIGN KEY (source_turn_id, source_trace_id, session_id, user_subject)
     REFERENCES support_turn (turn_id, trace_id, session_id, user_subject),
+  CONSTRAINT fk_pending_action_reference_confirmation_turn
+    FOREIGN KEY (confirmation_turn_id, confirmation_trace_id, session_id, user_subject)
+    REFERENCES support_turn (turn_id, trace_id, session_id, user_subject),
   CONSTRAINT chk_pending_action_reference_type
     CHECK (action_type = 'REFUND_REQUEST'),
   CONSTRAINT chk_pending_action_reference_commitment
@@ -109,10 +114,32 @@ CREATE TABLE pending_action_reference (
   CONSTRAINT chk_pending_action_reference_amount CHECK (amount_minor > 0),
   CONSTRAINT chk_pending_action_reference_currency CHECK (currency REGEXP '^[A-Z]{3}$'),
   CONSTRAINT chk_pending_action_reference_state
-    CHECK (state IN ('PENDING', 'DECLINED', 'EXPIRED', 'CONFIRMED')),
+    CHECK (state IN ('PENDING', 'CONFIRMING', 'DECLINED', 'EXPIRED', 'CONFIRMED')),
   CONSTRAINT chk_pending_action_reference_terminal CHECK (
-    (state = 'PENDING' AND resolved_at IS NULL)
-    OR (state IN ('DECLINED', 'EXPIRED', 'CONFIRMED') AND resolved_at IS NOT NULL)
+    (
+      state = 'PENDING'
+      AND confirmation_turn_id IS NULL
+      AND confirmation_trace_id IS NULL
+      AND resolved_at IS NULL
+    )
+    OR (
+      state = 'CONFIRMING'
+      AND confirmation_turn_id IS NOT NULL
+      AND confirmation_trace_id IS NOT NULL
+      AND resolved_at IS NULL
+    )
+    OR (
+      state IN ('DECLINED', 'EXPIRED')
+      AND confirmation_turn_id IS NULL
+      AND confirmation_trace_id IS NULL
+      AND resolved_at IS NOT NULL
+    )
+    OR (
+      state = 'CONFIRMED'
+      AND confirmation_turn_id IS NOT NULL
+      AND confirmation_trace_id IS NOT NULL
+      AND resolved_at IS NOT NULL
+    )
   )
 ) ENGINE=InnoDB;
 

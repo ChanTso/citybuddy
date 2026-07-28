@@ -18,6 +18,7 @@ counts: Counter[str] = Counter()
 
 def scenario(message: str) -> str:
     for value in (
+        "action-prepare-small",
         "action-prepare",
         "tool-success",
         "tool-malformed",
@@ -134,14 +135,15 @@ async def complete(request: Request) -> JSONResponse:
         return JSONResponse(status_code=503, content={"error": "transient"})
     if selected == "budget-exhaustion":
         return JSONResponse(content=tool_message("unknown.tool", "{}"))
-    if selected == "action-prepare" and not has_tool_feedback:
+    if selected in {"action-prepare", "action-prepare-small"} and not has_tool_feedback:
+        amount_minor = 50 if selected == "action-prepare-small" else 400
         return JSONResponse(
             content=tool_message(
                 "actions.refund.prepare",
                 json.dumps(
                     {
                         "orderId": "00000000-0000-0000-0000-000000000105",
-                        "amountMinor": 400,
+                        "amountMinor": amount_minor,
                         "currency": "CNY",
                     },
                     separators=(",", ":"),

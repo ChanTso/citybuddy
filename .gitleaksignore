@@ -2,3 +2,7 @@
 b91dbf4990575be84912cdae2dbb1242e78bf7a7:scripts/test_evaluation_sandbox_integration.sh:curl-auth-user:316
 # Synthetic mock-payment integration key from the first CB-105 branch commit; not a secret.
 5b6ad5655df58fcbee44482f91ad55c142ace10d:scripts/test_evaluation_sandbox_integration.sh:generic-api-key:324
+# Synthetic CB-121 expiry idempotency key repeated in one committed integration fixture.
+2988b11de6ba059beaea2380d538a36316df336b:scripts/test_evaluation_sandbox_integration.sh:generic-api-key:3713
+2988b11de6ba059beaea2380d538a36316df336b:scripts/test_evaluation_sandbox_integration.sh:generic-api-key:3717
+2988b11de6ba059beaea2380d538a36316df336b:scripts/test_evaluation_sandbox_integration.sh:generic-api-key:3737
