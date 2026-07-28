@@ -167,8 +167,26 @@ class SseEgressFilter:
 
     def project_result(self, result: ConversationResult) -> tuple[PublicSseEvent, ...]:
         source: tuple[SseSourceEvent, ...]
-        if result.outcome == "completed":
-            source = (
+        if result.outcome in {
+            "completed",
+            "action_pending",
+            "action_declined",
+            "action_expired",
+            "action_clarification",
+            "action_completed",
+        }:
+            receipt_source: tuple[SseSourceEvent, ...] = ()
+            if result.action_receipt is not None:
+                receipt_source = (
+                    SseSourceEvent(
+                        "ACTION_RECEIPT",
+                        {
+                            "receiptId": result.action_receipt.receipt.receipt_id,
+                            "status": result.action_receipt.receipt.status,
+                        },
+                    ),
+                )
+            source = receipt_source + (
                 SseSourceEvent("SAFE_TEXT", {"text": result.response_text}),
                 SseSourceEvent(
                     "TURN_COMPLETED",
@@ -201,6 +219,7 @@ class SseEgressFilter:
         public: list[PublicSseEvent] = []
         terminal = False
         text_seen = False
+        receipt_seen = False
         for event in source:
             if terminal:
                 raise SseProjectionError("source event follows terminal")
@@ -230,7 +249,14 @@ class SseEgressFilter:
                 required = {"conversationId", "traceId", "turnId", "outcome"}
                 if not text_seen or set(event.payload) != required:
                     raise SseProjectionError("invalid completed source")
-                if event.payload["outcome"] != "completed" or not all(
+                if event.payload["outcome"] not in {
+                    "completed",
+                    "action_pending",
+                    "action_declined",
+                    "action_expired",
+                    "action_clarification",
+                    "action_completed",
+                } or not all(
                     isinstance(event.payload[name], str) and event.payload[name]
                     for name in required
                 ):
@@ -255,9 +281,21 @@ class SseEgressFilter:
                 terminal = True
                 public.append(PublicSseEvent("error", {"sequence": 1, **event.payload}))
             elif event.event_type == "ACTION_RECEIPT":
-                # CB-120/CB-121 own receipt truth. This slice reserves the public
-                # schema but cannot accept or synthesize a receipt source.
-                raise SseProjectionError("receipt truth is unavailable")
+                if (
+                    receipt_seen
+                    or text_seen
+                    or set(event.payload) != {"receiptId", "status"}
+                    or event.payload["status"] != "REQUESTED"
+                    or not isinstance(event.payload["receiptId"], str)
+                ):
+                    raise SseProjectionError("invalid receipt source")
+                receipt_seen = True
+                public.append(
+                    PublicSseEvent(
+                        "action_receipt",
+                        {"sequence": len(public) + 1, **event.payload},
+                    )
+                )
             else:
                 raise SseProjectionError("unknown source event")
         if not terminal or not public or len(public) > MAX_PUBLIC_EVENTS:

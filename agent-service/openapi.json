@@ -1,6 +1,6 @@
 {
   "openapi": "3.1.0",
-  "info": {"title": "CityBuddy agent API", "version": "CB-103"},
+  "info": {"title": "CityBuddy agent API", "version": "CB-121"},
   "paths": {
     "/api/sessions": {
       "post": {
@@ -92,7 +92,12 @@
                         "completed",
                         "budget_exhausted",
                         "provider_denied",
-                        "retrieval_denied"
+                        "retrieval_denied",
+                        "action_pending",
+                        "action_declined",
+                        "action_expired",
+                        "action_clarification",
+                        "action_completed"
                       ]
                     },
                     "citations": {
@@ -100,7 +105,8 @@
                       "maxItems": 3,
                       "items": {"$ref": "#/components/schemas/RetrievalCitation"},
                       "description": "Source references projected only from sufficient retrieval evidence committed with this turn."
-                    }
+                    },
+                    "actionReceipt": {"$ref": "#/components/schemas/PublicActionReceipt"}
                   }
                 }
               }
@@ -109,6 +115,7 @@
           "401": {"$ref": "#/components/responses/Unauthorized"},
           "403": {"$ref": "#/components/responses/Forbidden"},
           "409": {"$ref": "#/components/responses/Conflict"},
+          "502": {"$ref": "#/components/responses/BadGateway"},
           "422": {"$ref": "#/components/responses/InvalidRequest"},
           "503": {"$ref": "#/components/responses/Unavailable"}
         }
@@ -163,6 +170,7 @@
           "401": {"$ref": "#/components/responses/Unauthorized"},
           "403": {"$ref": "#/components/responses/Forbidden"},
           "409": {"$ref": "#/components/responses/Conflict"},
+          "502": {"$ref": "#/components/responses/BadGateway"},
           "422": {"$ref": "#/components/responses/InvalidRequest"},
           "503": {"$ref": "#/components/responses/Unavailable"}
         }
@@ -294,9 +302,18 @@
         "properties": {
           "sequence": {"type": "integer", "minimum": 1, "maximum": 5},
           "receiptId": {"type": "string", "format": "uuid", "readOnly": true},
-          "status": {"type": "string", "enum": ["SUCCEEDED"]}
+          "status": {"type": "string", "const": "REQUESTED"}
         },
-        "description": "The only public action-status carrier, reserved for verified ActionReceipt truth in CB-120/CB-121; CB-082 does not emit it."
+        "description": "The only public action-status carrier, projected from one verified commerce ActionReceipt."
+      },
+      "PublicActionReceipt": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["receiptId", "status"],
+        "properties": {
+          "receiptId": {"type": "string", "format": "uuid", "readOnly": true},
+          "status": {"type": "string", "const": "REQUESTED"}
+        }
       },
       "SseDoneData": {
         "type": "object",
@@ -307,7 +324,17 @@
           "conversationId": {"type": "string", "format": "uuid", "readOnly": true},
           "traceId": {"type": "string", "format": "uuid", "readOnly": true},
           "turnId": {"type": "string", "format": "uuid", "readOnly": true},
-          "outcome": {"type": "string", "enum": ["completed"]}
+          "outcome": {
+            "type": "string",
+            "enum": [
+              "completed",
+              "action_pending",
+              "action_declined",
+              "action_expired",
+              "action_clarification",
+              "action_completed"
+            ]
+          }
         }
       },
       "SseErrorData": {
@@ -371,6 +398,11 @@
               "budget_exhausted",
               "provider_denied",
               "retrieval_denied",
+              "action_pending",
+              "action_declined",
+              "action_expired",
+              "action_clarification",
+              "action_completed",
               "failed"
             ]
           },
@@ -407,6 +439,10 @@
               "TOOL_LIFECYCLE",
               "TOOL_DENIED",
               "RETRIEVAL_DECISION",
+              "ACTION_PREPARED",
+              "ACTION_DECLINED",
+              "ACTION_EXPIRED",
+              "ACTION_RECEIPT",
               "AGENT_OUTCOME",
               "ASSISTANT_RESPONSE",
               "TURN_COMPLETED",
@@ -506,6 +542,13 @@
       "EvaluationEvidenceUnavailable": {
         "description": "Persisted evidence is incomplete, conflicting, oversized, or not safely projectable",
         "content": {"application/json": {"schema": {"$ref": "#/components/schemas/PublicError"}}}
+      }
+      ,
+      "BadGateway": {
+        "description": "Authenticated commerce response failed strict bounded receipt validation",
+        "content": {
+          "application/json": {"schema": {"$ref": "#/components/schemas/PublicError"}}
+        }
       }
     }
   }

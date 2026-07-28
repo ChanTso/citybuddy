@@ -14,6 +14,13 @@ import httpx
 from fastapi import HTTPException
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
+from .actions import (
+    ACTION_SCOPE,
+    PendingActionPayload,
+    RefundActionArguments,
+    action_argument_commitment,
+    strict_json_object,
+)
 from .faq_cache import FaqCache
 from .knowledge import (
     KnowledgeSearch,
@@ -45,6 +52,12 @@ class AgentRunResult:
     outcome: str
     events: tuple[AgentEvent, ...]
     retrieval_decision: RetrievalDecision | None = None
+    pending_action: PendingActionPayload | None = None
+
+    def __post_init__(self) -> None:
+        pending_expected = self.outcome == "action_pending"
+        if pending_expected != (self.pending_action is not None):
+            raise RuntimeError("Agent action outcome and PendingAction disagree")
 
 
 class AgentRunner(Protocol):
@@ -531,9 +544,9 @@ class ToolSpec:
     description: str
     authority: Literal["commerce_obo", "elasticsearch"]
     scope: str | None
-    risk: Literal["read"]
+    risk: Literal["read", "sensitive"]
     timeout_seconds: float
-    idempotency: Literal["read-only"]
+    idempotency: Literal["read-only", "turn-action-commitment"]
     input_schema: type[BaseModel]
     output_schema: type[BaseModel]
 
@@ -575,12 +588,28 @@ KNOWLEDGE_SEARCH_SPEC = ToolSpec(
     output_schema=KnowledgeSearchOutput,
 )
 
+REFUND_PREPARE_SPEC = ToolSpec(
+    name="actions.refund.prepare",
+    description=(
+        "Prepare one refund request for explicit user confirmation. This does not execute the "
+        "refund and the model cannot confirm it."
+    ),
+    authority="commerce_obo",
+    scope=ACTION_SCOPE,
+    risk="sensitive",
+    timeout_seconds=3.0,
+    idempotency="turn-action-commitment",
+    input_schema=RefundActionArguments,
+    output_schema=PendingActionPayload,
+)
+
 
 @dataclass(frozen=True)
 class ToolResult:
     outcome: Literal["ok", "deny_with_feedback"]
     model_view: dict[str, object]
     retrieval_decision: RetrievalDecision | None = None
+    pending_action: PendingActionPayload | None = None
 
 
 class ToolAdapter:
@@ -602,6 +631,7 @@ class ToolAdapter:
         self._specs = {
             CATALOG_PRODUCT_SPEC.name: CATALOG_PRODUCT_SPEC,
             KNOWLEDGE_SEARCH_SPEC.name: KNOWLEDGE_SEARCH_SPEC,
+            REFUND_PREPARE_SPEC.name: REFUND_PREPARE_SPEC,
         }
 
     def schemas(self) -> list[dict[str, object]]:
@@ -726,6 +756,11 @@ class ToolAdapter:
                 "Authorization": f"Bearer {obo}",
                 "X-Support-Session-Id": session_id,
             }
+            if spec is REFUND_PREPARE_SPEC:
+                if trace_id is None or turn_id is None:
+                    raise RuntimeError("Action preparation omitted server correlation")
+                headers["X-Agent-Trace-Id"] = trace_id
+                headers["X-Agent-Turn-Id"] = turn_id
             if sandbox_id is not None:
                 if trace_id is None or turn_id is None:
                     raise RuntimeError("Evaluation tool call omitted server correlation")
@@ -737,27 +772,63 @@ class ToolAdapter:
                 headers["X-Agent-Operation-Id"] = hashlib.sha256(
                     operation_material.encode("utf-8")
                 ).hexdigest()
+            endpoint = (
+                "/internal/tools/actions/prepare"
+                if spec is REFUND_PREPARE_SPEC
+                else f"/internal/tools/{name}"
+            )
+            request_body: object
+            if spec is REFUND_PREPARE_SPEC:
+                request_body = {
+                    "actionType": "REFUND_REQUEST",
+                    "arguments": arguments.model_dump(by_alias=True),
+                }
+            else:
+                request_body = arguments.model_dump(by_alias=True)
             response = httpx.post(
-                f"{self._base_url}/internal/tools/{name}",
+                f"{self._base_url}{endpoint}",
                 headers=headers,
-                json=arguments.model_dump(by_alias=True),
+                json=request_body,
                 timeout=spec.timeout_seconds,
             )
         except httpx.TimeoutException:
             return self._deny(name, "timeout", events)
         except httpx.NetworkError:
             return self._deny(name, "tool_unavailable", events)
-        if response.status_code in {400, 401, 403, 404, 408, 409, 422, 503, 504}:
+        if response.status_code in {400, 401, 403, 404, 408, 409, 422, 429, 503, 504}:
             return self._deny(name, "policy_denied", events)
-        if response.status_code != 200:
+        expected_statuses = {200, 201} if spec is REFUND_PREPARE_SPEC else {200}
+        if response.status_code not in expected_statuses:
             raise RuntimeError("Unexpected commerce tool failure")
         try:
-            bounded = spec.output_schema.model_validate(response.json())
+            bounded = spec.output_schema.model_validate(strict_json_object(response.content))
         except (ValidationError, ValueError, TypeError) as exception:
             raise RuntimeError("Invalid commerce tool response") from exception
+        if spec is REFUND_PREPARE_SPEC:
+            if not isinstance(arguments, RefundActionArguments) or not isinstance(
+                bounded, PendingActionPayload
+            ):
+                raise RuntimeError("Invalid commerce tool response")
+            if (
+                bounded.order_id != arguments.order_id
+                or bounded.amount_minor != arguments.amount_minor
+                or bounded.currency != arguments.currency
+                or bounded.argument_commitment
+                != action_argument_commitment(
+                    "REFUND_REQUEST",
+                    arguments.order_id,
+                    arguments.amount_minor,
+                    arguments.currency,
+                )
+            ):
+                raise RuntimeError("Commerce PendingAction contradicts the requested intent")
         model_view = bounded.model_dump(by_alias=True)
         events.append(AgentEvent("TOOL_LIFECYCLE", {"tool": name, "state": "succeeded"}))
-        return ToolResult(outcome="ok", model_view=model_view)
+        return ToolResult(
+            outcome="ok",
+            model_view=model_view,
+            pending_action=bounded if isinstance(bounded, PendingActionPayload) else None,
+        )
 
     @staticmethod
     def _deny(name: str, reason: str, events: list[AgentEvent]) -> ToolResult:
@@ -896,6 +967,23 @@ class BoundedAgent:
                             tuple(events),
                             retrieval_decision,
                         )
+                if result.pending_action is not None:
+                    events.append(
+                        AgentEvent(
+                            "ACTION_PREPARED",
+                            {
+                                "actionType": result.pending_action.action_type,
+                                "argumentCommitment": result.pending_action.argument_commitment,
+                            },
+                        )
+                    )
+                    events.append(AgentEvent("AGENT_OUTCOME", {"outcome": "action_pending"}))
+                    return AgentRunResult(
+                        "Please confirm or decline the prepared refund request.",
+                        "action_pending",
+                        tuple(events),
+                        pending_action=result.pending_action,
+                    )
                 if (
                     reply.tool_name == KNOWLEDGE_SEARCH_SPEC.name
                     and retrieval_decision is None

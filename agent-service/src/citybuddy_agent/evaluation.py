@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import uuid
 from datetime import UTC, datetime
 from typing import Literal, Protocol, cast
 
@@ -18,6 +19,11 @@ TerminalOutcome = Literal[
     "budget_exhausted",
     "provider_denied",
     "retrieval_denied",
+    "action_pending",
+    "action_declined",
+    "action_expired",
+    "action_clarification",
+    "action_completed",
     "failed",
 ]
 EventKind = Literal[
@@ -29,6 +35,10 @@ EventKind = Literal[
     "TOOL_LIFECYCLE",
     "TOOL_DENIED",
     "RETRIEVAL_DECISION",
+    "ACTION_PREPARED",
+    "ACTION_DECLINED",
+    "ACTION_EXPIRED",
+    "ACTION_RECEIPT",
     "AGENT_OUTCOME",
     "ASSISTANT_RESPONSE",
     "TURN_COMPLETED",
@@ -40,6 +50,11 @@ _TERMINAL_OUTCOMES = {
     "budget_exhausted",
     "provider_denied",
     "retrieval_denied",
+    "action_pending",
+    "action_declined",
+    "action_expired",
+    "action_clarification",
+    "action_completed",
 }
 _EVENT_TYPES = {
     "USER_INPUT",
@@ -50,6 +65,10 @@ _EVENT_TYPES = {
     "TOOL_LIFECYCLE",
     "TOOL_DENIED",
     "RETRIEVAL_DECISION",
+    "ACTION_PREPARED",
+    "ACTION_DECLINED",
+    "ACTION_EXPIRED",
+    "ACTION_RECEIPT",
     "AGENT_OUTCOME",
     "ASSISTANT_RESPONSE",
     "TURN_COMPLETED",
@@ -278,7 +297,11 @@ class MysqlEvaluationEvidenceStore:
         if any(event.event_kind in {"TURN_COMPLETED", "TURN_FAILED"} for event in events[:-1]):
             raise EvaluationEvidenceInvalid
         if terminal_outcome == "failed":
-            if [event.event_kind for event in events] != ["USER_INPUT", "TURN_FAILED"]:
+            if (
+                events[0].event_kind != "USER_INPUT"
+                or events[-1].event_kind != "TURN_FAILED"
+                or any(event.event_kind != "BUDGET_CHARGED" for event in events[1:-1])
+            ):
                 raise EvaluationEvidenceInvalid
             return
         if [event.event_kind for event in events[-3:]] != [
@@ -368,6 +391,33 @@ class MysqlEvaluationEvidenceStore:
                 raise EvaluationEvidenceInvalid
             outcome = str(decision_outcome)
             reference = str(index_version)
+        elif event_type == "ACTION_PREPARED":
+            action_type = payload.get("actionType")
+            commitment = payload.get("argumentCommitment")
+            if action_type != "REFUND_REQUEST" or not self._commitment(commitment):
+                raise EvaluationEvidenceInvalid
+            outcome = "prepared"
+            reference = str(commitment)
+        elif event_type == "ACTION_DECLINED":
+            if payload != {"outcome": "declined"}:
+                raise EvaluationEvidenceInvalid
+            outcome = "declined"
+        elif event_type == "ACTION_EXPIRED":
+            if payload != {"outcome": "expired"}:
+                raise EvaluationEvidenceInvalid
+            outcome = "expired"
+        elif event_type == "ACTION_RECEIPT":
+            receipt_id = payload.get("receiptId")
+            status = payload.get("status")
+            commitment = payload.get("receiptCommitment")
+            if (
+                not self._canonical_uuid(receipt_id)
+                or status != "REQUESTED"
+                or not self._commitment(commitment)
+            ):
+                raise EvaluationEvidenceInvalid
+            outcome = str(status)
+            reference = str(receipt_id)
         elif event_type in {"AGENT_OUTCOME", "ASSISTANT_RESPONSE", "TURN_COMPLETED"}:
             value = payload.get("outcome")
             if value not in _TERMINAL_OUTCOMES:
@@ -387,6 +437,23 @@ class MysqlEvaluationEvidenceStore:
             attempt=attempt,
             attempt_limit=attempt_limit,
             occurred_at=occurred_at,
+        )
+
+    @staticmethod
+    def _canonical_uuid(value: object) -> bool:
+        if not isinstance(value, str):
+            return False
+        try:
+            return str(uuid.UUID(value)) == value
+        except ValueError:
+            return False
+
+    @staticmethod
+    def _commitment(value: object) -> bool:
+        return (
+            isinstance(value, str)
+            and len(value) == 64
+            and all(character in "0123456789abcdef" for character in value)
         )
 
     def _load_retrieval(

@@ -7,6 +7,7 @@ import time
 import uuid
 from base64 import b64decode
 from collections.abc import Mapping
+from datetime import UTC, datetime
 from typing import Any, Literal, Protocol
 
 import httpx
@@ -17,8 +18,19 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel, ConfigDict, Field
 
+from .actions import (
+    ACTION_SCOPE,
+    ActionReceiptPayload,
+    ConfirmationDecision,
+    PendingActionReference,
+    confirmation_decision,
+    strict_json_object,
+)
 from .agent_control import (
+    AgentEvent,
     AgentRunner,
+    AttemptBudget,
+    AttemptBudgetExhausted,
     BoundedAgent,
     LiteLlmClient,
     ModelRouter,
@@ -296,6 +308,13 @@ class CitationResponse(BaseModel):
     title: str
 
 
+class ActionReceiptResponse(BaseModel):
+    model_config = ConfigDict(frozen=True)
+
+    receipt_id: str = Field(serialization_alias="receiptId")
+    status: Literal["REQUESTED"]
+
+
 class ChatResponse(BaseModel):
     model_config = ConfigDict(frozen=True)
 
@@ -305,6 +324,9 @@ class ChatResponse(BaseModel):
     reply: str
     outcome: str
     citations: tuple[CitationResponse, ...] = ()
+    action_receipt: ActionReceiptResponse | None = Field(
+        default=None, serialization_alias="actionReceipt"
+    )
 
 
 class FeedbackRequest(BaseModel):
@@ -385,6 +407,8 @@ class OboClient:
             },
             timeout=3.0,
         )
+        if response.status_code in {401, 403}:
+            raise HTTPException(status_code=403, detail="Forbidden")
         if response.status_code != 200:
             raise HTTPException(status_code=502, detail="Identity exchange rejected")
         try:
@@ -397,6 +421,108 @@ class OboClient:
         return token
 
 
+class ActionConfirmationBoundary(Protocol):
+    def confirm(
+        self,
+        *,
+        direct_token: str,
+        pending: PendingActionReference,
+        budget: AttemptBudget,
+    ) -> ActionReceiptPayload: ...
+
+
+class HttpActionConfirmationBoundary:
+    def __init__(self, base_url: str, obo: OboClient) -> None:
+        self._base_url = base_url.rstrip("/")
+        self._obo = obo
+
+    def confirm(
+        self,
+        *,
+        direct_token: str,
+        pending: PendingActionReference,
+        budget: AttemptBudget,
+    ) -> ActionReceiptPayload:
+        indeterminate = False
+        while True:
+            try:
+                budget.charge("identity_http", ACTION_SCOPE)
+            except AttemptBudgetExhausted as exception:
+                raise HTTPException(
+                    status_code=503,
+                    detail=(
+                        "Action confirmation indeterminate"
+                        if indeterminate
+                        else "Action confirmation attempt budget exhausted"
+                    ),
+                ) from exception
+            try:
+                obo = self._obo.exchange(
+                    direct_token,
+                    pending.user_subject,
+                    pending.session_id,
+                    ACTION_SCOPE,
+                    pending.sandbox_id,
+                )
+            except HTTPException:
+                raise
+            except (httpx.TimeoutException, httpx.NetworkError):
+                indeterminate = True
+                continue
+            try:
+                budget.charge("tool_http", "actions.refund.confirm")
+            except AttemptBudgetExhausted as exception:
+                raise HTTPException(
+                    status_code=503, detail="Action confirmation attempt budget exhausted"
+                ) from exception
+            headers = {
+                "Authorization": f"Bearer {obo}",
+                "X-Support-Session-Id": pending.session_id,
+                "X-Agent-Trace-Id": pending.source_trace_id,
+                "X-Agent-Turn-Id": pending.source_turn_id,
+            }
+            if pending.sandbox_id is not None:
+                headers["X-Eval-Sandbox-Id"] = pending.sandbox_id
+            try:
+                response = httpx.post(
+                    f"{self._base_url}/internal/tools/actions/{pending.pending_action_id}/confirm",
+                    headers=headers,
+                    timeout=3.0,
+                )
+            except (httpx.TimeoutException, httpx.NetworkError):
+                indeterminate = True
+                continue
+            if response.status_code == 200:
+                try:
+                    receipt = ActionReceiptPayload.model_validate(
+                        strict_json_object(response.content)
+                    )
+                except (ValueError, TypeError) as exception:
+                    raise HTTPException(
+                        status_code=502, detail="Invalid action confirmation response"
+                    ) from exception
+                if (
+                    receipt.pending_action_id != pending.pending_action_id
+                    or receipt.action_type != pending.action_type
+                    or receipt.order_id != pending.order_id
+                    or receipt.amount_minor != pending.amount_minor
+                    or receipt.currency != pending.currency
+                    or receipt.argument_commitment != pending.argument_commitment
+                ):
+                    raise HTTPException(
+                        status_code=502, detail="Invalid action confirmation response"
+                    )
+                return receipt
+            if response.status_code in {401, 403, 404}:
+                raise HTTPException(status_code=403, detail="Forbidden")
+            if response.status_code in {400, 409, 422}:
+                raise HTTPException(status_code=409, detail="Action confirmation rejected")
+            if response.status_code in {408, 429, 502, 503, 504}:
+                indeterminate = True
+                continue
+            raise RuntimeError("Unexpected action confirmation response")
+
+
 def create_app(
     settings: AgentSettings | None = None,
     *,
@@ -407,6 +533,7 @@ def create_app(
     feedback: FeedbackStore | None = None,
     evidence: EvaluationEvidenceStore | None = None,
     liveness: SandboxLiveness | None = None,
+    actions: ActionConfirmationBoundary | None = None,
 ) -> FastAPI:
     """Construct the app, enabling identity routes only with complete runtime configuration."""
     resolved = settings or AgentSettings()
@@ -484,6 +611,10 @@ def create_app(
     else:
         resolved_agent = agent
     app.state.obo_client = resolved_obo
+    resolved_actions = actions or HttpActionConfirmationBoundary(
+        resolved.commerce_tools_url, resolved_obo
+    )
+    app.state.actions = resolved_actions
     app.state.agent = resolved_agent
 
     def authorize(
@@ -549,8 +680,27 @@ def create_app(
         session_id: str,
         correlation_key: str,
     ) -> ConversationResult:
-        require_liveness(principal, token)
         verify_session(session_id, principal)
+        replay = resolved_conversations.replay_turn(
+            session_id=session_id,
+            subject=principal.subject,
+            sandbox_id=principal.sandbox_id,
+            correlation_key=correlation_key,
+            message=request.message,
+        )
+        if replay is not None:
+            return replay
+        pending = resolved_conversations.current_pending_action(
+            session_id=session_id,
+            subject=principal.subject,
+            sandbox_id=principal.sandbox_id,
+        )
+        pending_decision = confirmation_decision(request.message) if pending is not None else None
+        # A confirmation may be recovering a commerce commit whose response or local
+        # projection was lost. The fixed CB-118 result boundary owns that decision and
+        # resolves committed truth before mutable sandbox liveness or copied expiry.
+        if pending_decision is not ConfirmationDecision.CONFIRM:
+            require_liveness(principal, token)
         start = resolved_conversations.begin_turn(
             session_id=session_id,
             subject=principal.subject,
@@ -560,7 +710,45 @@ def create_app(
         )
         if start.replay is not None:
             return start.replay
+        action_events: list[AgentEvent] = []
         try:
+            if pending is not None:
+                if pending_decision is ConfirmationDecision.CONFIRM:
+                    budget = AttemptBudget(resolved.attempt_budget, action_events)
+                    receipt = resolved_actions.confirm(
+                        direct_token=token,
+                        pending=pending,
+                        budget=budget,
+                    )
+                    return resolved_conversations.complete_action_receipt(
+                        start=start,
+                        pending=pending,
+                        receipt=receipt,
+                        response_text="The refund request was accepted.",
+                        events=tuple(action_events),
+                    )
+                if pending.expires_at <= datetime.now(UTC):
+                    return resolved_conversations.complete_action_expired(
+                        start=start,
+                        pending=pending,
+                        response_text="The prepared action expired and was not executed.",
+                    )
+                if pending_decision is ConfirmationDecision.DECLINE:
+                    return resolved_conversations.complete_action_decline(
+                        start=start,
+                        pending=pending,
+                        response_text="The prepared action was declined and was not executed.",
+                    )
+                if pending_decision is ConfirmationDecision.CLARIFY:
+                    return resolved_conversations.complete_turn(
+                        start=start,
+                        response_text=(
+                            "Please reply with an exact confirmation or decline for the prepared "
+                            "refund request."
+                        ),
+                        outcome="action_clarification",
+                        events=(AgentEvent("AGENT_OUTCOME", {"outcome": "action_clarification"}),),
+                    )
             if principal.sandbox_id is None:
                 agent_result = resolved_agent.run(
                     message=request.message,
@@ -586,9 +774,14 @@ def create_app(
                 outcome=agent_result.outcome,
                 events=agent_result.events,
                 retrieval_decision=agent_result.retrieval_decision,
+                pending_action=agent_result.pending_action,
             )
         except Exception:
-            resolved_conversations.fail_turn(start=start, failure_code="agent_execution_failed")
+            resolved_conversations.fail_turn(
+                start=start,
+                failure_code="agent_execution_failed",
+                events=tuple(action_events),
+            )
             raise
 
     @app.post("/api/sessions", response_model=SessionResponse, status_code=201)
@@ -606,7 +799,7 @@ def create_app(
             session_id = resolved_sessions.create(principal.subject, principal.sandbox_id)
         return SessionResponse(session_id=session_id)
 
-    @app.post("/api/chat", response_model=ChatResponse)
+    @app.post("/api/chat", response_model=ChatResponse, response_model_exclude_none=True)
     def chat(
         request: ChatRequest,
         authorization: str | None = Header(default=None),
@@ -648,6 +841,14 @@ def create_app(
                     title=evidence.title,
                 )
                 for evidence in result.retrieval_evidence
+            ),
+            action_receipt=(
+                ActionReceiptResponse(
+                    receipt_id=result.action_receipt.receipt.receipt_id,
+                    status=result.action_receipt.receipt.status,
+                )
+                if result.action_receipt is not None
+                else None
             ),
         )
 

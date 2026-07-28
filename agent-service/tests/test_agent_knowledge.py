@@ -276,6 +276,7 @@ def test_tool_adapter_uses_elasticsearch_without_obo_or_caller_authority() -> No
         assert isinstance(name, str)
         tool_names.add(name)
     assert tool_names == {
+        "actions.refund.prepare",
         "catalog.product.get",
         "knowledge.search",
     }

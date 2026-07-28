@@ -5,7 +5,9 @@ import httpx
 import pytest
 from citybuddy_agent.agent_control import (
     CATALOG_PRODUCT_SPEC,
+    REFUND_PREPARE_SPEC,
     AgentEvent,
+    AgentRunResult,
     AttemptBudget,
     CatalogProductInput,
     CircuitOpen,
@@ -440,3 +442,115 @@ def test_toolspec_schema_forbids_unknown_fields() -> None:
     assert CATALOG_PRODUCT_SPEC.scope == "catalog:read"
     assert CATALOG_PRODUCT_SPEC.risk == "read"
     assert CATALOG_PRODUCT_SPEC.idempotency == "read-only"
+
+
+def test_agent_result_requires_pending_reference_exactly_for_action_pending() -> None:
+    with pytest.raises(RuntimeError, match="outcome and PendingAction disagree"):
+        AgentRunResult("pending", "action_pending", ())
+
+
+def test_sensitive_prepare_uses_fixed_endpoint_scope_and_server_correlation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    requests: list[tuple[tuple[Any, ...], dict[str, Any]]] = []
+
+    def post(*args: Any, **kwargs: Any) -> httpx.Response:
+        requests.append((args, kwargs))
+        return httpx.Response(
+            201,
+            json={
+                "pendingActionId": "00000000-0000-0000-0000-000000000121",
+                "actionType": "REFUND_REQUEST",
+                "orderId": "00000000-0000-0000-0000-000000000040",
+                "amountMinor": 400,
+                "currency": "CNY",
+                "state": "PREPARED",
+                "expiresAt": "2026-07-28T04:00:00Z",
+                "replayed": False,
+            },
+        )
+
+    monkeypatch.setattr(httpx, "post", post)
+    obo = RecordingObo()
+    result = ToolAdapter("https://commerce.test", obo).execute(
+        name=REFUND_PREPARE_SPEC.name,
+        serialized_arguments=json.dumps(
+            {
+                "orderId": "00000000-0000-0000-0000-000000000040",
+                "amountMinor": 400,
+                "currency": "CNY",
+            }
+        ),
+        direct_token="direct",
+        subject="user-1",
+        session_id="session-1",
+        trace_id="trace-1",
+        turn_id="00000000-0000-0000-0000-000000000121",
+        budget=AttemptBudget(4, []),
+        events=[],
+    )
+
+    assert result.pending_action is not None
+    assert obo.calls == [("direct", "user-1", "session-1", "refund:create")]
+    args, kwargs = requests[0]
+    assert args[0] == "https://commerce.test/internal/tools/actions/prepare"
+    assert kwargs["headers"]["X-Agent-Trace-Id"] == "trace-1"
+    assert kwargs["headers"]["X-Agent-Turn-Id"] == ("00000000-0000-0000-0000-000000000121")
+    assert kwargs["json"] == {
+        "actionType": "REFUND_REQUEST",
+        "arguments": {
+            "orderId": "00000000-0000-0000-0000-000000000040",
+            "amountMinor": 400,
+            "currency": "CNY",
+        },
+    }
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("orderId", "00000000-0000-0000-0000-000000000041"),
+        ("amountMinor", 401),
+        ("currency", "USD"),
+    ],
+)
+def test_sensitive_prepare_rejects_self_consistent_but_substituted_response_intent(
+    field: str,
+    value: object,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    response_payload: dict[str, object] = {
+        "pendingActionId": "00000000-0000-0000-0000-000000000121",
+        "actionType": "REFUND_REQUEST",
+        "orderId": "00000000-0000-0000-0000-000000000040",
+        "amountMinor": 400,
+        "currency": "CNY",
+        "state": "PREPARED",
+        "expiresAt": "2026-07-28T04:00:00Z",
+        "replayed": False,
+    }
+    response_payload[field] = value
+    monkeypatch.setattr(
+        httpx,
+        "post",
+        lambda *args, **kwargs: httpx.Response(201, json=response_payload),
+    )
+
+    with pytest.raises(RuntimeError, match="contradicts the requested intent"):
+        ToolAdapter("https://commerce.test", RecordingObo()).execute(
+            name=REFUND_PREPARE_SPEC.name,
+            serialized_arguments=json.dumps(
+                {
+                    "orderId": "00000000-0000-0000-0000-000000000040",
+                    "amountMinor": 400,
+                    "currency": "CNY",
+                }
+            ),
+            direct_token="direct",
+            subject="user-1",
+            session_id="session-1",
+            trace_id="trace-1",
+            turn_id="00000000-0000-0000-0000-000000000121",
+            budget=AttemptBudget(4, []),
+            events=[],
+        )

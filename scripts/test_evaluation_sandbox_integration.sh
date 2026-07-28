@@ -462,7 +462,7 @@ start_agent() {
   MYSQL_AGENT_APP_PASSWORD="$agent_app_password" \
   AGENT_SERVICE_CLIENT_ID=agent-service \
   AGENT_SERVICE_CLIENT_SECRET="$agent_service_password" \
-  AGENT_EXCHANGE_SCOPES=catalog:read \
+  AGENT_EXCHANGE_SCOPES='catalog:read refund:create' \
   AGENT_MODEL_PROXY_URL="http://127.0.0.1:$proxy_port" \
   AGENT_COMMERCE_TOOLS_URL="http://127.0.0.1:$commerce_port" \
   AGENT_COMMERCE_LIVENESS_URL="http://127.0.0.1:$commerce_port" \
@@ -912,9 +912,25 @@ assert_mysql_fails "agent runtime cannot execute DDL" \
   mysql_query agent_app "$agent_app_password" cs_db 'CREATE TABLE forbidden_cb103 (id INT)'
 agent_grants="$(mysql_query agent_app "$agent_app_password" '' 'SHOW GRANTS FOR CURRENT_USER')"
 for table in support_session support_conversation support_turn support_event support_feedback \
-  retrieval_decision retrieval_evidence; do
+  retrieval_decision retrieval_evidence pending_action_reference action_receipt_projection; do
   grep -Fq "\`cs_db\`.\`$table\`" <<<"$agent_grants"
 done
+for identity in auth_app commerce_app; do
+  password="$auth_app_password"
+  if [[ "$identity" == commerce_app ]]; then
+    password="$commerce_app_password"
+  fi
+  for table in pending_action_reference action_receipt_projection; do
+    assert_mysql_fails "$identity cannot read agent-owned $table" \
+      mysql_query "$identity" "$password" cs_db "SELECT * FROM $table"
+  done
+done
+assert_mysql_fails "agent receipt projection is immutable" \
+  mysql_query agent_app "$agent_app_password" cs_db \
+  "UPDATE action_receipt_projection SET status = 'REQUESTED' WHERE receipt_id = 'none'"
+assert_mysql_fails "agent receipt projection cannot be deleted" \
+  mysql_query agent_app "$agent_app_password" cs_db \
+  "DELETE FROM action_receipt_projection WHERE receipt_id = 'none'"
 if grep -Fq 'commerce_db' <<<"$agent_grants"; then
   echo "Agent runtime gained forbidden commerce_db access." >&2
   exit 1
@@ -3573,6 +3589,194 @@ assert_status 200 "payment state recovers after every authoritative row is resto
   --user "evaluation-manager:$management_password" \
   --header 'X-Eval-Sandbox-Id: sandbox-payment'
 
+# CB-121 proves that commerce commit remains authoritative while each local projection write
+# boundary rolls back atomically and a restarted agent converges through the fixed confirm result.
+uv run python scripts/fake_litellm_server.py --port 0 >>"$tmp_dir/model.log" 2>&1 &
+model_pid=$!
+process_bound_port proxy_port uvicorn "$model_pid" "$tmp_dir/model.log" 0
+wait_http "http://127.0.0.1:$proxy_port/fixture/counts" "$model_pid" "$tmp_dir/model.log"
+start_agent true
+assert_status 201 "agent action session binds the payment subject and sandbox" \
+  --request POST "http://127.0.0.1:$agent_port/api/sessions" \
+  --header "Authorization: Bearer $payment_token" \
+  --header 'X-Eval-Sandbox-Id: sandbox-payment' \
+  --header 'Content-Type: application/json' \
+  --data '{}'
+agent_action_session="$(uv run python scripts/read_json_field.py \
+  "$tmp_dir/http-response.json" sessionId)"
+assert_status 200 "agent prepares one bounded refund action without executing it" \
+  --request POST "http://127.0.0.1:$agent_port/api/chat" \
+  --header "Authorization: Bearer $payment_token" \
+  --header 'X-Eval-Sandbox-Id: sandbox-payment' \
+  --header "X-Session-Id: $agent_action_session" \
+  --header 'Idempotency-Key: cb121-action-prepare' \
+  --header 'Content-Type: application/json' \
+  --data '{"message":"action-prepare"}'
+assert_equal action_pending \
+  "$(uv run python scripts/read_json_field.py "$tmp_dir/http-response.json" outcome)" \
+  "agent preparation publishes only the pending outcome"
+if jq -e 'has("actionReceipt")' "$tmp_dir/http-response.json" >/dev/null; then
+  echo "Pending action response exposed an ActionReceipt." >&2
+  exit 1
+fi
+agent_pending_id="$(mysql_query agent_app "$agent_app_password" cs_db \
+  "SELECT pending_action_id FROM pending_action_reference WHERE session_id = '$agent_action_session' AND state = 'PENDING'")"
+assert_equal '1:0:0' \
+  "$(mysql_query agent_app "$agent_app_password" cs_db \
+    "SELECT CONCAT((SELECT COUNT(*) FROM pending_action_reference WHERE pending_action_id = '$agent_pending_id' AND state = 'PENDING'), ':', (SELECT COUNT(*) FROM action_receipt_projection WHERE pending_action_id = '$agent_pending_id'), ':', (SELECT COUNT(*) FROM support_event WHERE event_type = 'ACTION_RECEIPT' AND session_id = '$agent_action_session'))")" \
+  "prepared action has one reference and no local or public receipt"
+
+assert_agent_action_projection_rolled_back() {
+  local label="$1"
+  assert_equal 'PENDING:0:0' \
+    "$(mysql_query agent_app "$agent_app_password" cs_db \
+      "SELECT CONCAT((SELECT state FROM pending_action_reference WHERE pending_action_id = '$agent_pending_id'), ':', (SELECT COUNT(*) FROM action_receipt_projection WHERE pending_action_id = '$agent_pending_id'), ':', (SELECT COUNT(*) FROM support_event WHERE event_type = 'ACTION_RECEIPT' AND session_id = '$agent_action_session'))")" \
+    "$label rolls back the complete local projection transaction"
+}
+
+confirm_agent_action_503() {
+  local key="$1"
+  local label="$2"
+  assert_status 503 "$label" \
+    --request POST "http://127.0.0.1:$agent_port/api/chat" \
+    --header "Authorization: Bearer $payment_token" \
+    --header 'X-Eval-Sandbox-Id: sandbox-payment' \
+    --header "X-Session-Id: $agent_action_session" \
+    --header "Idempotency-Key: $key" \
+    --header 'Content-Type: application/json' \
+    --data '{"message":"confirm refund"}'
+  if jq -e 'has("actionReceipt")' "$tmp_dir/http-response.json" >/dev/null; then
+    echo "$label exposed a receipt before durable local projection." >&2
+    exit 1
+  fi
+}
+
+mysql_query root "$root_password" cs_db \
+  "REVOKE INSERT ON cs_db.action_receipt_projection FROM 'agent_app'@'%'"
+confirm_agent_action_503 cb121-projection-insert-failure \
+  "receipt projection insert failure is bounded and non-successful"
+mysql_query root "$root_password" '' \
+  "GRANT INSERT ON cs_db.action_receipt_projection TO 'agent_app'@'%'"
+assert_agent_action_projection_rolled_back "projection insert failure"
+agent_receipt_id="$(mysql_query commerce_app "$commerce_app_password" commerce_db \
+  "SELECT receipt_id FROM action_receipt WHERE pending_action_id = '$agent_pending_id'")"
+agent_refund_id="$(mysql_query commerce_app "$commerce_app_password" commerce_db \
+  "SELECT refund_id FROM action_receipt WHERE pending_action_id = '$agent_pending_id'")"
+assert_equal '1:1:1' \
+  "$(mysql_query commerce_app "$commerce_app_password" commerce_db \
+    "SELECT CONCAT((SELECT COUNT(*) FROM action_receipt WHERE pending_action_id = '$agent_pending_id'), ':', (SELECT COUNT(*) FROM mock_refund WHERE refund_id = '$agent_refund_id'), ':', (SELECT COUNT(*) FROM commerce_outbox WHERE aggregate_type = 'REFUND' AND aggregate_id = '$agent_refund_id' AND event_type = 'REFUND_REQUESTED'))")" \
+  "commerce ActionReceipt remains the one authoritative commit after local loss"
+
+mysql_query root "$root_password" cs_db \
+  "REVOKE UPDATE (state, resolved_at) ON cs_db.pending_action_reference FROM 'agent_app'@'%'"
+confirm_agent_action_503 cb121-pending-update-failure \
+  "pending reference transition failure is bounded and non-successful"
+mysql_query root "$root_password" '' \
+  "GRANT UPDATE (state, resolved_at) ON cs_db.pending_action_reference TO 'agent_app'@'%'"
+assert_agent_action_projection_rolled_back "pending reference transition failure"
+
+mysql_query root "$root_password" cs_db \
+  "REVOKE INSERT ON cs_db.support_event FROM 'agent_app'@'%'"
+confirm_agent_action_503 cb121-receipt-event-failure \
+  "receipt evidence insert failure is bounded and non-successful"
+mysql_query root "$root_password" '' \
+  "GRANT INSERT ON cs_db.support_event TO 'agent_app'@'%'"
+assert_agent_action_projection_rolled_back "receipt evidence insert failure"
+
+mysql_query root "$root_password" cs_db \
+  "REVOKE UPDATE ON cs_db.support_turn FROM 'agent_app'@'%'"
+confirm_agent_action_503 cb121-turn-commit-failure \
+  "turn commit failure is bounded and non-successful"
+mysql_query root "$root_password" '' \
+  "GRANT UPDATE ON cs_db.support_turn TO 'agent_app'@'%'"
+assert_agent_action_projection_rolled_back "turn commit failure"
+assert_equal '1:1:1' \
+  "$(mysql_query commerce_app "$commerce_app_password" commerce_db \
+    "SELECT CONCAT((SELECT COUNT(*) FROM action_receipt WHERE pending_action_id = '$agent_pending_id'), ':', (SELECT COUNT(*) FROM mock_refund WHERE refund_id = '$agent_refund_id'), ':', (SELECT COUNT(*) FROM commerce_outbox WHERE aggregate_type = 'REFUND' AND aggregate_id = '$agent_refund_id' AND event_type = 'REFUND_REQUESTED'))")" \
+  "all local failures preserve one commerce receipt/refund/Outbox closure"
+
+stop_process agent_pid "$agent_pid"
+start_agent true
+# Hold the agent-owned pending row so both recovery requests have read the same PENDING
+# reference and reach the local projection transaction before either can publish it.
+mysql --protocol=TCP --host=127.0.0.1 --port="$MYSQL_PORT" \
+  --user=root --password="$root_password" --database=cs_db --batch --skip-column-names \
+  --execute="START TRANSACTION; SELECT pending_action_id FROM pending_action_reference WHERE pending_action_id = '$agent_pending_id' FOR UPDATE; SELECT GET_LOCK('cb121_pending_projection_lock', 0); SELECT SLEEP(60); ROLLBACK;" \
+  >"$tmp_dir/cb121-pending-lock.log" 2>&1 &
+agent_pending_lock_pid=$!
+wait_for_mysql_value 1 \
+  "SELECT IF(IS_USED_LOCK('cb121_pending_projection_lock') IS NULL, 0, 1)" \
+  "CB-121 controlled pending projection lock is held"
+agent_recovery_pids=()
+for recovery_index in 1 2; do
+  (
+    request_status "$tmp_dir/cb121-recovery-$recovery_index.response" \
+      --request POST "http://127.0.0.1:$agent_port/api/chat/stream" \
+      --header "Authorization: Bearer $payment_token" \
+      --header 'X-Eval-Sandbox-Id: sandbox-payment' \
+      --header "X-Session-Id: $agent_action_session" \
+      --header "Idempotency-Key: cb121-action-recovery-$recovery_index" \
+      --header 'Content-Type: application/json' \
+      --data '{"message":"confirm refund"}' \
+      >"$tmp_dir/cb121-recovery-$recovery_index.status"
+  ) &
+  agent_recovery_pids+=("$!")
+done
+wait_for_mysql_value 2 \
+  "SELECT COUNT(*) FROM information_schema.processlist WHERE USER = 'agent_app' AND DB = 'cs_db' AND INFO LIKE 'SELECT source_turn_id, source_trace_id, conversation_id, session_id,%FOR UPDATE'" \
+  "both restarted Agent confirmations reached the same local PendingAction lock"
+agent_pending_lock_connection_id="$(mysql_query root "$root_password" commerce_db \
+  "SELECT IS_USED_LOCK('cb121_pending_projection_lock')")"
+if [[ ! "$agent_pending_lock_connection_id" =~ ^[0-9]+$ ]]; then
+  echo "CB-121 controlled pending projection lock lost its owning connection." >&2
+  exit 1
+fi
+mysql_query root "$root_password" commerce_db \
+  "KILL CONNECTION $agent_pending_lock_connection_id" || true
+kill "$agent_pending_lock_pid" >/dev/null 2>&1 || true
+wait "$agent_pending_lock_pid" >/dev/null 2>&1 || true
+for recovery_pid in "${agent_recovery_pids[@]}"; do
+  wait "$recovery_pid"
+done
+for recovery_index in 1 2; do
+  assert_equal 200 "$(cat "$tmp_dir/cb121-recovery-$recovery_index.status")" \
+    "concurrent restarted Agent recovery $recovery_index re-queries committed Action truth"
+  assert_equal 1 \
+    "$(grep -c '^event: action_receipt$' "$tmp_dir/cb121-recovery-$recovery_index.response")" \
+    "concurrent recovery $recovery_index emits one receipt event"
+  assert_equal 1 \
+    "$(grep -c '^event: done$' "$tmp_dir/cb121-recovery-$recovery_index.response")" \
+    "concurrent recovery $recovery_index emits one terminal event"
+  receipt_event_line="$(grep -n '^event: action_receipt$' \
+    "$tmp_dir/cb121-recovery-$recovery_index.response" | cut -d: -f1)"
+  token_event_line="$(grep -n '^event: token$' \
+    "$tmp_dir/cb121-recovery-$recovery_index.response" | cut -d: -f1)"
+  if ((receipt_event_line >= token_event_line)); then
+    echo "Concurrent Action receipt was not emitted before explanation prose." >&2
+    exit 1
+  fi
+  grep -Fq "\"receiptId\":\"$agent_receipt_id\",\"status\":\"REQUESTED\"" \
+    "$tmp_dir/cb121-recovery-$recovery_index.response"
+done
+assert_equal 'CONFIRMED:1:2' \
+  "$(mysql_query agent_app "$agent_app_password" cs_db \
+    "SELECT CONCAT((SELECT state FROM pending_action_reference WHERE pending_action_id = '$agent_pending_id'), ':', (SELECT COUNT(*) FROM action_receipt_projection WHERE pending_action_id = '$agent_pending_id' AND receipt_id = '$agent_receipt_id'), ':', (SELECT COUNT(*) FROM support_event WHERE event_type = 'ACTION_RECEIPT' AND session_id = '$agent_action_session'))")" \
+  "concurrent recovery commits one immutable projection and one receipt event per turn"
+assert_status 200 "same confirmation turn replays without another commerce execution" \
+  --request POST "http://127.0.0.1:$agent_port/api/chat/stream" \
+  --header "Authorization: Bearer $payment_token" \
+  --header 'X-Eval-Sandbox-Id: sandbox-payment' \
+  --header "X-Session-Id: $agent_action_session" \
+  --header 'Idempotency-Key: cb121-action-recovery-1' \
+  --header 'Content-Type: application/json' \
+  --data '{"message":"confirm refund"}'
+assert_equal 1 "$(grep -c '^event: action_receipt$' "$tmp_dir/http-response.json")" \
+  "same-turn replay emits exactly one stored receipt"
+assert_equal '1:1:1' \
+  "$(mysql_query commerce_app "$commerce_app_password" commerce_db \
+    "SELECT CONCAT((SELECT COUNT(*) FROM action_receipt WHERE pending_action_id = '$agent_pending_id'), ':', (SELECT COUNT(*) FROM mock_refund WHERE refund_id = '$agent_refund_id'), ':', (SELECT COUNT(*) FROM commerce_outbox WHERE aggregate_type = 'REFUND' AND aggregate_id = '$agent_refund_id' AND event_type = 'REFUND_REQUESTED'))")" \
+  "same-turn replay never re-executes commerce"
+
 action_session='action-payment-session'
 action_trace='action-payment-trace'
 action_turn='00000000-0000-0000-0000-000000000401'
@@ -3612,6 +3816,7 @@ assert_equal '1:1:1' \
     "SELECT CONCAT((SELECT COUNT(*) FROM action_receipt WHERE receipt_id = '$action_receipt_id'), ':', (SELECT COUNT(*) FROM mock_refund WHERE refund_id = '$action_refund_id'), ':', (SELECT COUNT(*) FROM commerce_outbox WHERE aggregate_type = 'REFUND' AND aggregate_id = '$action_refund_id' AND event_type = 'REFUND_REQUESTED'))")" \
   "Action confirm commits one receipt, refund, and Outbox row"
 
+stop_process agent_pid "$agent_pid"
 stop_process commerce_pid "$commerce_pid"
 start_commerce evaluation "http://127.0.0.1:$auth_port"
 payment_replay_timestamp="$(date +%s)"
@@ -3716,10 +3921,6 @@ assert_status 204 "token header path and registry liveness agree" \
   --header "Authorization: Bearer $direct_token" \
   --header 'X-Eval-Sandbox-Id: sandbox-main'
 
-uv run python scripts/fake_litellm_server.py --port 0 >>"$tmp_dir/model.log" 2>&1 &
-model_pid=$!
-process_bound_port proxy_port uvicorn "$model_pid" "$tmp_dir/model.log" 0
-wait_http "http://127.0.0.1:$proxy_port/fixture/counts" "$model_pid" "$tmp_dir/model.log"
 start_agent true
 assert_status 201 "evaluation support session binds subject and sandbox" \
   --request POST "http://127.0.0.1:$agent_port/api/sessions" \

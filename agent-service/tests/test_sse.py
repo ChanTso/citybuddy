@@ -1,6 +1,8 @@
 import asyncio
+from typing import cast
 
 import pytest
+from citybuddy_agent.actions import StoredActionReceipt
 from citybuddy_agent.conversation import ConversationResult
 from citybuddy_agent.sse import (
     MAX_PUBLIC_EVENTS,
@@ -78,6 +80,46 @@ def test_filter_bounds_chunks_and_emits_one_ordered_terminal() -> None:
 def test_filter_rejects_unknown_private_reordered_duplicate_and_synthetic_sources(
     source: tuple[SseSourceEvent, ...],
 ) -> None:
+    with pytest.raises(SseProjectionError):
+        SseEgressFilter().project(source)
+
+
+def test_conversation_result_requires_receipt_exactly_for_action_completed() -> None:
+    with pytest.raises(RuntimeError, match="outcome and ActionReceipt projection disagree"):
+        ConversationResult("c", "t", "u", "done", "action_completed")
+    with pytest.raises(RuntimeError, match="outcome and ActionReceipt projection disagree"):
+        ConversationResult(
+            "c",
+            "t",
+            "u",
+            "ordinary",
+            "completed",
+            action_receipt=cast(StoredActionReceipt, object()),
+        )
+
+
+def test_filter_rejects_duplicate_receipt_sources() -> None:
+    source = (
+        SseSourceEvent(
+            "ACTION_RECEIPT",
+            {"receiptId": "11111111-1111-1111-1111-111111111111", "status": "REQUESTED"},
+        ),
+        SseSourceEvent(
+            "ACTION_RECEIPT",
+            {"receiptId": "11111111-1111-1111-1111-111111111111", "status": "REQUESTED"},
+        ),
+        SseSourceEvent("SAFE_TEXT", {"text": "The request is recorded."}),
+        SseSourceEvent(
+            "TURN_COMPLETED",
+            {
+                "conversationId": "c",
+                "traceId": "t",
+                "turnId": "u",
+                "outcome": "action_completed",
+            },
+        ),
+    )
+
     with pytest.raises(SseProjectionError):
         SseEgressFilter().project(source)
 

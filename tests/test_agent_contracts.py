@@ -41,6 +41,7 @@ def test_chat_response_is_allowlisted_and_server_ids_are_read_only() -> None:
         "reply",
         "outcome",
         "citations",
+        "actionReceipt",
     }
     for name in ("conversationId", "traceId", "turnId"):
         assert response["properties"][name]["readOnly"] is True
@@ -49,6 +50,11 @@ def test_chat_response_is_allowlisted_and_server_ids_are_read_only() -> None:
         "budget_exhausted",
         "provider_denied",
         "retrieval_denied",
+        "action_pending",
+        "action_declined",
+        "action_expired",
+        "action_clarification",
+        "action_completed",
     ]
     citation = contract()["components"]["schemas"]["RetrievalCitation"]
     assert citation["additionalProperties"] is False
@@ -60,7 +66,15 @@ def test_chat_response_is_allowlisted_and_server_ids_are_read_only() -> None:
         "title",
     }
     assert response["properties"]["citations"]["maxItems"] == 3
-    assert set(operation["responses"]) == {"200", "401", "403", "409", "422", "503"}
+    assert set(operation["responses"]) == {
+        "200",
+        "401",
+        "403",
+        "409",
+        "422",
+        "502",
+        "503",
+    }
 
 
 def test_stream_contract_fixes_headers_event_names_and_allowlisted_payloads() -> None:
@@ -96,6 +110,14 @@ def test_stream_contract_fixes_headers_event_names_and_allowlisted_payloads() ->
         "only public action-status carrier"
         in payload["components"]["schemas"]["SseActionReceiptData"]["description"]
     )
+    assert payload["components"]["schemas"]["SseDoneData"]["properties"]["outcome"]["enum"] == [
+        "completed",
+        "action_pending",
+        "action_declined",
+        "action_expired",
+        "action_clarification",
+        "action_completed",
+    ]
 
     source = (ROOT / "agent-service/src/citybuddy_agent/sse.py").read_text(encoding="utf-8")
     assert "MAX_PUBLIC_EVENTS" in source
@@ -223,6 +245,38 @@ def test_retrieval_evidence_schema_is_turn_bound_atomic_and_append_only() -> Non
         source.index("for event in events:")
         < source.index("self._insert_retrieval_decision(")
         < source.index("UPDATE support_turn SET state = 'COMPLETED'")
+    )
+
+
+def test_action_projection_schema_is_single_pending_atomic_and_least_privileged() -> None:
+    migration = (
+        ROOT / "infra/mysql/migrations/agent/V007__action_receipt_projection.sql"
+    ).read_text(encoding="utf-8")
+    grants = (ROOT / "infra/mysql/grants/V001__migration_access.sql").read_text(encoding="utf-8")
+    source = (ROOT / "agent-service/src/citybuddy_agent/conversation.py").read_text(
+        encoding="utf-8"
+    )
+
+    assert "GENERATED ALWAYS AS" in migration
+    assert "CASE WHEN state = 'PENDING' THEN session_id ELSE NULL END" in migration
+    assert "UNIQUE KEY uq_pending_action_reference_active_session" in migration
+    assert "UNIQUE KEY uq_action_receipt_projection_pending" in migration
+    assert "UNIQUE KEY uq_action_receipt_projection_confirmation_turn" in migration
+    assert "published_event_sequence INT UNSIGNED NOT NULL" in migration
+    assert (
+        "GRANT SELECT, INSERT, UPDATE (state, resolved_at) "
+        "ON cs_db.pending_action_reference TO 'agent_app'@'%';" in grants
+    )
+    assert "GRANT SELECT, INSERT ON cs_db.action_receipt_projection TO 'agent_app'@'%';" in grants
+    assert "UPDATE ON cs_db.action_receipt_projection" not in grants
+    assert "DELETE ON cs_db.action_receipt_projection" not in grants
+    receipt_method_start = source.rindex("    def complete_action_receipt(")
+    receipt_method_end = source.index("    def fail_turn(", receipt_method_start)
+    receipt_method = source[receipt_method_start:receipt_method_end]
+    assert (
+        receipt_method.index("INSERT INTO action_receipt_projection")
+        < receipt_method.index('event=AgentEvent(\n                            "ACTION_RECEIPT"')
+        < receipt_method.index("self._finish_turn(")
     )
 
 

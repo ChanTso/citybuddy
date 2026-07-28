@@ -2,18 +2,26 @@ import base64
 import json
 import time
 from collections.abc import Mapping
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Any, Literal
 
 import httpx
 import jwt
 import pymysql
 import pytest
-from citybuddy_agent.agent_control import AgentEvent, AgentRunner, AgentRunResult
+from citybuddy_agent.actions import (
+    ActionReceiptPayload,
+    PendingActionPayload,
+    PendingActionReference,
+    StoredActionReceipt,
+)
+from citybuddy_agent.agent_control import AgentEvent, AgentRunner, AgentRunResult, AttemptBudget
 from citybuddy_agent.application import (
+    ActionConfirmationBoundary,
     AgentSettings,
     DirectJwtValidator,
     DirectPrincipal,
+    HttpActionConfirmationBoundary,
     OboClient,
     SessionStore,
     create_app,
@@ -80,6 +88,8 @@ class MemoryConversationStore(ConversationStore):
         self.pending: dict[tuple[str, str], tuple[str, TurnStart]] = {}
         self.failures: list[tuple[str, str]] = []
         self.calls = 0
+        self.action_pending: PendingActionReference | None = None
+        self.action_receipts: dict[str, ActionReceiptPayload] = {}
 
     def begin_turn(
         self,
@@ -111,6 +121,27 @@ class MemoryConversationStore(ConversationStore):
         self.pending[key] = (message, start)
         return start
 
+    def replay_turn(
+        self,
+        *,
+        session_id: str,
+        subject: str,
+        sandbox_id: str | None,
+        correlation_key: str,
+        message: str,
+    ) -> ConversationResult | None:
+        if (
+            self.sessions.owners.get(session_id) != subject
+            or self.sessions.sandboxes.get(session_id) != sandbox_id
+        ):
+            raise ConversationOwnershipError
+        existing = self.results.get((session_id, correlation_key))
+        if existing is None:
+            return None
+        if existing[0] != message:
+            raise CorrelationConflictError
+        return existing[1]
+
     def complete_turn(
         self,
         *,
@@ -119,6 +150,7 @@ class MemoryConversationStore(ConversationStore):
         outcome: str,
         events: tuple[AgentEvent, ...],
         retrieval_decision: RetrievalDecision | None = None,
+        pending_action: PendingActionPayload | None = None,
     ) -> ConversationResult:
         del events
         key, pending = next(
@@ -134,9 +166,129 @@ class MemoryConversationStore(ConversationStore):
         )
         self.results[key] = (pending[0], result)
         del self.pending[key]
+        if pending_action is not None:
+            self.action_pending = PendingActionReference(
+                pending_action_id=pending_action.pending_action_id,
+                source_turn_id=start.turn_id,
+                source_trace_id=start.trace_id,
+                conversation_id=start.conversation_id,
+                session_id=key[0],
+                user_subject=self.sessions.owners[key[0]],
+                sandbox_id=self.sessions.sandboxes[key[0]],
+                action_type=pending_action.action_type,
+                argument_commitment=pending_action.argument_commitment,
+                order_id=pending_action.order_id,
+                amount_minor=pending_action.amount_minor,
+                currency=pending_action.currency,
+                expires_at=pending_action.expires_at,
+            )
         return result
 
-    def fail_turn(self, *, start: TurnStart, failure_code: str) -> None:
+    def current_pending_action(
+        self, *, session_id: str, subject: str, sandbox_id: str | None
+    ) -> PendingActionReference | None:
+        pending = self.action_pending
+        if pending is None:
+            return None
+        if (
+            pending.session_id != session_id
+            or pending.user_subject != subject
+            or pending.sandbox_id != sandbox_id
+        ):
+            return None
+        return pending
+
+    def complete_action_decline(
+        self,
+        *,
+        start: TurnStart,
+        pending: PendingActionReference,
+        response_text: str,
+    ) -> ConversationResult:
+        if self.action_pending != pending:
+            raise AssertionError("Unexpected pending action")
+        self.action_pending = None
+        return self._finish_action_result(
+            start=start,
+            response_text=response_text,
+            outcome="action_declined",
+        )
+
+    def complete_action_receipt(
+        self,
+        *,
+        start: TurnStart,
+        pending: PendingActionReference,
+        receipt: ActionReceiptPayload,
+        response_text: str,
+        events: tuple[AgentEvent, ...] = (),
+    ) -> ConversationResult:
+        del events
+        if self.action_pending != pending:
+            raise AssertionError("Unexpected pending action")
+        self.action_pending = None
+        self.action_receipts[start.turn_id] = receipt
+        return self._finish_action_result(
+            start=start,
+            response_text=response_text,
+            outcome="action_completed",
+            receipt=receipt,
+            pending=pending,
+        )
+
+    def complete_action_expired(
+        self,
+        *,
+        start: TurnStart,
+        pending: PendingActionReference,
+        response_text: str,
+    ) -> ConversationResult:
+        if self.action_pending != pending:
+            raise AssertionError("Unexpected pending action")
+        self.action_pending = None
+        return self._finish_action_result(
+            start=start,
+            response_text=response_text,
+            outcome="action_expired",
+        )
+
+    def _finish_action_result(
+        self,
+        *,
+        start: TurnStart,
+        response_text: str,
+        outcome: str,
+        receipt: ActionReceiptPayload | None = None,
+        pending: PendingActionReference | None = None,
+    ) -> ConversationResult:
+        key, reserved = next(
+            item for item in self.pending.items() if item[1][1].turn_id == start.turn_id
+        )
+        stored_receipt = (
+            StoredActionReceipt(receipt, pending.source_turn_id, start.turn_id)
+            if receipt is not None and pending is not None
+            else None
+        )
+        result = ConversationResult(
+            start.conversation_id,
+            start.trace_id,
+            start.turn_id,
+            response_text,
+            outcome,
+            action_receipt=stored_receipt,
+        )
+        self.results[key] = (reserved[0], result)
+        del self.pending[key]
+        return result
+
+    def fail_turn(
+        self,
+        *,
+        start: TurnStart,
+        failure_code: str,
+        events: tuple[AgentEvent, ...] = (),
+    ) -> None:
+        del events
         self.failures.append((start.turn_id, failure_code))
         for key, pending in tuple(self.pending.items()):
             if pending[1].turn_id == start.turn_id:
@@ -167,6 +319,58 @@ class MemoryAgent(AgentRunner):
             "completed",
             (AgentEvent("AGENT_OUTCOME", {"outcome": "completed"}),),
         )
+
+
+class PendingAgent(AgentRunner):
+    def __init__(self, pending: PendingActionPayload) -> None:
+        self.pending = pending
+        self.calls = 0
+
+    def run(
+        self,
+        *,
+        message: str,
+        direct_token: str,
+        subject: str,
+        session_id: str,
+        trace_id: str,
+        turn_id: str,
+        sandbox_id: str | None = None,
+    ) -> AgentRunResult:
+        self.calls += 1
+        del message, direct_token, subject, session_id, trace_id, turn_id, sandbox_id
+        return AgentRunResult(
+            "Please confirm or decline the prepared refund request.",
+            "action_pending",
+            (
+                AgentEvent(
+                    "ACTION_PREPARED",
+                    {
+                        "actionType": self.pending.action_type,
+                        "argumentCommitment": self.pending.argument_commitment,
+                    },
+                ),
+            ),
+            pending_action=self.pending,
+        )
+
+
+class MemoryActionBoundary(ActionConfirmationBoundary):
+    def __init__(self, receipt: ActionReceiptPayload) -> None:
+        self.receipt = receipt
+        self.calls: list[tuple[str, PendingActionReference]] = []
+
+    def confirm(
+        self,
+        *,
+        direct_token: str,
+        pending: PendingActionReference,
+        budget: AttemptBudget,
+    ) -> ActionReceiptPayload:
+        budget.charge("identity_http", "refund:create")
+        budget.charge("tool_http", "actions.refund.confirm")
+        self.calls.append((direct_token, pending))
+        return self.receipt
 
 
 class MemoryFeedbackStore(FeedbackStore):
@@ -978,6 +1182,18 @@ def test_chat_requires_route_permission_before_conversation_access() -> None:
 
 def test_chat_redacts_mysql_failure() -> None:
     class FailedConversationStore(ConversationStore):
+        def replay_turn(
+            self,
+            *,
+            session_id: str,
+            subject: str,
+            sandbox_id: str | None,
+            correlation_key: str,
+            message: str,
+        ) -> ConversationResult | None:
+            del session_id, subject, sandbox_id, correlation_key, message
+            raise pymysql.OperationalError(1142, "private SQL detail")
+
         def begin_turn(
             self,
             *,
@@ -998,11 +1214,57 @@ def test_chat_redacts_mysql_failure() -> None:
             outcome: str,
             events: tuple[AgentEvent, ...],
             retrieval_decision: RetrievalDecision | None = None,
+            pending_action: PendingActionPayload | None = None,
         ) -> ConversationResult:
-            del start, response_text, outcome, events, retrieval_decision
+            del start, response_text, outcome, events, retrieval_decision, pending_action
             raise AssertionError("unreachable")
 
-        def fail_turn(self, *, start: TurnStart, failure_code: str) -> None:
+        def current_pending_action(
+            self, *, session_id: str, subject: str, sandbox_id: str | None
+        ) -> PendingActionReference | None:
+            del session_id, subject, sandbox_id
+            raise AssertionError("unreachable")
+
+        def complete_action_decline(
+            self,
+            *,
+            start: TurnStart,
+            pending: PendingActionReference,
+            response_text: str,
+        ) -> ConversationResult:
+            del start, pending, response_text
+            raise AssertionError("unreachable")
+
+        def complete_action_expired(
+            self,
+            *,
+            start: TurnStart,
+            pending: PendingActionReference,
+            response_text: str,
+        ) -> ConversationResult:
+            del start, pending, response_text
+            raise AssertionError("unreachable")
+
+        def complete_action_receipt(
+            self,
+            *,
+            start: TurnStart,
+            pending: PendingActionReference,
+            receipt: ActionReceiptPayload,
+            response_text: str,
+            events: tuple[AgentEvent, ...] = (),
+        ) -> ConversationResult:
+            del start, pending, receipt, response_text, events
+            raise AssertionError("unreachable")
+
+        def fail_turn(
+            self,
+            *,
+            start: TurnStart,
+            failure_code: str,
+            events: tuple[AgentEvent, ...] = (),
+        ) -> None:
+            del start, failure_code, events
             raise AssertionError("unreachable")
 
     private, public_jwk = key_fixture("current-key")
@@ -1125,7 +1387,412 @@ def test_stream_projects_durable_result_and_replay_through_fixed_sse_schema() ->
     )
     assert forbidden.status_code == 403
     assert forbidden.json() == {"detail": "Forbidden"}
-    assert conversations.calls == 2
+    assert conversations.calls == 1
+
+
+def action_payloads() -> tuple[PendingActionPayload, ActionReceiptPayload]:
+    pending_id = "00000000-0000-0000-0000-000000000121"
+    order_id = "00000000-0000-0000-0000-000000000040"
+    pending = PendingActionPayload.model_validate(
+        {
+            "pendingActionId": pending_id,
+            "actionType": "REFUND_REQUEST",
+            "orderId": order_id,
+            "amountMinor": 400,
+            "currency": "CNY",
+            "state": "PREPARED",
+            "expiresAt": datetime.now(UTC) + timedelta(minutes=10),
+            "replayed": False,
+        }
+    )
+    receipt = ActionReceiptPayload.model_validate(
+        {
+            "receiptId": "00000000-0000-0000-0000-000000000122",
+            "pendingActionId": pending_id,
+            "actionType": "REFUND_REQUEST",
+            "status": "REQUESTED",
+            "orderId": order_id,
+            "refundId": "00000000-0000-0000-0000-000000000071",
+            "resourceVersion": 1,
+            "amountMinor": 400,
+            "currency": "CNY",
+            "committedAt": datetime.now(UTC),
+            "replayed": False,
+        }
+    )
+    return pending, receipt
+
+
+def test_pending_action_requires_exact_confirmation_and_projects_one_receipt() -> None:
+    pending, receipt = action_payloads()
+    private, public_jwk = key_fixture("current-key")
+    sessions = MemorySessionStore()
+    session_id = sessions.create("user-123")
+    conversations = MemoryConversationStore(sessions)
+    agent = PendingAgent(pending)
+    actions = MemoryActionBoundary(receipt)
+    client = TestClient(
+        create_app(
+            settings(),
+            validator=DirectJwtValidator(settings(), CountingJwksSource([public_jwk])),
+            sessions=sessions,
+            conversations=conversations,
+            agent=agent,
+            actions=actions,
+        )
+    )
+    token = direct_token(private, "current-key")
+    common = {
+        "Authorization": f"Bearer {token}",
+        "X-Session-Id": session_id,
+    }
+
+    prepared = client.post(
+        "/api/chat",
+        headers={**common, "Idempotency-Key": "prepare"},
+        json={"message": "refund my order"},
+    )
+    assert prepared.status_code == 200
+    assert prepared.json()["outcome"] == "action_pending"
+    assert "actionReceipt" not in prepared.json()
+    assert conversations.action_pending is not None
+
+    ambiguous = client.post(
+        "/api/chat",
+        headers={**common, "Idempotency-Key": "ambiguous"},
+        json={"message": "maybe later"},
+    )
+    assert ambiguous.status_code == 200
+    assert ambiguous.json()["outcome"] == "action_clarification"
+    assert conversations.action_pending is not None
+    assert actions.calls == []
+
+    confirmed = client.post(
+        "/api/chat",
+        headers={**common, "Idempotency-Key": "confirm"},
+        json={"message": "confirm refund"},
+    )
+    assert confirmed.status_code == 200
+    assert confirmed.json()["outcome"] == "action_completed"
+    assert confirmed.json()["actionReceipt"] == {
+        "receiptId": receipt.receipt_id,
+        "status": "REQUESTED",
+    }
+    assert len(actions.calls) == 1
+    assert actions.calls[0][0] == token
+    assert actions.calls[0][1].pending_action_id == pending.pending_action_id
+    assert conversations.action_pending is None
+    assert agent.calls == 1
+
+    replay = client.post(
+        "/api/chat",
+        headers={**common, "Idempotency-Key": "confirm"},
+        json={"message": "confirm refund"},
+    )
+    assert replay.json() == confirmed.json()
+    assert len(actions.calls) == 1
+    assert agent.calls == 1
+
+
+def test_confirmation_requeries_the_fixed_result_with_the_shared_attempt_budget(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    pending_payload, receipt = action_payloads()
+    pending = PendingActionReference(
+        pending_action_id=pending_payload.pending_action_id,
+        source_turn_id="00000000-0000-0000-0000-000000000124",
+        source_trace_id="00000000-0000-0000-0000-000000000125",
+        conversation_id="00000000-0000-0000-0000-000000000126",
+        session_id="session-1",
+        user_subject="user-1",
+        sandbox_id="sandbox-1",
+        action_type=pending_payload.action_type,
+        argument_commitment=pending_payload.argument_commitment,
+        order_id=pending_payload.order_id,
+        amount_minor=pending_payload.amount_minor,
+        currency=pending_payload.currency,
+        expires_at=pending_payload.expires_at,
+    )
+
+    class FreshObo(OboClient):
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def exchange(self, *args: object) -> str:
+            self.calls += 1
+            assert args == ("direct", "user-1", "session-1", "refund:create", "sandbox-1")
+            return f"obo-{self.calls}"
+
+    requests: list[dict[str, Any]] = []
+
+    def post(*args: object, **kwargs: Any) -> httpx.Response:
+        requests.append({"args": args, **kwargs})
+        if len(requests) == 1:
+            raise httpx.ReadTimeout("response lost after commerce commit")
+        return httpx.Response(200, json=receipt.model_dump(by_alias=True, mode="json"))
+
+    monkeypatch.setattr(httpx, "post", post)
+    obo = FreshObo()
+    events: list[AgentEvent] = []
+    budget = AttemptBudget(4, events)
+
+    observed = HttpActionConfirmationBoundary("https://commerce.test", obo).confirm(
+        direct_token="direct",
+        pending=pending,
+        budget=budget,
+    )
+
+    assert observed.receipt_id == receipt.receipt_id
+    assert obo.calls == 2
+    assert budget.used == 4
+    assert [event.payload["kind"] for event in events] == [
+        "identity_http",
+        "tool_http",
+        "identity_http",
+        "tool_http",
+    ]
+    assert {request["args"][0] for request in requests} == {
+        f"https://commerce.test/internal/tools/actions/{pending.pending_action_id}/confirm"
+    }
+    assert {request["headers"]["X-Agent-Turn-Id"] for request in requests} == {
+        pending.source_turn_id
+    }
+
+
+@pytest.mark.parametrize(
+    ("field", "changed"),
+    [
+        ("pendingActionId", "00000000-0000-0000-0000-000000000999"),
+        ("actionType", "OTHER"),
+        ("orderId", "00000000-0000-0000-0000-000000000999"),
+        ("amountMinor", 401),
+        ("currency", "USD"),
+    ],
+)
+def test_confirmation_rejects_every_contradictory_pending_identity(
+    monkeypatch: pytest.MonkeyPatch, field: str, changed: object
+) -> None:
+    pending_payload, receipt = action_payloads()
+    pending = PendingActionReference(
+        pending_action_id=pending_payload.pending_action_id,
+        source_turn_id="00000000-0000-0000-0000-000000000124",
+        source_trace_id="00000000-0000-0000-0000-000000000125",
+        conversation_id="00000000-0000-0000-0000-000000000126",
+        session_id="session-1",
+        user_subject="user-1",
+        sandbox_id=None,
+        action_type=pending_payload.action_type,
+        argument_commitment=pending_payload.argument_commitment,
+        order_id=pending_payload.order_id,
+        amount_minor=pending_payload.amount_minor,
+        currency=pending_payload.currency,
+        expires_at=pending_payload.expires_at,
+    )
+    response = receipt.model_dump(by_alias=True, mode="json")
+    response[field] = changed
+
+    class FixedObo(OboClient):
+        def __init__(self) -> None:
+            pass
+
+        def exchange(self, *args: object) -> str:
+            del args
+            return "obo"
+
+    monkeypatch.setattr(
+        httpx,
+        "post",
+        lambda *args, **kwargs: httpx.Response(200, json=response),
+    )
+
+    with pytest.raises(HTTPException) as rejected:
+        HttpActionConfirmationBoundary("https://commerce.test", FixedObo()).confirm(
+            direct_token="direct",
+            pending=pending,
+            budget=AttemptBudget(2, []),
+        )
+    assert rejected.value.status_code == 502
+    assert rejected.value.detail == "Invalid action confirmation response"
+
+
+def test_expired_pending_action_is_a_distinct_terminal_without_commerce() -> None:
+    pending, receipt = action_payloads()
+    private, public_jwk = key_fixture("current-key")
+    sessions = MemorySessionStore()
+    session_id = sessions.create("user-123")
+    conversations = MemoryConversationStore(sessions)
+    conversations.action_pending = PendingActionReference(
+        pending_action_id=pending.pending_action_id,
+        source_turn_id="00000000-0000-0000-0000-000000000124",
+        source_trace_id="00000000-0000-0000-0000-000000000125",
+        conversation_id=f"server-conversation-{session_id}",
+        session_id=session_id,
+        user_subject="user-123",
+        sandbox_id=None,
+        action_type=pending.action_type,
+        argument_commitment=pending.argument_commitment,
+        order_id=pending.order_id,
+        amount_minor=pending.amount_minor,
+        currency=pending.currency,
+        expires_at=datetime.now(UTC) - timedelta(seconds=1),
+    )
+    actions = MemoryActionBoundary(receipt)
+    client = TestClient(
+        create_app(
+            settings(),
+            validator=DirectJwtValidator(settings(), CountingJwksSource([public_jwk])),
+            sessions=sessions,
+            conversations=conversations,
+            agent=PendingAgent(pending),
+            actions=actions,
+        )
+    )
+
+    expired = client.post(
+        "/api/chat",
+        headers={
+            "Authorization": f"Bearer {direct_token(private, 'current-key')}",
+            "X-Session-Id": session_id,
+            "Idempotency-Key": "expired",
+        },
+        json={"message": "maybe later"},
+    )
+
+    assert expired.status_code == 200
+    assert expired.json()["outcome"] == "action_expired"
+    assert "actionReceipt" not in expired.json()
+    assert actions.calls == []
+    assert conversations.action_pending is None
+
+
+def test_committed_confirmation_recovery_precedes_copied_expiry_and_liveness() -> None:
+    pending, receipt = action_payloads()
+    private, public_jwk = key_fixture("current-key")
+    resolved = evaluation_settings()
+    sessions = MemorySessionStore()
+    conversations = MemoryConversationStore(sessions)
+    liveness = MemoryLiveness()
+    actions = MemoryActionBoundary(receipt)
+    client = TestClient(
+        create_app(
+            resolved,
+            validator=DirectJwtValidator(resolved, CountingJwksSource([public_jwk])),
+            sessions=sessions,
+            conversations=conversations,
+            agent=PendingAgent(pending),
+            actions=actions,
+            liveness=liveness,
+        )
+    )
+    token = direct_token(
+        private,
+        "current-key",
+        token_type="eval_direct_user",
+        extra={"sandbox": "sandbox-1"},
+    )
+    headers = {
+        "Authorization": f"Bearer {token}",
+        "X-Eval-Sandbox-Id": "sandbox-1",
+    }
+    created = client.post("/api/sessions", headers=headers, json={})
+    assert created.status_code == 201
+    session_id = created.json()["sessionId"]
+    conversations.action_pending = PendingActionReference(
+        pending_action_id=pending.pending_action_id,
+        source_turn_id="00000000-0000-0000-0000-000000000124",
+        source_trace_id="00000000-0000-0000-0000-000000000125",
+        conversation_id=f"server-conversation-{session_id}",
+        session_id=session_id,
+        user_subject="user-123",
+        sandbox_id="sandbox-1",
+        action_type=pending.action_type,
+        argument_commitment=pending.argument_commitment,
+        order_id=pending.order_id,
+        amount_minor=pending.amount_minor,
+        currency=pending.currency,
+        expires_at=datetime.now(UTC) - timedelta(seconds=1),
+    )
+    liveness.active = False
+
+    recovered = client.post(
+        "/api/chat",
+        headers={
+            **headers,
+            "X-Session-Id": session_id,
+            "Idempotency-Key": "committed-recovery",
+        },
+        json={"message": "confirm refund"},
+    )
+
+    assert recovered.status_code == 200
+    assert recovered.json()["actionReceipt"]["receiptId"] == receipt.receipt_id
+    assert len(actions.calls) == 1
+    assert liveness.calls == [(token, "sandbox-1")]
+
+
+def test_decline_never_calls_commerce_and_stream_receipt_precedes_text() -> None:
+    pending, receipt = action_payloads()
+    private, public_jwk = key_fixture("current-key")
+    sessions = MemorySessionStore()
+    session_id = sessions.create("user-123")
+    conversations = MemoryConversationStore(sessions)
+    actions = MemoryActionBoundary(receipt)
+    client = TestClient(
+        create_app(
+            settings(),
+            validator=DirectJwtValidator(settings(), CountingJwksSource([public_jwk])),
+            sessions=sessions,
+            conversations=conversations,
+            agent=PendingAgent(pending),
+            actions=actions,
+        )
+    )
+    headers = {
+        "Authorization": f"Bearer {direct_token(private, 'current-key')}",
+        "X-Session-Id": session_id,
+    }
+    assert (
+        client.post(
+            "/api/chat",
+            headers={**headers, "Idempotency-Key": "prepare-decline"},
+            json={"message": "refund my order"},
+        ).status_code
+        == 200
+    )
+    declined = client.post(
+        "/api/chat",
+        headers={**headers, "Idempotency-Key": "decline"},
+        json={"message": "do not confirm"},
+    )
+    assert declined.status_code == 200
+    assert declined.json()["outcome"] == "action_declined"
+    assert actions.calls == []
+
+    conversations.action_pending = PendingActionReference(
+        pending_action_id=pending.pending_action_id,
+        source_turn_id="server-turn-source",
+        source_trace_id="server-trace-source",
+        conversation_id=f"server-conversation-{session_id}",
+        session_id=session_id,
+        user_subject="user-123",
+        sandbox_id=None,
+        action_type=pending.action_type,
+        argument_commitment=pending.argument_commitment,
+        order_id=pending.order_id,
+        amount_minor=pending.amount_minor,
+        currency=pending.currency,
+        expires_at=pending.expires_at,
+    )
+    streamed = client.post(
+        "/api/chat/stream",
+        headers={**headers, "Idempotency-Key": "confirm-stream"},
+        json={"message": "yes"},
+    )
+    assert streamed.status_code == 200
+    assert streamed.text.index("event: action_receipt") < streamed.text.index("event: token")
+    assert streamed.text.count("event: action_receipt") == 1
+    assert streamed.text.count("event: done") == 1
+    assert '"status":"REQUESTED"' in streamed.text
 
 
 def test_stream_withholds_action_claim_and_private_execution_failure() -> None:
