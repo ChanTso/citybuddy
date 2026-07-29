@@ -12,6 +12,7 @@ import jwt
 import pymysql
 import pytest
 from citybuddy_agent.actions import (
+    ActionJsonError,
     ActionReceiptPayload,
     PendingActionPayload,
     PendingActionReference,
@@ -1028,6 +1029,181 @@ def test_pending_action_expiry_requires_exact_prepared_event_anchor() -> None:
             subject="user-1",
             sandbox_id="sandbox-1",
         )
+
+
+def test_deep_persisted_action_payloads_reach_shared_integrity_boundaries() -> None:
+    pending_action_id = "00000000-0000-0000-0000-000000000121"
+    source_turn_id = "00000000-0000-0000-0000-000000000122"
+    source_trace_id = "00000000-0000-0000-0000-000000000123"
+    conversation_id = "00000000-0000-0000-0000-000000000124"
+    confirmation_turn_id = "00000000-0000-0000-0000-000000000125"
+    confirmation_trace_id = "00000000-0000-0000-0000-000000000126"
+    receipt_id = "00000000-0000-0000-0000-000000000127"
+    refund_id = "00000000-0000-0000-0000-000000000128"
+    order_id = "00000000-0000-0000-0000-000000000040"
+    commitment = action_argument_commitment("REFUND_REQUEST", order_id, 400, "CNY")
+    expires_at = datetime(2026, 7, 28, 4, 0, 0, 123456, tzinfo=UTC)
+    committed_at = datetime(2026, 7, 28, 4, 1, 0, 123456, tzinfo=UTC)
+    deep_payload = '{"root":' + ("[" * 1100) + "0" + ("]" * 1100) + "}"
+    pending_row = (
+        pending_action_id,
+        source_turn_id,
+        source_trace_id,
+        conversation_id,
+        "session-1",
+        "user-1",
+        "sandbox-1",
+        "REFUND_REQUEST",
+        commitment,
+        order_id,
+        400,
+        "CNY",
+        "PENDING",
+        expires_at,
+        None,
+        None,
+        None,
+    )
+    deep_source_rows = action_turn_rows(
+        trace_id=source_trace_id,
+        session_id="session-1",
+        subject="user-1",
+        action_event_type="ACTION_PREPARED",
+        action_payload=deep_payload,
+        outcome="action_pending",
+    )
+
+    with pytest.raises(ConversationIntegrityError) as conversation_prepared:
+        MysqlConversationStore._load_pending_action_for_turn(
+            ScriptedCursor([[pending_row], deep_source_rows]),  # type: ignore[arg-type]
+            turn_id=source_turn_id,
+            trace_id=source_trace_id,
+            conversation_id=conversation_id,
+            session_id="session-1",
+            subject="user-1",
+            sandbox_id="sandbox-1",
+        )
+    assert isinstance(conversation_prepared.value.__cause__, Exception)
+    assert isinstance(conversation_prepared.value.__cause__.__cause__, ActionJsonError)
+
+    with pytest.raises(EvaluationEvidenceInvalid):
+        MysqlEvaluationEvidenceStore._validate_pending_truth_row(
+            object.__new__(MysqlEvaluationEvidenceStore),
+            ScriptedCursor(
+                [
+                    [
+                        (
+                            source_trace_id,
+                            conversation_id,
+                            "session-1",
+                            "user-1",
+                            "COMPLETED",
+                            "action_pending",
+                        )
+                    ],
+                    deep_source_rows,
+                ]
+            ),  # type: ignore[arg-type]
+            pending=pending_row,
+            session_id="session-1",
+            subject="user-1",
+            sandbox_id="sandbox-1",
+        )
+
+    receipt = ActionReceiptPayload.model_validate(
+        {
+            "receiptId": receipt_id,
+            "pendingActionId": pending_action_id,
+            "actionType": "REFUND_REQUEST",
+            "status": "REQUESTED",
+            "orderId": order_id,
+            "refundId": refund_id,
+            "resourceVersion": 1,
+            "amountMinor": 400,
+            "currency": "CNY",
+            "committedAt": committed_at,
+            "replayed": True,
+        }
+    )
+    conversation_projection = (
+        receipt_id,
+        pending_action_id,
+        "REFUND_REQUEST",
+        "REQUESTED",
+        order_id,
+        refund_id,
+        1,
+        400,
+        "CNY",
+        committed_at,
+        source_turn_id,
+        confirmation_turn_id,
+        confirmation_trace_id,
+        "session-1",
+        "user-1",
+        receipt.argument_commitment,
+        receipt.receipt_commitment,
+        2,
+    )
+    deep_receipt_event = (
+        confirmation_trace_id,
+        "session-1",
+        "user-1",
+        "ACTION_RECEIPT",
+        deep_payload,
+    )
+    with pytest.raises(ConversationIntegrityError) as conversation_receipt:
+        MysqlConversationStore._load_action_receipt(
+            ScriptedCursor([[conversation_projection], [deep_receipt_event]]),  # type: ignore[arg-type]
+            confirmation_turn_id,
+        )
+    assert isinstance(conversation_receipt.value.__cause__, ActionJsonError)
+
+    evaluation_projection = (
+        receipt_id,
+        pending_action_id,
+        source_turn_id,
+        confirmation_turn_id,
+        confirmation_trace_id,
+        "session-1",
+        "user-1",
+        "sandbox-1",
+        "REFUND_REQUEST",
+        receipt.argument_commitment,
+        "REQUESTED",
+        order_id,
+        refund_id,
+        1,
+        400,
+        "CNY",
+        committed_at,
+        receipt.receipt_commitment,
+        2,
+    )
+    with pytest.raises(EvaluationEvidenceInvalid) as evaluation_receipt:
+        MysqlEvaluationEvidenceStore._load_valid_receipt_projection(
+            object.__new__(MysqlEvaluationEvidenceStore),
+            ScriptedCursor(
+                [
+                    [evaluation_projection],
+                    [
+                        (
+                            confirmation_trace_id,
+                            "session-1",
+                            "user-1",
+                            "COMPLETED",
+                            "action_completed",
+                        )
+                    ],
+                    [deep_receipt_event],
+                ]
+            ),  # type: ignore[arg-type]
+            pending_action_id=pending_action_id,
+            session_id="session-1",
+            subject="user-1",
+            sandbox_id="sandbox-1",
+        )
+    assert isinstance(evaluation_receipt.value.__cause__, ActionJsonError)
 
 
 def test_pending_action_claim_and_completion_lock_the_exact_expiry_anchor() -> None:
