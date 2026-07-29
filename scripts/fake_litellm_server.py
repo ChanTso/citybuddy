@@ -8,12 +8,14 @@ import json
 from collections import Counter
 from typing import Any
 
+import httpx
 import uvicorn
 from fastapi import FastAPI, Request
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, Response
 
 app = FastAPI(docs_url=None, redoc_url=None)
 counts: Counter[str] = Counter()
+commerce_base_url = ""
 
 
 def scenario(message: str) -> str:
@@ -30,6 +32,7 @@ def scenario(message: str) -> str:
         "circuit-recover",
         "provider-failure",
         "unsafe-action-claim",
+        "action-prepare",
         "disconnect-slow",
         "retrieval-sufficient",
         "retrieval-insufficient",
@@ -133,6 +136,20 @@ async def complete(request: Request) -> JSONResponse:
         return JSONResponse(status_code=503, content={"error": "transient"})
     if selected == "budget-exhaustion":
         return JSONResponse(content=tool_message("unknown.tool", "{}"))
+    if selected == "action-prepare" and not has_tool_feedback:
+        return JSONResponse(
+            content=tool_message(
+                "actions.refund.prepare",
+                json.dumps(
+                    {
+                        "orderId": "00000000-0000-0000-0000-000000000105",
+                        "amountMinor": 400,
+                        "currency": "CNY",
+                    },
+                    separators=(",", ":"),
+                ),
+            )
+        )
     if selected.startswith("retrieval-") and not has_tool_feedback:
         tool_arguments: dict[str, str] = {"query": user_messages[0]}
         if selected == "retrieval-sufficient":
@@ -173,15 +190,54 @@ async def timeout_tool(request: Request) -> JSONResponse:
     return JSONResponse(status_code=504, content={"error": "late fixture"})
 
 
+@app.post("/internal/tools/actions/prepare")
+async def action_prepare_proxy(request: Request) -> Response:
+    if not commerce_base_url:
+        return JSONResponse(status_code=503, content={"error": "proxy is not configured"})
+    forwarded_headers = {
+        name: value
+        for name, value in request.headers.items()
+        if name
+        in {
+            "authorization",
+            "content-type",
+            "x-support-session-id",
+            "x-eval-sandbox-id",
+            "x-agent-trace-id",
+            "x-agent-turn-id",
+            "x-agent-operation-id",
+        }
+    }
+    async with httpx.AsyncClient(timeout=5.0) as client:
+        upstream = await client.post(
+            f"{commerce_base_url}/internal/tools/actions/prepare",
+            headers=forwarded_headers,
+            content=await request.body(),
+        )
+    session_id = request.headers.get("x-support-session-id", "")
+    counts[f"action-proxy:{session_id}"] += 1
+    if counts["action-proxy:lost-after-upstream"] == 0:
+        counts["action-proxy:lost-after-upstream"] += 1
+        return JSONResponse(status_code=503, content={"error": "response lost after upstream"})
+    return Response(
+        content=upstream.content,
+        status_code=upstream.status_code,
+        media_type=upstream.headers.get("content-type", "application/json"),
+    )
+
+
 @app.get("/fixture/counts")
 def fixture_counts() -> dict[str, int]:
     return dict(counts)
 
 
 def main() -> None:
+    global commerce_base_url
     parser = argparse.ArgumentParser()
     parser.add_argument("--port", type=int, required=True)
+    parser.add_argument("--commerce-base-url", default="")
     args = parser.parse_args()
+    commerce_base_url = args.commerce_base_url.rstrip("/")
     uvicorn.run(app, host="127.0.0.1", port=args.port, access_log=False)
 
 

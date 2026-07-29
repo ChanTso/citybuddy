@@ -135,6 +135,32 @@ def test_filter_preserves_non_success_action_guidance(safe_text: str) -> None:
     assert [event.name for event in events] == ["token", "done"]
 
 
+@pytest.mark.parametrize(
+    ("outcome", "text"),
+    [
+        ("action_pending", "A refund request is ready for your explicit decision."),
+        (
+            "action_clarification",
+            "Please reply with an exact confirmation or decline for the prepared refund request.",
+        ),
+        ("action_declined", "The prepared action was declined and was not executed."),
+        ("action_expired", "The prepared action expired and was not executed."),
+    ],
+)
+def test_filter_projects_cb122_local_action_outcomes_without_receipt(
+    outcome: str, text: str
+) -> None:
+    result = ConversationResult("c", "t", "u", text, outcome)
+
+    events = SseEgressFilter().project_result(result)
+
+    assert events[0].name == "token"
+    assert events[-1].name == "done"
+    assert all(event.name == "token" for event in events[:-1])
+    assert events[-1].data["outcome"] == outcome
+    assert all(event.name != "action_receipt" for event in events)
+
+
 def test_encoder_revalidates_public_name_and_fields() -> None:
     with pytest.raises(SseProjectionError):
         encode_event(PublicSseEvent("internal", {"sequence": 1}))

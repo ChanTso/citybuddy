@@ -1,6 +1,6 @@
 {
   "openapi": "3.1.0",
-  "info": {"title": "CityBuddy agent API", "version": "CB-103"},
+  "info": {"title": "CityBuddy agent API", "version": "CB-122"},
   "paths": {
     "/api/sessions": {
       "post": {
@@ -92,7 +92,11 @@
                         "completed",
                         "budget_exhausted",
                         "provider_denied",
-                        "retrieval_denied"
+                        "retrieval_denied",
+                        "action_pending",
+                        "action_clarification",
+                        "action_declined",
+                        "action_expired"
                       ]
                     },
                     "citations": {
@@ -109,6 +113,7 @@
           "401": {"$ref": "#/components/responses/Unauthorized"},
           "403": {"$ref": "#/components/responses/Forbidden"},
           "409": {"$ref": "#/components/responses/Conflict"},
+          "502": {"$ref": "#/components/responses/BadGateway"},
           "422": {"$ref": "#/components/responses/InvalidRequest"},
           "503": {"$ref": "#/components/responses/Unavailable"}
         }
@@ -163,6 +168,7 @@
           "401": {"$ref": "#/components/responses/Unauthorized"},
           "403": {"$ref": "#/components/responses/Forbidden"},
           "409": {"$ref": "#/components/responses/Conflict"},
+          "502": {"$ref": "#/components/responses/BadGateway"},
           "422": {"$ref": "#/components/responses/InvalidRequest"},
           "503": {"$ref": "#/components/responses/Unavailable"}
         }
@@ -296,7 +302,7 @@
           "receiptId": {"type": "string", "format": "uuid", "readOnly": true},
           "status": {"type": "string", "enum": ["SUCCEEDED"]}
         },
-        "description": "The only public action-status carrier, reserved for verified ActionReceipt truth in CB-120/CB-121; CB-082 does not emit it."
+        "description": "The only public action-status carrier, reserved for verified ActionReceipt truth in CB-123; CB-122 never emits it."
       },
       "SseDoneData": {
         "type": "object",
@@ -307,7 +313,16 @@
           "conversationId": {"type": "string", "format": "uuid", "readOnly": true},
           "traceId": {"type": "string", "format": "uuid", "readOnly": true},
           "turnId": {"type": "string", "format": "uuid", "readOnly": true},
-          "outcome": {"type": "string", "enum": ["completed"]}
+          "outcome": {
+            "type": "string",
+            "enum": [
+              "completed",
+              "action_pending",
+              "action_clarification",
+              "action_declined",
+              "action_expired"
+            ]
+          }
         }
       },
       "SseErrorData": {
@@ -371,6 +386,10 @@
               "budget_exhausted",
               "provider_denied",
               "retrieval_denied",
+              "action_pending",
+              "action_clarification",
+              "action_declined",
+              "action_expired",
               "failed"
             ]
           },
@@ -407,6 +426,9 @@
               "TOOL_LIFECYCLE",
               "TOOL_DENIED",
               "RETRIEVAL_DECISION",
+              "ACTION_PREPARED",
+              "ACTION_DECLINED",
+              "ACTION_EXPIRED",
               "AGENT_OUTCOME",
               "ASSISTANT_RESPONSE",
               "TURN_COMPLETED",
@@ -493,6 +515,10 @@
       },
       "InvalidRequest": {
         "description": "Malformed or unknown request field",
+        "content": {"application/json": {"schema": {"$ref": "#/components/schemas/PublicError"}}}
+      },
+      "BadGateway": {
+        "description": "An authenticated action dependency returned an invalid bounded response",
         "content": {"application/json": {"schema": {"$ref": "#/components/schemas/PublicError"}}}
       },
       "Unavailable": {

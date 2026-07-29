@@ -70,6 +70,7 @@ expected=(
   "GRANT SELECT, INSERT ON cs_db.support_feedback TO 'agent_app'@'%';"
   "GRANT SELECT, INSERT ON cs_db.retrieval_decision TO 'agent_app'@'%';"
   "GRANT SELECT, INSERT ON cs_db.retrieval_evidence TO 'agent_app'@'%';"
+  "GRANT SELECT, INSERT, UPDATE (state, resolved_at, resolution_turn_id, resolution_trace_id) ON cs_db.pending_action_reference TO 'agent_app'@'%';"
   "GRANT SELECT, INSERT, UPDATE ON commerce_db.auth_eval_test_principal TO 'auth_app'@'%';"
   "GRANT SELECT, INSERT, UPDATE ON commerce_db.eval_sandbox TO 'commerce_app'@'%';"
   "GRANT SELECT, INSERT, UPDATE, DELETE ON commerce_db.eval_sandbox_product_fixture TO 'commerce_app'@'%';"
@@ -162,15 +163,16 @@ support_grant="${actual[23]}"
 support_lifecycle_grants="$(printf '%s\n' "${actual[@]:23:4}")"
 support_feedback_grants="$(printf '%s\n' "${actual[@]:23:5}")"
 legacy_runtime_sql="$(printf '%s\n' "${actual[@]:5:4}" "$support_grant")"
-evaluation_grant="${actual[30]}"
-sandbox_grants="$(printf '%s\n' "${actual[@]:31:3}")"
-evaluation_audit_grant="${actual[34]}"
-evaluation_product_observation_grant="${actual[35]}"
-evaluation_audit_watermark_grant="${actual[36]}"
-v013_migration_grants="$(printf '%s\n' "${actual[37]}" "${actual[38]}")"
-v013_migration_revokes="$(printf '%s\n' "${actual[39]}" "${actual[40]}")"
-faq_runtime_grants="$(printf '%s\n' "${actual[@]:41:3}")"
-action_runtime_grants="$(printf '%s\n' "${actual[@]:44:2}")"
+agent_action_reference_grant="${actual[30]}"
+evaluation_grant="${actual[31]}"
+sandbox_grants="$(printf '%s\n' "${actual[@]:32:3}")"
+evaluation_audit_grant="${actual[35]}"
+evaluation_product_observation_grant="${actual[36]}"
+evaluation_audit_watermark_grant="${actual[37]}"
+v013_migration_grants="$(printf '%s\n' "${actual[38]}" "${actual[39]}")"
+v013_migration_revokes="$(printf '%s\n' "${actual[40]}" "${actual[41]}")"
+faq_runtime_grants="$(printf '%s\n' "${actual[@]:42:3}")"
+action_runtime_grants="$(printf '%s\n' "${actual[@]:45:2}")"
 
 if [[ "$v013_force_revoke" == true ]]; then
   mysql "${mysql_args[@]}" --execute="
@@ -244,7 +246,8 @@ runtime_table_state="$(mysql "${mysql_args[@]}" --execute="
       'support_event',
       'support_feedback',
       'retrieval_decision',
-      'retrieval_evidence'
+      'retrieval_evidence',
+      'pending_action_reference'
     );
   SET ROLE NONE;")"
 
@@ -271,6 +274,7 @@ feedback_table_present=false
 retrieval_tables_present=false
 retrieval_decision_present=false
 retrieval_evidence_present=false
+agent_action_reference_present=false
 if [[ "$normalized_runtime_table_state" == *"commerce_db.auth_eval_test_principal"* ]]; then
   runtime_table_count="${normalized_runtime_table_state%%:*}"
   runtime_table_list="${normalized_runtime_table_state#*:}"
@@ -451,6 +455,18 @@ elif [[ "$retrieval_decision_present" == true ]]; then
   normalized_runtime_table_state="$((runtime_table_count - 2)):$runtime_table_list"
   retrieval_tables_present=true
 fi
+if [[ "$runtime_table_state" == *"cs_db.pending_action_reference"* ]]; then
+  if [[ "$retrieval_tables_present" != true ]]; then
+    echo "Grant job found PendingAction reference without the prerequisite retrieval schema." >&2
+    exit 1
+  fi
+  runtime_table_count="${normalized_runtime_table_state%%:*}"
+  runtime_table_list="${normalized_runtime_table_state#*:}"
+  runtime_table_list="$(remove_runtime_table "$runtime_table_list" \
+    cs_db.pending_action_reference)"
+  normalized_runtime_table_state="$((runtime_table_count - 1)):$runtime_table_list"
+  agent_action_reference_present=true
+fi
 if [[ ",$normalized_runtime_table_state," == *",cs_db.support_feedback,"* ]]; then
   runtime_table_count="${normalized_runtime_table_state%%:*}"
   runtime_table_list="${normalized_runtime_table_state#*:}"
@@ -509,7 +525,13 @@ if [[ "$normalized_runtime_table_state" == "$commerce_complete_runtime_table_sta
   echo "runtime-grants=commerce-applied-awaiting-support-migration"
 elif [[ "$normalized_runtime_table_state" == "$cb080_runtime_table_state" ]]; then
   selected_runtime_sql="$(printf '%s\n' "${actual[@]:5:22}")"
-  if [[ "$retrieval_tables_present" == true ]]; then
+  if [[ "$agent_action_reference_present" == true ]]; then
+    if [[ "$retrieval_tables_present" != true || "$feedback_table_present" != true ]]; then
+      echo "Grant job found PendingAction reference without the prerequisite support schema." >&2
+      exit 1
+    fi
+    selected_runtime_sql="$(printf '%s\n' "${actual[@]:5:26}")"
+  elif [[ "$retrieval_tables_present" == true ]]; then
     if [[ "$feedback_table_present" != true ]]; then
       echo "Grant job found retrieval tables without the prerequisite feedback schema." >&2
       exit 1

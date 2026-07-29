@@ -8,12 +8,25 @@ import threading
 import time
 from collections.abc import Callable
 from dataclasses import dataclass
+from datetime import UTC, datetime, timedelta
 from typing import Literal, Protocol
 
 import httpx
 from fastapi import HTTPException
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
+from .actions import (
+    ACTION_SCOPE,
+    MAX_ACTION_PENDING_TTL_SECONDS,
+    ActionJsonError,
+    BoundedHttpResponse,
+    PendingActionPayload,
+    RefundActionArguments,
+    action_argument_commitment,
+    bounded_http_post,
+    canonical_action_timestamp,
+    strict_json_object,
+)
 from .faq_cache import FaqCache
 from .knowledge import (
     KnowledgeSearch,
@@ -45,6 +58,11 @@ class AgentRunResult:
     outcome: str
     events: tuple[AgentEvent, ...]
     retrieval_decision: RetrievalDecision | None = None
+    pending_action: PendingActionPayload | None = None
+
+    def __post_init__(self) -> None:
+        if (self.outcome == "action_pending") != (self.pending_action is not None):
+            raise RuntimeError("Agent action outcome and PendingAction disagree")
 
 
 class AgentRunner(Protocol):
@@ -84,6 +102,39 @@ class ProviderFailure(Exception):
 
 class CircuitOpen(Exception):
     """The selected provider circuit is not currently admitting work."""
+
+
+TOOL_BOUNDARY_FAILURE_REASONS = frozenset(
+    {
+        "ACTION_PREPARATION_IDENTITY_UNAVAILABLE",
+        "ACTION_PREPARATION_COMMERCE_UNAVAILABLE",
+        "ACTION_PREPARATION_RESPONSE_INVALID",
+        "ACTION_PREPARATION_DURABLE_TRUTH_INCONSISTENT",
+        "ACTION_SANDBOX_LIVENESS_UNAVAILABLE",
+        "ACTION_SANDBOX_LIVENESS_REJECTED",
+        "ACTION_SESSION_PERSISTENCE_UNAVAILABLE",
+        "ACTION_REPLAY_PERSISTENCE_UNAVAILABLE",
+        "ACTION_REFERENCE_PERSISTENCE_UNAVAILABLE",
+        "ACTION_TURN_RESERVATION_PERSISTENCE_UNAVAILABLE",
+        "ACTION_EXPIRY_PERSISTENCE_UNAVAILABLE",
+        "ACTION_DECLINE_PERSISTENCE_UNAVAILABLE",
+        "ACTION_CLARIFICATION_PERSISTENCE_UNAVAILABLE",
+        "AGENT_TURN_COMPLETION_PERSISTENCE_UNAVAILABLE",
+        "ACTION_CONFIRMATION_UNAVAILABLE",
+    }
+)
+
+
+class ToolBoundaryFailure(Exception):
+    """A sensitive-tool boundary failure with a closed server-only producer."""
+
+    def __init__(self, *, status_code: int, reason: str, detail: str) -> None:
+        if reason not in TOOL_BOUNDARY_FAILURE_REASONS:
+            raise ValueError("Unregistered sensitive-tool boundary producer")
+        super().__init__(detail)
+        self.status_code = status_code
+        self.reason = reason
+        self.detail = detail
 
 
 @dataclass
@@ -531,9 +582,9 @@ class ToolSpec:
     description: str
     authority: Literal["commerce_obo", "elasticsearch"]
     scope: str | None
-    risk: Literal["read"]
+    risk: Literal["read", "sensitive"]
     timeout_seconds: float
-    idempotency: Literal["read-only"]
+    idempotency: Literal["read-only", "turn-action-commitment"]
     input_schema: type[BaseModel]
     output_schema: type[BaseModel]
 
@@ -575,12 +626,28 @@ KNOWLEDGE_SEARCH_SPEC = ToolSpec(
     output_schema=KnowledgeSearchOutput,
 )
 
+REFUND_PREPARE_SPEC = ToolSpec(
+    name="actions.refund.prepare",
+    description=(
+        "Prepare one refund request for explicit user confirmation. This does not execute "
+        "the refund and the model cannot confirm it."
+    ),
+    authority="commerce_obo",
+    scope=ACTION_SCOPE,
+    risk="sensitive",
+    timeout_seconds=3.0,
+    idempotency="turn-action-commitment",
+    input_schema=RefundActionArguments,
+    output_schema=PendingActionPayload,
+)
+
 
 @dataclass(frozen=True)
 class ToolResult:
     outcome: Literal["ok", "deny_with_feedback"]
     model_view: dict[str, object]
     retrieval_decision: RetrievalDecision | None = None
+    pending_action: PendingActionPayload | None = None
 
 
 class ToolAdapter:
@@ -602,6 +669,7 @@ class ToolAdapter:
         self._specs = {
             CATALOG_PRODUCT_SPEC.name: CATALOG_PRODUCT_SPEC,
             KNOWLEDGE_SEARCH_SPEC.name: KNOWLEDGE_SEARCH_SPEC,
+            REFUND_PREPARE_SPEC.name: REFUND_PREPARE_SPEC,
         }
 
     def schemas(self) -> list[dict[str, object]]:
@@ -628,9 +696,9 @@ class ToolAdapter:
         if spec is None:
             return self._deny(name, "unknown_tool", events)
         try:
-            decoded = json.loads(serialized_arguments)
+            decoded = strict_json_object(serialized_arguments.encode("utf-8"))
             arguments = spec.input_schema.model_validate(decoded)
-        except (json.JSONDecodeError, ValidationError, TypeError):
+        except (ActionJsonError, ValidationError, TypeError, UnicodeError):
             return self._deny(name, "invalid_arguments", events)
         events.append(AgentEvent("TOOL_LIFECYCLE", {"tool": name, "state": "requested"}))
         if spec.authority == "elasticsearch":
@@ -716,16 +784,34 @@ class ToolAdapter:
                 obo = self._obo.exchange(direct_token, subject, session_id, spec.scope)
             else:
                 obo = self._obo.exchange(direct_token, subject, session_id, spec.scope, sandbox_id)
-        except HTTPException:
+        except HTTPException as exception:
+            if exception.status_code in {401, 403}:
+                return self._deny(name, "identity_denied", events)
+            if spec is REFUND_PREPARE_SPEC:
+                raise ToolBoundaryFailure(
+                    status_code=503,
+                    reason="ACTION_PREPARATION_IDENTITY_UNAVAILABLE",
+                    detail="Action preparation unavailable",
+                ) from exception
             return self._deny(name, "identity_denied", events)
         except (httpx.TimeoutException, httpx.NetworkError):
+            if spec is REFUND_PREPARE_SPEC:
+                raise ToolBoundaryFailure(
+                    status_code=503,
+                    reason="ACTION_PREPARATION_IDENTITY_UNAVAILABLE",
+                    detail="Action preparation unavailable",
+                ) from None
             return self._deny(name, "identity_unavailable", events)
-        budget.charge("tool_http", name)
         try:
             headers = {
                 "Authorization": f"Bearer {obo}",
                 "X-Support-Session-Id": session_id,
             }
+            if spec is REFUND_PREPARE_SPEC:
+                if trace_id is None or turn_id is None:
+                    raise RuntimeError("Action preparation omitted server correlation")
+                headers["X-Agent-Trace-Id"] = trace_id
+                headers["X-Agent-Turn-Id"] = turn_id
             if sandbox_id is not None:
                 if trace_id is None or turn_id is None:
                     raise RuntimeError("Evaluation tool call omitted server correlation")
@@ -737,27 +823,140 @@ class ToolAdapter:
                 headers["X-Agent-Operation-Id"] = hashlib.sha256(
                     operation_material.encode("utf-8")
                 ).hexdigest()
-            response = httpx.post(
-                f"{self._base_url}/internal/tools/{name}",
-                headers=headers,
-                json=arguments.model_dump(by_alias=True),
-                timeout=spec.timeout_seconds,
-            )
+            response: BoundedHttpResponse | httpx.Response
+            if spec is REFUND_PREPARE_SPEC:
+                response = self._prepare_with_bounded_replay(
+                    spec=spec,
+                    arguments=arguments,
+                    headers=headers,
+                    name=name,
+                    budget=budget,
+                )
+            else:
+                budget.charge("tool_http", name)
+                response = httpx.post(
+                    f"{self._base_url}/internal/tools/{name}",
+                    headers=headers,
+                    json=arguments.model_dump(by_alias=True),
+                    timeout=spec.timeout_seconds,
+                )
         except httpx.TimeoutException:
             return self._deny(name, "timeout", events)
         except httpx.NetworkError:
             return self._deny(name, "tool_unavailable", events)
-        if response.status_code in {400, 401, 403, 404, 408, 409, 422, 503, 504}:
+        except ActionJsonError as exception:
+            raise ToolBoundaryFailure(
+                status_code=502,
+                reason="ACTION_PREPARATION_RESPONSE_INVALID",
+                detail="Invalid action preparation response",
+            ) from exception
+        if response.status_code in {400, 401, 403, 404, 409, 422}:
             return self._deny(name, "policy_denied", events)
-        if response.status_code != 200:
+        if response.status_code in {408, 429, 502, 503, 504} and spec is REFUND_PREPARE_SPEC:
+            raise ToolBoundaryFailure(
+                status_code=503,
+                reason="ACTION_PREPARATION_COMMERCE_UNAVAILABLE",
+                detail="Action preparation unavailable",
+            )
+        if response.status_code in {408, 503, 504}:
+            return self._deny(name, "policy_denied", events)
+        expected_statuses = {200, 201} if spec is REFUND_PREPARE_SPEC else {200}
+        if response.status_code not in expected_statuses:
             raise RuntimeError("Unexpected commerce tool failure")
         try:
-            bounded = spec.output_schema.model_validate(response.json())
-        except (ValidationError, ValueError, TypeError) as exception:
+            document = (
+                strict_json_object(response.content)
+                if isinstance(response, BoundedHttpResponse)
+                else response.json()
+            )
+            bounded = spec.output_schema.model_validate(document)
+        except (ActionJsonError, ValidationError, ValueError, TypeError) as exception:
+            if spec is REFUND_PREPARE_SPEC:
+                raise ToolBoundaryFailure(
+                    status_code=502,
+                    reason="ACTION_PREPARATION_RESPONSE_INVALID",
+                    detail="Invalid action preparation response",
+                ) from exception
             raise RuntimeError("Invalid commerce tool response") from exception
+        if spec is REFUND_PREPARE_SPEC:
+            if not isinstance(arguments, RefundActionArguments) or not isinstance(
+                bounded, PendingActionPayload
+            ):
+                raise RuntimeError("Invalid action preparation types")
+            if (response.status_code == 200) != bounded.replayed:
+                raise ToolBoundaryFailure(
+                    status_code=502,
+                    reason="ACTION_PREPARATION_RESPONSE_INVALID",
+                    detail="Invalid action preparation response",
+                )
+            now = datetime.now(UTC)
+            if not (
+                now < bounded.expires_at <= now + timedelta(seconds=MAX_ACTION_PENDING_TTL_SECONDS)
+            ):
+                raise ToolBoundaryFailure(
+                    status_code=502,
+                    reason="ACTION_PREPARATION_RESPONSE_INVALID",
+                    detail="Invalid action preparation response",
+                )
+            if (
+                bounded.order_id != arguments.order_id
+                or bounded.amount_minor != arguments.amount_minor
+                or bounded.currency != arguments.currency
+                or bounded.argument_commitment
+                != action_argument_commitment(
+                    "REFUND_REQUEST",
+                    arguments.order_id,
+                    arguments.amount_minor,
+                    arguments.currency,
+                )
+            ):
+                raise ToolBoundaryFailure(
+                    status_code=409,
+                    reason="ACTION_PREPARATION_DURABLE_TRUTH_INCONSISTENT",
+                    detail="Action preparation conflict",
+                )
         model_view = bounded.model_dump(by_alias=True)
         events.append(AgentEvent("TOOL_LIFECYCLE", {"tool": name, "state": "succeeded"}))
-        return ToolResult(outcome="ok", model_view=model_view)
+        return ToolResult(
+            outcome="ok",
+            model_view=model_view,
+            pending_action=bounded if isinstance(bounded, PendingActionPayload) else None,
+        )
+
+    def _prepare_with_bounded_replay(
+        self,
+        *,
+        spec: ToolSpec,
+        arguments: BaseModel,
+        headers: dict[str, str],
+        name: str,
+        budget: AttemptBudget,
+    ) -> BoundedHttpResponse:
+        request_body = {
+            "actionType": "REFUND_REQUEST",
+            "arguments": arguments.model_dump(by_alias=True),
+        }
+        for attempt in range(2):
+            budget.charge("tool_http", name)
+            try:
+                response = bounded_http_post(
+                    f"{self._base_url}/internal/tools/actions/prepare",
+                    headers=headers,
+                    json=request_body,
+                    timeout=spec.timeout_seconds,
+                )
+            except (httpx.TimeoutException, httpx.NetworkError) as exception:
+                if attempt == 0:
+                    continue
+                raise ToolBoundaryFailure(
+                    status_code=503,
+                    reason="ACTION_PREPARATION_COMMERCE_UNAVAILABLE",
+                    detail="Action preparation unavailable",
+                ) from exception
+            if response.status_code in {408, 429, 502, 503, 504} and attempt == 0:
+                continue
+            return response
+        raise RuntimeError("Bounded action preparation replay did not terminate")
 
     @staticmethod
     def _deny(name: str, reason: str, events: list[AgentEvent]) -> ToolResult:
@@ -896,6 +1095,27 @@ class BoundedAgent:
                             tuple(events),
                             retrieval_decision,
                         )
+                if result.pending_action is not None:
+                    events.append(
+                        AgentEvent(
+                            "ACTION_PREPARED",
+                            {
+                                "pendingActionId": result.pending_action.pending_action_id,
+                                "actionType": result.pending_action.action_type,
+                                "argumentCommitment": result.pending_action.argument_commitment,
+                                "expiresAt": canonical_action_timestamp(
+                                    result.pending_action.expires_at
+                                ),
+                            },
+                        )
+                    )
+                    events.append(AgentEvent("AGENT_OUTCOME", {"outcome": "action_pending"}))
+                    return AgentRunResult(
+                        "Please confirm or decline the prepared refund request.",
+                        "action_pending",
+                        tuple(events),
+                        pending_action=result.pending_action,
+                    )
                 if (
                     reply.tool_name == KNOWLEDGE_SEARCH_SPEC.name
                     and retrieval_decision is None

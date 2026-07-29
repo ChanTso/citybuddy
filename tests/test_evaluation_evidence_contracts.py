@@ -94,6 +94,17 @@ def test_evaluation_evidence_schema_is_a_closed_safe_projection() -> None:
         "docType",
     }
     assert set(feedback["properties"]) == {"rating", "occurredAt"}
+    assert set(response["properties"]["terminalOutcome"]["enum"]) >= {
+        "action_pending",
+        "action_clarification",
+        "action_declined",
+        "action_expired",
+    }
+    assert set(event["properties"]["eventKind"]["enum"]) >= {
+        "ACTION_PREPARED",
+        "ACTION_DECLINED",
+        "ACTION_EXPIRED",
+    }
     public_fields = (
         set(response["properties"])
         | set(event["properties"])
@@ -131,14 +142,15 @@ def test_evaluation_store_uses_only_exact_agent_truth_and_persisted_sequence() -
     assert "JOIN support_conversation conversation" in source
     assert "JOIN support_session session_record" in source
     assert "turn_record.trace_id = %s AND session_record.sandbox_id = %s" in source
-    assert "user_subject FROM support_event WHERE trace_id = %s" in source
+    assert '"IF(OCTET_LENGTH(payload_json) <= 4096, payload_json, NULL), "' in source
+    assert '"created_at, turn_id FROM support_event WHERE turn_id = %s "' in source
     assert '"ORDER BY sequence LIMIT %s"' in source
     assert "ORDER BY evidence_rank LIMIT %s" in source
     assert "ORDER BY created_at, feedback_id LIMIT %s" in source
     assert "retrieval_event.outcome != row[6]" in source
     assert "retrieval_event.reference != row[4]" in source
     assert "self._validate_lifecycle(events, terminal_outcome)" in source
-    assert "self._utc_timestamp(row[3])" in source
+    assert "self._utc_timestamp(row[7])" in source
     assert "self._utc_timestamp(row[1])" in source
     assert "SET time_zone = '+00:00'" in source
     assert 'user="agent_app"' in source

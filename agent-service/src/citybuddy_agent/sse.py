@@ -79,6 +79,13 @@ _ACTION_COMPLETION_CJK = (
     "已取消",
 )
 _NEGATION_CJK = ("没有", "尚未", "并未", "还未", "还没", "未", "没", "不")
+_PUBLIC_COMPLETED_OUTCOMES = {
+    "completed",
+    "action_pending",
+    "action_clarification",
+    "action_declined",
+    "action_expired",
+}
 
 
 def _is_negated(words: list[str], index: int) -> bool:
@@ -167,7 +174,7 @@ class SseEgressFilter:
 
     def project_result(self, result: ConversationResult) -> tuple[PublicSseEvent, ...]:
         source: tuple[SseSourceEvent, ...]
-        if result.outcome == "completed":
+        if result.outcome in _PUBLIC_COMPLETED_OUTCOMES:
             source = (
                 SseSourceEvent("SAFE_TEXT", {"text": result.response_text}),
                 SseSourceEvent(
@@ -230,7 +237,7 @@ class SseEgressFilter:
                 required = {"conversationId", "traceId", "turnId", "outcome"}
                 if not text_seen or set(event.payload) != required:
                     raise SseProjectionError("invalid completed source")
-                if event.payload["outcome"] != "completed" or not all(
+                if event.payload["outcome"] not in _PUBLIC_COMPLETED_OUTCOMES or not all(
                     isinstance(event.payload[name], str) and event.payload[name]
                     for name in required
                 ):

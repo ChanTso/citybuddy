@@ -9,6 +9,20 @@ from typing import Literal, Protocol, cast
 import pymysql
 from pydantic import AwareDatetime, BaseModel, ConfigDict, Field
 
+from .actions import (
+    ACTION_TURN_EVENTS_SQL,
+    PENDING_ACTION_RESOLUTION_TURN_SQL,
+    PENDING_ACTION_SOURCE_TURN_SQL,
+    ActionEvidenceError,
+    ActionJsonError,
+    PendingActionReference,
+    strict_json_object,
+    validate_pending_action_events,
+    validate_pending_action_reference,
+    validate_pending_action_resolution,
+    validate_resolved_action_events,
+)
+
 MAX_EVIDENCE_EVENTS = 48
 MAX_FEEDBACK_RECORDS = 8
 MAX_RETRIEVAL_SOURCES = 3
@@ -18,6 +32,10 @@ TerminalOutcome = Literal[
     "budget_exhausted",
     "provider_denied",
     "retrieval_denied",
+    "action_pending",
+    "action_clarification",
+    "action_declined",
+    "action_expired",
     "failed",
 ]
 EventKind = Literal[
@@ -29,6 +47,9 @@ EventKind = Literal[
     "TOOL_LIFECYCLE",
     "TOOL_DENIED",
     "RETRIEVAL_DECISION",
+    "ACTION_PREPARED",
+    "ACTION_DECLINED",
+    "ACTION_EXPIRED",
     "AGENT_OUTCOME",
     "ASSISTANT_RESPONSE",
     "TURN_COMPLETED",
@@ -40,6 +61,21 @@ _TERMINAL_OUTCOMES = {
     "budget_exhausted",
     "provider_denied",
     "retrieval_denied",
+    "action_pending",
+    "action_clarification",
+    "action_declined",
+    "action_expired",
+}
+_ACTION_TERMINAL_OUTCOMES = {
+    "action_pending",
+    "action_clarification",
+    "action_declined",
+    "action_expired",
+}
+_ACTION_EVENT_TYPES = {
+    "ACTION_PREPARED",
+    "ACTION_DECLINED",
+    "ACTION_EXPIRED",
 }
 _EVENT_TYPES = {
     "USER_INPUT",
@@ -50,6 +86,9 @@ _EVENT_TYPES = {
     "TOOL_LIFECYCLE",
     "TOOL_DENIED",
     "RETRIEVAL_DECISION",
+    "ACTION_PREPARED",
+    "ACTION_DECLINED",
+    "ACTION_EXPIRED",
     "AGENT_OUTCOME",
     "ASSISTANT_RESPONSE",
     "TURN_COMPLETED",
@@ -73,6 +112,10 @@ class EvaluationEvidenceNotFound(Exception):
 
 class EvaluationEvidenceInvalid(Exception):
     """Persisted evidence is incomplete, conflicting, or outside the safe schema."""
+
+
+class ActionEvaluationEvidenceInvalid(EvaluationEvidenceInvalid):
+    """Persisted action evidence has an inconsistent durable closure."""
 
 
 class EvidenceEventResponse(BaseModel):
@@ -160,15 +203,15 @@ class MysqlEvaluationEvidenceStore:
                     cursor.execute(
                         "SELECT turn_record.trace_id, turn_record.turn_id, "
                         "turn_record.session_id, turn_record.user_subject, "
-                        "turn_record.state, turn_record.outcome "
+                        "turn_record.state, turn_record.outcome, "
+                        "turn_record.conversation_id, conversation.conversation_id, "
+                        "conversation.session_id, conversation.user_subject, "
+                        "session_record.user_subject "
                         "FROM support_turn turn_record "
-                        "JOIN support_conversation conversation "
+                        "LEFT JOIN support_conversation conversation "
                         "ON conversation.conversation_id = turn_record.conversation_id "
-                        "AND conversation.session_id = turn_record.session_id "
-                        "AND conversation.user_subject = turn_record.user_subject "
                         "JOIN support_session session_record "
                         "ON session_record.session_id = turn_record.session_id "
-                        "AND session_record.user_subject = turn_record.user_subject "
                         "WHERE turn_record.trace_id = %s AND session_record.sandbox_id = %s "
                         "LIMIT 2",
                         (trace_id, sandbox_id),
@@ -177,15 +220,26 @@ class MysqlEvaluationEvidenceStore:
                     if len(turns) != 1:
                         raise EvaluationEvidenceNotFound
                     turn = turns[0]
-                    terminal_outcome = self._terminal_outcome(turn[4], turn[5])
-                    events = self._load_events(
-                        cursor,
-                        trace_id=trace_id,
-                        turn_id=str(turn[1]),
-                        session_id=str(turn[2]),
-                        subject=str(turn[3]),
-                        terminal_outcome=terminal_outcome,
-                    )
+                    action_truth_present = self._action_truth_present(cursor, str(turn[1]))
+                    terminal_outcome: TerminalOutcome | None = None
+                    try:
+                        terminal_outcome = self._terminal_outcome(turn[4], turn[5])
+                        if tuple(turn[7:10]) != (turn[6], turn[2], turn[3]) or turn[10] != turn[3]:
+                            raise EvaluationEvidenceInvalid
+                        events = self._load_events(
+                            cursor,
+                            trace_id=trace_id,
+                            turn_id=str(turn[1]),
+                            session_id=str(turn[2]),
+                            subject=str(turn[3]),
+                            sandbox_id=sandbox_id,
+                            conversation_id=str(turn[6]),
+                            terminal_outcome=terminal_outcome,
+                        )
+                    except EvaluationEvidenceInvalid as exception:
+                        if action_truth_present or terminal_outcome in _ACTION_TERMINAL_OUTCOMES:
+                            raise ActionEvaluationEvidenceInvalid from exception
+                        raise
                     retrieval = self._load_retrieval(
                         cursor,
                         trace_id=trace_id,
@@ -216,6 +270,23 @@ class MysqlEvaluationEvidenceStore:
         )
 
     @staticmethod
+    def _action_truth_present(cursor: pymysql.cursors.Cursor, turn_id: str) -> bool:
+        cursor.execute(
+            "SELECT event_type FROM support_event WHERE turn_id = %s ORDER BY sequence LIMIT %s",
+            (turn_id, MAX_EVIDENCE_EVENTS + 1),
+        )
+        event_rows = cursor.fetchall()
+        cursor.execute(
+            "SELECT pending_action_id FROM pending_action_reference "
+            "WHERE source_turn_id = %s OR resolution_turn_id = %s LIMIT 2",
+            (turn_id, turn_id),
+        )
+        reference_rows = cursor.fetchall()
+        return bool(reference_rows) or any(
+            row and row[0] in _ACTION_EVENT_TYPES for row in event_rows
+        )
+
+    @staticmethod
     def _terminal_outcome(state: object, outcome: object) -> TerminalOutcome:
         if state == "FAILED" and outcome is None:
             return "failed"
@@ -231,13 +302,16 @@ class MysqlEvaluationEvidenceStore:
         turn_id: str,
         session_id: str,
         subject: str,
+        sandbox_id: str,
+        conversation_id: str,
         terminal_outcome: TerminalOutcome,
     ) -> tuple[EvidenceEventResponse, ...]:
         cursor.execute(
-            "SELECT sequence, event_type, payload_json, created_at, turn_id, session_id, "
-            "user_subject FROM support_event WHERE trace_id = %s "
+            "SELECT event_id, trace_id, session_id, user_subject, sequence, event_type, "
+            "IF(OCTET_LENGTH(payload_json) <= 4096, payload_json, NULL), "
+            "created_at, turn_id FROM support_event WHERE turn_id = %s "
             "ORDER BY sequence LIMIT %s",
-            (trace_id, MAX_EVIDENCE_EVENTS + 1),
+            (turn_id, MAX_EVIDENCE_EVENTS + 1),
         )
         rows = cursor.fetchall()
         if len(rows) < 2 or len(rows) > MAX_EVIDENCE_EVENTS:
@@ -245,20 +319,21 @@ class MysqlEvaluationEvidenceStore:
         events: list[EvidenceEventResponse] = []
         for expected, row in enumerate(rows, start=1):
             if (
-                row[0] != expected
-                or row[4] != turn_id
-                or row[5] != session_id
-                or row[6] != subject
-                or row[1] not in _EVENT_TYPES
-                or not isinstance(row[3], datetime)
+                row[1] != trace_id
+                or row[2] != session_id
+                or row[3] != subject
+                or row[4] != expected
+                or row[5] not in _EVENT_TYPES
+                or not isinstance(row[7], datetime)
+                or row[8] != turn_id
             ):
                 raise EvaluationEvidenceInvalid
             events.append(
                 self._project_event(
                     expected,
-                    str(row[1]),
-                    row[2],
-                    self._utc_timestamp(row[3]),
+                    str(row[5]),
+                    row[6],
+                    self._utc_timestamp(row[7]),
                 )
             )
         if events[0].event_kind != "USER_INPUT" or events[0].outcome != "accepted":
@@ -269,6 +344,17 @@ class MysqlEvaluationEvidenceStore:
         if terminal_outcome != "failed" and events[-1].outcome != terminal_outcome:
             raise EvaluationEvidenceInvalid
         self._validate_lifecycle(events, terminal_outcome)
+        self._validate_action_truth(
+            cursor,
+            rows=rows,
+            trace_id=trace_id,
+            turn_id=turn_id,
+            session_id=session_id,
+            subject=subject,
+            sandbox_id=sandbox_id,
+            conversation_id=conversation_id,
+            terminal_outcome=terminal_outcome,
+        )
         return tuple(events)
 
     @staticmethod
@@ -368,6 +454,27 @@ class MysqlEvaluationEvidenceStore:
                 raise EvaluationEvidenceInvalid
             outcome = str(decision_outcome)
             reference = str(index_version)
+        elif event_type == "ACTION_PREPARED":
+            pending_action_id = payload.get("pendingActionId")
+            if (
+                not self._bounded_string(pending_action_id, 36)
+                or payload.get("actionType") != "REFUND_REQUEST"
+                or not self._bounded_string(payload.get("argumentCommitment"), 64)
+                or not self._bounded_string(payload.get("expiresAt"), 27)
+            ):
+                raise EvaluationEvidenceInvalid
+            outcome = "prepared"
+            reference = str(pending_action_id)
+        elif event_type in {"ACTION_DECLINED", "ACTION_EXPIRED"}:
+            pending_action_id = payload.get("pendingActionId")
+            expected = "declined" if event_type == "ACTION_DECLINED" else "expired"
+            if (
+                not self._bounded_string(pending_action_id, 36)
+                or payload.get("outcome") != expected
+            ):
+                raise EvaluationEvidenceInvalid
+            outcome = expected
+            reference = str(pending_action_id)
         elif event_type in {"AGENT_OUTCOME", "ASSISTANT_RESPONSE", "TURN_COMPLETED"}:
             value = payload.get("outcome")
             if value not in _TERMINAL_OUTCOMES:
@@ -388,6 +495,191 @@ class MysqlEvaluationEvidenceStore:
             attempt_limit=attempt_limit,
             occurred_at=occurred_at,
         )
+
+    def _validate_action_truth(
+        self,
+        cursor: pymysql.cursors.Cursor,
+        *,
+        rows: tuple[tuple[object, ...], ...],
+        trace_id: str,
+        turn_id: str,
+        session_id: str,
+        subject: str,
+        sandbox_id: str,
+        conversation_id: str,
+        terminal_outcome: TerminalOutcome,
+    ) -> None:
+        has_action_event = any(
+            row[5] in {"ACTION_PREPARED", "ACTION_DECLINED", "ACTION_EXPIRED"} for row in rows
+        )
+        cursor.execute(
+            "SELECT pending_action_id FROM pending_action_reference "
+            "WHERE source_turn_id = %s LIMIT 2",
+            (turn_id,),
+        )
+        source_references = cursor.fetchall()
+        cursor.execute(
+            "SELECT pending_action_id FROM pending_action_reference "
+            "WHERE resolution_turn_id = %s LIMIT 2",
+            (turn_id,),
+        )
+        resolution_references = cursor.fetchall()
+        if terminal_outcome not in _ACTION_TERMINAL_OUTCOMES:
+            if has_action_event or source_references or resolution_references:
+                raise EvaluationEvidenceInvalid
+            return
+        if terminal_outcome == "action_clarification":
+            if has_action_event or source_references or resolution_references:
+                raise EvaluationEvidenceInvalid
+            return
+        if terminal_outcome == "action_pending" and (
+            len(source_references) != 1 or resolution_references
+        ):
+            raise EvaluationEvidenceInvalid
+        if terminal_outcome in {"action_declined", "action_expired"} and (
+            source_references or len(resolution_references) != 1
+        ):
+            raise EvaluationEvidenceInvalid
+        event_rows = [tuple(row[:7]) for row in rows]
+        if terminal_outcome == "action_pending":
+            cursor.execute(
+                "SELECT pending_action_id, source_turn_id, source_trace_id, conversation_id, "
+                "session_id, user_subject, sandbox_id, action_type, argument_commitment, "
+                "order_id, amount_minor, currency, state, expires_at, resolved_at, "
+                "resolution_turn_id, resolution_trace_id "
+                "FROM pending_action_reference WHERE source_turn_id = %s LIMIT 2",
+                (turn_id,),
+            )
+            pending_rows = cursor.fetchall()
+            if len(pending_rows) != 1:
+                raise EvaluationEvidenceInvalid
+            pending, state = self._validated_pending_reference(
+                cursor,
+                pending_rows[0],
+                expected_turn_id=turn_id,
+                expected_trace_id=trace_id,
+                expected_conversation_id=conversation_id,
+                expected_session_id=session_id,
+                expected_subject=subject,
+                expected_sandbox_id=sandbox_id,
+            )
+            self._validate_pending_events(event_rows, pending, pending_rows[0][13])
+            if state != "PENDING":
+                self._validate_pending_resolution(cursor, pending=pending, state=state)
+            return
+        try:
+            action_payload = strict_json_object(str(rows[1][6]).encode("utf-8"))
+        except (ActionJsonError, IndexError, TypeError) as exception:
+            raise EvaluationEvidenceInvalid from exception
+        pending_action_id = action_payload.get("pendingActionId")
+        if not isinstance(pending_action_id, str):
+            raise EvaluationEvidenceInvalid
+        expected_state = "DECLINED" if terminal_outcome == "action_declined" else "EXPIRED"
+        try:
+            validate_resolved_action_events(
+                event_rows,
+                expected_trace_id=trace_id,
+                expected_session_id=session_id,
+                expected_user_subject=subject,
+                pending_action_id=pending_action_id,
+                outcome=terminal_outcome,  # type: ignore[arg-type]
+            )
+        except ActionEvidenceError as exception:
+            raise EvaluationEvidenceInvalid from exception
+        cursor.execute(
+            "SELECT pending_action_id, source_turn_id, source_trace_id, conversation_id, "
+            "session_id, user_subject, sandbox_id, action_type, argument_commitment, "
+            "order_id, amount_minor, currency, state, expires_at, resolved_at, "
+            "resolution_turn_id, resolution_trace_id "
+            "FROM pending_action_reference WHERE pending_action_id = %s LIMIT 2",
+            (pending_action_id,),
+        )
+        pending_rows = cursor.fetchall()
+        if len(pending_rows) != 1:
+            raise EvaluationEvidenceInvalid
+        pending, state = self._validated_pending_reference(
+            cursor,
+            pending_rows[0],
+            expected_session_id=session_id,
+            expected_subject=subject,
+            expected_sandbox_id=sandbox_id,
+        )
+        if state != expected_state or pending_rows[0][14] is None:
+            raise EvaluationEvidenceInvalid
+        if pending.resolution_turn_id != turn_id or pending.resolution_trace_id != trace_id:
+            raise EvaluationEvidenceInvalid
+        cursor.execute(ACTION_TURN_EVENTS_SQL, (pending.source_turn_id,))
+        self._validate_pending_events(cursor.fetchall(), pending, pending_rows[0][13])
+        self._validate_pending_resolution(cursor, pending=pending, state=state)
+
+    def _validated_pending_reference(
+        self,
+        cursor: pymysql.cursors.Cursor,
+        row: tuple[object, ...],
+        *,
+        expected_turn_id: str | None = None,
+        expected_trace_id: str | None = None,
+        expected_conversation_id: str | None = None,
+        expected_session_id: str,
+        expected_subject: str,
+        expected_sandbox_id: str,
+    ) -> tuple[PendingActionReference, str]:
+        cursor.execute(PENDING_ACTION_SOURCE_TURN_SQL, (row[1],))
+        try:
+            pending, state, _ = validate_pending_action_reference(
+                tuple(row),
+                cursor.fetchall(),
+                expected_turn_id=expected_turn_id,
+                expected_trace_id=expected_trace_id,
+                expected_conversation_id=expected_conversation_id,
+                expected_session_id=expected_session_id,
+                expected_user_subject=expected_subject,
+                expected_sandbox_id=expected_sandbox_id,
+            )
+        except ActionEvidenceError as exception:
+            raise EvaluationEvidenceInvalid from exception
+        return pending, state
+
+    @staticmethod
+    def _validate_pending_resolution(
+        cursor: pymysql.cursors.Cursor,
+        *,
+        pending: PendingActionReference,
+        state: str,
+    ) -> None:
+        cursor.execute(PENDING_ACTION_RESOLUTION_TURN_SQL, (pending.resolution_turn_id,))
+        turn_rows = cursor.fetchall()
+        cursor.execute(ACTION_TURN_EVENTS_SQL, (pending.resolution_turn_id,))
+        event_rows = cursor.fetchall()
+        try:
+            validate_pending_action_resolution(pending, state, turn_rows, event_rows)
+        except ActionEvidenceError as exception:
+            raise EvaluationEvidenceInvalid from exception
+
+    @staticmethod
+    def _validate_pending_events(
+        rows: tuple[tuple[object, ...], ...] | list[tuple[object, ...]],
+        pending: PendingActionReference,
+        persisted_expiry: object,
+    ) -> None:
+        if not isinstance(persisted_expiry, datetime):
+            raise EvaluationEvidenceInvalid
+        expiry = MysqlEvaluationEvidenceStore._utc_timestamp(persisted_expiry)
+        if expiry != pending.expires_at:
+            raise EvaluationEvidenceInvalid
+        try:
+            validate_pending_action_events(
+                rows,
+                expected_trace_id=pending.source_trace_id,
+                expected_session_id=pending.session_id,
+                expected_user_subject=pending.user_subject,
+                pending_action_id=pending.pending_action_id,
+                action_type=pending.action_type,
+                argument_commitment=pending.argument_commitment,
+                expires_at=expiry,
+            )
+        except ActionEvidenceError as exception:
+            raise EvaluationEvidenceInvalid from exception
 
     def _load_retrieval(
         self,
