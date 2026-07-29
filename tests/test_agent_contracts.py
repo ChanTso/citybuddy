@@ -256,6 +256,7 @@ def test_action_projection_schema_is_single_pending_atomic_and_least_privileged(
     source = (ROOT / "agent-service/src/citybuddy_agent/conversation.py").read_text(
         encoding="utf-8"
     )
+    mysql_source = source[source.index("class MysqlConversationStore:") :]
 
     assert "GENERATED ALWAYS AS" in migration
     assert "CASE WHEN state IN ('PENDING', 'CONFIRMING') THEN session_id ELSE NULL END" in migration
@@ -271,6 +272,44 @@ def test_action_projection_schema_is_single_pending_atomic_and_least_privileged(
     assert "GRANT SELECT, INSERT ON cs_db.action_receipt_projection TO 'agent_app'@'%';" in grants
     assert "UPDATE ON cs_db.action_receipt_projection" not in grants
     assert "DELETE ON cs_db.action_receipt_projection" not in grants
+    assert "GRANT SELECT, INSERT ON cs_db.support_event TO 'agent_app'@'%';" in grants
+    assert "UPDATE ON cs_db.support_event" not in grants
+    assert "DELETE ON cs_db.support_event" not in grants
+    assert (
+        "\"WHERE turn_id = %s AND event_type = 'ACTION_PREPARED' \"\n"
+        '            "LIMIT 2 FOR SHARE"'
+    ) in source
+    preparation_lock = mysql_source[
+        mysql_source.index("    def _lock_pending_preparation_anchor(") : mysql_source.index(
+            "    def _lock_matching_pending(",
+            mysql_source.index("    def _lock_pending_preparation_anchor("),
+        )
+    ]
+    assert "WHERE turn_id = %s AND event_type = 'ACTION_PREPARED'" in preparation_lock
+    assert "LIMIT 2 FOR SHARE" in preparation_lock
+    assert "pending.source_turn_id" in preparation_lock
+    assert "FOR SHARE" in preparation_lock
+    assert "FOR UPDATE" not in preparation_lock
+    confirmation_claim = mysql_source[
+        mysql_source.index("    def begin_or_resume_confirmation_turn(") : mysql_source.index(
+            "    def replay_turn(", mysql_source.index("    def begin_or_resume_confirmation_turn(")
+        )
+    ]
+    assert confirmation_claim.index(
+        "FROM pending_action_reference WHERE pending_action_id = %s FOR UPDATE"
+    ) < confirmation_claim.index("self._lock_pending_preparation_anchor(")
+    for method_name, next_method, mutable_turn_lock in (
+        ("complete_action_decline", "complete_action_expired", "_lock_executable_turn("),
+        ("complete_action_expired", "complete_action_receipt", "_lock_executable_turn("),
+        ("complete_action_receipt", "fail_turn", "FROM support_turn WHERE turn_id = %s FOR UPDATE"),
+    ):
+        method = mysql_source[
+            mysql_source.index(f"    def {method_name}(") : mysql_source.index(
+                f"    def {next_method}(",
+                mysql_source.index(f"    def {method_name}("),
+            )
+        ]
+        assert method.index(mutable_turn_lock) < method.index("_lock_matching_pending(")
     receipt_method_start = source.rindex("    def complete_action_receipt(")
     receipt_method_end = source.index("    def fail_turn(", receipt_method_start)
     receipt_method = source[receipt_method_start:receipt_method_end]

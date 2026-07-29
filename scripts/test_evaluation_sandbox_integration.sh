@@ -73,6 +73,23 @@ assert_mysql_fails() {
   echo "Verified MySQL rejection: $label"
 }
 
+assert_mysql_error_code() {
+  local expected_code="$1"
+  local expected_state="$2"
+  local label="$3"
+  shift 3
+  if "$@" >"$tmp_dir/mysql-specific-rejection.log" 2>&1; then
+    echo "Expected MySQL $expected_code rejection succeeded: $label" >&2
+    exit 1
+  fi
+  if ! grep -Eq "ERROR $expected_code \\($expected_state\\)" \
+    "$tmp_dir/mysql-specific-rejection.log"; then
+    echo "Unexpected MySQL rejection class for $label." >&2
+    exit 1
+  fi
+  echo "Verified MySQL $expected_code/$expected_state rejection: $label"
+}
+
 assert_mysql_integrity_fails() {
   local label="$1"
   shift
@@ -284,6 +301,47 @@ assert_agent_status_reason() {
     exit 1
   fi
   echo "Verified HTTP $expected with reason $reason: $label"
+}
+
+assert_agent_status_reason_phase() {
+  local expected="$1"
+  local reason="$2"
+  local phase="$3"
+  local public_detail="$4"
+  local label="$5"
+  shift 5
+  local status
+  local agent_log_start
+  local request_logs
+  local attribution_count
+  agent_log_start="$(wc -l <"$tmp_dir/agent.log")"
+  status="$(request_status "$tmp_dir/http-response.json" "$@")"
+  request_logs="$(
+    tail -n "+$((agent_log_start + 1))" "$tmp_dir/agent.log" \
+      | grep -E 'agent_request_(rejected|cleanup_failed)' || true
+  )"
+  agent_last_request_logs="$request_logs"
+  if [[ "$status" != "$expected" ]]; then
+    echo "Unexpected HTTP status for $label: $status" >&2
+    cat "$tmp_dir/http-response.json" >&2
+    printf '%s\n' "$request_logs" >&2
+    exit 1
+  fi
+  assert_equal "$public_detail" \
+    "$(uv run python scripts/read_json_field.py "$tmp_dir/http-response.json" detail)" \
+    "$label exposes only its fixed public response"
+  attribution_count="$(
+    printf '%s\n' "$request_logs" \
+      | grep -c "reason_code=$reason phase=$phase" || true
+  )"
+  assert_equal 1 "$attribution_count" \
+    "$label has one exact request-local reason and phase"
+  if grep -Fq "$reason" "$tmp_dir/http-response.json" \
+    || grep -Fq "$phase" "$tmp_dir/http-response.json"; then
+    echo "$label leaked its server-only attribution." >&2
+    exit 1
+  fi
+  echo "Verified HTTP $expected with reason $reason and phase $phase: $label"
 }
 
 assert_agent_status_without_reason() {
@@ -1004,6 +1062,30 @@ assert_mysql_fails "agent receipt projection is immutable" \
 assert_mysql_fails "agent receipt projection cannot be deleted" \
   mysql_query agent_app "$agent_app_password" cs_db \
   "DELETE FROM action_receipt_projection WHERE receipt_id = 'none'"
+assert_equal 'INSERT,SELECT' \
+  "$(mysql_query root "$root_password" '' \
+    "SELECT GROUP_CONCAT(privilege_type ORDER BY privilege_type) FROM information_schema.table_privileges WHERE grantee = \"'agent_app'@'%'\" AND table_schema = 'cs_db' AND table_name = 'support_event'")" \
+  "agent runtime has only append/read table privileges on immutable support events"
+assert_equal '' \
+  "$(mysql_query root "$root_password" '' \
+    "SELECT COALESCE(GROUP_CONCAT(CONCAT(column_name, ':', privilege_type) ORDER BY column_name, privilege_type), '') FROM information_schema.column_privileges WHERE grantee = \"'agent_app'@'%'\" AND table_schema = 'cs_db' AND table_name = 'support_event'")" \
+  "agent runtime has no hidden support-event column privilege"
+mysql_query agent_app "$agent_app_password" cs_db \
+  "SELECT COUNT(*) FROM support_event"
+mysql_query agent_app "$agent_app_password" cs_db \
+  "START TRANSACTION; SELECT payload_json FROM support_event WHERE turn_id = 'none' AND event_type = 'ACTION_PREPARED' LIMIT 2 FOR SHARE; ROLLBACK"
+assert_mysql_error_code 1142 42000 \
+  "agent runtime cannot take an exclusive lock on immutable support events" \
+  mysql_query agent_app "$agent_app_password" cs_db \
+  "START TRANSACTION; SELECT payload_json FROM support_event WHERE turn_id = 'none' AND event_type = 'ACTION_PREPARED' LIMIT 2 FOR UPDATE; ROLLBACK"
+assert_mysql_error_code 1142 42000 \
+  "agent runtime cannot update immutable support events" \
+  mysql_query agent_app "$agent_app_password" cs_db \
+  "UPDATE support_event SET payload_json = payload_json WHERE event_id = 'none'"
+assert_mysql_error_code 1142 42000 \
+  "agent runtime cannot delete immutable support events" \
+  mysql_query agent_app "$agent_app_password" cs_db \
+  "DELETE FROM support_event WHERE event_id = 'none'"
 if grep -Fq 'commerce_db' <<<"$agent_grants"; then
   echo "Agent runtime gained forbidden commerce_db access." >&2
   exit 1
@@ -3696,14 +3778,50 @@ prepare_agent_action_case() {
 prepare_agent_action_case cb121-decline
 agent_decline_session="$prepared_case_session"
 agent_decline_pending_id="$prepared_case_pending_id"
-assert_status 200 "an exact decline resolves the local reference without commerce execution" \
+MYSQL_HOST=127.0.0.1 \
+MYSQL_PORT="$MYSQL_PORT" \
+MYSQL_ROOT_PASSWORD="$root_password" \
+MYSQL_AGENT_APP_PASSWORD="$agent_app_password" \
+PENDING_ACTION_ID="$agent_decline_pending_id" \
+  uv run python scripts/check_agent_action_event_lock.py
+agent_decline_log_start="$(wc -l <"$tmp_dir/agent.log")"
+agent_decline_status="$(request_status "$tmp_dir/http-response.json" \
   --request POST "http://127.0.0.1:$agent_port/api/chat" \
   --header "Authorization: Bearer $payment_token" \
   --header 'X-Eval-Sandbox-Id: sandbox-payment' \
   --header "X-Session-Id: $agent_decline_session" \
   --header 'Idempotency-Key: cb121-decline-resolve' \
   --header 'Content-Type: application/json' \
-  --data '{"message":"decline"}'
+  --data '{"message":"decline"}')"
+agent_decline_request_logs="$(
+  tail -n "+$((agent_decline_log_start + 1))" "$tmp_dir/agent.log" \
+    | grep -E 'agent_request_(rejected|cleanup_failed)' || true
+)"
+if [[ "$agent_decline_status" != 200 ]]; then
+  echo "Unexpected HTTP status for exact decline: $agent_decline_status" >&2
+  cat "$tmp_dir/http-response.json" >&2
+  printf '%s\n' "$agent_decline_request_logs" >&2
+  mysql_query agent_app "$agent_app_password" cs_db \
+    "SELECT p.state AS pending_state, t.state AS turn_state, t.outcome, (SELECT COUNT(*) FROM action_receipt_projection WHERE pending_action_id = p.pending_action_id) AS local_receipts, (SELECT COUNT(*) FROM support_event WHERE session_id = p.session_id AND event_type IN ('ACTION_DECLINED', 'ACTION_RECEIPT')) AS action_events FROM pending_action_reference p LEFT JOIN support_turn t ON t.session_id = p.session_id AND t.correlation_key = 'cb121-decline-resolve' WHERE p.pending_action_id = '$agent_decline_pending_id'" >&2
+  mysql_query commerce_app "$commerce_app_password" commerce_db \
+    "SELECT (SELECT COUNT(*) FROM action_receipt WHERE pending_action_id = '$agent_decline_pending_id') AS receipts, (SELECT COUNT(*) FROM mock_refund WHERE request_idempotency_key = CONCAT('action:', '$agent_decline_pending_id')) AS refunds, (SELECT COUNT(*) FROM commerce_outbox WHERE aggregate_type = 'REFUND' AND aggregate_id IN (SELECT refund_id FROM mock_refund WHERE request_idempotency_key = CONCAT('action:', '$agent_decline_pending_id'))) AS outbox" >&2
+  exit 1
+fi
+if printf '%s\n' "$agent_decline_request_logs" \
+  | grep -Eq 'reason_code=.*(UNAVAILABLE|INDETERMINATE|TURN_PREVIOUSLY_FAILED)'; then
+  echo "Normal exact decline emitted an unavailable attribution." >&2
+  printf '%s\n' "$agent_decline_request_logs" >&2
+  exit 1
+fi
+assert_equal 'DECLINED:1:1:0:0' \
+  "$(mysql_query agent_app "$agent_app_password" cs_db \
+    "SELECT CONCAT(p.state, ':', (SELECT COUNT(*) FROM support_event WHERE session_id = p.session_id AND event_type = 'ACTION_DECLINED'), ':', (SELECT COUNT(*) FROM support_turn WHERE session_id = p.session_id AND correlation_key = 'cb121-decline-resolve' AND state = 'COMPLETED' AND outcome = 'action_declined'), ':', (SELECT COUNT(*) FROM action_receipt_projection WHERE pending_action_id = p.pending_action_id), ':', (SELECT COUNT(*) FROM support_event WHERE session_id = p.session_id AND event_type = 'ACTION_RECEIPT')) FROM pending_action_reference p WHERE p.pending_action_id = '$agent_decline_pending_id'")" \
+  "exact decline atomically commits one decline event and terminal outcome without a receipt"
+assert_equal '0:0:0' \
+  "$(mysql_query commerce_app "$commerce_app_password" commerce_db \
+    "SELECT CONCAT((SELECT COUNT(*) FROM action_receipt WHERE pending_action_id = '$agent_decline_pending_id'), ':', (SELECT COUNT(*) FROM mock_refund WHERE request_idempotency_key = CONCAT('action:', '$agent_decline_pending_id')), ':', (SELECT COUNT(*) FROM commerce_outbox WHERE aggregate_type = 'REFUND' AND aggregate_id IN (SELECT refund_id FROM mock_refund WHERE request_idempotency_key = CONCAT('action:', '$agent_decline_pending_id'))))")" \
+  "exact decline performs no Commerce receipt, refund, or Outbox mutation"
+echo "Verified HTTP 200: an exact decline resolves the local reference without commerce execution"
 agent_decline_trace="$(mysql_query agent_app "$agent_app_password" cs_db \
   "SELECT trace_id FROM support_turn WHERE session_id = '$agent_decline_session' AND correlation_key = 'cb121-decline-resolve'")"
 assert_status 200 "decline evaluation is anchored to the resolved PendingAction" \
@@ -3748,6 +3866,109 @@ assert_equal 0 \
   "$(mysql_query commerce_app "$commerce_app_password" commerce_db \
     "SELECT COUNT(*) FROM action_receipt WHERE pending_action_id = '$agent_decline_pending_id'")" \
   "decline integrity rejection creates no authoritative receipt"
+
+prepare_agent_action_case cb121-decline-liveness-unavailable
+agent_decline_liveness_session="$prepared_case_session"
+agent_decline_liveness_pending_id="$prepared_case_pending_id"
+stop_process commerce_pid "$commerce_pid"
+assert_agent_status_reason_phase 503 ACTION_SANDBOX_LIVENESS_UNAVAILABLE SANDBOX_LIVENESS \
+  "Service unavailable" \
+  "exact decline attributes a real sandbox-liveness dependency outage" \
+  --request POST "http://127.0.0.1:$agent_port/api/chat" \
+  --header "Authorization: Bearer $payment_token" \
+  --header 'X-Eval-Sandbox-Id: sandbox-payment' \
+  --header "X-Session-Id: $agent_decline_liveness_session" \
+  --header 'Idempotency-Key: cb121-decline-liveness-resolve' \
+  --header 'Content-Type: application/json' \
+  --data '{"message":"decline"}'
+assert_equal 'PENDING:0:0:0:0' \
+  "$(mysql_query agent_app "$agent_app_password" cs_db \
+    "SELECT CONCAT(p.state, ':', (SELECT COUNT(*) FROM support_turn WHERE session_id = p.session_id AND correlation_key = 'cb121-decline-liveness-resolve'), ':', (SELECT COUNT(*) FROM support_event WHERE session_id = p.session_id AND event_type = 'ACTION_DECLINED'), ':', (SELECT COUNT(*) FROM action_receipt_projection WHERE pending_action_id = p.pending_action_id), ':', (SELECT COUNT(*) FROM support_event WHERE session_id = p.session_id AND event_type = 'ACTION_RECEIPT')) FROM pending_action_reference p WHERE p.pending_action_id = '$agent_decline_liveness_pending_id'")" \
+  "liveness outage leaves no decline, receipt, event, or turn side effect"
+assert_equal '0:0:0' \
+  "$(mysql_query commerce_app "$commerce_app_password" commerce_db \
+    "SELECT CONCAT((SELECT COUNT(*) FROM action_receipt WHERE pending_action_id = '$agent_decline_liveness_pending_id'), ':', (SELECT COUNT(*) FROM mock_refund WHERE request_idempotency_key = CONCAT('action:', '$agent_decline_liveness_pending_id')), ':', (SELECT COUNT(*) FROM commerce_outbox WHERE aggregate_type = 'REFUND' AND aggregate_id IN (SELECT refund_id FROM mock_refund WHERE request_idempotency_key = CONCAT('action:', '$agent_decline_liveness_pending_id'))))")" \
+  "liveness outage performs no Commerce mutation"
+start_commerce evaluation "http://127.0.0.1:$auth_port"
+stop_process agent_pid "$agent_pid"
+start_agent true
+assert_status 200 "the same decline intent succeeds after liveness dependency recovery" \
+  --request POST "http://127.0.0.1:$agent_port/api/chat" \
+  --header "Authorization: Bearer $payment_token" \
+  --header 'X-Eval-Sandbox-Id: sandbox-payment' \
+  --header "X-Session-Id: $agent_decline_liveness_session" \
+  --header 'Idempotency-Key: cb121-decline-liveness-resolve' \
+  --header 'Content-Type: application/json' \
+  --data '{"message":"decline"}'
+assert_equal 'DECLINED:1:1:0' \
+  "$(mysql_query agent_app "$agent_app_password" cs_db \
+    "SELECT CONCAT(p.state, ':', (SELECT COUNT(*) FROM support_event WHERE session_id = p.session_id AND event_type = 'ACTION_DECLINED'), ':', (SELECT COUNT(*) FROM support_turn WHERE session_id = p.session_id AND correlation_key = 'cb121-decline-liveness-resolve' AND outcome = 'action_declined'), ':', (SELECT COUNT(*) FROM action_receipt_projection WHERE pending_action_id = p.pending_action_id)) FROM pending_action_reference p WHERE p.pending_action_id = '$agent_decline_liveness_pending_id'")" \
+  "decline converges exactly once after liveness recovery"
+
+prepare_agent_action_case cb121-decline-persistence-unavailable
+agent_decline_persistence_session="$prepared_case_session"
+agent_decline_persistence_pending_id="$prepared_case_pending_id"
+agent_pending_update_privileges_before="$(
+  mysql_query root "$root_password" '' \
+    "SELECT GROUP_CONCAT(CONCAT(column_name, ':', privilege_type) ORDER BY column_name, privilege_type) FROM information_schema.column_privileges WHERE grantee = \"'agent_app'@'%'\" AND table_schema = 'cs_db' AND table_name = 'pending_action_reference'"
+)"
+mysql_query root "$root_password" cs_db \
+  "REVOKE UPDATE (state) ON cs_db.pending_action_reference FROM 'agent_app'@'%'"
+assert_agent_status_reason_phase 503 ACTION_DECLINE_PERSISTENCE_UNAVAILABLE \
+  ACTION_DECLINE_COMMIT "Service unavailable" \
+  "exact decline attributes a real local persistence rejection" \
+  --request POST "http://127.0.0.1:$agent_port/api/chat" \
+  --header "Authorization: Bearer $payment_token" \
+  --header 'X-Eval-Sandbox-Id: sandbox-payment' \
+  --header "X-Session-Id: $agent_decline_persistence_session" \
+  --header 'Idempotency-Key: cb121-decline-persistence-resolve' \
+  --header 'Content-Type: application/json' \
+  --data '{"message":"decline"}'
+if ! printf '%s\n' "$agent_last_request_logs" | grep -Eq 'mysql_vendor_code=[0-9]+'; then
+  echo "Decline persistence witness did not record a safe MySQL vendor code." >&2
+  printf '%s\n' "$agent_last_request_logs" >&2
+  exit 1
+fi
+assert_equal 'PENDING:0:0:0' \
+  "$(mysql_query agent_app "$agent_app_password" cs_db \
+    "SELECT CONCAT(p.state, ':', (SELECT COUNT(*) FROM support_event WHERE session_id = p.session_id AND event_type = 'ACTION_DECLINED'), ':', (SELECT COUNT(*) FROM action_receipt_projection WHERE pending_action_id = p.pending_action_id), ':', (SELECT COUNT(*) FROM support_event WHERE session_id = p.session_id AND event_type = 'ACTION_RECEIPT')) FROM pending_action_reference p WHERE p.pending_action_id = '$agent_decline_persistence_pending_id'")" \
+  "decline persistence rejection rolls back PendingAction and all local action truth"
+assert_equal '0:0:0' \
+  "$(mysql_query commerce_app "$commerce_app_password" commerce_db \
+    "SELECT CONCAT((SELECT COUNT(*) FROM action_receipt WHERE pending_action_id = '$agent_decline_persistence_pending_id'), ':', (SELECT COUNT(*) FROM mock_refund WHERE request_idempotency_key = CONCAT('action:', '$agent_decline_persistence_pending_id')), ':', (SELECT COUNT(*) FROM commerce_outbox WHERE aggregate_type = 'REFUND' AND aggregate_id IN (SELECT refund_id FROM mock_refund WHERE request_idempotency_key = CONCAT('action:', '$agent_decline_persistence_pending_id'))))")" \
+  "decline persistence rejection performs no Commerce mutation"
+mysql_query root "$root_password" cs_db \
+  "GRANT UPDATE (state) ON cs_db.pending_action_reference TO 'agent_app'@'%'"
+assert_equal "$agent_pending_update_privileges_before" \
+  "$(mysql_query root "$root_password" '' \
+    "SELECT GROUP_CONCAT(CONCAT(column_name, ':', privilege_type) ORDER BY column_name, privilege_type) FROM information_schema.column_privileges WHERE grantee = \"'agent_app'@'%'\" AND table_schema = 'cs_db' AND table_name = 'pending_action_reference'")" \
+  "decline persistence fixture restores the exact pre-revocation column privilege set"
+prepare_agent_action_case cb121-decline-persistence-restored
+agent_decline_recovery_session="$prepared_case_session"
+agent_decline_recovery_pending_id="$prepared_case_pending_id"
+agent_decline_recovery_log_start="$(wc -l <"$tmp_dir/agent.log")"
+agent_decline_recovery_status="$(request_status "$tmp_dir/http-response.json" \
+  --request POST "http://127.0.0.1:$agent_port/api/chat" \
+  --header "Authorization: Bearer $payment_token" \
+  --header 'X-Eval-Sandbox-Id: sandbox-payment' \
+  --header "X-Session-Id: $agent_decline_recovery_session" \
+  --header 'Idempotency-Key: cb121-decline-persistence-restored-resolve' \
+  --header 'Content-Type: application/json' \
+  --data '{"message":"decline"}')"
+agent_decline_recovery_logs="$(
+  tail -n "+$((agent_decline_recovery_log_start + 1))" "$tmp_dir/agent.log" \
+    | grep -E 'agent_request_(rejected|cleanup_failed)' || true
+)"
+if [[ "$agent_decline_recovery_status" != 200 ]]; then
+  echo "Restored decline persistence did not recover the same request intent: $agent_decline_recovery_status" >&2
+  cat "$tmp_dir/http-response.json" >&2
+  printf '%s\n' "$agent_decline_recovery_logs" >&2
+  exit 1
+fi
+assert_equal 'DECLINED:1:1:0' \
+  "$(mysql_query agent_app "$agent_app_password" cs_db \
+    "SELECT CONCAT(p.state, ':', (SELECT COUNT(*) FROM support_event WHERE session_id = p.session_id AND event_type = 'ACTION_DECLINED'), ':', (SELECT COUNT(*) FROM support_turn WHERE session_id = p.session_id AND correlation_key = 'cb121-decline-persistence-restored-resolve' AND outcome = 'action_declined'), ':', (SELECT COUNT(*) FROM action_receipt_projection WHERE pending_action_id = p.pending_action_id)) FROM pending_action_reference p WHERE p.pending_action_id = '$agent_decline_recovery_pending_id'")" \
+  "restored decline persistence supports a fresh normal decline with exact truth"
 
 stop_process agent_pid "$agent_pid"
 stop_process commerce_pid "$commerce_pid"
@@ -4024,9 +4245,8 @@ assert_agent_confirmation_recoverable() {
 
 confirm_agent_action_503() {
   local label="$1"
-  assert_agent_status_reason 503 agent_request_rejected \
-    ACTION_CONFIRMATION_LOCAL_PERSISTENCE_UNAVAILABLE \
-    "Action confirmation indeterminate" "$label" \
+  assert_agent_status_reason_phase 503 ACTION_RECEIPT_PERSISTENCE_UNAVAILABLE \
+    ACTION_RECEIPT_COMMIT "Action confirmation indeterminate" "$label" \
     --request POST "http://127.0.0.1:$agent_port/api/chat" \
     --header "Authorization: Bearer $payment_token" \
     --header 'X-Eval-Sandbox-Id: sandbox-payment' \
@@ -4308,6 +4528,114 @@ stop_process agent_pid "$agent_pid"
 start_agent true
 assert_agent_confirmation_arbitration "restored commerce boundary"
 recover_agent_action "commerce outage"
+
+# The first non-locking snapshot cannot authorize a later claim. Hold a corrupted expiry
+# uncommitted while the request takes that snapshot, then prove the locking claim read observes
+# the committed damage and fails before creating a confirmation turn or calling Commerce.
+prepare_agent_action_case cb121-expiry-before-claim action-prepare-small
+agent_action_session="$prepared_case_session"
+agent_pending_id="$prepared_case_pending_id"
+agent_confirmation_key=cb121-expiry-before-claim-confirm
+agent_phase_original_expiry="$(mysql_query agent_app "$agent_app_password" cs_db \
+  "SELECT DATE_FORMAT(expires_at, '%Y-%m-%d %H:%i:%s.%f') FROM pending_action_reference WHERE pending_action_id = '$agent_pending_id'")"
+mysql_query root "$root_password" cs_db \
+  "START TRANSACTION; UPDATE pending_action_reference SET expires_at = DATE_ADD(expires_at, INTERVAL 1 DAY) WHERE pending_action_id = '$agent_pending_id'; DO SLEEP(15); COMMIT" \
+  >"$tmp_dir/cb121-expiry-claim-corrupter.log" 2>&1 &
+agent_claim_corrupter_pid=$!
+agent_claim_corrupter_ready=false
+for _ in {1..100}; do
+  if [[ "$(mysql_query root "$root_password" cs_db \
+    "SELECT COUNT(*) FROM information_schema.innodb_trx WHERE trx_rows_modified = 1 AND trx_query = 'DO SLEEP(15)'")" -ge 1 ]]; then
+    agent_claim_corrupter_ready=true
+    break
+  fi
+  sleep 0.1
+done
+assert_equal true "$agent_claim_corrupter_ready" \
+  "the expiry corrupter holds the PendingAction row before confirmation starts"
+agent_claim_log_start="$(wc -l <"$tmp_dir/agent.log")"
+request_status "$tmp_dir/cb121-expiry-before-claim.response" \
+  --request POST "http://127.0.0.1:$agent_port/api/chat" \
+  --header "Authorization: Bearer $payment_token" \
+  --header 'X-Eval-Sandbox-Id: sandbox-payment' \
+  --header "X-Session-Id: $agent_action_session" \
+  --header "Idempotency-Key: $agent_confirmation_key" \
+  --header 'Content-Type: application/json' \
+  --data '{"message":"confirm refund"}' \
+  >"$tmp_dir/cb121-expiry-before-claim.status" &
+agent_claim_request_pid=$!
+agent_claim_wait_seen=false
+for _ in {1..100}; do
+  if [[ "$(mysql_query root "$root_password" cs_db \
+    "SELECT COUNT(*) FROM performance_schema.data_lock_waits waits JOIN performance_schema.data_locks requested ON requested.engine_lock_id = waits.requesting_engine_lock_id WHERE requested.object_schema = 'cs_db' AND requested.object_name = 'pending_action_reference'")" -ge 1 ]]; then
+    agent_claim_wait_seen=true
+    break
+  fi
+  if ! kill -0 "$agent_claim_request_pid" 2>/dev/null; then
+    break
+  fi
+  sleep 0.1
+done
+assert_equal true "$agent_claim_wait_seen" \
+  "confirmation reaches the locking PendingAction read after its stale snapshot"
+wait "$agent_claim_corrupter_pid"
+wait "$agent_claim_request_pid"
+assert_equal 409 "$(cat "$tmp_dir/cb121-expiry-before-claim.status")" \
+  "claim-phase expiry corruption is rejected after the locking re-read"
+assert_equal "Conversation evidence conflict" \
+  "$(uv run python scripts/read_json_field.py \
+    "$tmp_dir/cb121-expiry-before-claim.response" detail)" \
+  "claim-phase expiry corruption exposes only the fixed public response"
+agent_claim_request_logs="$(
+  tail -n "+$((agent_claim_log_start + 1))" "$tmp_dir/agent.log" \
+    | grep agent_request_rejected || true
+)"
+assert_equal 1 \
+  "$(printf '%s\n' "$agent_claim_request_logs" \
+    | grep -c 'reason_code=CONVERSATION_ACTION_DURABLE_TRUTH_INCONSISTENT' || true)" \
+  "claim-phase expiry corruption has exact request-local attribution"
+assert_equal 'PENDING:0:0:0:0' \
+  "$(mysql_query agent_app "$agent_app_password" cs_db \
+    "SELECT CONCAT(p.state, ':', p.confirmation_turn_id IS NOT NULL, ':', (SELECT COUNT(*) FROM support_turn WHERE session_id = p.session_id AND correlation_key = '$agent_confirmation_key'), ':', (SELECT COUNT(*) FROM action_receipt_projection WHERE pending_action_id = p.pending_action_id), ':', (SELECT COUNT(*) FROM support_event WHERE session_id = p.session_id AND event_type = 'ACTION_RECEIPT')) FROM pending_action_reference p WHERE p.pending_action_id = '$agent_pending_id'")" \
+  "claim-phase corruption rolls back the confirmation turn and all local receipt truth"
+assert_equal 0 \
+  "$(mysql_query commerce_app "$commerce_app_password" commerce_db \
+    "SELECT COUNT(*) FROM action_receipt WHERE pending_action_id = '$agent_pending_id'")" \
+  "claim-phase corruption makes no Commerce call"
+mysql_query root "$root_password" cs_db \
+  "UPDATE pending_action_reference SET expires_at = '$agent_phase_original_expiry' WHERE pending_action_id = '$agent_pending_id'"
+recover_agent_action "claim-phase expiry restoration"
+
+# Corrupt the expiry inside the durable claim transition itself. Commerce may commit, but the
+# terminal local transaction must lock and revalidate the same preparation anchor before it can
+# publish a projection, receipt event, terminal turn, or public success.
+prepare_agent_action_case cb121-expiry-before-receipt action-prepare-small
+agent_action_session="$prepared_case_session"
+agent_pending_id="$prepared_case_pending_id"
+agent_confirmation_key=cb121-expiry-before-receipt-confirm
+agent_phase_original_expiry="$(mysql_query agent_app "$agent_app_password" cs_db \
+  "SELECT DATE_FORMAT(expires_at, '%Y-%m-%d %H:%i:%s.%f') FROM pending_action_reference WHERE pending_action_id = '$agent_pending_id'")"
+mysql_query root "$root_password" cs_db \
+  "CREATE TRIGGER cb121_corrupt_expiry_during_claim BEFORE UPDATE ON pending_action_reference FOR EACH ROW SET NEW.expires_at = IF(OLD.state = 'PENDING' AND NEW.state = 'CONFIRMING', DATE_ADD(OLD.expires_at, INTERVAL 1 DAY), NEW.expires_at)"
+assert_agent_status_reason 409 agent_request_rejected \
+  CONVERSATION_ACTION_DURABLE_TRUTH_INCONSISTENT "Conversation evidence conflict" \
+  "receipt commit revalidates expiry corrupted after the claim read" \
+  --request POST "http://127.0.0.1:$agent_port/api/chat" \
+  --header "Authorization: Bearer $payment_token" \
+  --header 'X-Eval-Sandbox-Id: sandbox-payment' \
+  --header "X-Session-Id: $agent_action_session" \
+  --header "Idempotency-Key: $agent_confirmation_key" \
+  --header 'Content-Type: application/json' \
+  --data '{"message":"confirm refund"}'
+mysql_query root "$root_password" cs_db "DROP TRIGGER cb121_corrupt_expiry_during_claim"
+assert_agent_confirmation_checkpoint "post-claim expiry corruption"
+assert_equal '1:1:1' \
+  "$(mysql_query commerce_app "$commerce_app_password" commerce_db \
+    "SELECT CONCAT((SELECT COUNT(*) FROM action_receipt WHERE pending_action_id = '$agent_pending_id'), ':', (SELECT COUNT(*) FROM mock_refund WHERE request_idempotency_key = CONCAT('action:', '$agent_pending_id')), ':', (SELECT COUNT(*) FROM commerce_outbox WHERE aggregate_type = 'REFUND' AND aggregate_id IN (SELECT refund_id FROM mock_refund WHERE request_idempotency_key = CONCAT('action:', '$agent_pending_id'))))")" \
+  "post-claim corruption cannot erase or duplicate the already committed Commerce result"
+mysql_query root "$root_password" cs_db \
+  "UPDATE pending_action_reference SET expires_at = '$agent_phase_original_expiry' WHERE pending_action_id = '$agent_pending_id'"
+recover_agent_action "post-claim expiry restoration"
 
 action_session='action-payment-session'
 action_trace='action-payment-trace'

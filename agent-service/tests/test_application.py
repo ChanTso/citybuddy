@@ -3,6 +3,7 @@ import json
 import time
 from collections.abc import Mapping
 from contextlib import contextmanager
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from typing import Any, Literal
 
@@ -26,12 +27,18 @@ from citybuddy_agent.agent_control import (
     ToolBoundaryFailure,
 )
 from citybuddy_agent.application import (
+    ACTION_503_PRODUCER_INVENTORY,
     ActionConfirmationBoundary,
+    AgentRequestPhase,
     AgentSettings,
+    AgentUnavailableReason,
     DirectJwtValidator,
     DirectPrincipal,
     HttpActionConfirmationBoundary,
+    HttpSandboxLiveness,
     OboClient,
+    SandboxLivenessRejected,
+    SandboxLivenessUnavailable,
     SessionStore,
     create_app,
 )
@@ -45,6 +52,7 @@ from citybuddy_agent.conversation import (
     ConversationStore,
     CorrelationConflictError,
     MysqlConversationStore,
+    TurnFailedError,
     TurnStart,
 )
 from citybuddy_agent.evaluation import (
@@ -516,12 +524,15 @@ class MemoryFeedbackStore(FeedbackStore):
 class MemoryLiveness:
     def __init__(self) -> None:
         self.active = True
+        self.unavailable = False
         self.calls: list[tuple[str, str]] = []
 
     def require_active(self, direct_token: str, sandbox_id: str) -> None:
         self.calls.append((direct_token, sandbox_id))
+        if self.unavailable:
+            raise SandboxLivenessUnavailable
         if not self.active:
-            raise HTTPException(status_code=403, detail="Forbidden")
+            raise SandboxLivenessRejected
 
 
 class MemoryEvidenceStore(EvaluationEvidenceStore):
@@ -617,10 +628,15 @@ class ScriptedCursor:
     def __init__(self, results: list[list[tuple[object, ...]]]) -> None:
         self.results = results
         self.current: list[tuple[object, ...]] = []
+        self.queries: list[str] = []
 
     def execute(self, query: str, arguments: object) -> None:
-        del query, arguments
+        del arguments
+        self.queries.append(query)
         self.current = self.results.pop(0)
+
+    def fetchone(self) -> tuple[object, ...] | None:
+        return self.current[0] if self.current else None
 
     def fetchall(self) -> list[tuple[object, ...]]:
         return self.current
@@ -943,6 +959,98 @@ def test_pending_action_expiry_requires_exact_prepared_event_anchor() -> None:
             subject="user-1",
             sandbox_id="sandbox-1",
         )
+
+
+def test_pending_action_claim_and_completion_lock_the_exact_expiry_anchor() -> None:
+    pending = PendingActionReference(
+        pending_action_id="00000000-0000-0000-0000-000000000121",
+        source_turn_id="00000000-0000-0000-0000-000000000122",
+        source_trace_id="00000000-0000-0000-0000-000000000123",
+        conversation_id="00000000-0000-0000-0000-000000000124",
+        session_id="session-1",
+        user_subject="user-1",
+        sandbox_id="sandbox-1",
+        action_type="REFUND_REQUEST",
+        argument_commitment=action_argument_commitment(
+            "REFUND_REQUEST",
+            "00000000-0000-0000-0000-000000000040",
+            400,
+            "CNY",
+        ),
+        order_id="00000000-0000-0000-0000-000000000040",
+        amount_minor=400,
+        currency="CNY",
+        expires_at=datetime(2026, 7, 28, 4, 5, 0, 123456, tzinfo=UTC),
+    )
+    valid_payload = json.dumps(
+        {
+            "pendingActionId": pending.pending_action_id,
+            "actionType": pending.action_type,
+            "argumentCommitment": pending.argument_commitment,
+            "expiresAt": canonical_action_timestamp(pending.expires_at),
+        }
+    )
+
+    claim_cursor = ScriptedCursor([[(valid_payload,)]])
+    MysqlConversationStore._lock_pending_preparation_anchor(
+        claim_cursor,  # type: ignore[arg-type]
+        pending=pending,
+        persisted_expiry=pending.expires_at.replace(tzinfo=None),
+    )
+    assert claim_cursor.queries == [
+        "SELECT payload_json FROM support_event "
+        "WHERE turn_id = %s AND event_type = 'ACTION_PREPARED' "
+        "LIMIT 2 FOR SHARE"
+    ]
+
+    completion_row = (
+        pending.source_turn_id,
+        pending.source_trace_id,
+        pending.conversation_id,
+        pending.session_id,
+        pending.user_subject,
+        pending.sandbox_id,
+        pending.action_type,
+        pending.argument_commitment,
+        pending.order_id,
+        pending.amount_minor,
+        pending.currency,
+        "CONFIRMING",
+        pending.expires_at.replace(tzinfo=None),
+        "00000000-0000-0000-0000-000000000125",
+        "00000000-0000-0000-0000-000000000126",
+        None,
+    )
+    completion_cursor = ScriptedCursor([[completion_row], [(valid_payload,)]])
+    assert (
+        MysqlConversationStore._lock_matching_pending(
+            completion_cursor,  # type: ignore[arg-type]
+            pending,
+            confirmation_turn_id="00000000-0000-0000-0000-000000000125",
+            confirmation_trace_id="00000000-0000-0000-0000-000000000126",
+        )
+        == "CONFIRMING"
+    )
+    assert completion_cursor.queries[1].endswith("LIMIT 2 FOR SHARE")
+
+    for persisted_expiry, prepared_expiry in (
+        (pending.expires_at + timedelta(seconds=1), pending.expires_at),
+        (pending.expires_at, pending.expires_at + timedelta(seconds=1)),
+    ):
+        damaged_payload = json.dumps(
+            {
+                "pendingActionId": pending.pending_action_id,
+                "actionType": pending.action_type,
+                "argumentCommitment": pending.argument_commitment,
+                "expiresAt": canonical_action_timestamp(prepared_expiry),
+            }
+        )
+        with pytest.raises(ConversationIntegrityError, match="preparation event is inconsistent"):
+            MysqlConversationStore._lock_pending_preparation_anchor(
+                ScriptedCursor([[(damaged_payload,)]]),  # type: ignore[arg-type]
+                pending=pending,
+                persisted_expiry=persisted_expiry,
+            )
 
 
 def test_receipt_replay_requires_the_committed_pending_projection() -> None:
@@ -1433,6 +1541,35 @@ def test_evaluation_session_and_chat_require_liveness_and_exact_sandbox() -> Non
     assert agent.calls == 1
 
 
+def test_http_sandbox_liveness_uses_typed_internal_results(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    liveness = HttpSandboxLiveness("https://commerce.test")
+    responses: list[httpx.Response | Exception] = [
+        httpx.Response(204),
+        httpx.Response(403),
+        httpx.ReadTimeout("private dependency detail"),
+        httpx.Response(500),
+    ]
+
+    def post(*args: object, **kwargs: object) -> httpx.Response:
+        del args, kwargs
+        result = responses.pop(0)
+        if isinstance(result, Exception):
+            raise result
+        return result
+
+    monkeypatch.setattr(httpx, "post", post)
+
+    liveness.require_active("direct", "sandbox-1")
+    with pytest.raises(SandboxLivenessRejected):
+        liveness.require_active("direct", "sandbox-1")
+    with pytest.raises(SandboxLivenessUnavailable):
+        liveness.require_active("direct", "sandbox-1")
+    with pytest.raises(SandboxLivenessUnavailable):
+        liveness.require_active("direct", "sandbox-1")
+
+
 def test_obo_client_rechecks_owner_and_server_allowlist(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -1679,7 +1816,7 @@ def test_chat_requires_route_permission_before_conversation_access() -> None:
     assert conversations.calls == 0
 
 
-def test_chat_redacts_mysql_failure() -> None:
+def test_chat_redacts_mysql_failure(caplog: pytest.LogCaptureFixture) -> None:
     class FailedConversationStore(ConversationStore):
         def replay_turn(
             self,
@@ -1811,6 +1948,9 @@ def test_chat_redacts_mysql_failure() -> None:
     assert response.status_code == 503
     assert response.json() == {"detail": "Service unavailable"}
     assert "private SQL detail" not in response.text
+    assert "reason_code=ACTION_REPLAY_PERSISTENCE_UNAVAILABLE" in caplog.text
+    assert "phase=TURN_REPLAY" in caplog.text
+    assert "ACTION_DECLINE_PERSISTENCE_UNAVAILABLE" not in caplog.text
 
 
 def test_unexpected_agent_error_is_visible_and_marks_the_reserved_turn_failed() -> None:
@@ -1941,6 +2081,581 @@ def action_payloads() -> tuple[PendingActionPayload, ActionReceiptPayload]:
     return pending, receipt
 
 
+class PhaseFailingConversationStore(MemoryConversationStore):
+    def __init__(self, sessions: MemorySessionStore) -> None:
+        super().__init__(sessions)
+        self.failed_phase: AgentRequestPhase | None = None
+        self.cleanup_fails = False
+        self.turn_previously_failed = False
+
+    def _fail(self, phase: AgentRequestPhase) -> None:
+        if self.failed_phase is phase:
+            raise pymysql.OperationalError(1205, "private persistence detail")
+
+    def replay_turn(
+        self,
+        *,
+        session_id: str,
+        subject: str,
+        sandbox_id: str | None,
+        correlation_key: str,
+        message: str,
+    ) -> ConversationResult | None:
+        if self.turn_previously_failed:
+            raise TurnFailedError
+        self._fail(AgentRequestPhase.TURN_REPLAY)
+        return super().replay_turn(
+            session_id=session_id,
+            subject=subject,
+            sandbox_id=sandbox_id,
+            correlation_key=correlation_key,
+            message=message,
+        )
+
+    def current_action_reference(
+        self, *, session_id: str, subject: str, sandbox_id: str | None
+    ) -> ActionReferenceSnapshot | None:
+        self._fail(AgentRequestPhase.ACTION_REFERENCE_LOOKUP)
+        return super().current_action_reference(
+            session_id=session_id,
+            subject=subject,
+            sandbox_id=sandbox_id,
+        )
+
+    def begin_turn(
+        self,
+        *,
+        session_id: str,
+        subject: str,
+        sandbox_id: str | None,
+        correlation_key: str,
+        message: str,
+    ) -> TurnStart:
+        self._fail(AgentRequestPhase.TURN_RESERVATION)
+        return super().begin_turn(
+            session_id=session_id,
+            subject=subject,
+            sandbox_id=sandbox_id,
+            correlation_key=correlation_key,
+            message=message,
+        )
+
+    def begin_or_resume_confirmation_turn(
+        self,
+        *,
+        session_id: str,
+        subject: str,
+        sandbox_id: str | None,
+        correlation_key: str,
+        message: str,
+        pending: PendingActionReference,
+    ) -> TurnStart:
+        self._fail(AgentRequestPhase.TURN_RESERVATION)
+        return super().begin_or_resume_confirmation_turn(
+            session_id=session_id,
+            subject=subject,
+            sandbox_id=sandbox_id,
+            correlation_key=correlation_key,
+            message=message,
+            pending=pending,
+        )
+
+    def complete_action_decline(
+        self,
+        *,
+        start: TurnStart,
+        pending: PendingActionReference,
+        response_text: str,
+    ) -> ConversationResult:
+        self._fail(AgentRequestPhase.ACTION_DECLINE_COMMIT)
+        return super().complete_action_decline(
+            start=start,
+            pending=pending,
+            response_text=response_text,
+        )
+
+    def complete_action_expired(
+        self,
+        *,
+        start: TurnStart,
+        pending: PendingActionReference,
+        response_text: str,
+    ) -> ConversationResult:
+        self._fail(AgentRequestPhase.ACTION_EXPIRY_COMMIT)
+        return super().complete_action_expired(
+            start=start,
+            pending=pending,
+            response_text=response_text,
+        )
+
+    def complete_action_receipt(
+        self,
+        *,
+        start: TurnStart,
+        pending: PendingActionReference,
+        receipt: ActionReceiptPayload,
+        response_text: str,
+        events: tuple[AgentEvent, ...] = (),
+    ) -> ConversationResult:
+        self._fail(AgentRequestPhase.ACTION_RECEIPT_COMMIT)
+        return super().complete_action_receipt(
+            start=start,
+            pending=pending,
+            receipt=receipt,
+            response_text=response_text,
+            events=events,
+        )
+
+    def complete_turn(
+        self,
+        *,
+        start: TurnStart,
+        response_text: str,
+        outcome: str,
+        events: tuple[AgentEvent, ...],
+        retrieval_decision: RetrievalDecision | None = None,
+        pending_action: PendingActionPayload | None = None,
+    ) -> ConversationResult:
+        self._fail(AgentRequestPhase.TURN_COMPLETION)
+        return super().complete_turn(
+            start=start,
+            response_text=response_text,
+            outcome=outcome,
+            events=events,
+            retrieval_decision=retrieval_decision,
+            pending_action=pending_action,
+        )
+
+    def fail_turn(
+        self,
+        *,
+        start: TurnStart,
+        failure_code: str,
+        events: tuple[AgentEvent, ...] = (),
+    ) -> None:
+        if self.cleanup_fails:
+            raise pymysql.OperationalError(1205, "private cleanup detail")
+        super().fail_turn(start=start, failure_code=failure_code, events=events)
+
+
+def action_test_client(
+    *,
+    liveness: MemoryLiveness | None = None,
+    action_boundary: ActionConfirmationBoundary | None = None,
+) -> tuple[
+    TestClient,
+    dict[str, str],
+    PhaseFailingConversationStore,
+    MemoryLiveness,
+    ActionConfirmationBoundary,
+]:
+    pending, receipt = action_payloads()
+    private, public_jwk = key_fixture("current-key")
+    resolved = evaluation_settings()
+    sessions = MemorySessionStore()
+    session_id = sessions.create("user-123", "sandbox-1")
+    conversations = PhaseFailingConversationStore(sessions)
+    live = liveness or MemoryLiveness()
+    actions = action_boundary or MemoryActionBoundary(receipt)
+    client = TestClient(
+        create_app(
+            resolved,
+            validator=DirectJwtValidator(resolved, CountingJwksSource([public_jwk])),
+            sessions=sessions,
+            conversations=conversations,
+            agent=PendingAgent(pending),
+            actions=actions,
+            liveness=live,
+        )
+    )
+    headers = {
+        "Authorization": (
+            "Bearer "
+            + direct_token(
+                private,
+                "current-key",
+                token_type="eval_direct_user",
+                extra={"sandbox": "sandbox-1"},
+            )
+        ),
+        "X-Eval-Sandbox-Id": "sandbox-1",
+        "X-Session-Id": session_id,
+    }
+    prepared = client.post(
+        "/api/chat",
+        headers={**headers, "Idempotency-Key": "prepare"},
+        json={"message": "prepare refund"},
+    )
+    assert prepared.status_code == 200
+    assert conversations.action_state == "PENDING"
+    return client, headers, conversations, live, actions
+
+
+def assert_request_unavailable(
+    *,
+    response: Any,
+    caplog: pytest.LogCaptureFixture,
+    reason: AgentUnavailableReason,
+    phase: AgentRequestPhase,
+) -> None:
+    assert response.status_code == 503
+    assert response.json() == {
+        "detail": (
+            "Action confirmation indeterminate"
+            if phase is AgentRequestPhase.ACTION_RECEIPT_COMMIT
+            else "Service unavailable"
+        )
+    }
+    assert f"reason_code={reason.value}" in caplog.text
+    assert f"phase={phase.value}" in caplog.text
+    assert reason.value not in response.text
+    assert "private persistence detail" not in response.text
+
+
+def test_action_503_producer_inventory_is_closed() -> None:
+    assert set(ACTION_503_PRODUCER_INVENTORY) == set(AgentUnavailableReason)
+    assert all(
+        ACTION_503_PRODUCER_INVENTORY[reason] is phase
+        for reason, phase in ACTION_503_PRODUCER_INVENTORY.items()
+    )
+
+
+def test_unregistered_action_503_producer_fails_visibly() -> None:
+    class UnregisteredUnavailableAgent:
+        def run(self, **kwargs: object) -> AgentRunResult:
+            del kwargs
+            raise ToolBoundaryFailure(
+                status_code=503,
+                reason="new_unregistered_producer",
+                detail="Service unavailable",
+            )
+
+    private, public_jwk = key_fixture("current-key")
+    sessions = MemorySessionStore()
+    session_id = sessions.create("user-123")
+    with pytest.raises(
+        RuntimeError,
+        match="Action-reachable 503 producer is not registered",
+    ):
+        TestClient(
+            create_app(
+                settings(),
+                validator=DirectJwtValidator(
+                    settings(),
+                    CountingJwksSource([public_jwk]),
+                ),
+                sessions=sessions,
+                conversations=MemoryConversationStore(sessions),
+                agent=UnregisteredUnavailableAgent(),
+            )
+        ).post(
+            "/api/chat",
+            headers={
+                "Authorization": f"Bearer {direct_token(private, 'current-key')}",
+                "X-Session-Id": session_id,
+                "Idempotency-Key": "unregistered-503",
+            },
+            json={"message": "prepare action"},
+        )
+
+
+@pytest.mark.parametrize(
+    ("phase", "reason", "message"),
+    [
+        (
+            AgentRequestPhase.TURN_REPLAY,
+            AgentUnavailableReason.ACTION_REPLAY_PERSISTENCE_UNAVAILABLE,
+            "decline",
+        ),
+        (
+            AgentRequestPhase.ACTION_REFERENCE_LOOKUP,
+            AgentUnavailableReason.ACTION_REFERENCE_PERSISTENCE_UNAVAILABLE,
+            "decline",
+        ),
+        (
+            AgentRequestPhase.TURN_RESERVATION,
+            AgentUnavailableReason.ACTION_TURN_RESERVATION_PERSISTENCE_UNAVAILABLE,
+            "decline",
+        ),
+        (
+            AgentRequestPhase.ACTION_DECLINE_COMMIT,
+            AgentUnavailableReason.ACTION_DECLINE_PERSISTENCE_UNAVAILABLE,
+            "decline",
+        ),
+        (
+            AgentRequestPhase.ACTION_RECEIPT_COMMIT,
+            AgentUnavailableReason.ACTION_RECEIPT_PERSISTENCE_UNAVAILABLE,
+            "confirm refund",
+        ),
+        (
+            AgentRequestPhase.TURN_COMPLETION,
+            AgentUnavailableReason.TURN_COMPLETION_PERSISTENCE_UNAVAILABLE,
+            "please explain",
+        ),
+    ],
+)
+def test_action_persistence_failures_have_phase_specific_request_attribution(
+    phase: AgentRequestPhase,
+    reason: AgentUnavailableReason,
+    message: str,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    client, headers, conversations, _, _ = action_test_client()
+    caplog.clear()
+    conversations.failed_phase = phase
+
+    response = client.post(
+        "/api/chat",
+        headers={**headers, "Idempotency-Key": f"fault-{phase.value}"},
+        json={"message": message},
+    )
+
+    assert_request_unavailable(response=response, caplog=caplog, reason=reason, phase=phase)
+    assert conversations.action_state == (
+        "CONFIRMING" if phase is AgentRequestPhase.ACTION_RECEIPT_COMMIT else "PENDING"
+    )
+    assert conversations.action_receipts == {}
+
+
+def test_action_expiry_persistence_failure_has_exact_request_attribution(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    client, headers, conversations, _, _ = action_test_client()
+    assert conversations.action_pending is not None
+    conversations.action_pending = replace(
+        conversations.action_pending,
+        expires_at=datetime.now(UTC) - timedelta(seconds=1),
+    )
+    conversations.failed_phase = AgentRequestPhase.ACTION_EXPIRY_COMMIT
+    caplog.clear()
+
+    response = client.post(
+        "/api/chat",
+        headers={**headers, "Idempotency-Key": "expiry-fault"},
+        json={"message": "later"},
+    )
+
+    assert_request_unavailable(
+        response=response,
+        caplog=caplog,
+        reason=AgentUnavailableReason.ACTION_EXPIRY_PERSISTENCE_UNAVAILABLE,
+        phase=AgentRequestPhase.ACTION_EXPIRY_COMMIT,
+    )
+    assert conversations.action_state == "PENDING"
+
+
+def test_action_liveness_unavailable_has_exact_request_attribution(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    client, headers, conversations, liveness, _ = action_test_client()
+    liveness.unavailable = True
+    caplog.clear()
+
+    response = client.post(
+        "/api/chat",
+        headers={**headers, "Idempotency-Key": "liveness-fault"},
+        json={"message": "decline"},
+    )
+
+    assert_request_unavailable(
+        response=response,
+        caplog=caplog,
+        reason=AgentUnavailableReason.ACTION_SANDBOX_LIVENESS_UNAVAILABLE,
+        phase=AgentRequestPhase.SANDBOX_LIVENESS,
+    )
+    assert conversations.action_state == "PENDING"
+    assert not any(key[1] == "liveness-fault" for key in conversations.pending)
+
+
+def test_stream_action_liveness_unavailable_uses_same_registered_attribution(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    client, headers, conversations, liveness, _ = action_test_client()
+    liveness.unavailable = True
+    caplog.clear()
+
+    response = client.post(
+        "/api/chat/stream",
+        headers={**headers, "Idempotency-Key": "stream-liveness-fault"},
+        json={"message": "decline"},
+    )
+
+    assert_request_unavailable(
+        response=response,
+        caplog=caplog,
+        reason=AgentUnavailableReason.ACTION_SANDBOX_LIVENESS_UNAVAILABLE,
+        phase=AgentRequestPhase.SANDBOX_LIVENESS,
+    )
+    assert conversations.action_state == "PENDING"
+    assert not any(key[1] == "stream-liveness-fault" for key in conversations.pending)
+
+
+def test_confirmation_indeterminate_has_registered_request_attribution(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    class IndeterminateActionBoundary:
+        def confirm(
+            self,
+            *,
+            direct_token: str,
+            pending: PendingActionReference,
+            budget: AttemptBudget,
+        ) -> ActionReceiptPayload:
+            del direct_token, pending, budget
+            raise ToolBoundaryFailure(
+                status_code=503,
+                reason=AgentUnavailableReason.ACTION_CONFIRMATION_INDETERMINATE.value,
+                detail="Action confirmation indeterminate",
+            )
+
+    client, headers, conversations, _, _ = action_test_client(
+        action_boundary=IndeterminateActionBoundary()
+    )
+    caplog.clear()
+
+    response = client.post(
+        "/api/chat",
+        headers={**headers, "Idempotency-Key": "confirmation-indeterminate"},
+        json={"message": "confirm refund"},
+    )
+
+    assert response.status_code == 503
+    assert response.json() == {"detail": "Action confirmation indeterminate"}
+    assert "reason_code=ACTION_CONFIRMATION_INDETERMINATE" in caplog.text
+    assert "phase=ACTION_RECEIPT_COMMIT" in caplog.text
+    assert "ACTION_CONFIRMATION_INDETERMINATE" not in response.text
+    assert conversations.action_state == "CONFIRMING"
+    assert conversations.action_receipts == {}
+
+
+def test_previously_failed_turn_has_distinct_request_attribution(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    client, headers, conversations, _, _ = action_test_client()
+    conversations.turn_previously_failed = True
+    caplog.clear()
+
+    response = client.post(
+        "/api/chat",
+        headers={**headers, "Idempotency-Key": "failed-turn"},
+        json={"message": "decline"},
+    )
+
+    assert_request_unavailable(
+        response=response,
+        caplog=caplog,
+        reason=AgentUnavailableReason.ACTION_TURN_PREVIOUSLY_FAILED,
+        phase=AgentRequestPhase.TURN_REPLAY,
+    )
+    assert conversations.action_state == "PENDING"
+
+
+def test_session_verification_persistence_failure_has_exact_request_attribution(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    class FailingSessionStore(MemorySessionStore):
+        unavailable = False
+
+        def verify_owner(
+            self,
+            session_id: str,
+            subject: str,
+            sandbox_id: str | None = None,
+        ) -> None:
+            if self.unavailable:
+                raise pymysql.OperationalError(1040, "private connection detail")
+            super().verify_owner(session_id, subject, sandbox_id)
+
+    pending, receipt = action_payloads()
+    private, public_jwk = key_fixture("current-key")
+    resolved = evaluation_settings()
+    sessions = FailingSessionStore()
+    session_id = sessions.create("user-123", "sandbox-1")
+    conversations = PhaseFailingConversationStore(sessions)
+    client = TestClient(
+        create_app(
+            resolved,
+            validator=DirectJwtValidator(resolved, CountingJwksSource([public_jwk])),
+            sessions=sessions,
+            conversations=conversations,
+            agent=PendingAgent(pending),
+            actions=MemoryActionBoundary(receipt),
+            liveness=MemoryLiveness(),
+        )
+    )
+    token = direct_token(
+        private,
+        "current-key",
+        token_type="eval_direct_user",
+        extra={"sandbox": "sandbox-1"},
+    )
+    sessions.unavailable = True
+    caplog.clear()
+
+    response = client.post(
+        "/api/chat",
+        headers={
+            "Authorization": f"Bearer {token}",
+            "X-Eval-Sandbox-Id": "sandbox-1",
+            "X-Session-Id": session_id,
+            "Idempotency-Key": "session-fault",
+        },
+        json={"message": "decline"},
+    )
+
+    assert_request_unavailable(
+        response=response,
+        caplog=caplog,
+        reason=AgentUnavailableReason.ACTION_SESSION_PERSISTENCE_UNAVAILABLE,
+        phase=AgentRequestPhase.SESSION_VERIFICATION,
+    )
+    assert conversations.pending == {}
+
+
+def test_original_persistence_reason_survives_fail_turn_cleanup_failure(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    client, headers, conversations, _, _ = action_test_client()
+    conversations.failed_phase = AgentRequestPhase.ACTION_DECLINE_COMMIT
+    conversations.cleanup_fails = True
+    caplog.clear()
+
+    response = client.post(
+        "/api/chat",
+        headers={**headers, "Idempotency-Key": "decline-cleanup-fault"},
+        json={"message": "decline"},
+    )
+
+    assert_request_unavailable(
+        response=response,
+        caplog=caplog,
+        reason=AgentUnavailableReason.ACTION_DECLINE_PERSISTENCE_UNAVAILABLE,
+        phase=AgentRequestPhase.ACTION_DECLINE_COMMIT,
+    )
+    assert "cleanup_reason_code=TURN_COMPLETION_PERSISTENCE_UNAVAILABLE" in caplog.text
+    assert "original_reason_code=ACTION_DECLINE_PERSISTENCE_UNAVAILABLE" in caplog.text
+    assert "private cleanup detail" not in caplog.text
+
+
+def test_normal_decline_has_no_unavailable_attribution(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    client, headers, conversations, _, _ = action_test_client()
+    caplog.clear()
+
+    response = client.post(
+        "/api/chat",
+        headers={**headers, "Idempotency-Key": "normal-decline"},
+        json={"message": "decline"},
+    )
+
+    assert response.status_code == 200
+    assert response.json()["outcome"] == "action_declined"
+    assert "PERSISTENCE_UNAVAILABLE" not in caplog.text
+    assert "ACTION_SANDBOX_LIVENESS_UNAVAILABLE" not in caplog.text
+    assert conversations.action_state == "DECLINED"
+
+
 def test_pending_action_requires_exact_confirmation_and_projects_one_receipt() -> None:
     pending, receipt = action_payloads()
     private, public_jwk = key_fixture("current-key")
@@ -2012,7 +2727,9 @@ def test_pending_action_requires_exact_confirmation_and_projects_one_receipt() -
     assert agent.calls == 1
 
 
-def test_post_claim_unavailability_keeps_same_confirmation_turn_recoverable() -> None:
+def test_post_claim_unavailability_keeps_same_confirmation_turn_recoverable(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
     pending, receipt = action_payloads()
 
     class UnavailableOnceAction(MemoryActionBoundary):
@@ -2066,6 +2783,10 @@ def test_post_claim_unavailability_keeps_same_confirmation_turn_recoverable() ->
         json={"message": "confirm refund"},
     )
     assert first.status_code == 503
+    assert first.json() == {"detail": "Action confirmation indeterminate"}
+    assert "reason_code=ACTION_CONFIRMATION_IDENTITY_UNAVAILABLE" in caplog.text
+    assert "phase=ACTION_RECEIPT_COMMIT" in caplog.text
+    assert "ACTION_CONFIRMATION_IDENTITY_UNAVAILABLE" not in first.text
     assert conversations.failures == []
     claim = conversations.confirmation_claim
     assert claim is not None

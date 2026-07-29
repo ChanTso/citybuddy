@@ -283,6 +283,11 @@ class MysqlConversationStore:
                         )
                     if not isinstance(owner[12], datetime):
                         raise ConversationIntegrityError("PendingAction expiry is invalid")
+                    self._lock_pending_preparation_anchor(
+                        cursor,
+                        pending=pending,
+                        persisted_expiry=owner[12],
+                    )
                     if existing is not None:
                         if (
                             existing[2] != conversation_id
@@ -1160,7 +1165,72 @@ class MysqlConversationStore:
         return cast(tuple[object, ...], turn)
 
     @staticmethod
+    def _validate_pending_preparation_anchor(
+        raw_payload: object,
+        *,
+        pending: PendingActionReference,
+        persisted_expiry: object,
+    ) -> None:
+        if not isinstance(persisted_expiry, datetime):
+            raise ConversationIntegrityError("PendingAction expiry is invalid")
+        persisted_aware = (
+            persisted_expiry.replace(tzinfo=UTC)
+            if persisted_expiry.tzinfo is None
+            else persisted_expiry.astimezone(UTC)
+        )
+        try:
+            pending_expiry = parse_canonical_action_timestamp(
+                canonical_action_timestamp(pending.expires_at)
+            )
+            payload = strict_json_object(str(raw_payload).encode("utf-8"))
+            prepared_expiry = parse_canonical_action_timestamp(
+                payload.get("expiresAt") if isinstance(payload, dict) else None
+            )
+        except (AttributeError, UnicodeError, ValueError) as exception:
+            raise ConversationIntegrityError(
+                "PendingAction preparation event is invalid"
+            ) from exception
+        if (
+            payload
+            != {
+                "pendingActionId": pending.pending_action_id,
+                "actionType": pending.action_type,
+                "argumentCommitment": pending.argument_commitment,
+                "expiresAt": canonical_action_timestamp(prepared_expiry),
+            }
+            or prepared_expiry != persisted_aware
+            or prepared_expiry != pending_expiry
+        ):
+            raise ConversationIntegrityError("PendingAction preparation event is inconsistent")
+
+    @classmethod
+    def _lock_pending_preparation_anchor(
+        cls,
+        cursor: pymysql.cursors.Cursor,
+        *,
+        pending: PendingActionReference,
+        persisted_expiry: object,
+    ) -> None:
+        cursor.execute(
+            "SELECT payload_json FROM support_event "
+            "WHERE turn_id = %s AND event_type = 'ACTION_PREPARED' "
+            "LIMIT 2 FOR SHARE",
+            (pending.source_turn_id,),
+        )
+        rows = cursor.fetchall()
+        if len(rows) != 1:
+            raise ConversationIntegrityError(
+                "PendingAction preparation event cardinality is inconsistent"
+            )
+        cls._validate_pending_preparation_anchor(
+            rows[0][0],
+            pending=pending,
+            persisted_expiry=persisted_expiry,
+        )
+
+    @classmethod
     def _lock_matching_pending(
+        cls,
         cursor: pymysql.cursors.Cursor,
         pending: PendingActionReference,
         *,
@@ -1204,6 +1274,11 @@ class MysqlConversationStore:
         expires_at = row[12]
         if not isinstance(expires_at, datetime):
             raise ConversationIntegrityError("PendingAction expiry is invalid")
+        cls._lock_pending_preparation_anchor(
+            cursor,
+            pending=pending,
+            persisted_expiry=expires_at,
+        )
         aware_expiry = expires_at.replace(tzinfo=UTC) if expires_at.tzinfo is None else expires_at
         expired = aware_expiry <= datetime.now(UTC)
         confirmation_binding = tuple(row[13:15])
@@ -1494,27 +1569,11 @@ class MysqlConversationStore:
             raise ConversationIntegrityError(
                 "PendingAction preparation event cardinality is inconsistent"
             )
-        try:
-            payload = strict_json_object(str(event_rows[0][0]).encode("utf-8"))
-        except (UnicodeError, ValueError) as exception:
-            raise ConversationIntegrityError(
-                "PendingAction preparation event is invalid"
-            ) from exception
-        try:
-            prepared_expiry = parse_canonical_action_timestamp(
-                payload.get("expiresAt") if isinstance(payload, dict) else None
-            )
-        except ValueError as exception:
-            raise ConversationIntegrityError(
-                "PendingAction preparation event expiry is invalid"
-            ) from exception
-        if payload != {
-            "pendingActionId": reference.pending_action_id,
-            "actionType": reference.action_type,
-            "argumentCommitment": reference.argument_commitment,
-            "expiresAt": canonical_action_timestamp(prepared_expiry),
-        } or prepared_expiry != reference.expires_at.astimezone(UTC):
-            raise ConversationIntegrityError("PendingAction preparation event is inconsistent")
+        cls._validate_pending_preparation_anchor(
+            event_rows[0][0],
+            pending=reference,
+            persisted_expiry=expires_at,
+        )
         cursor.execute(
             "SELECT confirmation_turn_id, confirmation_trace_id "
             "FROM action_receipt_projection "

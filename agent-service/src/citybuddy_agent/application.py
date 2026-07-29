@@ -7,9 +7,10 @@ import secrets
 import time
 import uuid
 from base64 import b64decode
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from datetime import UTC, datetime
-from typing import Any, Literal, Protocol
+from enum import Enum
+from typing import Any, Literal, Protocol, TypeVar
 
 import httpx
 import jwt
@@ -78,6 +79,142 @@ DIRECT_TOKEN_TYPE = "direct_user"
 EVALUATION_DIRECT_TOKEN_TYPE = "eval_direct_user"
 MAX_EVALUATION_AUTHORIZATION_LENGTH = 1024
 LOGGER = logging.getLogger(__name__)
+T = TypeVar("T")
+
+
+class AgentRequestPhase(str, Enum):
+    SESSION_VERIFICATION = "SESSION_VERIFICATION"
+    TURN_REPLAY = "TURN_REPLAY"
+    ACTION_REFERENCE_LOOKUP = "ACTION_REFERENCE_LOOKUP"
+    SANDBOX_LIVENESS = "SANDBOX_LIVENESS"
+    TURN_RESERVATION = "TURN_RESERVATION"
+    ACTION_DECLINE_COMMIT = "ACTION_DECLINE_COMMIT"
+    ACTION_EXPIRY_COMMIT = "ACTION_EXPIRY_COMMIT"
+    ACTION_RECEIPT_COMMIT = "ACTION_RECEIPT_COMMIT"
+    TURN_COMPLETION = "TURN_COMPLETION"
+
+
+class AgentUnavailableReason(str, Enum):
+    ACTION_SANDBOX_LIVENESS_UNAVAILABLE = "ACTION_SANDBOX_LIVENESS_UNAVAILABLE"
+    ACTION_TURN_PREVIOUSLY_FAILED = "ACTION_TURN_PREVIOUSLY_FAILED"
+    ACTION_SESSION_PERSISTENCE_UNAVAILABLE = "ACTION_SESSION_PERSISTENCE_UNAVAILABLE"
+    ACTION_REPLAY_PERSISTENCE_UNAVAILABLE = "ACTION_REPLAY_PERSISTENCE_UNAVAILABLE"
+    ACTION_REFERENCE_PERSISTENCE_UNAVAILABLE = "ACTION_REFERENCE_PERSISTENCE_UNAVAILABLE"
+    ACTION_TURN_RESERVATION_PERSISTENCE_UNAVAILABLE = (
+        "ACTION_TURN_RESERVATION_PERSISTENCE_UNAVAILABLE"
+    )
+    ACTION_DECLINE_PERSISTENCE_UNAVAILABLE = "ACTION_DECLINE_PERSISTENCE_UNAVAILABLE"
+    ACTION_EXPIRY_PERSISTENCE_UNAVAILABLE = "ACTION_EXPIRY_PERSISTENCE_UNAVAILABLE"
+    ACTION_RECEIPT_PERSISTENCE_UNAVAILABLE = "ACTION_RECEIPT_PERSISTENCE_UNAVAILABLE"
+    TURN_COMPLETION_PERSISTENCE_UNAVAILABLE = "TURN_COMPLETION_PERSISTENCE_UNAVAILABLE"
+    ACTION_CONFIRMATION_IDENTITY_UNAVAILABLE = "ACTION_CONFIRMATION_IDENTITY_UNAVAILABLE"
+    ACTION_CONFIRMATION_INDETERMINATE = "ACTION_CONFIRMATION_INDETERMINATE"
+    ACTION_PREPARATION_IDENTITY_UNAVAILABLE = "identity_unavailable"
+    ACTION_PREPARATION_COMMERCE_TIMEOUT = "commerce_timeout"
+    ACTION_PREPARATION_COMMERCE_INDETERMINATE = "commerce_indeterminate"
+    ACTION_PREPARATION_COMMERCE_UNAVAILABLE = "commerce_unavailable"
+
+
+ACTION_503_PRODUCER_INVENTORY: Mapping[AgentUnavailableReason, AgentRequestPhase] = {
+    AgentUnavailableReason.ACTION_SANDBOX_LIVENESS_UNAVAILABLE: (
+        AgentRequestPhase.SANDBOX_LIVENESS
+    ),
+    AgentUnavailableReason.ACTION_TURN_PREVIOUSLY_FAILED: AgentRequestPhase.TURN_REPLAY,
+    AgentUnavailableReason.ACTION_SESSION_PERSISTENCE_UNAVAILABLE: (
+        AgentRequestPhase.SESSION_VERIFICATION
+    ),
+    AgentUnavailableReason.ACTION_REPLAY_PERSISTENCE_UNAVAILABLE: (AgentRequestPhase.TURN_REPLAY),
+    AgentUnavailableReason.ACTION_REFERENCE_PERSISTENCE_UNAVAILABLE: (
+        AgentRequestPhase.ACTION_REFERENCE_LOOKUP
+    ),
+    AgentUnavailableReason.ACTION_TURN_RESERVATION_PERSISTENCE_UNAVAILABLE: (
+        AgentRequestPhase.TURN_RESERVATION
+    ),
+    AgentUnavailableReason.ACTION_DECLINE_PERSISTENCE_UNAVAILABLE: (
+        AgentRequestPhase.ACTION_DECLINE_COMMIT
+    ),
+    AgentUnavailableReason.ACTION_EXPIRY_PERSISTENCE_UNAVAILABLE: (
+        AgentRequestPhase.ACTION_EXPIRY_COMMIT
+    ),
+    AgentUnavailableReason.ACTION_RECEIPT_PERSISTENCE_UNAVAILABLE: (
+        AgentRequestPhase.ACTION_RECEIPT_COMMIT
+    ),
+    AgentUnavailableReason.TURN_COMPLETION_PERSISTENCE_UNAVAILABLE: (
+        AgentRequestPhase.TURN_COMPLETION
+    ),
+    AgentUnavailableReason.ACTION_CONFIRMATION_IDENTITY_UNAVAILABLE: (
+        AgentRequestPhase.ACTION_RECEIPT_COMMIT
+    ),
+    AgentUnavailableReason.ACTION_CONFIRMATION_INDETERMINATE: (
+        AgentRequestPhase.ACTION_RECEIPT_COMMIT
+    ),
+    AgentUnavailableReason.ACTION_PREPARATION_IDENTITY_UNAVAILABLE: (
+        AgentRequestPhase.TURN_COMPLETION
+    ),
+    AgentUnavailableReason.ACTION_PREPARATION_COMMERCE_TIMEOUT: (AgentRequestPhase.TURN_COMPLETION),
+    AgentUnavailableReason.ACTION_PREPARATION_COMMERCE_INDETERMINATE: (
+        AgentRequestPhase.TURN_COMPLETION
+    ),
+    AgentUnavailableReason.ACTION_PREPARATION_COMMERCE_UNAVAILABLE: (
+        AgentRequestPhase.TURN_COMPLETION
+    ),
+}
+
+PERSISTENCE_REASON_BY_PHASE: Mapping[AgentRequestPhase, AgentUnavailableReason] = {
+    AgentRequestPhase.SESSION_VERIFICATION: (
+        AgentUnavailableReason.ACTION_SESSION_PERSISTENCE_UNAVAILABLE
+    ),
+    AgentRequestPhase.TURN_REPLAY: (AgentUnavailableReason.ACTION_REPLAY_PERSISTENCE_UNAVAILABLE),
+    AgentRequestPhase.ACTION_REFERENCE_LOOKUP: (
+        AgentUnavailableReason.ACTION_REFERENCE_PERSISTENCE_UNAVAILABLE
+    ),
+    AgentRequestPhase.TURN_RESERVATION: (
+        AgentUnavailableReason.ACTION_TURN_RESERVATION_PERSISTENCE_UNAVAILABLE
+    ),
+    AgentRequestPhase.ACTION_DECLINE_COMMIT: (
+        AgentUnavailableReason.ACTION_DECLINE_PERSISTENCE_UNAVAILABLE
+    ),
+    AgentRequestPhase.ACTION_EXPIRY_COMMIT: (
+        AgentUnavailableReason.ACTION_EXPIRY_PERSISTENCE_UNAVAILABLE
+    ),
+    AgentRequestPhase.ACTION_RECEIPT_COMMIT: (
+        AgentUnavailableReason.ACTION_RECEIPT_PERSISTENCE_UNAVAILABLE
+    ),
+    AgentRequestPhase.TURN_COMPLETION: (
+        AgentUnavailableReason.TURN_COMPLETION_PERSISTENCE_UNAVAILABLE
+    ),
+}
+
+
+class SandboxLivenessRejected(Exception):
+    """The authoritative liveness boundary returned a definite rejection."""
+
+
+class SandboxLivenessUnavailable(Exception):
+    """The authoritative liveness boundary could not produce a decision."""
+
+
+class AgentRequestUnavailable(Exception):
+    def __init__(
+        self,
+        reason: AgentUnavailableReason,
+        phase: AgentRequestPhase,
+        *,
+        vendor_code: int | None = None,
+        sql_state: str | None = None,
+    ) -> None:
+        super().__init__(reason.value)
+        self.reason = reason
+        self.phase = phase
+        self.vendor_code = vendor_code
+        self.sql_state = sql_state
+
+
+def _mysql_diagnostics(exception: pymysql.MySQLError) -> tuple[int | None, str | None]:
+    vendor_code = exception.args[0] if exception.args and type(exception.args[0]) is int else None
+    raw_sql_state = getattr(exception, "sqlstate", None)
+    sql_state = raw_sql_state if isinstance(raw_sql_state, str) else None
+    return vendor_code, sql_state
 
 
 class AgentSettings(BaseModel):
@@ -371,12 +508,12 @@ class HttpSandboxLiveness:
                 timeout=3.0,
             )
         except (httpx.TimeoutException, httpx.NetworkError) as exception:
-            raise HTTPException(status_code=503, detail="Service unavailable") from exception
+            raise SandboxLivenessUnavailable from exception
         if response.status_code == 204:
             return
         if response.status_code in {400, 401, 403, 404, 409, 422}:
-            raise HTTPException(status_code=403, detail="Forbidden")
-        raise HTTPException(status_code=503, detail="Service unavailable")
+            raise SandboxLivenessRejected
+        raise SandboxLivenessUnavailable
 
 
 class OboClient:
@@ -464,7 +601,7 @@ class HttpActionConfirmationBoundary:
             except AttemptBudgetExhausted as exception:
                 raise ToolBoundaryFailure(
                     status_code=503,
-                    reason="ACTION_CONFIRMATION_INDETERMINATE",
+                    reason=AgentUnavailableReason.ACTION_CONFIRMATION_INDETERMINATE.value,
                     detail=(
                         "Action confirmation indeterminate"
                         if indeterminate
@@ -488,13 +625,13 @@ class HttpActionConfirmationBoundary:
                     ) from exception
                 raise ToolBoundaryFailure(
                     status_code=503,
-                    reason="ACTION_CONFIRMATION_IDENTITY_UNAVAILABLE",
+                    reason=(AgentUnavailableReason.ACTION_CONFIRMATION_IDENTITY_UNAVAILABLE.value),
                     detail="Action confirmation indeterminate",
                 ) from exception
             except (httpx.TimeoutException, httpx.NetworkError) as exception:
                 raise ToolBoundaryFailure(
                     status_code=503,
-                    reason="ACTION_CONFIRMATION_IDENTITY_UNAVAILABLE",
+                    reason=(AgentUnavailableReason.ACTION_CONFIRMATION_IDENTITY_UNAVAILABLE.value),
                     detail="Action confirmation indeterminate",
                 ) from exception
             try:
@@ -502,7 +639,7 @@ class HttpActionConfirmationBoundary:
             except AttemptBudgetExhausted as exception:
                 raise ToolBoundaryFailure(
                     status_code=503,
-                    reason="ACTION_CONFIRMATION_INDETERMINATE",
+                    reason=AgentUnavailableReason.ACTION_CONFIRMATION_INDETERMINATE.value,
                     detail="Action confirmation attempt budget exhausted",
                 ) from exception
             headers = {
@@ -711,7 +848,7 @@ def create_app(
         if principal.sandbox_id is None:
             return
         if resolved_liveness is None:
-            raise HTTPException(status_code=503, detail="Service unavailable")
+            raise SandboxLivenessUnavailable
         resolved_liveness.require_active(token, principal.sandbox_id)
 
     def verify_session(session_id: str, principal: DirectPrincipal) -> None:
@@ -719,6 +856,80 @@ def create_app(
             resolved_sessions.verify_owner(session_id, principal.subject)
         else:
             resolved_sessions.verify_owner(session_id, principal.subject, principal.sandbox_id)
+
+    def in_request_phase(
+        phase: AgentRequestPhase,
+        work: Callable[[], T],
+    ) -> T:
+        try:
+            return work()
+        except SandboxLivenessUnavailable as exception:
+            raise AgentRequestUnavailable(
+                AgentUnavailableReason.ACTION_SANDBOX_LIVENESS_UNAVAILABLE,
+                phase,
+            ) from exception
+        except TurnFailedError as exception:
+            raise AgentRequestUnavailable(
+                AgentUnavailableReason.ACTION_TURN_PREVIOUSLY_FAILED,
+                phase,
+            ) from exception
+        except pymysql.MySQLError as exception:
+            vendor_code, sql_state = _mysql_diagnostics(exception)
+            raise AgentRequestUnavailable(
+                PERSISTENCE_REASON_BY_PHASE[phase],
+                phase,
+                vendor_code=vendor_code,
+                sql_state=sql_state,
+            ) from exception
+
+    def log_request_unavailable(exception: AgentRequestUnavailable) -> None:
+        fields: list[object] = [exception.reason.value, exception.phase.value]
+        message = "agent_request_rejected reason_code=%s phase=%s"
+        if exception.vendor_code is not None:
+            message += " mysql_vendor_code=%s"
+            fields.append(exception.vendor_code)
+        if exception.sql_state is not None:
+            message += " sql_state=%s"
+            fields.append(exception.sql_state)
+        LOGGER.warning(message, *fields)
+
+    def unavailable_public_detail(exception: AgentRequestUnavailable) -> str:
+        if exception.phase is AgentRequestPhase.ACTION_RECEIPT_COMMIT:
+            return "Action confirmation indeterminate"
+        return "Service unavailable"
+
+    def fail_turn_without_masking(
+        *,
+        start: Any,
+        failure_code: str,
+        events: tuple[AgentEvent, ...],
+        original_reason: str,
+        original_phase: AgentRequestPhase,
+    ) -> None:
+        try:
+            resolved_conversations.fail_turn(
+                start=start,
+                failure_code=failure_code,
+                events=events,
+            )
+        except pymysql.MySQLError as cleanup_exception:
+            vendor_code, sql_state = _mysql_diagnostics(cleanup_exception)
+            fields: list[object] = [
+                original_reason,
+                original_phase.value,
+                AgentUnavailableReason.TURN_COMPLETION_PERSISTENCE_UNAVAILABLE.value,
+            ]
+            message = (
+                "agent_request_cleanup_failed original_reason_code=%s "
+                "original_phase=%s cleanup_reason_code=%s"
+            )
+            if vendor_code is not None:
+                message += " mysql_vendor_code=%s"
+                fields.append(vendor_code)
+            if sql_state is not None:
+                message += " sql_state=%s"
+                fields.append(sql_state)
+            LOGGER.warning(message, *fields)
 
     def execute_turn(
         request: ChatRequest,
@@ -728,20 +939,29 @@ def create_app(
         session_id: str,
         correlation_key: str,
     ) -> ConversationResult:
-        verify_session(session_id, principal)
-        replay = resolved_conversations.replay_turn(
-            session_id=session_id,
-            subject=principal.subject,
-            sandbox_id=principal.sandbox_id,
-            correlation_key=correlation_key,
-            message=request.message,
+        in_request_phase(
+            AgentRequestPhase.SESSION_VERIFICATION,
+            lambda: verify_session(session_id, principal),
+        )
+        replay = in_request_phase(
+            AgentRequestPhase.TURN_REPLAY,
+            lambda: resolved_conversations.replay_turn(
+                session_id=session_id,
+                subject=principal.subject,
+                sandbox_id=principal.sandbox_id,
+                correlation_key=correlation_key,
+                message=request.message,
+            ),
         )
         if replay is not None:
             return replay
-        current_action = resolved_conversations.current_action_reference(
-            session_id=session_id,
-            subject=principal.subject,
-            sandbox_id=principal.sandbox_id,
+        current_action = in_request_phase(
+            AgentRequestPhase.ACTION_REFERENCE_LOOKUP,
+            lambda: resolved_conversations.current_action_reference(
+                session_id=session_id,
+                subject=principal.subject,
+                sandbox_id=principal.sandbox_id,
+            ),
         )
         pending_decision = confirmation_decision(request.message)
         pending = (
@@ -765,23 +985,32 @@ def create_app(
         # projection was lost. The fixed CB-118 result boundary owns that decision and
         # resolves committed truth before mutable sandbox liveness or copied expiry.
         if pending_decision is not ConfirmationDecision.CONFIRM:
-            require_liveness(principal, token)
+            in_request_phase(
+                AgentRequestPhase.SANDBOX_LIVENESS,
+                lambda: require_liveness(principal, token),
+            )
         if pending is not None and pending_decision is ConfirmationDecision.CONFIRM:
-            start = resolved_conversations.begin_or_resume_confirmation_turn(
-                session_id=session_id,
-                subject=principal.subject,
-                sandbox_id=principal.sandbox_id,
-                correlation_key=correlation_key,
-                message=request.message,
-                pending=pending,
+            start = in_request_phase(
+                AgentRequestPhase.TURN_RESERVATION,
+                lambda: resolved_conversations.begin_or_resume_confirmation_turn(
+                    session_id=session_id,
+                    subject=principal.subject,
+                    sandbox_id=principal.sandbox_id,
+                    correlation_key=correlation_key,
+                    message=request.message,
+                    pending=pending,
+                ),
             )
         else:
-            start = resolved_conversations.begin_turn(
-                session_id=session_id,
-                subject=principal.subject,
-                sandbox_id=principal.sandbox_id,
-                correlation_key=correlation_key,
-                message=request.message,
+            start = in_request_phase(
+                AgentRequestPhase.TURN_RESERVATION,
+                lambda: resolved_conversations.begin_turn(
+                    session_id=session_id,
+                    subject=principal.subject,
+                    sandbox_id=principal.sandbox_id,
+                    correlation_key=correlation_key,
+                    message=request.message,
+                ),
             )
         if start.replay is not None:
             return start.replay
@@ -795,34 +1024,51 @@ def create_app(
                         pending=pending,
                         budget=budget,
                     )
-                    return resolved_conversations.complete_action_receipt(
-                        start=start,
-                        pending=pending,
-                        receipt=receipt,
-                        response_text="The refund request was accepted.",
-                        events=tuple(action_events),
+                    return in_request_phase(
+                        AgentRequestPhase.ACTION_RECEIPT_COMMIT,
+                        lambda: resolved_conversations.complete_action_receipt(
+                            start=start,
+                            pending=pending,
+                            receipt=receipt,
+                            response_text="The refund request was accepted.",
+                            events=tuple(action_events),
+                        ),
                     )
                 if pending.expires_at <= datetime.now(UTC):
-                    return resolved_conversations.complete_action_expired(
-                        start=start,
-                        pending=pending,
-                        response_text="The prepared action expired and was not executed.",
+                    return in_request_phase(
+                        AgentRequestPhase.ACTION_EXPIRY_COMMIT,
+                        lambda: resolved_conversations.complete_action_expired(
+                            start=start,
+                            pending=pending,
+                            response_text="The prepared action expired and was not executed.",
+                        ),
                     )
                 if pending_decision is ConfirmationDecision.DECLINE:
-                    return resolved_conversations.complete_action_decline(
-                        start=start,
-                        pending=pending,
-                        response_text="The prepared action was declined and was not executed.",
+                    return in_request_phase(
+                        AgentRequestPhase.ACTION_DECLINE_COMMIT,
+                        lambda: resolved_conversations.complete_action_decline(
+                            start=start,
+                            pending=pending,
+                            response_text="The prepared action was declined and was not executed.",
+                        ),
                     )
                 if pending_decision is ConfirmationDecision.CLARIFY:
-                    return resolved_conversations.complete_turn(
-                        start=start,
-                        response_text=(
-                            "Please reply with an exact confirmation or decline for the prepared "
-                            "refund request."
+                    return in_request_phase(
+                        AgentRequestPhase.TURN_COMPLETION,
+                        lambda: resolved_conversations.complete_turn(
+                            start=start,
+                            response_text=(
+                                "Please reply with an exact confirmation or decline for the "
+                                "prepared refund request."
+                            ),
+                            outcome="action_clarification",
+                            events=(
+                                AgentEvent(
+                                    "AGENT_OUTCOME",
+                                    {"outcome": "action_clarification"},
+                                ),
+                            ),
                         ),
-                        outcome="action_clarification",
-                        events=(AgentEvent("AGENT_OUTCOME", {"outcome": "action_clarification"}),),
                     )
             if principal.sandbox_id is None:
                 agent_result = resolved_agent.run(
@@ -843,50 +1089,69 @@ def create_app(
                     turn_id=start.turn_id,
                     sandbox_id=principal.sandbox_id,
                 )
-            return resolved_conversations.complete_turn(
-                start=start,
-                response_text=agent_result.response_text,
-                outcome=agent_result.outcome,
-                events=agent_result.events,
-                retrieval_decision=agent_result.retrieval_decision,
-                pending_action=agent_result.pending_action,
+            return in_request_phase(
+                AgentRequestPhase.TURN_COMPLETION,
+                lambda: resolved_conversations.complete_turn(
+                    start=start,
+                    response_text=agent_result.response_text,
+                    outcome=agent_result.outcome,
+                    events=agent_result.events,
+                    retrieval_decision=agent_result.retrieval_decision,
+                    pending_action=agent_result.pending_action,
+                ),
             )
         except ToolBoundaryFailure as exception:
+            tool_phase = (
+                AgentRequestPhase.ACTION_RECEIPT_COMMIT
+                if start.confirmation_pending_id is not None
+                else AgentRequestPhase.TURN_COMPLETION
+            )
+            if exception.status_code == 503:
+                try:
+                    unavailable_reason = AgentUnavailableReason(exception.reason)
+                except ValueError as unregistered:
+                    raise RuntimeError(
+                        "Action-reachable 503 producer is not registered"
+                    ) from unregistered
+                if ACTION_503_PRODUCER_INVENTORY[unavailable_reason] is not tool_phase:
+                    raise RuntimeError(
+                        "Action-reachable 503 producer is registered for another phase"
+                    ) from exception
             LOGGER.warning(
-                "agent_request_rejected reason_code=%s",
+                "agent_request_rejected reason_code=%s phase=%s",
                 exception.reason,
+                tool_phase.value,
             )
             if start.confirmation_pending_id is None:
-                resolved_conversations.fail_turn(
+                fail_turn_without_masking(
                     start=start,
                     failure_code=exception.reason,
                     events=tuple(action_events),
+                    original_reason=exception.reason,
+                    original_phase=tool_phase,
                 )
             raise HTTPException(
                 status_code=exception.status_code, detail=exception.detail
             ) from exception
         except ActionArbitrationConflictError:
             if start.confirmation_pending_id is None:
-                resolved_conversations.fail_turn(
+                fail_turn_without_masking(
                     start=start,
                     failure_code="ACTION_CONFIRMATION_ARBITRATION_CONFLICT",
                     events=tuple(action_events),
+                    original_reason="ACTION_CONFIRMATION_ARBITRATION_CONFLICT",
+                    original_phase=AgentRequestPhase.TURN_COMPLETION,
                 )
             raise
-        except pymysql.MySQLError as exception:
-            if start.confirmation_pending_id is not None:
-                LOGGER.warning(
-                    "agent_request_rejected "
-                    "reason_code=ACTION_CONFIRMATION_LOCAL_PERSISTENCE_UNAVAILABLE"
+        except AgentRequestUnavailable as exception:
+            if start.confirmation_pending_id is None:
+                fail_turn_without_masking(
+                    start=start,
+                    failure_code=exception.reason.value,
+                    events=tuple(action_events),
+                    original_reason=exception.reason.value,
+                    original_phase=exception.phase,
                 )
-                raise HTTPException(
-                    status_code=503, detail="Action confirmation indeterminate"
-                ) from exception
-            resolved_conversations.fail_turn(
-                start=start,
-                failure_code="agent_execution_failed",
-                events=tuple(action_events),
-            )
             raise
         except Exception:
             if start.confirmation_pending_id is None:
@@ -905,11 +1170,23 @@ def create_app(
     ) -> SessionResponse:
         del request
         principal, token = authorize(authorization, x_eval_sandbox_id, SESSION_PERMISSION)
-        require_liveness(principal, token)
-        if principal.sandbox_id is None:
-            session_id = resolved_sessions.create(principal.subject)
-        else:
-            session_id = resolved_sessions.create(principal.subject, principal.sandbox_id)
+        try:
+            in_request_phase(
+                AgentRequestPhase.SANDBOX_LIVENESS,
+                lambda: require_liveness(principal, token),
+            )
+            if principal.sandbox_id is None:
+                session_id = resolved_sessions.create(principal.subject)
+            else:
+                session_id = resolved_sessions.create(principal.subject, principal.sandbox_id)
+        except SandboxLivenessRejected as exception:
+            raise HTTPException(status_code=403, detail="Forbidden") from exception
+        except AgentRequestUnavailable as exception:
+            log_request_unavailable(exception)
+            raise HTTPException(
+                status_code=503,
+                detail=unavailable_public_detail(exception),
+            ) from exception
         return SessionResponse(session_id=session_id)
 
     @app.post("/api/chat", response_model=ChatResponse, response_model_exclude_none=True)
@@ -949,10 +1226,14 @@ def create_app(
             ) from exception
         except TurnInProgressError as exception:
             raise HTTPException(status_code=409, detail="Turn in progress") from exception
-        except TurnFailedError as exception:
-            raise HTTPException(status_code=503, detail="Service unavailable") from exception
-        except pymysql.MySQLError as exception:
-            raise HTTPException(status_code=503, detail="Service unavailable") from exception
+        except SandboxLivenessRejected as exception:
+            raise HTTPException(status_code=403, detail="Forbidden") from exception
+        except AgentRequestUnavailable as exception:
+            log_request_unavailable(exception)
+            raise HTTPException(
+                status_code=503,
+                detail=unavailable_public_detail(exception),
+            ) from exception
         return ChatResponse(
             conversation_id=result.conversation_id,
             trace_id=result.trace_id,
@@ -1017,10 +1298,14 @@ def create_app(
             ) from exception
         except TurnInProgressError as exception:
             raise HTTPException(status_code=409, detail="Turn in progress") from exception
-        except TurnFailedError as exception:
-            raise HTTPException(status_code=503, detail="Service unavailable") from exception
-        except pymysql.MySQLError as exception:
-            raise HTTPException(status_code=503, detail="Service unavailable") from exception
+        except SandboxLivenessRejected as exception:
+            raise HTTPException(status_code=403, detail="Forbidden") from exception
+        except AgentRequestUnavailable as exception:
+            log_request_unavailable(exception)
+            raise HTTPException(
+                status_code=503,
+                detail=unavailable_public_detail(exception),
+            ) from exception
         except HTTPException:
             raise
         except Exception:
