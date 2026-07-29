@@ -127,7 +127,7 @@ The linked slice name is the canonical detailed specification. Target outcomes a
 | [CB-116 — Committed payment truth closure and authorization visibility](docs/slices/CB-116.md) | P1 | `VERIFIED` | `CB-071`, `CB-105` |
 | [CB-117 — Refund contention safety and bounded recovery](docs/slices/CB-117.md) | P1 | `VERIFIED` | `CB-116` |
 | [CB-118 — Commerce PendingAction and atomic ActionReceipt transaction](docs/slices/CB-118.md) | P1 | `VERIFIED` | `CB-116`, `CB-117`, `CB-082` |
-| [CB-121 — Agent confirmation, receipt projection, and turn commit](docs/slices/CB-121.md) | P1 | `IN_PROGRESS` | `CB-118`, `CB-082` |
+| [CB-121 — Agent confirmation, receipt projection, and turn commit](docs/slices/CB-121.md) | P1 | `BLOCKED` | `CB-118`, `CB-082` |
 | [CB-130 — Memory watermarks, prompt/PII, and tiered output safety](docs/slices/CB-130.md) | P1 | `PLANNED` | `CB-113`, `CB-121` |
 | [CB-131 — Authoritative handoff tickets and agent projection](docs/slices/CB-131.md) | P1 | `PLANNED` | `CB-130` |
 | `CB-132 — Reviewed failure-candidate capture and authenticated export` | P1 | `PLANNED` | `CB-131` |
