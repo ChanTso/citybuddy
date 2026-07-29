@@ -1073,11 +1073,11 @@ assert_equal '' \
 mysql_query agent_app "$agent_app_password" cs_db \
   "SELECT COUNT(*) FROM support_event"
 mysql_query agent_app "$agent_app_password" cs_db \
-  "START TRANSACTION; SELECT payload_json FROM support_event WHERE turn_id = 'none' AND event_type = 'ACTION_PREPARED' LIMIT 2 FOR SHARE; ROLLBACK"
+  "START TRANSACTION; SELECT event_id, trace_id, session_id, user_subject, sequence, event_type, payload_json FROM support_event WHERE turn_id = 'none' ORDER BY sequence LIMIT 49 FOR SHARE; ROLLBACK"
 assert_mysql_error_code 1142 42000 \
   "agent runtime cannot take an exclusive lock on immutable support events" \
   mysql_query agent_app "$agent_app_password" cs_db \
-  "START TRANSACTION; SELECT payload_json FROM support_event WHERE turn_id = 'none' AND event_type = 'ACTION_PREPARED' LIMIT 2 FOR UPDATE; ROLLBACK"
+  "START TRANSACTION; SELECT event_id, trace_id, session_id, user_subject, sequence, event_type, payload_json FROM support_event WHERE turn_id = 'none' ORDER BY sequence LIMIT 49 FOR UPDATE; ROLLBACK"
 assert_mysql_error_code 1142 42000 \
   "agent runtime cannot update immutable support events" \
   mysql_query agent_app "$agent_app_password" cs_db \
@@ -3784,6 +3784,34 @@ MYSQL_ROOT_PASSWORD="$root_password" \
 MYSQL_AGENT_APP_PASSWORD="$agent_app_password" \
 PENDING_ACTION_ID="$agent_decline_pending_id" \
   uv run python scripts/check_agent_action_event_lock.py
+agent_decline_source_turn_id="$(mysql_query agent_app "$agent_app_password" cs_db \
+  "SELECT source_turn_id FROM pending_action_reference WHERE pending_action_id = '$agent_decline_pending_id'")"
+agent_decline_prepared_event_id="$(mysql_query agent_app "$agent_app_password" cs_db \
+  "SELECT event_id FROM support_event WHERE turn_id = '$agent_decline_source_turn_id' AND event_type = 'ACTION_PREPARED'")"
+agent_decline_prepared_sequence="$(mysql_query agent_app "$agent_app_password" cs_db \
+  "SELECT sequence FROM support_event WHERE event_id = '$agent_decline_prepared_event_id'")"
+mysql_query root "$root_password" cs_db \
+  "UPDATE support_event SET sequence = sequence + 100 WHERE turn_id = '$agent_decline_source_turn_id' AND sequence > $agent_decline_prepared_sequence; UPDATE support_event SET sequence = sequence - 99 WHERE turn_id = '$agent_decline_source_turn_id' AND sequence > $((agent_decline_prepared_sequence + 100)); UPDATE support_event SET event_type = 'MODEL_OUTCOME' WHERE event_id = '$agent_decline_prepared_event_id'; INSERT INTO support_event (event_id, turn_id, trace_id, session_id, user_subject, sequence, event_type, payload_json) SELECT '00000000-0000-0000-0000-000000000992', turn_id, trace_id, session_id, user_subject, $((agent_decline_prepared_sequence + 1)), 'ACTION_PREPARED', payload_json FROM support_event WHERE event_id = '$agent_decline_prepared_event_id'"
+assert_agent_status_reason 409 agent_request_rejected \
+  CONVERSATION_ACTION_DURABLE_TRUTH_INCONSISTENT "Conversation evidence conflict" \
+  "changed preparation type plus a sibling is rejected on exact decline" \
+  --request POST "http://127.0.0.1:$agent_port/api/chat" \
+  --header "Authorization: Bearer $payment_token" \
+  --header 'X-Eval-Sandbox-Id: sandbox-payment' \
+  --header "X-Session-Id: $agent_decline_session" \
+  --header 'Idempotency-Key: cb121-decline-damaged-source' \
+  --header 'Content-Type: application/json' \
+  --data '{"message":"decline"}'
+assert_equal 'PENDING:0:0:0' \
+  "$(mysql_query agent_app "$agent_app_password" cs_db \
+    "SELECT CONCAT(p.state, ':', (SELECT COUNT(*) FROM support_event WHERE session_id = p.session_id AND event_type = 'ACTION_DECLINED'), ':', (SELECT COUNT(*) FROM action_receipt_projection WHERE pending_action_id = p.pending_action_id), ':', (SELECT COUNT(*) FROM support_event WHERE session_id = p.session_id AND event_type = 'ACTION_RECEIPT')) FROM pending_action_reference p WHERE p.pending_action_id = '$agent_decline_pending_id'")" \
+  "damaged source-turn decline creates zero action terminal or receipt truth"
+assert_equal '0:0:0' \
+  "$(mysql_query commerce_app "$commerce_app_password" commerce_db \
+    "SELECT CONCAT((SELECT COUNT(*) FROM action_receipt WHERE pending_action_id = '$agent_decline_pending_id'), ':', (SELECT COUNT(*) FROM mock_refund WHERE request_idempotency_key = CONCAT('action:', '$agent_decline_pending_id')), ':', (SELECT COUNT(*) FROM commerce_outbox WHERE aggregate_type = 'REFUND' AND aggregate_id IN (SELECT refund_id FROM mock_refund WHERE request_idempotency_key = CONCAT('action:', '$agent_decline_pending_id'))))")" \
+  "damaged source-turn decline creates zero commerce truth"
+mysql_query root "$root_password" cs_db \
+  "DELETE FROM support_event WHERE event_id = '00000000-0000-0000-0000-000000000992'; UPDATE support_event SET sequence = sequence - 1 WHERE turn_id = '$agent_decline_source_turn_id' AND sequence > $((agent_decline_prepared_sequence + 1)) ORDER BY sequence; UPDATE support_event SET event_type = 'ACTION_PREPARED' WHERE event_id = '$agent_decline_prepared_event_id'"
 agent_decline_log_start="$(wc -l <"$tmp_dir/agent.log")"
 agent_decline_status="$(request_status "$tmp_dir/http-response.json" \
   --request POST "http://127.0.0.1:$agent_port/api/chat" \
@@ -3998,6 +4026,34 @@ for _ in {1..75}; do
 done
 assert_equal true "$agent_expiry_elapsed" \
   "the configured one-minute PendingAction reaches its real expiry within the bounded fixture"
+agent_expiry_source_turn_id="$(mysql_query agent_app "$agent_app_password" cs_db \
+  "SELECT source_turn_id FROM pending_action_reference WHERE pending_action_id = '$agent_expiry_pending_id'")"
+agent_expiry_prepared_event_id="$(mysql_query agent_app "$agent_app_password" cs_db \
+  "SELECT event_id FROM support_event WHERE turn_id = '$agent_expiry_source_turn_id' AND event_type = 'ACTION_PREPARED'")"
+agent_expiry_prepared_sequence="$(mysql_query agent_app "$agent_app_password" cs_db \
+  "SELECT sequence FROM support_event WHERE event_id = '$agent_expiry_prepared_event_id'")"
+mysql_query root "$root_password" cs_db \
+  "UPDATE support_event SET sequence = sequence + 100 WHERE turn_id = '$agent_expiry_source_turn_id' AND sequence > $agent_expiry_prepared_sequence; UPDATE support_event SET sequence = sequence - 99 WHERE turn_id = '$agent_expiry_source_turn_id' AND sequence > $((agent_expiry_prepared_sequence + 100)); UPDATE support_event SET event_type = 'MODEL_OUTCOME' WHERE event_id = '$agent_expiry_prepared_event_id'; INSERT INTO support_event (event_id, turn_id, trace_id, session_id, user_subject, sequence, event_type, payload_json) SELECT '00000000-0000-0000-0000-000000000993', turn_id, trace_id, session_id, user_subject, $((agent_expiry_prepared_sequence + 1)), 'ACTION_PREPARED', payload_json FROM support_event WHERE event_id = '$agent_expiry_prepared_event_id'"
+assert_agent_status_reason 409 agent_request_rejected \
+  CONVERSATION_ACTION_DURABLE_TRUTH_INCONSISTENT "Conversation evidence conflict" \
+  "changed preparation type plus a sibling is rejected on expiry" \
+  --request POST "http://127.0.0.1:$agent_port/api/chat" \
+  --header "Authorization: Bearer $payment_token" \
+  --header 'X-Eval-Sandbox-Id: sandbox-payment' \
+  --header "X-Session-Id: $agent_expiry_session" \
+  --header 'Idempotency-Key: cb121-expiry-damaged-source' \
+  --header 'Content-Type: application/json' \
+  --data '{"message":"later"}'
+assert_equal 'PENDING:0:0:0' \
+  "$(mysql_query agent_app "$agent_app_password" cs_db \
+    "SELECT CONCAT(p.state, ':', (SELECT COUNT(*) FROM support_event WHERE session_id = p.session_id AND event_type = 'ACTION_EXPIRED'), ':', (SELECT COUNT(*) FROM action_receipt_projection WHERE pending_action_id = p.pending_action_id), ':', (SELECT COUNT(*) FROM support_event WHERE session_id = p.session_id AND event_type = 'ACTION_RECEIPT')) FROM pending_action_reference p WHERE p.pending_action_id = '$agent_expiry_pending_id'")" \
+  "damaged source-turn expiry creates zero action terminal or receipt truth"
+assert_equal '0:0:0' \
+  "$(mysql_query commerce_app "$commerce_app_password" commerce_db \
+    "SELECT CONCAT((SELECT COUNT(*) FROM action_receipt WHERE pending_action_id = '$agent_expiry_pending_id'), ':', (SELECT COUNT(*) FROM mock_refund WHERE request_idempotency_key = CONCAT('action:', '$agent_expiry_pending_id')), ':', (SELECT COUNT(*) FROM commerce_outbox WHERE aggregate_type = 'REFUND' AND aggregate_id IN (SELECT refund_id FROM mock_refund WHERE request_idempotency_key = CONCAT('action:', '$agent_expiry_pending_id'))))")" \
+  "damaged source-turn expiry creates zero commerce truth"
+mysql_query root "$root_password" cs_db \
+  "DELETE FROM support_event WHERE event_id = '00000000-0000-0000-0000-000000000993'; UPDATE support_event SET sequence = sequence - 1 WHERE turn_id = '$agent_expiry_source_turn_id' AND sequence > $((agent_expiry_prepared_sequence + 1)) ORDER BY sequence; UPDATE support_event SET event_type = 'ACTION_PREPARED' WHERE event_id = '$agent_expiry_prepared_event_id'"
 assert_status 200 "an expired local reference resolves without commerce execution" \
   --request POST "http://127.0.0.1:$agent_port/api/chat" \
   --header "Authorization: Bearer $payment_token" \
@@ -4153,6 +4209,73 @@ assert_agent_status_reason 409 evaluation_request_rejected \
 mysql_query root "$root_password" cs_db \
   "UPDATE support_event SET payload_json = JSON_OBJECT('pendingActionId', '$agent_pending_id', 'actionType', 'REFUND_REQUEST', 'argumentCommitment', '$agent_argument_commitment', 'expiresAt', '$agent_prepared_expires_at') WHERE turn_id = (SELECT turn_id FROM support_turn WHERE trace_id = '$agent_prepare_trace') AND event_type = 'ACTION_PREPARED'"
 assert_status 200 "restored ACTION_PREPARED payload restores action evidence" \
+  --request GET "http://127.0.0.1:$agent_port/api/eval/evidence/$agent_prepare_trace" \
+  --user "evaluation-manager:$management_password" \
+  --header 'X-Eval-Sandbox-Id: sandbox-payment'
+
+agent_source_turn_id="$(mysql_query agent_app "$agent_app_password" cs_db \
+  "SELECT turn_id FROM support_turn WHERE trace_id = '$agent_prepare_trace'")"
+agent_prepared_event_id="$(mysql_query agent_app "$agent_app_password" cs_db \
+  "SELECT event_id FROM support_event WHERE turn_id = '$agent_source_turn_id' AND event_type = 'ACTION_PREPARED'")"
+agent_prepared_sequence="$(mysql_query agent_app "$agent_app_password" cs_db \
+  "SELECT sequence FROM support_event WHERE event_id = '$agent_prepared_event_id'")"
+
+assert_agent_source_turn_closure_rejected() {
+  local label="$1"
+  assert_agent_status_reason 409 agent_request_rejected \
+    CONVERSATION_ACTION_DURABLE_TRUTH_INCONSISTENT "Conversation evidence conflict" \
+    "$label is rejected by conversation replay" \
+    --request POST "http://127.0.0.1:$agent_port/api/chat" \
+    --header "Authorization: Bearer $payment_token" \
+    --header 'X-Eval-Sandbox-Id: sandbox-payment' \
+    --header "X-Session-Id: $agent_action_session" \
+    --header 'Idempotency-Key: cb121-action-prepare' \
+    --header 'Content-Type: application/json' \
+    --data '{"message":"action-prepare"}'
+  assert_agent_status_reason 409 evaluation_request_rejected \
+    EVALUATION_ACTION_DURABLE_TRUTH_INCONSISTENT "Evidence unavailable" \
+    "$label is rejected by evaluation" \
+    --request GET "http://127.0.0.1:$agent_port/api/eval/evidence/$agent_prepare_trace" \
+    --user "evaluation-manager:$management_password" \
+    --header 'X-Eval-Sandbox-Id: sandbox-payment'
+}
+
+# The locator must enumerate the whole turn: changing the original type and adding a
+# content-identical sibling must not make the damaged original disappear.
+mysql_query root "$root_password" cs_db \
+  "UPDATE support_event SET sequence = sequence + 100 WHERE turn_id = '$agent_source_turn_id' AND sequence > $agent_prepared_sequence; UPDATE support_event SET sequence = sequence - 99 WHERE turn_id = '$agent_source_turn_id' AND sequence > $((agent_prepared_sequence + 100)); UPDATE support_event SET event_type = 'MODEL_OUTCOME' WHERE event_id = '$agent_prepared_event_id'; INSERT INTO support_event (event_id, turn_id, trace_id, session_id, user_subject, sequence, event_type, payload_json) SELECT '00000000-0000-0000-0000-000000000990', turn_id, trace_id, session_id, user_subject, $((agent_prepared_sequence + 1)), 'ACTION_PREPARED', payload_json FROM support_event WHERE event_id = '$agent_prepared_event_id'"
+assert_agent_source_turn_closure_rejected \
+  "changed original type plus a content-identical ACTION_PREPARED sibling"
+mysql_query root "$root_password" cs_db \
+  "DELETE FROM support_event WHERE event_id = '00000000-0000-0000-0000-000000000990'; UPDATE support_event SET sequence = sequence - 1 WHERE turn_id = '$agent_source_turn_id' AND sequence > $((agent_prepared_sequence + 1)) ORDER BY sequence; UPDATE support_event SET event_type = 'ACTION_PREPARED' WHERE event_id = '$agent_prepared_event_id'"
+
+# A second declaration cannot hide behind a still-valid original.
+mysql_query root "$root_password" cs_db \
+  "UPDATE support_event SET sequence = sequence + 100 WHERE turn_id = '$agent_source_turn_id' AND sequence > $agent_prepared_sequence; UPDATE support_event SET sequence = sequence - 99 WHERE turn_id = '$agent_source_turn_id' AND sequence > $((agent_prepared_sequence + 100)); INSERT INTO support_event (event_id, turn_id, trace_id, session_id, user_subject, sequence, event_type, payload_json) SELECT '00000000-0000-0000-0000-000000000991', turn_id, trace_id, session_id, user_subject, $((agent_prepared_sequence + 1)), 'ACTION_PREPARED', payload_json FROM support_event WHERE event_id = '$agent_prepared_event_id'"
+assert_agent_source_turn_closure_rejected "duplicate ACTION_PREPARED sibling"
+mysql_query root "$root_password" cs_db \
+  "DELETE FROM support_event WHERE event_id = '00000000-0000-0000-0000-000000000991'; UPDATE support_event SET sequence = sequence - 1 WHERE turn_id = '$agent_source_turn_id' AND sequence > $((agent_prepared_sequence + 1)) ORDER BY sequence"
+
+# Sequence gaps and terminal-tail mutations are independently observable.
+mysql_query root "$root_password" cs_db \
+  "UPDATE support_event SET sequence = sequence + 1 WHERE turn_id = '$agent_source_turn_id' AND sequence > $agent_prepared_sequence ORDER BY sequence DESC"
+assert_agent_source_turn_closure_rejected "source-turn sequence gap"
+mysql_query root "$root_password" cs_db \
+  "UPDATE support_event SET sequence = sequence - 1 WHERE turn_id = '$agent_source_turn_id' AND sequence > $((agent_prepared_sequence + 1)) ORDER BY sequence"
+mysql_query root "$root_password" cs_db \
+  "UPDATE support_event SET event_type = 'TURN_COMPLETED' WHERE turn_id = '$agent_source_turn_id' AND event_type = 'ASSISTANT_RESPONSE'"
+assert_agent_source_turn_closure_rejected "source-turn terminal-tail mutation"
+mysql_query root "$root_password" cs_db \
+  "UPDATE support_event SET event_type = 'ASSISTANT_RESPONSE' WHERE turn_id = '$agent_source_turn_id' AND sequence = (SELECT terminal_sequence - 1 FROM (SELECT MAX(sequence) AS terminal_sequence FROM support_event WHERE turn_id = '$agent_source_turn_id') terminal)"
+assert_status 200 "restored source-turn closure restores conversation replay" \
+  --request POST "http://127.0.0.1:$agent_port/api/chat" \
+  --header "Authorization: Bearer $payment_token" \
+  --header 'X-Eval-Sandbox-Id: sandbox-payment' \
+  --header "X-Session-Id: $agent_action_session" \
+  --header 'Idempotency-Key: cb121-action-prepare' \
+  --header 'Content-Type: application/json' \
+  --data '{"message":"action-prepare"}'
+assert_status 200 "restored source-turn closure restores evaluation" \
   --request GET "http://127.0.0.1:$agent_port/api/eval/evidence/$agent_prepare_trace" \
   --user "evaluation-manager:$management_password" \
   --header 'X-Eval-Sandbox-Id: sandbox-payment'

@@ -6,7 +6,9 @@ from datetime import UTC, datetime, timedelta
 import httpx
 import pytest
 from citybuddy_agent.actions import (
+    ActionJsonError,
     ActionReceiptPayload,
+    ActionSourceTurnClosureError,
     ConfirmationDecision,
     PendingActionPayload,
     bounded_http_post,
@@ -14,6 +16,7 @@ from citybuddy_agent.actions import (
     confirmation_decision,
     parse_canonical_action_timestamp,
     strict_json_object,
+    validate_action_source_turn_closure,
 )
 from pydantic import ValidationError
 
@@ -110,6 +113,103 @@ def test_strict_action_decoder_rejects_duplicate_unknown_and_unbounded_values() 
     receipt["amountMinor"] = True
     with pytest.raises(ValidationError):
         ActionReceiptPayload.model_validate(strict_json_object(json.dumps(receipt).encode()))
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        b"[" + (b"[" * 1099) + b"0" + (b"]" * 1100),
+        json.dumps({"root": [[[[[[[[[[[[[[[[[0]]]]]]]]]]]]]]]]]}).encode(),
+        json.dumps({"root": list(range(256))}).encode(),
+        b'{"value":NaN}',
+        b'{"value":Infinity}',
+        b'["not-an-object"]',
+        b"",
+        b"\xff",
+    ],
+)
+def test_strict_action_decoder_is_total_and_bounded(payload: bytes) -> None:
+    with pytest.raises(ActionJsonError):
+        strict_json_object(payload)
+
+
+def test_strict_action_decoder_accepts_exact_depth_and_node_budgets() -> None:
+    exact_depth: object = 0
+    for _ in range(14):
+        exact_depth = [exact_depth]
+    assert strict_json_object(json.dumps({"root": exact_depth}).encode()) == {"root": exact_depth}
+    exact_nodes = strict_json_object(json.dumps({"values": list(range(254))}).encode())
+    values = exact_nodes["values"]
+    assert isinstance(values, list)
+    assert len(values) == 254
+
+
+def test_source_turn_closure_enumerates_before_validating_event_content() -> None:
+    trace_id = "00000000-0000-0000-0000-000000000123"
+    pending_action_id = "00000000-0000-0000-0000-000000000121"
+    expiry = datetime(2026, 7, 28, 4, 0, 0, 123456, tzinfo=UTC)
+    prepared = {
+        "pendingActionId": pending_action_id,
+        "actionType": "REFUND_REQUEST",
+        "argumentCommitment": "a" * 64,
+        "expiresAt": canonical_action_timestamp(expiry),
+    }
+
+    def row(sequence: int, event_type: str, payload: object) -> tuple[object, ...]:
+        return (
+            f"00000000-0000-0000-0000-{sequence:012d}",
+            trace_id,
+            "session-1",
+            "user-1",
+            sequence,
+            event_type,
+            json.dumps(payload),
+        )
+
+    valid = [
+        row(1, "USER_INPUT", {"accepted": True}),
+        row(2, "ACTION_PREPARED", prepared),
+        row(3, "AGENT_OUTCOME", {"outcome": "action_pending"}),
+        row(4, "ASSISTANT_RESPONSE", {"outcome": "action_pending"}),
+        row(5, "TURN_COMPLETED", {"outcome": "action_pending"}),
+    ]
+    validate_action_source_turn_closure(
+        valid,
+        expected_trace_id=trace_id,
+        expected_session_id="session-1",
+        expected_user_subject="user-1",
+        pending_action_id=pending_action_id,
+        action_type="REFUND_REQUEST",
+        argument_commitment="a" * 64,
+        expires_at=expiry,
+    )
+    counterexamples = []
+    changed_original = list(valid)
+    changed_original[1] = row(2, "MODEL_OUTCOME", prepared)
+    changed_original.insert(2, row(3, "ACTION_PREPARED", prepared))
+    changed_original[3:] = [
+        tuple((*item[:4], index, *item[5:])) for index, item in enumerate(changed_original[3:], 4)
+    ]
+    counterexamples.append(changed_original)
+    counterexamples.append(valid[:2] + [row(3, "ACTION_PREPARED", prepared)] + valid[2:])
+    gap = list(valid)
+    gap[2] = tuple((*gap[2][:4], 4, *gap[2][5:]))
+    counterexamples.append(gap)
+    tail_mutation = list(valid)
+    tail_mutation[-2] = row(4, "TURN_COMPLETED", {"outcome": "action_pending"})
+    counterexamples.append(tail_mutation)
+    for damaged in counterexamples:
+        with pytest.raises(ActionSourceTurnClosureError):
+            validate_action_source_turn_closure(
+                damaged,
+                expected_trace_id=trace_id,
+                expected_session_id="session-1",
+                expected_user_subject="user-1",
+                pending_action_id=pending_action_id,
+                action_type="REFUND_REQUEST",
+                argument_commitment="a" * 64,
+                expires_at=expiry,
+            )
 
 
 def test_action_response_bound_stops_stream_before_full_materialization(

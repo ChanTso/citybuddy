@@ -16,6 +16,7 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from .actions import (
     ACTION_SCOPE,
+    ActionJsonError,
     BoundedHttpResponse,
     PendingActionPayload,
     RefundActionArguments,
@@ -671,9 +672,9 @@ class ToolAdapter:
         if spec is None:
             return self._deny(name, "unknown_tool", events)
         try:
-            decoded = json.loads(serialized_arguments)
+            decoded = strict_json_object(serialized_arguments.encode("utf-8"))
             arguments = spec.input_schema.model_validate(decoded)
-        except (json.JSONDecodeError, ValidationError, TypeError):
+        except (ActionJsonError, ValidationError, TypeError, UnicodeError):
             return self._deny(name, "invalid_arguments", events)
         events.append(AgentEvent("TOOL_LIFECYCLE", {"tool": name, "state": "requested"}))
         if spec.authority == "elasticsearch":
@@ -895,7 +896,7 @@ class ToolAdapter:
             bounded = spec.output_schema.model_validate(response_document)
         except ToolBoundaryFailure:
             raise
-        except (ValidationError, ValueError, TypeError) as exception:
+        except (ActionJsonError, ValidationError, ValueError, TypeError) as exception:
             raise ToolBoundaryFailure(
                 status_code=502,
                 reason="invalid_commerce_response",

@@ -22,6 +22,7 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from .actions import (
     ACTION_SCOPE,
+    ActionJsonError,
     ActionReceiptPayload,
     ConfirmationDecision,
     PendingActionReference,
@@ -562,7 +563,7 @@ class OboClient:
             raise HTTPException(status_code=503, detail="Identity exchange unavailable")
         try:
             payload = strict_json_object(response.content)
-        except (TypeError, ValueError) as exception:
+        except ActionJsonError as exception:
             raise HTTPException(
                 status_code=503, detail="Identity exchange unavailable"
             ) from exception
@@ -670,7 +671,7 @@ class HttpActionConfirmationBoundary:
                     receipt = ActionReceiptPayload.model_validate(
                         strict_json_object(response.content)
                     )
-                except (ValueError, TypeError) as exception:
+                except (ActionJsonError, ValueError, TypeError) as exception:
                     raise ToolBoundaryFailure(
                         status_code=502,
                         reason="ACTION_CONFIRMATION_RESPONSE_INVALID",

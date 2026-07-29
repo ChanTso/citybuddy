@@ -10,11 +10,14 @@ import pymysql
 from pydantic import AwareDatetime, BaseModel, ConfigDict, Field
 
 from .actions import (
+    ACTION_SOURCE_TURN_EVENTS_SQL,
+    ActionJsonError,
     ActionReceiptPayload,
+    ActionSourceTurnClosureError,
     action_argument_commitment,
-    canonical_action_timestamp,
     parse_canonical_action_timestamp,
     strict_json_object,
+    validate_action_source_turn_closure,
 )
 
 MAX_EVIDENCE_EVENTS = 48
@@ -379,7 +382,7 @@ class MysqlEvaluationEvidenceStore:
     def _payload(value: object) -> dict[str, object]:
         try:
             decoded = strict_json_object(value.encode("utf-8")) if isinstance(value, str) else value
-        except (UnicodeError, ValueError) as exception:
+        except ActionJsonError as exception:
             raise EvaluationEvidenceInvalid from exception
         if not isinstance(decoded, dict):
             raise EvaluationEvidenceInvalid
@@ -476,6 +479,7 @@ class MysqlEvaluationEvidenceStore:
             ):
                 raise EvaluationEvidenceInvalid
             outcome = "declined"
+            reference = str(payload["pendingActionId"])
         elif event_type == "ACTION_EXPIRED":
             if (
                 set(payload) != {"pendingActionId", "outcome"}
@@ -484,6 +488,7 @@ class MysqlEvaluationEvidenceStore:
             ):
                 raise EvaluationEvidenceInvalid
             outcome = "expired"
+            reference = str(payload["pendingActionId"])
         elif event_type == "ACTION_RECEIPT":
             receipt_id = payload.get("receiptId")
             pending_action_id = payload.get("pendingActionId")
@@ -567,23 +572,13 @@ class MysqlEvaluationEvidenceStore:
         elif terminal_outcome in {"action_declined", "action_expired"}:
             if pending_rows or prepared_events or len(resolution_events) != 1:
                 raise EvaluationEvidenceInvalid
-            event_type, expected_state, expected_outcome = {
-                "action_declined": ("ACTION_DECLINED", "DECLINED", "declined"),
-                "action_expired": ("ACTION_EXPIRED", "EXPIRED", "expired"),
+            expected_state, expected_outcome = {
+                "action_declined": ("DECLINED", "declined"),
+                "action_expired": ("EXPIRED", "expired"),
             }[terminal_outcome]
-            cursor.execute(
-                "SELECT payload_json FROM support_event "
-                "WHERE turn_id = %s AND event_type = %s LIMIT 2",
-                (turn_id, event_type),
-            )
-            event_rows = cursor.fetchall()
-            if len(event_rows) != 1:
-                raise EvaluationEvidenceInvalid
-            payload = self._payload(event_rows[0][0])
-            pending_action_id = payload.get("pendingActionId")
+            pending_action_id = resolution_events[0].reference
             if (
-                payload != {"pendingActionId": pending_action_id, "outcome": expected_outcome}
-                or not self._canonical_uuid(pending_action_id)
+                not self._canonical_uuid(pending_action_id)
                 or resolution_events[0].outcome != expected_outcome
             ):
                 raise EvaluationEvidenceInvalid
@@ -605,15 +600,6 @@ class MysqlEvaluationEvidenceStore:
                 subject=subject,
                 sandbox_id=sandbox_id,
             )
-            cursor.execute(
-                "SELECT turn_id, event_type FROM support_event "
-                "WHERE event_type IN ('ACTION_DECLINED', 'ACTION_EXPIRED') "
-                "AND JSON_UNQUOTE(JSON_EXTRACT(payload_json, '$.pendingActionId')) = %s LIMIT 2",
-                (pending_action_id,),
-            )
-            reverse_rows = cursor.fetchall()
-            if len(reverse_rows) != 1 or tuple(reverse_rows[0]) != (turn_id, event_type):
-                raise EvaluationEvidenceInvalid
         elif pending_rows or prepared_events or resolution_events:
             raise EvaluationEvidenceInvalid
 
@@ -630,18 +616,14 @@ class MysqlEvaluationEvidenceStore:
         if len(receipt_events) != 1:
             raise EvaluationEvidenceInvalid
         cursor.execute(
-            "SELECT payload_json FROM support_event "
-            "WHERE turn_id = %s AND event_type = 'ACTION_RECEIPT' LIMIT 2",
+            "SELECT pending_action_id FROM action_receipt_projection "
+            "WHERE confirmation_turn_id = %s LIMIT 2",
             (turn_id,),
         )
-        receipt_rows = cursor.fetchall()
-        if len(receipt_rows) != 1:
+        receipt_owner_rows = cursor.fetchall()
+        if len(receipt_owner_rows) != 1:
             raise EvaluationEvidenceInvalid
-        receipt_payload = self._payload(receipt_rows[0][0])
-        receipt_id = receipt_payload.get("receiptId")
-        pending_action_id = receipt_payload.get("pendingActionId")
-        if not self._canonical_uuid(receipt_id) or not self._canonical_uuid(pending_action_id):
-            raise EvaluationEvidenceInvalid
+        pending_action_id = str(receipt_owner_rows[0][0])
         receipt, projection = self._load_valid_receipt_projection(
             cursor,
             pending_action_id=str(pending_action_id),
@@ -650,21 +632,13 @@ class MysqlEvaluationEvidenceStore:
             sandbox_id=sandbox_id,
         )
         if (
-            receipt.receipt_id != receipt_id
-            or receipt_events[0].outcome != receipt.status
+            receipt_events[0].outcome != receipt.status
             or receipt_events[0].reference != receipt.receipt_id
             or (
                 projection[3] == turn_id
                 and (projection[4] != trace_id or receipt_events[0].sequence != projection[18])
             )
         ):
-            raise EvaluationEvidenceInvalid
-        if receipt_payload != {
-            "receiptId": receipt.receipt_id,
-            "pendingActionId": receipt.pending_action_id,
-            "status": receipt.status,
-            "receiptCommitment": receipt.receipt_commitment,
-        }:
             raise EvaluationEvidenceInvalid
         cursor.execute(
             "SELECT pending_action_id, source_turn_id, source_trace_id, conversation_id, "
@@ -754,29 +728,24 @@ class MysqlEvaluationEvidenceStore:
             "action_pending",
         ):
             raise EvaluationEvidenceInvalid
-        cursor.execute(
-            "SELECT payload_json FROM support_event "
-            "WHERE turn_id = %s AND event_type = 'ACTION_PREPARED' LIMIT 2",
-            (pending[1],),
-        )
+        cursor.execute(ACTION_SOURCE_TURN_EVENTS_SQL, (pending[1],))
         prepared_rows = cursor.fetchall()
-        if len(prepared_rows) != 1:
-            raise EvaluationEvidenceInvalid
-        prepared_payload = self._payload(prepared_rows[0][0])
-        try:
-            prepared_expiry = parse_canonical_action_timestamp(prepared_payload.get("expiresAt"))
-        except ValueError:
-            raise EvaluationEvidenceInvalid from None
         persisted_expiry = pending[13]
         if persisted_expiry.tzinfo is None:
             persisted_expiry = persisted_expiry.replace(tzinfo=UTC)
-        if prepared_payload != {
-            "pendingActionId": str(pending[0]),
-            "actionType": str(pending[7]),
-            "argumentCommitment": str(pending[8]),
-            "expiresAt": canonical_action_timestamp(prepared_expiry),
-        } or prepared_expiry != persisted_expiry.astimezone(UTC):
-            raise EvaluationEvidenceInvalid
+        try:
+            validate_action_source_turn_closure(
+                prepared_rows,
+                expected_trace_id=str(pending[2]),
+                expected_session_id=session_id,
+                expected_user_subject=subject,
+                pending_action_id=str(pending[0]),
+                action_type=str(pending[7]),
+                argument_commitment=str(pending[8]),
+                expires_at=persisted_expiry,
+            )
+        except ActionSourceTurnClosureError:
+            raise EvaluationEvidenceInvalid from None
         cursor.execute(
             "SELECT pending_action_id FROM action_receipt_projection "
             "WHERE pending_action_id = %s LIMIT 2",
@@ -884,15 +853,15 @@ class MysqlEvaluationEvidenceStore:
         ):
             raise EvaluationEvidenceInvalid
         cursor.execute(
-            "SELECT sequence, payload_json FROM support_event "
-            "WHERE turn_id = %s AND event_type = 'ACTION_RECEIPT' LIMIT 2",
-            (projection[3],),
+            "SELECT trace_id, session_id, user_subject, event_type, payload_json "
+            "FROM support_event WHERE turn_id = %s AND sequence = %s LIMIT 2",
+            (projection[3], projection[18]),
         )
         event_rows = cursor.fetchall()
         if (
             len(event_rows) != 1
-            or event_rows[0][0] != projection[18]
-            or self._payload(event_rows[0][1])
+            or tuple(event_rows[0][:4]) != (projection[4], session_id, subject, "ACTION_RECEIPT")
+            or self._payload(event_rows[0][4])
             != {
                 "receiptId": receipt.receipt_id,
                 "pendingActionId": receipt.pending_action_id,

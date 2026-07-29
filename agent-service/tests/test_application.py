@@ -642,6 +642,36 @@ class ScriptedCursor:
         return self.current
 
 
+def action_turn_rows(
+    *,
+    trace_id: str,
+    session_id: str,
+    subject: str,
+    action_event_type: str,
+    action_payload: str,
+    outcome: str,
+) -> list[tuple[object, ...]]:
+    payloads = (
+        ("USER_INPUT", '{"accepted":true}'),
+        (action_event_type, action_payload),
+        ("AGENT_OUTCOME", json.dumps({"outcome": outcome})),
+        ("ASSISTANT_RESPONSE", json.dumps({"outcome": outcome})),
+        ("TURN_COMPLETED", json.dumps({"outcome": outcome})),
+    )
+    return [
+        (
+            f"00000000-0000-0000-0000-{sequence:012d}",
+            trace_id,
+            session_id,
+            subject,
+            sequence,
+            event_type,
+            payload,
+        )
+        for sequence, (event_type, payload) in enumerate(payloads, start=1)
+    ]
+
+
 def test_evaluation_action_truth_rejects_missing_pending_and_receipt_projections() -> None:
     store = object.__new__(MysqlEvaluationEvidenceStore)
     now = datetime.now(UTC)
@@ -808,7 +838,14 @@ def test_resolved_action_replay_and_evaluation_require_the_pending_projection(
 
     conversation_cursor = ScriptedCursor(
         [
-            [(event_payload,)],
+            action_turn_rows(
+                trace_id="00000000-0000-0000-0000-000000000126",
+                session_id="session-1",
+                subject="user-1",
+                action_event_type=event_type,
+                action_payload=event_payload,
+                outcome=terminal_outcome,
+            ),
             [
                 (
                     source_turn_id,
@@ -822,9 +859,15 @@ def test_resolved_action_replay_and_evaluation_require_the_pending_projection(
                 )
             ],
             [pending_row],
-            [(prepared_payload,)],
+            action_turn_rows(
+                trace_id=source_trace_id,
+                session_id="session-1",
+                subject="user-1",
+                action_event_type="ACTION_PREPARED",
+                action_payload=prepared_payload,
+                outcome="action_pending",
+            ),
             [],
-            [(resolution_turn_id, event_type)],
         ]
     )
     MysqlConversationStore._validate_resolved_action_turn(
@@ -840,12 +883,12 @@ def test_resolved_action_replay_and_evaluation_require_the_pending_projection(
         sequence=2,
         event_kind=event_type,  # type: ignore[arg-type]
         outcome=event_outcome,
+        reference=pending_action_id,
         occurred_at=now,
     )
     evaluation_cursor = ScriptedCursor(
         [
             [],
-            [(event_payload,)],
             [pending_row],
             [
                 (
@@ -857,9 +900,15 @@ def test_resolved_action_replay_and_evaluation_require_the_pending_projection(
                     "action_pending",
                 )
             ],
-            [(prepared_payload,)],
+            action_turn_rows(
+                trace_id=source_trace_id,
+                session_id="session-1",
+                subject="user-1",
+                action_event_type="ACTION_PREPARED",
+                action_payload=prepared_payload,
+                outcome="action_pending",
+            ),
             [],
-            [(resolution_turn_id, event_type)],
             [],
         ]
     )
@@ -876,7 +925,19 @@ def test_resolved_action_replay_and_evaluation_require_the_pending_projection(
         events=(resolution_event,),
     )
 
-    missing_projection = ScriptedCursor([[(event_payload,)], []])
+    missing_projection = ScriptedCursor(
+        [
+            action_turn_rows(
+                trace_id="00000000-0000-0000-0000-000000000126",
+                session_id="session-1",
+                subject="user-1",
+                action_event_type=event_type,
+                action_payload=event_payload,
+                outcome=terminal_outcome,
+            ),
+            [],
+        ]
+    )
     with pytest.raises(ConversationIntegrityError, match="cardinality"):
         MysqlConversationStore._validate_resolved_action_turn(
             missing_projection,  # type: ignore[arg-type]
@@ -924,9 +985,17 @@ def test_pending_action_expiry_requires_exact_prepared_event_anchor() -> None:
         }
     )
 
-    with pytest.raises(ConversationIntegrityError, match="preparation event is inconsistent"):
+    damaged_source_rows = action_turn_rows(
+        trace_id=source_trace_id,
+        session_id="session-1",
+        subject="user-1",
+        action_event_type="ACTION_PREPARED",
+        action_payload=damaged_payload,
+        outcome="action_pending",
+    )
+    with pytest.raises(ConversationIntegrityError, match="source turn is inconsistent"):
         MysqlConversationStore._load_pending_action_for_turn(
-            ScriptedCursor([[pending_row], [(damaged_payload,)]]),  # type: ignore[arg-type]
+            ScriptedCursor([[pending_row], damaged_source_rows]),  # type: ignore[arg-type]
             turn_id=source_turn_id,
             trace_id=source_trace_id,
             conversation_id=conversation_id,
@@ -947,7 +1016,7 @@ def test_pending_action_expiry_requires_exact_prepared_event_anchor() -> None:
                     "action_pending",
                 )
             ],
-            [(damaged_payload,)],
+            damaged_source_rows,
         ]
     )
     with pytest.raises(EvaluationEvidenceInvalid):
@@ -991,16 +1060,23 @@ def test_pending_action_claim_and_completion_lock_the_exact_expiry_anchor() -> N
         }
     )
 
-    claim_cursor = ScriptedCursor([[(valid_payload,)]])
-    MysqlConversationStore._lock_pending_preparation_anchor(
+    valid_source_rows = action_turn_rows(
+        trace_id=pending.source_trace_id,
+        session_id=pending.session_id,
+        subject=pending.user_subject,
+        action_event_type="ACTION_PREPARED",
+        action_payload=valid_payload,
+        outcome="action_pending",
+    )
+    claim_cursor = ScriptedCursor([valid_source_rows])
+    MysqlConversationStore._lock_pending_source_turn(
         claim_cursor,  # type: ignore[arg-type]
         pending=pending,
         persisted_expiry=pending.expires_at.replace(tzinfo=None),
     )
     assert claim_cursor.queries == [
-        "SELECT payload_json FROM support_event "
-        "WHERE turn_id = %s AND event_type = 'ACTION_PREPARED' "
-        "LIMIT 2 FOR SHARE"
+        "SELECT event_id, trace_id, session_id, user_subject, sequence, event_type, "
+        "payload_json FROM support_event WHERE turn_id = %s ORDER BY sequence LIMIT 49 FOR SHARE"
     ]
 
     completion_row = (
@@ -1021,7 +1097,7 @@ def test_pending_action_claim_and_completion_lock_the_exact_expiry_anchor() -> N
         "00000000-0000-0000-0000-000000000126",
         None,
     )
-    completion_cursor = ScriptedCursor([[completion_row], [(valid_payload,)]])
+    completion_cursor = ScriptedCursor([[completion_row], valid_source_rows])
     assert (
         MysqlConversationStore._lock_matching_pending(
             completion_cursor,  # type: ignore[arg-type]
@@ -1031,7 +1107,7 @@ def test_pending_action_claim_and_completion_lock_the_exact_expiry_anchor() -> N
         )
         == "CONFIRMING"
     )
-    assert completion_cursor.queries[1].endswith("LIMIT 2 FOR SHARE")
+    assert completion_cursor.queries[1].endswith("LIMIT 49 FOR SHARE")
 
     for persisted_expiry, prepared_expiry in (
         (pending.expires_at + timedelta(seconds=1), pending.expires_at),
@@ -1045,9 +1121,17 @@ def test_pending_action_claim_and_completion_lock_the_exact_expiry_anchor() -> N
                 "expiresAt": canonical_action_timestamp(prepared_expiry),
             }
         )
-        with pytest.raises(ConversationIntegrityError, match="preparation event is inconsistent"):
-            MysqlConversationStore._lock_pending_preparation_anchor(
-                ScriptedCursor([[(damaged_payload,)]]),  # type: ignore[arg-type]
+        damaged_rows = action_turn_rows(
+            trace_id=pending.source_trace_id,
+            session_id=pending.session_id,
+            subject=pending.user_subject,
+            action_event_type="ACTION_PREPARED",
+            action_payload=damaged_payload,
+            outcome="action_pending",
+        )
+        with pytest.raises(ConversationIntegrityError, match="source turn is inconsistent"):
+            MysqlConversationStore._lock_pending_source_turn(
+                ScriptedCursor([damaged_rows]),  # type: ignore[arg-type]
                 pending=pending,
                 persisted_expiry=persisted_expiry,
             )
@@ -1666,6 +1750,27 @@ def test_obo_client_rejects_malformed_exchange_response(
 
     assert malformed.value.status_code == 503
     assert malformed.value.detail == "Identity exchange unavailable"
+
+
+def test_obo_client_rejects_deep_exchange_response_without_recursion_escape(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    sessions = MemorySessionStore()
+    session_id = sessions.create("user-123")
+    deep = b'{"root":' + (b"[" * 1100) + b"0" + (b"]" * 1100) + b"}"
+    monkeypatch.setattr(
+        httpx,
+        "stream",
+        streamed(lambda *args, **kwargs: httpx.Response(200, content=deep)),
+    )
+    with pytest.raises(HTTPException) as rejected:
+        OboClient(settings(), sessions).exchange(
+            "direct-token", "user-123", session_id, "catalog:read"
+        )
+    assert (rejected.value.status_code, rejected.value.detail) == (
+        503,
+        "Identity exchange unavailable",
+    )
 
 
 def test_chat_persists_server_owned_result_and_replays_same_intent() -> None:
@@ -2969,6 +3074,52 @@ def test_confirmation_rejects_every_contradictory_pending_identity(
     assert rejected.value.status_code == 502
     assert rejected.value.detail == "Invalid action confirmation response"
     assert rejected.value.reason == "ACTION_CONFIRMATION_RESPONSE_INVALID"
+
+
+def test_confirmation_rejects_deep_receipt_without_recursion_escape(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    pending_payload, _ = action_payloads()
+    pending = PendingActionReference(
+        pending_action_id=pending_payload.pending_action_id,
+        source_turn_id="00000000-0000-0000-0000-000000000124",
+        source_trace_id="00000000-0000-0000-0000-000000000125",
+        conversation_id="00000000-0000-0000-0000-000000000126",
+        session_id="session-1",
+        user_subject="user-1",
+        sandbox_id=None,
+        action_type=pending_payload.action_type,
+        argument_commitment=pending_payload.argument_commitment,
+        order_id=pending_payload.order_id,
+        amount_minor=pending_payload.amount_minor,
+        currency=pending_payload.currency,
+        expires_at=pending_payload.expires_at,
+    )
+
+    class FixedObo(OboClient):
+        def __init__(self) -> None:
+            pass
+
+        def exchange(self, *args: object) -> str:
+            del args
+            return "obo"
+
+    deep = b'{"root":' + (b"[" * 1100) + b"0" + (b"]" * 1100) + b"}"
+    monkeypatch.setattr(
+        httpx,
+        "stream",
+        streamed(lambda *args, **kwargs: httpx.Response(200, content=deep)),
+    )
+    with pytest.raises(ToolBoundaryFailure) as rejected:
+        HttpActionConfirmationBoundary("https://commerce.test", FixedObo()).confirm(
+            direct_token="direct",
+            pending=pending,
+            budget=AttemptBudget(2, []),
+        )
+    assert (rejected.value.status_code, rejected.value.reason) == (
+        502,
+        "ACTION_CONFIRMATION_RESPONSE_INVALID",
+    )
 
 
 def test_expired_pending_action_is_a_distinct_terminal_without_commerce() -> None:

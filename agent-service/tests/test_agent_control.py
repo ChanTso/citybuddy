@@ -6,6 +6,7 @@ import httpx
 import pytest
 from citybuddy_agent.agent_control import (
     CATALOG_PRODUCT_SPEC,
+    KNOWLEDGE_SEARCH_SPEC,
     REFUND_PREPARE_SPEC,
     AgentEvent,
     AgentRunResult,
@@ -715,3 +716,60 @@ def test_sensitive_prepare_malformed_response_has_fixed_bounded_failure(
         )
     assert malformed.value.status_code == 502
     assert malformed.value.reason == "invalid_commerce_response"
+
+
+@pytest.mark.parametrize(
+    "tool_name",
+    [CATALOG_PRODUCT_SPEC.name, KNOWLEDGE_SEARCH_SPEC.name, REFUND_PREPARE_SPEC.name],
+)
+def test_all_model_tool_arguments_reject_deep_json(
+    tool_name: str,
+) -> None:
+    deep = '{"root":' + ("[" * 1100) + "0" + ("]" * 1100) + "}"
+    events: list[AgentEvent] = []
+    denied = ToolAdapter("https://commerce.test", RecordingObo()).execute(
+        name=tool_name,
+        serialized_arguments=deep,
+        direct_token="direct",
+        subject="user-1",
+        session_id="session-1",
+        trace_id="trace-1",
+        turn_id="00000000-0000-0000-0000-000000000121",
+        budget=AttemptBudget(4, []),
+        events=events,
+    )
+    assert denied.outcome == "deny_with_feedback"
+    assert events[-1].payload["reason"] == "invalid_arguments"
+
+
+def test_sensitive_action_response_rejects_deep_json(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    deep = '{"root":' + ("[" * 1100) + "0" + ("]" * 1100) + "}"
+    monkeypatch.setattr(
+        httpx,
+        "stream",
+        streamed(lambda *args, **kwargs: httpx.Response(201, content=deep.encode())),
+    )
+    with pytest.raises(ToolBoundaryFailure) as malformed:
+        ToolAdapter("https://commerce.test", RecordingObo()).execute(
+            name=REFUND_PREPARE_SPEC.name,
+            serialized_arguments=json.dumps(
+                {
+                    "orderId": "00000000-0000-0000-0000-000000000040",
+                    "amountMinor": 400,
+                    "currency": "CNY",
+                }
+            ),
+            direct_token="direct",
+            subject="user-1",
+            session_id="session-1",
+            trace_id="trace-1",
+            turn_id="00000000-0000-0000-0000-000000000121",
+            budget=AttemptBudget(4, []),
+            events=[],
+        )
+    assert (malformed.value.status_code, malformed.value.reason) == (
+        502,
+        "invalid_commerce_response",
+    )

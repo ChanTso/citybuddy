@@ -54,14 +54,15 @@ def main() -> None:
 
         with root.cursor() as cursor:
             cursor.execute(
-                "SELECT event_id, sequence, payload_json "
-                "FROM support_event WHERE turn_id = %s AND event_type = 'ACTION_PREPARED'",
+                "SELECT event_id, sequence, event_type, payload_json "
+                "FROM support_event WHERE turn_id = %s ORDER BY sequence LIMIT 49",
                 (source_turn_id,),
             )
-            event_rows = cursor.fetchall()
+            turn_events = cursor.fetchall()
+        event_rows = [row for row in turn_events if row[2] == "ACTION_PREPARED"]
         if len(event_rows) != 1:
             raise RuntimeError("The event-lock witness requires one preparation event")
-        event_id, _, payload_json = event_rows[0]
+        event_id, _, _, payload_json = event_rows[0]
 
         sibling_event_id = str(uuid.uuid4())
         with root.cursor() as cursor:
@@ -109,12 +110,16 @@ def main() -> None:
             try:
                 with agent.cursor() as cursor:
                     cursor.execute(
-                        "SELECT payload_json FROM support_event "
-                        "WHERE turn_id = %s AND event_type = 'ACTION_PREPARED' "
-                        "LIMIT 2 FOR SHARE",
+                        "SELECT event_id, trace_id, session_id, user_subject, sequence, "
+                        "event_type, payload_json FROM support_event WHERE turn_id = %s "
+                        "ORDER BY sequence LIMIT 49 FOR SHARE",
                         (source_turn_id,),
                     )
-                    if len(cursor.fetchall()) != 1:
+                    locked_rows = cursor.fetchall()
+                    if (
+                        len(locked_rows) != len(turn_events)
+                        or sum(row[5] == "ACTION_PREPARED" for row in locked_rows) != 1
+                    ):
                         raise RuntimeError("The locked preparation-event cardinality changed")
 
                 started = threading.Event()

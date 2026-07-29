@@ -275,18 +275,14 @@ def test_action_projection_schema_is_single_pending_atomic_and_least_privileged(
     assert "GRANT SELECT, INSERT ON cs_db.support_event TO 'agent_app'@'%';" in grants
     assert "UPDATE ON cs_db.support_event" not in grants
     assert "DELETE ON cs_db.support_event" not in grants
-    assert (
-        "\"WHERE turn_id = %s AND event_type = 'ACTION_PREPARED' \"\n"
-        '            "LIMIT 2 FOR SHARE"'
-    ) in source
+    assert 'ACTION_SOURCE_TURN_EVENTS_SQL + " FOR SHARE"' in source
     preparation_lock = mysql_source[
-        mysql_source.index("    def _lock_pending_preparation_anchor(") : mysql_source.index(
+        mysql_source.index("    def _lock_pending_source_turn(") : mysql_source.index(
             "    def _lock_matching_pending(",
-            mysql_source.index("    def _lock_pending_preparation_anchor("),
+            mysql_source.index("    def _lock_pending_source_turn("),
         )
     ]
-    assert "WHERE turn_id = %s AND event_type = 'ACTION_PREPARED'" in preparation_lock
-    assert "LIMIT 2 FOR SHARE" in preparation_lock
+    assert 'ACTION_SOURCE_TURN_EVENTS_SQL + " FOR SHARE"' in preparation_lock
     assert "pending.source_turn_id" in preparation_lock
     assert "FOR SHARE" in preparation_lock
     assert "FOR UPDATE" not in preparation_lock
@@ -297,7 +293,7 @@ def test_action_projection_schema_is_single_pending_atomic_and_least_privileged(
     ]
     assert confirmation_claim.index(
         "FROM pending_action_reference WHERE pending_action_id = %s FOR UPDATE"
-    ) < confirmation_claim.index("self._lock_pending_preparation_anchor(")
+    ) < confirmation_claim.index("self._lock_pending_source_turn(")
     for method_name, next_method, mutable_turn_lock in (
         ("complete_action_decline", "complete_action_expired", "_lock_executable_turn("),
         ("complete_action_expired", "complete_action_receipt", "_lock_executable_turn("),

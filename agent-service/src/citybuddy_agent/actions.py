@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 import unicodedata
 import uuid
 from dataclasses import dataclass
@@ -15,7 +16,18 @@ import httpx
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 MAX_ACTION_RESPONSE_BYTES = 4096
+MAX_ACTION_JSON_DEPTH = 16
+MAX_ACTION_JSON_NODES = 256
+MAX_ACTION_SOURCE_TURN_EVENTS = 48
 ACTION_SCOPE = "refund:create"
+
+
+class ActionJsonError(ValueError):
+    """An untrusted action document is not a bounded strict JSON object."""
+
+
+class ActionSourceTurnClosureError(ValueError):
+    """The durable source-turn action evidence is incomplete or contradictory."""
 
 
 @dataclass(frozen=True)
@@ -39,22 +51,148 @@ def _duplicate_rejecting_object(pairs: list[tuple[str, object]]) -> dict[str, ob
     result: dict[str, object] = {}
     for key, value in pairs:
         if key in result:
-            raise ValueError("Duplicate JSON object key")
+            raise ActionJsonError("Duplicate JSON object key")
         result[key] = value
     return result
 
 
-def strict_json_object(payload: bytes) -> object:
-    if not payload or len(payload) > MAX_ACTION_RESPONSE_BYTES:
-        raise ValueError("Action response is empty or oversized")
-    text = payload.decode("utf-8", errors="strict")
-    return json.loads(
-        text,
-        object_pairs_hook=_duplicate_rejecting_object,
-        parse_constant=lambda value: (_ for _ in ()).throw(
-            ValueError(f"Invalid JSON constant: {value}")
-        ),
-    )
+def strict_json_object(payload: bytes) -> dict[str, object]:
+    try:
+        if (
+            not isinstance(payload, bytes)
+            or not payload
+            or len(payload) > MAX_ACTION_RESPONSE_BYTES
+        ):
+            raise ActionJsonError("Action response is empty or oversized")
+        text = payload.decode("utf-8", errors="strict")
+        decoded = json.loads(
+            text,
+            object_pairs_hook=_duplicate_rejecting_object,
+            parse_constant=lambda value: (_ for _ in ()).throw(
+                ActionJsonError(f"Invalid JSON constant: {value}")
+            ),
+        )
+        if not isinstance(decoded, dict):
+            raise ActionJsonError("Action response root must be an object")
+        nodes = 0
+        stack: list[tuple[object, int]] = [(decoded, 1)]
+        while stack:
+            value, depth = stack.pop()
+            nodes += 1
+            if nodes > MAX_ACTION_JSON_NODES:
+                raise ActionJsonError("Action response has too many values")
+            if depth > MAX_ACTION_JSON_DEPTH:
+                raise ActionJsonError("Action response is too deeply nested")
+            if isinstance(value, dict):
+                if not all(isinstance(key, str) for key in value):
+                    raise ActionJsonError("Action response contains an invalid object key")
+                stack.extend((child, depth + 1) for child in value.values())
+            elif isinstance(value, list):
+                stack.extend((child, depth + 1) for child in value)
+            elif value is None or type(value) in {bool, int, str}:
+                continue
+            elif type(value) is float and math.isfinite(value):
+                continue
+            else:
+                raise ActionJsonError("Action response contains an invalid value")
+        return decoded
+    except ActionJsonError:
+        raise
+    except (UnicodeError, json.JSONDecodeError, TypeError, ValueError, RecursionError) as exception:
+        raise ActionJsonError("Action response is not valid bounded JSON") from exception
+
+
+@dataclass(frozen=True)
+class ActionSourceTurnEvent:
+    event_id: str
+    trace_id: str
+    session_id: str
+    user_subject: str
+    sequence: int
+    event_type: str
+    payload: dict[str, object]
+
+
+ACTION_SOURCE_TURN_EVENTS_SQL = (
+    "SELECT event_id, trace_id, session_id, user_subject, sequence, event_type, payload_json "
+    "FROM support_event WHERE turn_id = %s ORDER BY sequence LIMIT 49"
+)
+
+
+def validate_action_source_turn_closure(
+    rows: tuple[tuple[object, ...], ...] | list[tuple[object, ...]],
+    *,
+    expected_trace_id: str,
+    expected_session_id: str,
+    expected_user_subject: str,
+    pending_action_id: str,
+    action_type: str,
+    argument_commitment: str,
+    expires_at: datetime,
+) -> tuple[ActionSourceTurnEvent, ...]:
+    if not 4 <= len(rows) <= MAX_ACTION_SOURCE_TURN_EVENTS:
+        raise ActionSourceTurnClosureError("Action source turn cardinality is inconsistent")
+    events: list[ActionSourceTurnEvent] = []
+    try:
+        canonical_expiry = canonical_action_timestamp(expires_at)
+        for expected_sequence, row in enumerate(rows, start=1):
+            if (
+                len(row) != 7
+                or row[1] != expected_trace_id
+                or row[2] != expected_session_id
+                or row[3] != expected_user_subject
+                or row[4] != expected_sequence
+                or not all(isinstance(row[index], str) for index in (0, 1, 2, 3, 5, 6))
+            ):
+                raise ActionSourceTurnClosureError(
+                    "Action source turn identity or sequence is inconsistent"
+                )
+            events.append(
+                ActionSourceTurnEvent(
+                    event_id=str(row[0]),
+                    trace_id=str(row[1]),
+                    session_id=str(row[2]),
+                    user_subject=str(row[3]),
+                    sequence=expected_sequence,
+                    event_type=str(row[5]),
+                    payload=strict_json_object(str(row[6]).encode("utf-8")),
+                )
+            )
+    except (ActionJsonError, TypeError, ValueError) as exception:
+        if isinstance(exception, ActionSourceTurnClosureError):
+            raise
+        raise ActionSourceTurnClosureError("Action source turn content is invalid") from exception
+    prepared = [event for event in events if event.event_type == "ACTION_PREPARED"]
+    if (
+        len(prepared) != 1
+        or prepared[0] is not events[-4]
+        or events[0].event_type != "USER_INPUT"
+        or events[0].payload != {"accepted": True}
+        or prepared[0].payload
+        != {
+            "pendingActionId": pending_action_id,
+            "actionType": action_type,
+            "argumentCommitment": argument_commitment,
+            "expiresAt": canonical_expiry,
+        }
+        or [event.event_type for event in events[-3:]]
+        != ["AGENT_OUTCOME", "ASSISTANT_RESPONSE", "TURN_COMPLETED"]
+        or any(event.payload != {"outcome": "action_pending"} for event in events[-3:])
+        or any(
+            event.event_type in {"ACTION_DECLINED", "ACTION_EXPIRED", "ACTION_RECEIPT"}
+            for event in events
+        )
+        or any(
+            event is not prepared[0]
+            and bool(
+                {"pendingActionId", "actionType", "argumentCommitment", "expiresAt"}
+                & set(event.payload)
+            )
+            for event in events
+        )
+    ):
+        raise ActionSourceTurnClosureError("Action source turn closure is inconsistent")
+    return tuple(events)
 
 
 class RefundActionArguments(BaseModel):

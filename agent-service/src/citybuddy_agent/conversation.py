@@ -13,14 +13,17 @@ from typing import Literal, Protocol, cast
 import pymysql
 
 from .actions import (
+    ACTION_SOURCE_TURN_EVENTS_SQL,
+    ActionJsonError,
     ActionReceiptPayload,
+    ActionSourceTurnClosureError,
     PendingActionPayload,
     PendingActionReference,
     StoredActionReceipt,
     action_argument_commitment,
     canonical_action_timestamp,
-    parse_canonical_action_timestamp,
     strict_json_object,
+    validate_action_source_turn_closure,
 )
 from .agent_control import AgentEvent
 from .retrieval import RetrievalDecision, RetrievalEvidence
@@ -283,7 +286,7 @@ class MysqlConversationStore:
                         )
                     if not isinstance(owner[12], datetime):
                         raise ConversationIntegrityError("PendingAction expiry is invalid")
-                    self._lock_pending_preparation_anchor(
+                    self._lock_pending_source_turn(
                         cursor,
                         pending=pending,
                         persisted_expiry=owner[12],
@@ -1165,8 +1168,8 @@ class MysqlConversationStore:
         return cast(tuple[object, ...], turn)
 
     @staticmethod
-    def _validate_pending_preparation_anchor(
-        raw_payload: object,
+    def _validate_pending_source_turn(
+        rows: tuple[tuple[object, ...], ...] | list[tuple[object, ...]],
         *,
         pending: PendingActionReference,
         persisted_expiry: object,
@@ -1179,51 +1182,35 @@ class MysqlConversationStore:
             else persisted_expiry.astimezone(UTC)
         )
         try:
-            pending_expiry = parse_canonical_action_timestamp(
-                canonical_action_timestamp(pending.expires_at)
+            if persisted_aware != pending.expires_at.astimezone(UTC):
+                raise ActionSourceTurnClosureError("PendingAction expiry is inconsistent")
+            validate_action_source_turn_closure(
+                rows,
+                expected_trace_id=pending.source_trace_id,
+                expected_session_id=pending.session_id,
+                expected_user_subject=pending.user_subject,
+                pending_action_id=pending.pending_action_id,
+                action_type=pending.action_type,
+                argument_commitment=pending.argument_commitment,
+                expires_at=persisted_aware,
             )
-            payload = strict_json_object(str(raw_payload).encode("utf-8"))
-            prepared_expiry = parse_canonical_action_timestamp(
-                payload.get("expiresAt") if isinstance(payload, dict) else None
-            )
-        except (AttributeError, UnicodeError, ValueError) as exception:
+        except (AttributeError, ActionSourceTurnClosureError, ValueError) as exception:
             raise ConversationIntegrityError(
-                "PendingAction preparation event is invalid"
+                "PendingAction source turn is inconsistent"
             ) from exception
-        if (
-            payload
-            != {
-                "pendingActionId": pending.pending_action_id,
-                "actionType": pending.action_type,
-                "argumentCommitment": pending.argument_commitment,
-                "expiresAt": canonical_action_timestamp(prepared_expiry),
-            }
-            or prepared_expiry != persisted_aware
-            or prepared_expiry != pending_expiry
-        ):
-            raise ConversationIntegrityError("PendingAction preparation event is inconsistent")
 
     @classmethod
-    def _lock_pending_preparation_anchor(
+    def _lock_pending_source_turn(
         cls,
         cursor: pymysql.cursors.Cursor,
         *,
         pending: PendingActionReference,
         persisted_expiry: object,
     ) -> None:
-        cursor.execute(
-            "SELECT payload_json FROM support_event "
-            "WHERE turn_id = %s AND event_type = 'ACTION_PREPARED' "
-            "LIMIT 2 FOR SHARE",
-            (pending.source_turn_id,),
-        )
+        cursor.execute(ACTION_SOURCE_TURN_EVENTS_SQL + " FOR SHARE", (pending.source_turn_id,))
         rows = cursor.fetchall()
-        if len(rows) != 1:
-            raise ConversationIntegrityError(
-                "PendingAction preparation event cardinality is inconsistent"
-            )
-        cls._validate_pending_preparation_anchor(
-            rows[0][0],
+        cls._validate_pending_source_turn(
+            rows,
             pending=pending,
             persisted_expiry=persisted_expiry,
         )
@@ -1274,7 +1261,7 @@ class MysqlConversationStore:
         expires_at = row[12]
         if not isinstance(expires_at, datetime):
             raise ConversationIntegrityError("PendingAction expiry is invalid")
-        cls._lock_pending_preparation_anchor(
+        cls._lock_pending_source_turn(
             cursor,
             pending=pending,
             persisted_expiry=expires_at,
@@ -1559,18 +1546,10 @@ class MysqlConversationStore:
             )
         ):
             raise ConversationIntegrityError("PendingAction commitment is inconsistent")
-        cursor.execute(
-            "SELECT payload_json FROM support_event "
-            "WHERE turn_id = %s AND event_type = 'ACTION_PREPARED' LIMIT 2",
-            (turn_id,),
-        )
+        cursor.execute(ACTION_SOURCE_TURN_EVENTS_SQL, (turn_id,))
         event_rows = cursor.fetchall()
-        if len(event_rows) != 1:
-            raise ConversationIntegrityError(
-                "PendingAction preparation event cardinality is inconsistent"
-            )
-        cls._validate_pending_preparation_anchor(
-            event_rows[0][0],
+        cls._validate_pending_source_turn(
+            event_rows,
             pending=reference,
             persisted_expiry=expires_at,
         )
@@ -1617,17 +1596,12 @@ class MysqlConversationStore:
         cursor: pymysql.cursors.Cursor, turn_id: str
     ) -> StoredActionReceipt | None:
         cursor.execute(
-            "SELECT projection.receipt_id, projection.pending_action_id, "
-            "projection.action_type, projection.status, projection.order_id, "
-            "projection.refund_id, projection.resource_version, projection.amount_minor, "
-            "projection.currency, projection.committed_at, projection.source_turn_id, "
-            "projection.confirmation_turn_id, projection.argument_commitment, "
-            "projection.receipt_commitment, event.payload_json "
-            "FROM support_event event "
-            "JOIN action_receipt_projection projection "
-            "ON projection.receipt_id = "
-            "JSON_UNQUOTE(JSON_EXTRACT(event.payload_json, '$.receiptId')) "
-            "WHERE event.turn_id = %s AND event.event_type = 'ACTION_RECEIPT'",
+            "SELECT receipt_id, pending_action_id, action_type, status, order_id, "
+            "refund_id, resource_version, amount_minor, currency, committed_at, "
+            "source_turn_id, confirmation_turn_id, confirmation_trace_id, session_id, "
+            "user_subject, argument_commitment, "
+            "receipt_commitment, published_event_sequence "
+            "FROM action_receipt_projection WHERE confirmation_turn_id = %s LIMIT 2",
             (turn_id,),
         )
         rows = cursor.fetchall()
@@ -1661,15 +1635,24 @@ class MysqlConversationStore:
             raise ConversationIntegrityError(
                 "ActionReceipt projection content is invalid"
             ) from exception
+        cursor.execute(
+            "SELECT trace_id, session_id, user_subject, event_type, payload_json "
+            "FROM support_event WHERE turn_id = %s AND sequence = %s LIMIT 2",
+            (turn_id, row[17]),
+        )
+        event_rows = cursor.fetchall()
+        if len(event_rows) != 1 or event_rows[0][3] != "ACTION_RECEIPT":
+            raise ConversationIntegrityError("ActionReceipt event identity is inconsistent")
         try:
-            event_payload = strict_json_object(str(row[14]).encode("utf-8"))
-        except (UnicodeError, ValueError) as exception:
+            event_payload = strict_json_object(str(event_rows[0][4]).encode("utf-8"))
+        except ActionJsonError as exception:
             raise ConversationIntegrityError(
                 "ActionReceipt event payload is invalid"
             ) from exception
         if (
-            row[12] != receipt.argument_commitment
-            or row[13] != receipt.receipt_commitment
+            row[15] != receipt.argument_commitment
+            or row[16] != receipt.receipt_commitment
+            or tuple(event_rows[0][:3]) != tuple(row[12:15])
             or event_payload
             != {
                 "receiptId": receipt.receipt_id,
@@ -1740,16 +1723,30 @@ class MysqlConversationStore:
             "action_declined": ("ACTION_DECLINED", "DECLINED", "declined"),
             "action_expired": ("ACTION_EXPIRED", "EXPIRED", "expired"),
         }[outcome]
-        cursor.execute(
-            "SELECT payload_json FROM support_event WHERE turn_id = %s AND event_type = %s LIMIT 2",
-            (turn_id, event_type),
-        )
+        cursor.execute(ACTION_SOURCE_TURN_EVENTS_SQL, (turn_id,))
         event_rows = cursor.fetchall()
-        if len(event_rows) != 1:
+        try:
+            terminal_payloads = [
+                strict_json_object(str(row[6]).encode("utf-8")) for row in event_rows[-3:]
+            ]
+        except ActionJsonError as exception:
+            raise ConversationIntegrityError("Resolved action event is invalid") from exception
+        if (
+            not 4 <= len(event_rows) <= 48
+            or any(
+                len(row) != 7 or row[2] != session_id or row[3] != subject or row[4] != sequence
+                for sequence, row in enumerate(event_rows, start=1)
+            )
+            or [row[5] for row in event_rows[-3:]]
+            != ["AGENT_OUTCOME", "ASSISTANT_RESPONSE", "TURN_COMPLETED"]
+            or any(payload != {"outcome": outcome} for payload in terminal_payloads)
+            or sum(row[5] in {"ACTION_DECLINED", "ACTION_EXPIRED"} for row in event_rows) != 1
+            or event_rows[-4][5] != event_type
+        ):
             raise ConversationIntegrityError("Resolved action event cardinality is inconsistent")
         try:
-            payload = strict_json_object(str(event_rows[0][0]).encode("utf-8"))
-        except (UnicodeError, ValueError) as exception:
+            payload = strict_json_object(str(event_rows[-4][6]).encode("utf-8"))
+        except ActionJsonError as exception:
             raise ConversationIntegrityError("Resolved action event is invalid") from exception
         if not isinstance(payload, dict):
             raise ConversationIntegrityError("Resolved action event is invalid")
@@ -1790,15 +1787,6 @@ class MysqlConversationStore:
         )
         if pending.pending_action_id != pending_action_id or loaded_state != state:
             raise ConversationIntegrityError("Resolved action event and PendingAction disagree")
-        cursor.execute(
-            "SELECT turn_id, event_type FROM support_event "
-            "WHERE event_type IN ('ACTION_DECLINED', 'ACTION_EXPIRED') "
-            "AND JSON_UNQUOTE(JSON_EXTRACT(payload_json, '$.pendingActionId')) = %s LIMIT 2",
-            (pending_action_id,),
-        )
-        resolution_rows = cursor.fetchall()
-        if len(resolution_rows) != 1 or tuple(resolution_rows[0]) != (turn_id, event_type):
-            raise ConversationIntegrityError("Resolved action event identity is not unique")
 
     @classmethod
     def _load_action_receipt_by_pending(
