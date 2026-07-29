@@ -1,8 +1,8 @@
 # CityBuddy implementation index
 
-**Document version:** v0.35\
-**Verification date:** 2026-07-27\
-**Repository phase:** Refund contention safety and bounded recovery ready
+**Document version:** v0.36\
+**Verification date:** 2026-07-29\
+**Repository phase:** Agent PendingAction reference, local decisions, and evidence closure ready
 
 ## How to use this index
 
@@ -128,10 +128,12 @@ The linked slice name is the canonical detailed specification. Target outcomes a
 | [CB-117 — Refund contention safety and bounded recovery](docs/slices/CB-117.md) | P1 | `VERIFIED` | `CB-116` |
 | [CB-118 — Commerce PendingAction and atomic ActionReceipt transaction](docs/slices/CB-118.md) | P1 | `VERIFIED` | `CB-116`, `CB-117`, `CB-082` |
 | [CB-121 — Agent confirmation, receipt projection, and turn commit](docs/slices/CB-121.md) | P1 | `BLOCKED` | `CB-118`, `CB-082` |
-| [CB-130 — Memory watermarks, prompt/PII, and tiered output safety](docs/slices/CB-130.md) | P1 | `PLANNED` | `CB-113`, `CB-121` |
+| [CB-122 — Agent PendingAction reference, local decisions, and evidence closure](docs/slices/CB-122.md) | P1 | `READY` | `CB-118`, `CB-082` |
+| [CB-123 — Agent confirmation arbitration, ActionReceipt projection, and turn commit](docs/slices/CB-123.md) | P1 | `PLANNED` | `CB-122`, `CB-118`, `CB-082` |
+| [CB-130 — Memory watermarks, prompt/PII, and tiered output safety](docs/slices/CB-130.md) | P1 | `PLANNED` | `CB-113`, `CB-123` |
 | [CB-131 — Authoritative handoff tickets and agent projection](docs/slices/CB-131.md) | P1 | `PLANNED` | `CB-130` |
 | `CB-132 — Reviewed failure-candidate capture and authenticated export` | P1 | `PLANNED` | `CB-131` |
-| `CB-140 — Minimal web demonstration` | P1 | `PLANNED` | `CB-020`, `CB-030`, `CB-061`, `CB-082`, `CB-091`, `CB-121` |
+| `CB-140 — Minimal web demonstration` | P1 | `PLANNED` | `CB-020`, `CB-030`, `CB-061`, `CB-082`, `CB-091`, `CB-123` |
 | `CB-150 — Metrics and optional no-op trace sink` | P1 | `PLANNED` | `CB-105`, `CB-132`, `CB-140` |
 | `CB-151 — Scripted reset/demo and repeatable fault drills` | P1 | `PLANNED` | `CB-150` |
 | `CB-152 — Load, latency, and quality evidence` | P1 | `PLANNED` | `CB-151` |
