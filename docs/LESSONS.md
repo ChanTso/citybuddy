@@ -332,3 +332,8 @@ This file records only factual pitfalls supported by merged pull-request, commit
 - 根因：实现只在聚合完成后分类结果，没有同时验证聚合输入代表的 durable truth 是否成立，也没有把“有界”施加在数据库获取边界。于是内容完整性损坏既可能被降格为普通业务拒绝，也可能在到达分类逻辑前因无界物化或算术溢出失败。
 - 解决：退款 repository 以数据库单行精确 `DECIMAL SUM` 取代 active-row 列表，并以 `longValueExact()` 把域外总和提升为专用 `RefundIntegrityException`；service 在计算本次可退款余额前先把负数、超过已支付总额与溢出统一归因到 `REFUND_DURABLE_TRUTH_INCONSISTENT`。真实 MySQL 回归分别构造 600+600、`Long.MAX_VALUE + 1` 与 1,025 条独立 active refund，均固定返回 attributed 409，且 refund/Outbox 计数不变；完整 Action 原子事务、并发、响应丢失与回放证据保持通过。
 - 结论：聚合值也属于持久真值，必须先验证其完整性再用于业务资格判定；“结果集合最终很小”不能证明获取有界，边界必须在数据库查询阶段收敛为固定大小。本次属于现有 “Bounds apply before materialization” 与 attributable fault classification 清单项，没有新增 recurring defect class。
+
+## CB-122 — Aggregate closeout evidence disagreement
+
+- 现象：本地顺序执行的 aggregate closeout 与配置化的分布式 CI matrix 可能因依赖启动健康对环境敏感而给出不同结果。
+- 结论：必须如实记录两边证据；归因不唯一的本地失败不能重标为外部基础设施，也不能仅为获得绿灯而原样重跑。任何证据替代都必须由所有者限定到单一切片，不能成为后续 closeout 的通用先例。Closeout 必须在同一 diff 中同时更新权威路线表，以及同文件中声明当前 phase 或 verified capability 的全部叙述，否则一个文档会呈现相互矛盾的仓库事实。

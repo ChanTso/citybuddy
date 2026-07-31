@@ -2,7 +2,7 @@
 
 **Document version:** v0.36\
 **Verification date:** 2026-07-29\
-**Repository phase:** Agent PendingAction reference, local decisions, and evidence closure in progress
+**Repository phase:** CB-122 Agent PendingAction reference, local decisions, and evidence closure verified; CB-123 is the sole ready slice
 
 ## How to use this index
 
@@ -36,6 +36,7 @@ The repository contains the verified local-runtime foundations, identity vertica
 - an executable six-family asynchronous-entry inventory proving zero current evaluation-reachable carriers, real evaluation-token rejection at production commerce controllers, payload non-carriage, and real-Broker rejection of reserved sandbox metadata before current production handlers;
 - evaluation mock-payment attempts bound to sandbox fixture orders, independently authenticated callback context with exact sandbox/session/trace/operation correlation, in-transaction active-liveness fencing, atomic callback/payment/order/ledger/audit truth, idempotent replay, and business-truth-anchored bidirectional audit/state completeness reconciliation;
 - direct-user durable support chat over server-owned sessions, with owner isolation, deterministic idempotent replay, atomic conversation/turn truth, and ordered append-only event evidence in `cs_db`;
+- one Agent-owned, non-authoritative PendingAction reference and local evidence closure, with complete validation of the Commerce `PREPARED` response bindings, local clarification/decline/expiry decisions, local-closure-first replay, shared conversation/evaluation action-evidence validation, and request-local action producer attribution; exact confirmation remains a fixed, side-effect-free non-success until CB-123;
 - one bounded ReAct agent with deterministic routing signals, server-owned business-tier selection, one shared attempt budget, provider-isolated finite circuit breakers, role-alias-only fake-provider routing, executable fixed ToolSpec mediation, just-in-time exact-scope OBO, and ordered durable routing/model/budget/circuit/tool/terminal evidence;
 - filtered owner-scoped SSE over the same durable turn truth, with fixed public event schemas, bounded safety buffering, single-terminal ordering, disconnect-safe replay, and owner-scoped append-only feedback in `cs_db`;
 - commerce-owned product and CRM truth, authenticated published-product reads, a non-authoritative Redis cache with bounded penetration and hot-key protection, and transactional Outbox plus idempotent RocketMQ invalidation;
@@ -128,8 +129,8 @@ The linked slice name is the canonical detailed specification. Target outcomes a
 | [CB-117 — Refund contention safety and bounded recovery](docs/slices/CB-117.md) | P1 | `VERIFIED` | `CB-116` |
 | [CB-118 — Commerce PendingAction and atomic ActionReceipt transaction](docs/slices/CB-118.md) | P1 | `VERIFIED` | `CB-116`, `CB-117`, `CB-082` |
 | [CB-121 — Agent confirmation, receipt projection, and turn commit](docs/slices/CB-121.md) | P1 | `BLOCKED` | `CB-118`, `CB-082` |
-| [CB-122 — Agent PendingAction reference, local decisions, and evidence closure](docs/slices/CB-122.md) | P1 | `IN_PROGRESS` | `CB-118`, `CB-082` |
-| [CB-123 — Agent confirmation arbitration, ActionReceipt projection, and turn commit](docs/slices/CB-123.md) | P1 | `PLANNED` | `CB-122`, `CB-118`, `CB-082` |
+| [CB-122 — Agent PendingAction reference, local decisions, and evidence closure](docs/slices/CB-122.md) | P1 | `VERIFIED` | `CB-118`, `CB-082` |
+| [CB-123 — Agent confirmation arbitration, ActionReceipt projection, and turn commit](docs/slices/CB-123.md) | P1 | `READY` | `CB-122`, `CB-118`, `CB-082` |
 | [CB-130 — Memory watermarks, prompt/PII, and tiered output safety](docs/slices/CB-130.md) | P1 | `PLANNED` | `CB-113`, `CB-123` |
 | [CB-131 — Authoritative handoff tickets and agent projection](docs/slices/CB-131.md) | P1 | `PLANNED` | `CB-130` |
 | `CB-132 — Reviewed failure-candidate capture and authenticated export` | P1 | `PLANNED` | `CB-131` |
