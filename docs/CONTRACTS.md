@@ -643,4 +643,26 @@ This replacement preserves the full original CB-121 product result, `commerce_db
 
 Only unstarted route dependencies move. CB-130 now depends on CB-113 and CB-123; CB-140 consumes CB-123 instead of CB-121; no downstream row depends on CB-121. CB-121 receives only the append-only supersession reference and remains `BLOCKED`. CB-122 is the sole `READY` row, CB-123 and all later committed work remain `PLANNED`, and no row is `IN_PROGRESS`. This decision changes only route/specification ownership and current contract references; it adds no production code, test, migration, grant, OpenAPI, runtime configuration, stored data, service/language responsibility, truth owner, credential, or deployed dependency. The route still ends at CB-152, and CB-152 retains the mandatory real environment-labelled load, latency, and quality evidence.
 
-Current Level 3 conflicts: **none unresolved as of 2026-07-29**.
+**Resolved Level 3 internal-interface amendment — 2026-07-30 (CB-118 prepare projection for CB-122):**
+Fresh CB-122 review proved that the verified CB-118 prepare response did not project the already
+committed PendingAction owner, support-session, turn, trace, required-scope, sandbox, and target
+version bindings, so the Agent could not independently validate the complete durable `PREPARED`
+result. The owner approved a narrow internal response amendment: `PendingActionView` now projects
+those existing values from the post-prepare `PendingActionRecord`; initial create and same-intent
+replay return identical bindings, with only the existing status/replayed distinction. No
+`pending_action` schema, transaction, idempotency commitment, confirmation, refund, receipt, or
+truth owner changes. CB-118 remains the authoritative PendingAction source.
+
+CB-122 must treat every projected value as untrusted input and compare it with the validated direct
+principal, owned session, server turn and trace, fixed `refund:create` scope, null-safe evaluation
+sandbox, canonical request arguments, and a positive target version. The Agent may persist
+`target_version` only as an immutable local evidence copy in its unmerged V007 reference and
+`ACTION_PREPARED` event; it cannot use that copy to override Commerce truth or avoid CB-118's later
+confirmation revalidation. The additional response bindings are restricted to the internal
+ToolAdapter. Explicit model input retains only pending-action id, action type, order id, amount,
+currency, state, and expiry; no new binding or server-only producer may enter model, chat, or SSE
+output. The impact radius is the CB-118 internal view/OpenAPI and tests plus CB-122 validation,
+evidence, producer attribution, and V007. Operational and migration cost is limited to the
+unreleased Agent evidence column; no deployed Commerce data migration or new endpoint is required.
+
+Current Level 3 conflicts: **none unresolved as of 2026-07-30**.

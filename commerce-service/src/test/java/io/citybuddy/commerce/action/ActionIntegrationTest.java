@@ -5,6 +5,7 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.node.ObjectNode;
 import com.nimbusds.jose.JWSAlgorithm;
 import com.nimbusds.jose.JWSHeader;
 import com.nimbusds.jose.crypto.RSASSASigner;
@@ -142,11 +143,18 @@ class ActionIntegrationTest {
     String pendingId = prepared.getBody().get("pendingActionId").asText();
     assertThat(prepared.getBody().get("state").asText()).isEqualTo("PREPARED");
     assertThat(prepared.getBody().get("replayed").asBoolean()).isFalse();
+    assertPreparedBindings(prepared.getBody(), paid.orderId(), "trace-main", turn, false);
 
     ResponseEntity<JsonNode> prepareReplay =
         prepare(obo(USER, SESSION, SCOPE), SESSION, "trace-main", turn, paid.orderId(), 400);
     assertThat(prepareReplay.getStatusCode()).isEqualTo(HttpStatus.OK);
     assertThat(prepareReplay.getBody().get("pendingActionId").asText()).isEqualTo(pendingId);
+    assertPreparedBindings(prepareReplay.getBody(), paid.orderId(), "trace-main", turn, true);
+    ObjectNode preparedProjection = prepared.getBody().deepCopy();
+    ObjectNode replayProjection = prepareReplay.getBody().deepCopy();
+    preparedProjection.remove("replayed");
+    replayProjection.remove("replayed");
+    assertThat(replayProjection).isEqualTo(preparedProjection);
     assertThat(
             prepare(obo(USER, SESSION, SCOPE), SESSION, "trace-main", turn, paid.orderId(), 401)
                 .getStatusCode())
@@ -195,6 +203,28 @@ class ActionIntegrationTest {
                 String.class,
                 pendingId))
         .isEqualTo("CONSUMED:2:1");
+  }
+
+  private void assertPreparedBindings(
+      JsonNode body, String orderId, String traceId, String turnId, boolean replayed) {
+    Map<String, Object> durable =
+        jdbc.queryForMap(
+            "SELECT user_subject, support_session_id, trace_id, turn_id, required_scope, "
+                + "sandbox_id, order_id, target_order_version FROM pending_action "
+                + "WHERE pending_action_id = ?",
+            body.get("pendingActionId").asText());
+    assertThat(body.get("userSubject").asText()).isEqualTo(durable.get("user_subject"));
+    assertThat(body.get("supportSessionId").asText()).isEqualTo(durable.get("support_session_id"));
+    assertThat(body.get("traceId").asText()).isEqualTo(durable.get("trace_id")).isEqualTo(traceId);
+    assertThat(body.get("turnId").asText()).isEqualTo(durable.get("turn_id")).isEqualTo(turnId);
+    assertThat(body.get("requiredScope").asText()).isEqualTo(durable.get("required_scope"));
+    assertThat(body.get("sandboxId").isNull()).isTrue();
+    assertThat(durable.get("sandbox_id")).isNull();
+    assertThat(body.get("orderId").asText()).isEqualTo(durable.get("order_id")).isEqualTo(orderId);
+    assertThat(body.get("targetVersion").asLong())
+        .isEqualTo(((Number) durable.get("target_order_version")).longValue())
+        .isPositive();
+    assertThat(body.get("replayed").asBoolean()).isEqualTo(replayed);
   }
 
   @Test

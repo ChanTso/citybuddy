@@ -2,11 +2,13 @@
 
 from __future__ import annotations
 
+import logging
 import secrets
 import time
 import uuid
 from base64 import b64decode
 from collections.abc import Mapping
+from datetime import UTC, datetime
 from typing import Any, Literal, Protocol
 
 import httpx
@@ -17,7 +19,10 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel, ConfigDict, Field
 
+from .actions import ConfirmationDecision, confirmation_decision
 from .agent_control import (
+    TOOL_BOUNDARY_FAILURE_REASONS,
+    AgentEvent,
     AgentRunner,
     BoundedAgent,
     LiteLlmClient,
@@ -26,8 +31,11 @@ from .agent_control import (
     ProviderRoute,
     RuleRouter,
     ToolAdapter,
+    ToolBoundaryFailure,
 )
 from .conversation import (
+    ActionArbitrationConflictError,
+    ConversationIntegrityError,
     ConversationOwnershipError,
     ConversationResult,
     ConversationStore,
@@ -37,6 +45,7 @@ from .conversation import (
     TurnInProgressError,
 )
 from .evaluation import (
+    ActionEvaluationEvidenceInvalid,
     EvaluationEvidenceInvalid,
     EvaluationEvidenceNotFound,
     EvaluationEvidenceResponse,
@@ -59,6 +68,29 @@ CHAT_PERMISSION = "support:chat"
 DIRECT_TOKEN_TYPE = "direct_user"
 EVALUATION_DIRECT_TOKEN_TYPE = "eval_direct_user"
 MAX_EVALUATION_AUTHORIZATION_LENGTH = 1024
+LOGGER = logging.getLogger(__name__)
+ACTION_REQUEST_FAILURE_REASONS = TOOL_BOUNDARY_FAILURE_REASONS | frozenset(
+    {
+        "AGENT_REQUEST_INVALID",
+        "AGENT_AUTHENTICATION_REJECTED",
+        "AGENT_AUTHORIZATION_REJECTED",
+        "ACTION_SESSION_OWNERSHIP_REJECTED",
+        "ACTION_IDEMPOTENCY_CONFLICT",
+        "ACTION_TURN_IN_PROGRESS",
+        "ACTION_TURN_PREVIOUSLY_FAILED",
+        "ACTION_DURABLE_TRUTH_INCONSISTENT",
+        "ACTION_EVALUATION_DURABLE_TRUTH_INCONSISTENT",
+        "ACTION_LOCAL_ARBITRATION_CONFLICT",
+        "ACTION_STREAM_PROJECTION_INVALID",
+        "ACTION_STREAM_UNEXPECTED_FAILURE",
+    }
+)
+
+
+def record_action_request_failure(reason: str) -> None:
+    if reason not in ACTION_REQUEST_FAILURE_REASONS:
+        raise ValueError("Unregistered action-request failure producer")
+    LOGGER.warning("agent_request_rejected reason_code=%s", reason)
 
 
 class AgentSettings(BaseModel):
@@ -327,6 +359,14 @@ class SandboxLiveness(Protocol):
     def require_active(self, direct_token: str, sandbox_id: str) -> None: ...
 
 
+class SandboxLivenessRejected(Exception):
+    """The authoritative sandbox boundary confirmed a fixed rejection."""
+
+
+class SandboxLivenessUnavailable(Exception):
+    """The authoritative sandbox boundary could not complete its observation."""
+
+
 class HttpSandboxLiveness:
     def __init__(self, base_url: str) -> None:
         self._base_url = base_url.rstrip("/")
@@ -342,12 +382,12 @@ class HttpSandboxLiveness:
                 timeout=3.0,
             )
         except (httpx.TimeoutException, httpx.NetworkError) as exception:
-            raise HTTPException(status_code=503, detail="Service unavailable") from exception
+            raise SandboxLivenessUnavailable from exception
         if response.status_code == 204:
             return
         if response.status_code in {400, 401, 403, 404, 409, 422}:
-            raise HTTPException(status_code=403, detail="Forbidden")
-        raise HTTPException(status_code=503, detail="Service unavailable")
+            raise SandboxLivenessRejected
+        raise SandboxLivenessUnavailable
 
 
 class OboClient:
@@ -385,6 +425,11 @@ class OboClient:
             },
             timeout=3.0,
         )
+        if response.status_code in {401, 403}:
+            raise HTTPException(
+                status_code=response.status_code,
+                detail="Identity exchange rejected",
+            )
         if response.status_code != 200:
             raise HTTPException(status_code=502, detail="Identity exchange rejected")
         try:
@@ -415,8 +460,21 @@ def create_app(
 
     @app.exception_handler(RequestValidationError)
     async def invalid_request(request: Request, exception: RequestValidationError) -> JSONResponse:
-        del request, exception
+        if request.url.path in {"/api/chat", "/api/chat/stream"}:
+            record_action_request_failure("AGENT_REQUEST_INVALID")
+        del exception
         return JSONResponse(status_code=422, content={"detail": "Invalid request"})
+
+    @app.exception_handler(ToolBoundaryFailure)
+    async def tool_boundary_failure(
+        request: Request, exception: ToolBoundaryFailure
+    ) -> JSONResponse:
+        del request
+        record_action_request_failure(exception.reason)
+        return JSONResponse(
+            status_code=exception.status_code,
+            content={"detail": exception.detail},
+        )
 
     if not resolved.identity_enabled:
         return app
@@ -496,13 +554,19 @@ def create_app(
             or not authorization.startswith("Bearer ")
             or (x_eval_sandbox_id is not None and not resolved.evaluation_enabled)
         ):
+            record_action_request_failure("AGENT_AUTHENTICATION_REJECTED")
             raise HTTPException(status_code=401, detail="Unauthorized")
         token = authorization[7:]
-        if x_eval_sandbox_id is None:
-            principal = resolved_validator.validate(token)
-        else:
-            principal = resolved_validator.validate(token, x_eval_sandbox_id)
+        try:
+            if x_eval_sandbox_id is None:
+                principal = resolved_validator.validate(token)
+            else:
+                principal = resolved_validator.validate(token, x_eval_sandbox_id)
+        except HTTPException:
+            record_action_request_failure("AGENT_AUTHENTICATION_REJECTED")
+            raise
         if permission not in principal.permissions:
+            record_action_request_failure("AGENT_AUTHORIZATION_REJECTED")
             raise HTTPException(status_code=403, detail="Forbidden")
         return principal, token
 
@@ -532,8 +596,25 @@ def create_app(
         if principal.sandbox_id is None:
             return
         if resolved_liveness is None:
-            raise HTTPException(status_code=503, detail="Service unavailable")
-        resolved_liveness.require_active(token, principal.sandbox_id)
+            raise ToolBoundaryFailure(
+                status_code=503,
+                reason="ACTION_SANDBOX_LIVENESS_UNAVAILABLE",
+                detail="Service unavailable",
+            )
+        try:
+            resolved_liveness.require_active(token, principal.sandbox_id)
+        except SandboxLivenessRejected as exception:
+            raise ToolBoundaryFailure(
+                status_code=403,
+                reason="ACTION_SANDBOX_LIVENESS_REJECTED",
+                detail="Forbidden",
+            ) from exception
+        except SandboxLivenessUnavailable as exception:
+            raise ToolBoundaryFailure(
+                status_code=503,
+                reason="ACTION_SANDBOX_LIVENESS_UNAVAILABLE",
+                detail="Service unavailable",
+            ) from exception
 
     def verify_session(session_id: str, principal: DirectPrincipal) -> None:
         if principal.sandbox_id is None:
@@ -549,18 +630,119 @@ def create_app(
         session_id: str,
         correlation_key: str,
     ) -> ConversationResult:
+        try:
+            verify_session(session_id, principal)
+        except HTTPException as exception:
+            if exception.status_code == 403:
+                raise ConversationOwnershipError from exception
+            raise
+        except pymysql.MySQLError as exception:
+            raise ToolBoundaryFailure(
+                status_code=503,
+                reason="ACTION_SESSION_PERSISTENCE_UNAVAILABLE",
+                detail="Service unavailable",
+            ) from exception
+        try:
+            replay = resolved_conversations.replay_turn(
+                session_id=session_id,
+                subject=principal.subject,
+                sandbox_id=principal.sandbox_id,
+                correlation_key=correlation_key,
+                message=request.message,
+            )
+        except pymysql.MySQLError as exception:
+            raise ToolBoundaryFailure(
+                status_code=503,
+                reason="ACTION_REPLAY_PERSISTENCE_UNAVAILABLE",
+                detail="Service unavailable",
+            ) from exception
+        if replay is not None:
+            return replay
+        try:
+            pending = resolved_conversations.current_pending_action(
+                session_id=session_id,
+                subject=principal.subject,
+                sandbox_id=principal.sandbox_id,
+            )
+        except pymysql.MySQLError as exception:
+            raise ToolBoundaryFailure(
+                status_code=503,
+                reason="ACTION_REFERENCE_PERSISTENCE_UNAVAILABLE",
+                detail="Service unavailable",
+            ) from exception
+        decision = confirmation_decision(request.message)
+        if pending is not None and decision is ConfirmationDecision.CONFIRM:
+            raise ToolBoundaryFailure(
+                status_code=409,
+                reason="ACTION_CONFIRMATION_UNAVAILABLE",
+                detail="Action confirmation unavailable",
+            )
         require_liveness(principal, token)
-        verify_session(session_id, principal)
-        start = resolved_conversations.begin_turn(
-            session_id=session_id,
-            subject=principal.subject,
-            sandbox_id=principal.sandbox_id,
-            correlation_key=correlation_key,
-            message=request.message,
-        )
+        try:
+            start = resolved_conversations.begin_turn(
+                session_id=session_id,
+                subject=principal.subject,
+                sandbox_id=principal.sandbox_id,
+                correlation_key=correlation_key,
+                message=request.message,
+            )
+        except pymysql.MySQLError as exception:
+            raise ToolBoundaryFailure(
+                status_code=503,
+                reason="ACTION_TURN_RESERVATION_PERSISTENCE_UNAVAILABLE",
+                detail="Service unavailable",
+            ) from exception
         if start.replay is not None:
             return start.replay
         try:
+            if pending is not None:
+                if pending.expires_at <= datetime.now(UTC):
+                    try:
+                        return resolved_conversations.complete_action_expired(
+                            start=start,
+                            pending=pending,
+                            response_text="The prepared action expired and was not executed.",
+                        )
+                    except pymysql.MySQLError as exception:
+                        raise ToolBoundaryFailure(
+                            status_code=503,
+                            reason="ACTION_EXPIRY_PERSISTENCE_UNAVAILABLE",
+                            detail="Service unavailable",
+                        ) from exception
+                if decision is ConfirmationDecision.DECLINE:
+                    try:
+                        return resolved_conversations.complete_action_decline(
+                            start=start,
+                            pending=pending,
+                            response_text="The prepared action was declined and was not executed.",
+                        )
+                    except pymysql.MySQLError as exception:
+                        raise ToolBoundaryFailure(
+                            status_code=503,
+                            reason="ACTION_DECLINE_PERSISTENCE_UNAVAILABLE",
+                            detail="Service unavailable",
+                        ) from exception
+                try:
+                    return resolved_conversations.complete_turn(
+                        start=start,
+                        response_text=(
+                            "Please reply with an exact confirmation or decline for the "
+                            "prepared refund request."
+                        ),
+                        outcome="action_clarification",
+                        events=(
+                            AgentEvent(
+                                "AGENT_OUTCOME",
+                                {"outcome": "action_clarification"},
+                            ),
+                        ),
+                    )
+                except pymysql.MySQLError as exception:
+                    raise ToolBoundaryFailure(
+                        status_code=503,
+                        reason="ACTION_CLARIFICATION_PERSISTENCE_UNAVAILABLE",
+                        detail="Service unavailable",
+                    ) from exception
             if principal.sandbox_id is None:
                 agent_result = resolved_agent.run(
                     message=request.message,
@@ -580,15 +762,36 @@ def create_app(
                     turn_id=start.turn_id,
                     sandbox_id=principal.sandbox_id,
                 )
-            return resolved_conversations.complete_turn(
-                start=start,
-                response_text=agent_result.response_text,
-                outcome=agent_result.outcome,
-                events=agent_result.events,
-                retrieval_decision=agent_result.retrieval_decision,
-            )
-        except Exception:
-            resolved_conversations.fail_turn(start=start, failure_code="agent_execution_failed")
+            for reason in agent_result.request_reasons:
+                record_action_request_failure(reason)
+            try:
+                return resolved_conversations.complete_turn(
+                    start=start,
+                    response_text=agent_result.response_text,
+                    outcome=agent_result.outcome,
+                    events=agent_result.events,
+                    retrieval_decision=agent_result.retrieval_decision,
+                    pending_action=agent_result.pending_action,
+                )
+            except pymysql.MySQLError as exception:
+                reason = (
+                    "ACTION_REFERENCE_PERSISTENCE_UNAVAILABLE"
+                    if agent_result.pending_action is not None
+                    else "AGENT_TURN_COMPLETION_PERSISTENCE_UNAVAILABLE"
+                )
+                raise ToolBoundaryFailure(
+                    status_code=503,
+                    reason=reason,
+                    detail="Service unavailable",
+                ) from exception
+        except Exception as original:
+            try:
+                resolved_conversations.fail_turn(start=start, failure_code="agent_execution_failed")
+            except Exception:
+                LOGGER.exception(
+                    "agent_request_cleanup_failed original_type=%s",
+                    type(original).__name__,
+                )
             raise
 
     @app.post("/api/sessions", response_model=SessionResponse, status_code=201)
@@ -624,15 +827,30 @@ def create_app(
                 correlation_key=idempotency_key,
             )
         except ConversationOwnershipError as exception:
+            record_action_request_failure("ACTION_SESSION_OWNERSHIP_REJECTED")
             raise HTTPException(status_code=403, detail="Forbidden") from exception
         except CorrelationConflictError as exception:
+            record_action_request_failure("ACTION_IDEMPOTENCY_CONFLICT")
             raise HTTPException(status_code=409, detail="Idempotency conflict") from exception
         except TurnInProgressError as exception:
+            record_action_request_failure("ACTION_TURN_IN_PROGRESS")
             raise HTTPException(status_code=409, detail="Turn in progress") from exception
         except TurnFailedError as exception:
+            record_action_request_failure("ACTION_TURN_PREVIOUSLY_FAILED")
             raise HTTPException(status_code=503, detail="Service unavailable") from exception
-        except pymysql.MySQLError as exception:
-            raise HTTPException(status_code=503, detail="Service unavailable") from exception
+        except ConversationIntegrityError as exception:
+            record_action_request_failure("ACTION_DURABLE_TRUTH_INCONSISTENT")
+            raise HTTPException(
+                status_code=409, detail="Action durable truth is inconsistent"
+            ) from exception
+        except ActionArbitrationConflictError as exception:
+            record_action_request_failure("ACTION_LOCAL_ARBITRATION_CONFLICT")
+            raise HTTPException(status_code=409, detail="Action state conflict") from exception
+        except ToolBoundaryFailure as exception:
+            record_action_request_failure(exception.reason)
+            raise HTTPException(
+                status_code=exception.status_code, detail=exception.detail
+            ) from exception
         return ChatResponse(
             conversation_id=result.conversation_id,
             trace_id=result.trace_id,
@@ -670,23 +888,40 @@ def create_app(
                 correlation_key=idempotency_key,
             )
         except ConversationOwnershipError as exception:
+            record_action_request_failure("ACTION_SESSION_OWNERSHIP_REJECTED")
             raise HTTPException(status_code=403, detail="Forbidden") from exception
         except CorrelationConflictError as exception:
+            record_action_request_failure("ACTION_IDEMPOTENCY_CONFLICT")
             raise HTTPException(status_code=409, detail="Idempotency conflict") from exception
         except TurnInProgressError as exception:
+            record_action_request_failure("ACTION_TURN_IN_PROGRESS")
             raise HTTPException(status_code=409, detail="Turn in progress") from exception
         except TurnFailedError as exception:
+            record_action_request_failure("ACTION_TURN_PREVIOUSLY_FAILED")
             raise HTTPException(status_code=503, detail="Service unavailable") from exception
-        except pymysql.MySQLError as exception:
-            raise HTTPException(status_code=503, detail="Service unavailable") from exception
+        except ConversationIntegrityError as exception:
+            record_action_request_failure("ACTION_DURABLE_TRUTH_INCONSISTENT")
+            raise HTTPException(
+                status_code=409, detail="Action durable truth is inconsistent"
+            ) from exception
+        except ActionArbitrationConflictError as exception:
+            record_action_request_failure("ACTION_LOCAL_ARBITRATION_CONFLICT")
+            raise HTTPException(status_code=409, detail="Action state conflict") from exception
+        except ToolBoundaryFailure as exception:
+            record_action_request_failure(exception.reason)
+            raise HTTPException(
+                status_code=exception.status_code, detail=exception.detail
+            ) from exception
         except HTTPException:
             raise
         except Exception:
+            record_action_request_failure("ACTION_STREAM_UNEXPECTED_FAILURE")
             events = sse_filter.terminal_error("stream_unavailable")
         else:
             try:
                 events = sse_filter.project_result(result)
             except SseProjectionError:
+                record_action_request_failure("ACTION_STREAM_PROJECTION_INVALID")
                 events = sse_filter.terminal_error("unsafe_output")
         return StreamingResponse(
             stream_events(events, http_request.is_disconnected),
@@ -757,6 +992,9 @@ def create_app(
                 return resolved_evidence.load(str(trace_id), x_eval_sandbox_id)
             except EvaluationEvidenceNotFound as exception:
                 raise HTTPException(status_code=404, detail="Evidence not found") from exception
+            except ActionEvaluationEvidenceInvalid as exception:
+                record_action_request_failure("ACTION_EVALUATION_DURABLE_TRUTH_INCONSISTENT")
+                raise HTTPException(status_code=409, detail="Evidence unavailable") from exception
             except EvaluationEvidenceInvalid as exception:
                 raise HTTPException(status_code=409, detail="Evidence unavailable") from exception
             except pymysql.MySQLError as exception:

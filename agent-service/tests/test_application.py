@@ -1,19 +1,28 @@
 import base64
 import json
+import logging
 import time
 from collections.abc import Mapping
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Any, Literal
 
 import httpx
 import jwt
 import pymysql
 import pytest
-from citybuddy_agent.agent_control import AgentEvent, AgentRunner, AgentRunResult
+from citybuddy_agent.actions import PendingActionPayload, PendingActionReference
+from citybuddy_agent.agent_control import (
+    AgentEvent,
+    AgentRunner,
+    AgentRunResult,
+    ToolBoundaryFailure,
+)
 from citybuddy_agent.application import (
+    ACTION_REQUEST_FAILURE_REASONS,
     AgentSettings,
     DirectJwtValidator,
     DirectPrincipal,
+    HttpSandboxLiveness,
     OboClient,
     SessionStore,
     create_app,
@@ -23,9 +32,11 @@ from citybuddy_agent.conversation import (
     ConversationResult,
     ConversationStore,
     CorrelationConflictError,
+    MysqlConversationStore,
     TurnStart,
 )
 from citybuddy_agent.evaluation import (
+    ActionEvaluationEvidenceInvalid,
     EvaluationEvidenceInvalid,
     EvaluationEvidenceNotFound,
     EvaluationEvidenceResponse,
@@ -79,7 +90,39 @@ class MemoryConversationStore(ConversationStore):
         self.results: dict[tuple[str, str], tuple[str, ConversationResult]] = {}
         self.pending: dict[tuple[str, str], tuple[str, TurnStart]] = {}
         self.failures: list[tuple[str, str]] = []
+        self.action_pending: PendingActionReference | None = None
         self.calls = 0
+
+    def replay_turn(
+        self,
+        *,
+        session_id: str,
+        subject: str,
+        sandbox_id: str | None,
+        correlation_key: str,
+        message: str,
+    ) -> ConversationResult | None:
+        if (
+            self.sessions.owners.get(session_id) != subject
+            or self.sessions.sandboxes.get(session_id) != sandbox_id
+        ):
+            raise ConversationOwnershipError
+        existing = self.results.get((session_id, correlation_key))
+        if existing is None:
+            return None
+        if existing[0] != message:
+            raise CorrelationConflictError
+        return existing[1]
+
+    def current_pending_action(
+        self, *, session_id: str, subject: str, sandbox_id: str | None
+    ) -> PendingActionReference | None:
+        if (
+            self.sessions.owners.get(session_id) != subject
+            or self.sessions.sandboxes.get(session_id) != sandbox_id
+        ):
+            raise ConversationOwnershipError
+        return self.action_pending
 
     def begin_turn(
         self,
@@ -119,6 +162,7 @@ class MemoryConversationStore(ConversationStore):
         outcome: str,
         events: tuple[AgentEvent, ...],
         retrieval_decision: RetrievalDecision | None = None,
+        pending_action: PendingActionPayload | None = None,
     ) -> ConversationResult:
         del events
         key, pending = next(
@@ -133,8 +177,55 @@ class MemoryConversationStore(ConversationStore):
             retrieval_decision.evidence if retrieval_decision is not None else (),
         )
         self.results[key] = (pending[0], result)
+        if pending_action is not None:
+            self.action_pending = PendingActionReference(
+                pending_action_id=pending_action.pending_action_id,
+                source_turn_id=start.turn_id,
+                source_trace_id=start.trace_id,
+                conversation_id=start.conversation_id,
+                session_id=key[0],
+                user_subject=self.sessions.owners[key[0]],
+                sandbox_id=self.sessions.sandboxes[key[0]],
+                action_type=pending_action.action_type,
+                argument_commitment=pending_action.argument_commitment,
+                order_id=pending_action.order_id,
+                target_version=pending_action.target_version,
+                amount_minor=pending_action.amount_minor,
+                currency=pending_action.currency,
+                expires_at=pending_action.expires_at,
+            )
         del self.pending[key]
         return result
+
+    def complete_action_decline(
+        self,
+        *,
+        start: TurnStart,
+        pending: PendingActionReference,
+        response_text: str,
+    ) -> ConversationResult:
+        self.action_pending = None
+        return self.complete_turn(
+            start=start,
+            response_text=response_text,
+            outcome="action_declined",
+            events=(),
+        )
+
+    def complete_action_expired(
+        self,
+        *,
+        start: TurnStart,
+        pending: PendingActionReference,
+        response_text: str,
+    ) -> ConversationResult:
+        self.action_pending = None
+        return self.complete_turn(
+            start=start,
+            response_text=response_text,
+            outcome="action_expired",
+            events=(),
+        )
 
     def fail_turn(self, *, start: TurnStart, failure_code: str) -> None:
         self.failures.append((start.turn_id, failure_code))
@@ -144,9 +235,10 @@ class MemoryConversationStore(ConversationStore):
 
 
 class MemoryAgent(AgentRunner):
-    def __init__(self) -> None:
+    def __init__(self, *, request_reasons: tuple[str, ...] = ()) -> None:
         self.calls = 0
         self.sandbox_ids: list[str | None] = []
+        self.request_reasons = request_reasons
 
     def run(
         self,
@@ -166,7 +258,87 @@ class MemoryAgent(AgentRunner):
             "Bounded support response.",
             "completed",
             (AgentEvent("AGENT_OUTCOME", {"outcome": "completed"}),),
+            request_reasons=self.request_reasons,
         )
+
+
+class PreparedActionAgent(AgentRunner):
+    def __init__(self, *, expires_at: datetime | None = None) -> None:
+        self.calls = 0
+        self.pending = PendingActionPayload.model_validate(
+            {
+                "pendingActionId": "00000000-0000-0000-0000-000000000121",
+                "actionType": "REFUND_REQUEST",
+                "userSubject": "user-1",
+                "supportSessionId": "session-1",
+                "traceId": "00000000-0000-0000-0000-000000000123",
+                "turnId": "00000000-0000-0000-0000-000000000122",
+                "requiredScope": "refund:create",
+                "sandboxId": None,
+                "orderId": "00000000-0000-0000-0000-000000000040",
+                "targetVersion": 1,
+                "amountMinor": 400,
+                "currency": "CNY",
+                "state": "PREPARED",
+                "expiresAt": (expires_at or datetime(2030, 7, 29, 12, 0, 0, 123456, tzinfo=UTC))
+                .isoformat(timespec="microseconds")
+                .replace("+00:00", "Z"),
+                "replayed": False,
+            }
+        )
+
+    def run(
+        self,
+        *,
+        message: str,
+        direct_token: str,
+        subject: str,
+        session_id: str,
+        trace_id: str,
+        turn_id: str,
+        sandbox_id: str | None = None,
+    ) -> AgentRunResult:
+        del message, direct_token, subject, session_id, trace_id, turn_id, sandbox_id
+        self.calls += 1
+        return AgentRunResult(
+            "A refund request is ready for your explicit decision.",
+            "action_pending",
+            (
+                AgentEvent(
+                    "ACTION_PREPARED",
+                    {
+                        "pendingActionId": self.pending.pending_action_id,
+                        "actionType": self.pending.action_type,
+                        "argumentCommitment": self.pending.argument_commitment,
+                        "targetVersion": self.pending.target_version,
+                        "expiresAt": self.pending.expires_at.isoformat(
+                            timespec="microseconds"
+                        ).replace("+00:00", "Z"),
+                    },
+                ),
+                AgentEvent("AGENT_OUTCOME", {"outcome": "action_pending"}),
+            ),
+            pending_action=self.pending,
+        )
+
+
+class BoundaryFailingAgent(AgentRunner):
+    def __init__(self, failure: ToolBoundaryFailure) -> None:
+        self.failure = failure
+
+    def run(
+        self,
+        *,
+        message: str,
+        direct_token: str,
+        subject: str,
+        session_id: str,
+        trace_id: str,
+        turn_id: str,
+        sandbox_id: str | None = None,
+    ) -> AgentRunResult:
+        del message, direct_token, subject, session_id, trace_id, turn_id, sandbox_id
+        raise self.failure
 
 
 class MemoryFeedbackStore(FeedbackStore):
@@ -213,6 +385,128 @@ class MemoryLiveness:
             raise HTTPException(status_code=403, detail="Forbidden")
 
 
+def test_action_request_failure_producer_inventory_is_closed() -> None:
+    assert ACTION_REQUEST_FAILURE_REASONS == {
+        "AGENT_REQUEST_INVALID",
+        "AGENT_AUTHENTICATION_REJECTED",
+        "AGENT_AUTHORIZATION_REJECTED",
+        "ACTION_SESSION_OWNERSHIP_REJECTED",
+        "ACTION_IDEMPOTENCY_CONFLICT",
+        "ACTION_TURN_IN_PROGRESS",
+        "ACTION_TURN_PREVIOUSLY_FAILED",
+        "ACTION_DURABLE_TRUTH_INCONSISTENT",
+        "ACTION_EVALUATION_DURABLE_TRUTH_INCONSISTENT",
+        "ACTION_LOCAL_ARBITRATION_CONFLICT",
+        "ACTION_STREAM_PROJECTION_INVALID",
+        "ACTION_STREAM_UNEXPECTED_FAILURE",
+        "ACTION_PREPARATION_IDENTITY_UNAUTHENTICATED",
+        "ACTION_PREPARATION_IDENTITY_FORBIDDEN",
+        "ACTION_PREPARATION_IDENTITY_UNAVAILABLE",
+        "ACTION_PREPARATION_COMMERCE_VALIDATION_REJECTED",
+        "ACTION_PREPARATION_COMMERCE_UNAUTHENTICATED",
+        "ACTION_PREPARATION_COMMERCE_FORBIDDEN",
+        "ACTION_PREPARATION_TARGET_NOT_FOUND",
+        "ACTION_PREPARATION_INTENT_CONFLICT",
+        "ACTION_PREPARATION_COMMERCE_UNAVAILABLE",
+        "ACTION_PREPARATION_COMMERCE_TIMEOUT",
+        "ACTION_PREPARATION_COMMERCE_INDETERMINATE",
+        "ACTION_PREPARATION_RESPONSE_INVALID",
+        "ACTION_PREPARATION_DURABLE_TRUTH_INCONSISTENT",
+        "ACTION_SANDBOX_LIVENESS_UNAVAILABLE",
+        "ACTION_SANDBOX_LIVENESS_REJECTED",
+        "ACTION_SESSION_PERSISTENCE_UNAVAILABLE",
+        "ACTION_REPLAY_PERSISTENCE_UNAVAILABLE",
+        "ACTION_REFERENCE_PERSISTENCE_UNAVAILABLE",
+        "ACTION_TURN_RESERVATION_PERSISTENCE_UNAVAILABLE",
+        "ACTION_EXPIRY_PERSISTENCE_UNAVAILABLE",
+        "ACTION_DECLINE_PERSISTENCE_UNAVAILABLE",
+        "ACTION_CLARIFICATION_PERSISTENCE_UNAVAILABLE",
+        "AGENT_TURN_COMPLETION_PERSISTENCE_UNAVAILABLE",
+        "ACTION_CONFIRMATION_UNAVAILABLE",
+    }
+
+
+def test_action_tool_denial_producer_is_logged_request_locally_without_public_leakage(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    private, public_jwk = key_fixture("current-key")
+    resolved = settings()
+    sessions = MemorySessionStore()
+    session_id = sessions.create("user-123")
+    reason = "ACTION_PREPARATION_COMMERCE_FORBIDDEN"
+    client = TestClient(
+        create_app(
+            resolved,
+            validator=DirectJwtValidator(resolved, CountingJwksSource([public_jwk])),
+            sessions=sessions,
+            conversations=MemoryConversationStore(sessions),
+            agent=MemoryAgent(request_reasons=(reason,)),
+            feedback=MemoryFeedbackStore(sessions, {}),
+        )
+    )
+
+    with caplog.at_level(logging.WARNING):
+        response = client.post(
+            "/api/chat",
+            headers={
+                "Authorization": f"Bearer {direct_token(private, 'current-key')}",
+                "X-Session-Id": session_id,
+                "Idempotency-Key": "prepare-forbidden",
+            },
+            json={"message": "prepare a refund"},
+        )
+
+    assert response.status_code == 200
+    assert response.json()["reply"] == "Bounded support response."
+    assert f"reason_code={reason}" in caplog.text
+    assert reason not in response.text
+
+
+def test_action_prepare_binding_failure_is_409_with_no_pending_closure_or_reason_leak(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    private, public_jwk = key_fixture("current-key")
+    resolved = settings()
+    sessions = MemorySessionStore()
+    session_id = sessions.create("user-123")
+    conversations = MemoryConversationStore(sessions)
+    reason = "ACTION_PREPARATION_DURABLE_TRUTH_INCONSISTENT"
+    client = TestClient(
+        create_app(
+            resolved,
+            validator=DirectJwtValidator(resolved, CountingJwksSource([public_jwk])),
+            sessions=sessions,
+            conversations=conversations,
+            agent=BoundaryFailingAgent(
+                ToolBoundaryFailure(
+                    status_code=409,
+                    reason=reason,
+                    detail="Action preparation conflict",
+                )
+            ),
+            feedback=MemoryFeedbackStore(sessions, {}),
+        )
+    )
+
+    with caplog.at_level(logging.WARNING):
+        response = client.post(
+            "/api/chat",
+            headers={
+                "Authorization": f"Bearer {direct_token(private, 'current-key')}",
+                "X-Session-Id": session_id,
+                "Idempotency-Key": "prepare-damaged",
+            },
+            json={"message": "prepare a refund"},
+        )
+
+    assert response.status_code == 409
+    assert response.json() == {"detail": "Action preparation conflict"}
+    assert f"reason_code={reason}" in caplog.text
+    assert reason not in response.text
+    assert conversations.action_pending is None
+    assert len(conversations.failures) == 1
+
+
 class MemoryEvidenceStore(EvaluationEvidenceStore):
     def __init__(self) -> None:
         self.calls: list[tuple[str, str]] = []
@@ -224,6 +518,8 @@ class MemoryEvidenceStore(EvaluationEvidenceStore):
             raise EvaluationEvidenceNotFound
         if self.mode == "invalid":
             raise EvaluationEvidenceInvalid
+        if self.mode == "action-invalid":
+            raise ActionEvaluationEvidenceInvalid
         now = datetime(2026, 7, 18, 12, 0, tzinfo=UTC)
         return EvaluationEvidenceResponse(
             schema_version="agent-evidence-v1",
@@ -459,7 +755,9 @@ def test_evaluation_evidence_route_is_profile_bound_and_independently_authentica
     }
 
 
-def test_evaluation_evidence_rejects_invalid_input_and_conceals_association_failures() -> None:
+def test_evaluation_evidence_rejects_invalid_input_and_conceals_association_failures(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
     trace_id = "00000000-0000-0000-0000-000000000001"
     evidence = MemoryEvidenceStore()
     client = TestClient(
@@ -493,6 +791,15 @@ def test_evaluation_evidence_rejects_invalid_input_and_conceals_association_fail
     invalid = client.get(f"/api/eval/evidence/{trace_id}", headers=headers)
     assert invalid.status_code == 409
     assert invalid.json() == {"detail": "Evidence unavailable"}
+    assert "ACTION_EVALUATION_DURABLE_TRUTH_INCONSISTENT" not in caplog.text
+
+    evidence.mode = "action-invalid"
+    caplog.clear()
+    action_invalid = client.get(f"/api/eval/evidence/{trace_id}", headers=headers)
+    assert action_invalid.status_code == 409
+    assert action_invalid.json() == {"detail": "Evidence unavailable"}
+    assert "reason_code=ACTION_EVALUATION_DURABLE_TRUTH_INCONSISTENT" in caplog.text
+    assert "ACTION_EVALUATION_DURABLE_TRUTH_INCONSISTENT" not in action_invalid.text
 
 
 def key_fixture(kid: str) -> tuple[rsa.RSAPrivateKey, dict[str, Any]]:
@@ -770,6 +1077,25 @@ def test_obo_client_rechecks_owner_and_server_allowlist(
     assert forged.value.status_code == 403
 
 
+@pytest.mark.parametrize("status", [401, 403])
+def test_obo_client_preserves_identity_rejection_status(
+    status: int, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    sessions = MemorySessionStore()
+    session_id = sessions.create("user-123")
+    client = OboClient(settings(), sessions)
+    monkeypatch.setattr(
+        httpx,
+        "post",
+        lambda *args, **kwargs: httpx.Response(status),  # noqa: ARG005
+    )
+
+    with pytest.raises(HTTPException) as rejected:
+        client.exchange("direct-token", "user-123", session_id, "catalog:read")
+
+    assert rejected.value.status_code == status
+
+
 def test_evaluation_obo_preserves_exact_sandbox_header(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -869,6 +1195,427 @@ def test_chat_persists_server_owned_result_and_replays_same_intent() -> None:
     assert "order" not in first.json()["reply"].lower()
     assert len(conversations.results) == 1
     assert agent.calls == 1
+
+
+def test_cb122_decline_lock_compares_the_complete_reference_after_target_version(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    expires_at = datetime.now(UTC) + timedelta(minutes=5)
+    pending = PendingActionReference(
+        pending_action_id="00000000-0000-0000-0000-000000000101",
+        source_turn_id="00000000-0000-0000-0000-000000000102",
+        source_trace_id="00000000-0000-0000-0000-000000000103",
+        conversation_id="00000000-0000-0000-0000-000000000104",
+        session_id="session-1",
+        user_subject="user-123",
+        sandbox_id="sandbox-1",
+        action_type="REFUND_REQUEST",
+        argument_commitment="a" * 64,
+        order_id="00000000-0000-0000-0000-000000000105",
+        target_version=7,
+        amount_minor=500,
+        currency="AUD",
+        expires_at=expires_at,
+    )
+
+    class PendingCursor:
+        def __init__(self) -> None:
+            self.execute_calls = 0
+
+        def execute(self, _sql: str, _arguments: tuple[object, ...]) -> None:
+            self.execute_calls += 1
+
+        def fetchone(self) -> tuple[object, ...]:
+            return (
+                pending.source_turn_id,
+                pending.source_trace_id,
+                pending.conversation_id,
+                pending.session_id,
+                pending.user_subject,
+                pending.sandbox_id,
+                pending.action_type,
+                pending.argument_commitment,
+                pending.order_id,
+                pending.target_version,
+                pending.amount_minor,
+                pending.currency,
+                "PENDING",
+                expires_at,
+                None,
+                None,
+                None,
+            )
+
+        @staticmethod
+        def fetchall() -> tuple[()]:
+            return ()
+
+    def accept_source_turn(
+        cls: type[MysqlConversationStore],
+        rows: object,
+        *,
+        pending: PendingActionReference,
+        persisted_expiry: object,
+    ) -> None:
+        del cls, rows, pending, persisted_expiry
+
+    monkeypatch.setattr(
+        MysqlConversationStore,
+        "_validate_pending_source_turn",
+        classmethod(accept_source_turn),
+    )
+    cursor: Any = PendingCursor()
+
+    assert (
+        MysqlConversationStore._lock_matching_pending(
+            cursor,
+            pending,
+            require_expired=False,
+        )
+        == "PENDING"
+    )
+    assert cursor.execute_calls == 2
+
+
+def test_cb122_pending_decline_and_confirmation_unavailable_are_local_and_exact(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    private, public_jwk = key_fixture("current-key")
+    sessions = MemorySessionStore()
+    session_id = sessions.create("user-123")
+    conversations = MemoryConversationStore(sessions)
+    agent = PreparedActionAgent()
+    client = TestClient(
+        create_app(
+            settings(),
+            validator=DirectJwtValidator(settings(), CountingJwksSource([public_jwk])),
+            sessions=sessions,
+            conversations=conversations,
+            agent=agent,
+        )
+    )
+    headers = {
+        "Authorization": f"Bearer {direct_token(private, 'current-key')}",
+        "X-Session-Id": session_id,
+    }
+
+    prepared = client.post(
+        "/api/chat",
+        headers={**headers, "Idempotency-Key": "prepare"},
+        json={"message": "prepare refund"},
+    )
+    calls_after_prepare = conversations.calls
+    with caplog.at_level(logging.WARNING):
+        confirmation = client.post(
+            "/api/chat",
+            headers={**headers, "Idempotency-Key": "confirm"},
+            json={"message": "confirm"},
+        )
+
+    assert prepared.status_code == 200
+    assert prepared.json()["outcome"] == "action_pending"
+    assert confirmation.status_code == 409
+    assert confirmation.json() == {"detail": "Action confirmation unavailable"}
+    assert conversations.calls == calls_after_prepare
+    assert conversations.action_pending is not None
+    assert agent.calls == 1
+    assert "reason_code=ACTION_CONFIRMATION_UNAVAILABLE" in caplog.text
+    assert "ACTION_CONFIRMATION_UNAVAILABLE" not in confirmation.text
+
+    declined = client.post(
+        "/api/chat/stream",
+        headers={**headers, "Idempotency-Key": "decline"},
+        json={"message": "decline"},
+    )
+    assert declined.status_code == 200
+    assert declined.text.count("event: token\n") == 1
+    assert declined.text.count("event: done\n") == 1
+    assert '"outcome":"action_declined"' in declined.text
+    assert "event: action_receipt" not in declined.text
+    assert conversations.action_pending is None
+    assert agent.calls == 1
+
+
+def test_action_liveness_unavailable_has_request_local_reason_without_public_leak(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    private, public_jwk = key_fixture("current-key")
+    resolved = evaluation_settings()
+    sessions = MemorySessionStore()
+    session_id = sessions.create("user-123", "sandbox-1")
+
+    def unavailable(*args: object, **kwargs: object) -> httpx.Response:
+        del args, kwargs
+        raise httpx.ConnectError("private network detail")
+
+    monkeypatch.setattr(httpx, "post", unavailable)
+    client = TestClient(
+        create_app(
+            resolved,
+            validator=DirectJwtValidator(resolved, CountingJwksSource([public_jwk])),
+            sessions=sessions,
+            conversations=MemoryConversationStore(sessions),
+            agent=MemoryAgent(),
+            feedback=MemoryFeedbackStore(sessions, {}),
+            liveness=HttpSandboxLiveness("https://commerce.test"),
+        )
+    )
+    token = direct_token(
+        private,
+        "current-key",
+        token_type="eval_direct_user",
+        extra={"sandbox": "sandbox-1"},
+    )
+
+    with caplog.at_level(logging.WARNING):
+        response = client.post(
+            "/api/chat",
+            headers={
+                "Authorization": f"Bearer {token}",
+                "X-Eval-Sandbox-Id": "sandbox-1",
+                "X-Session-Id": session_id,
+                "Idempotency-Key": "liveness-unavailable",
+            },
+            json={"message": "prepare refund"},
+        )
+
+    assert response.status_code == 503
+    assert response.json() == {"detail": "Service unavailable"}
+    assert "ACTION_SANDBOX_LIVENESS_UNAVAILABLE" in caplog.text
+    assert "private network detail" not in response.text
+    assert "reason" not in response.json()
+
+
+def test_action_authentication_authorization_and_ownership_producers_do_not_impersonate(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    private, public_jwk = key_fixture("current-key")
+    resolved = settings()
+    sessions = MemorySessionStore()
+    session_id = sessions.create("user-123")
+    client = TestClient(
+        create_app(
+            resolved,
+            validator=DirectJwtValidator(resolved, CountingJwksSource([public_jwk])),
+            sessions=sessions,
+            conversations=MemoryConversationStore(sessions),
+            agent=MemoryAgent(),
+            feedback=MemoryFeedbackStore(sessions, {}),
+        )
+    )
+    cases: tuple[tuple[dict[str, str], str, int, str], ...] = (
+        (
+            {},
+            "owned",
+            401,
+            "AGENT_AUTHENTICATION_REJECTED",
+        ),
+        (
+            {
+                "Authorization": (
+                    "Bearer "
+                    + direct_token(
+                        private,
+                        "current-key",
+                        permissions=["support:session:create"],
+                    )
+                )
+            },
+            session_id,
+            403,
+            "AGENT_AUTHORIZATION_REJECTED",
+        ),
+        (
+            {
+                "Authorization": (
+                    "Bearer " + direct_token(private, "current-key", subject="other-user")
+                )
+            },
+            session_id,
+            403,
+            "ACTION_SESSION_OWNERSHIP_REJECTED",
+        ),
+    )
+    for index, (authorization, target_session, status, reason) in enumerate(cases):
+        caplog.clear()
+        with caplog.at_level(logging.WARNING):
+            response = client.post(
+                "/api/chat",
+                headers={
+                    **authorization,
+                    "X-Session-Id": target_session,
+                    "Idempotency-Key": f"producer-{index}",
+                },
+                json={"message": "prepare refund"},
+            )
+        assert response.status_code == status
+        assert reason in caplog.text
+        assert all(
+            other not in caplog.text
+            for other in {
+                "AGENT_AUTHENTICATION_REJECTED",
+                "AGENT_AUTHORIZATION_REJECTED",
+                "ACTION_SESSION_OWNERSHIP_REJECTED",
+            }
+            - {reason}
+        )
+        assert "reason" not in response.json()
+
+
+@pytest.mark.parametrize(
+    ("producer", "reason"),
+    [
+        ("session", "ACTION_SESSION_PERSISTENCE_UNAVAILABLE"),
+        ("replay_turn", "ACTION_REPLAY_PERSISTENCE_UNAVAILABLE"),
+        ("current_pending_action", "ACTION_REFERENCE_PERSISTENCE_UNAVAILABLE"),
+        ("begin_turn", "ACTION_TURN_RESERVATION_PERSISTENCE_UNAVAILABLE"),
+    ],
+)
+def test_action_request_persistence_phase_producers_are_exact(
+    producer: str,
+    reason: str,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    private, public_jwk = key_fixture("current-key")
+    resolved = settings()
+    sessions = MemorySessionStore()
+    session_id = sessions.create("user-123")
+    conversations = MemoryConversationStore(sessions)
+
+    def unavailable(*args: object, **kwargs: object) -> None:
+        del args, kwargs
+        raise pymysql.OperationalError(1142, "private database detail")
+
+    if producer == "session":
+        monkeypatch.setattr(sessions, "verify_owner", unavailable)
+    else:
+        monkeypatch.setattr(conversations, producer, unavailable)
+    client = TestClient(
+        create_app(
+            resolved,
+            validator=DirectJwtValidator(resolved, CountingJwksSource([public_jwk])),
+            sessions=sessions,
+            conversations=conversations,
+            agent=MemoryAgent(),
+            feedback=MemoryFeedbackStore(sessions, {}),
+        )
+    )
+    with caplog.at_level(logging.WARNING):
+        response = client.post(
+            "/api/chat",
+            headers={
+                "Authorization": f"Bearer {direct_token(private, 'current-key')}",
+                "X-Session-Id": session_id,
+                "Idempotency-Key": f"failure-{producer}",
+            },
+            json={"message": "action-prepare"},
+        )
+
+    assert response.status_code == 503
+    assert response.json() == {"detail": "Service unavailable"}
+    assert f"reason_code={reason}" in caplog.text
+    assert all(
+        f"reason_code={other}" not in caplog.text
+        for other in {
+            "ACTION_SESSION_PERSISTENCE_UNAVAILABLE",
+            "ACTION_REPLAY_PERSISTENCE_UNAVAILABLE",
+            "ACTION_REFERENCE_PERSISTENCE_UNAVAILABLE",
+            "ACTION_TURN_RESERVATION_PERSISTENCE_UNAVAILABLE",
+        }
+        - {reason}
+    )
+    assert "1142" not in response.text
+    assert "private database detail" not in response.text
+
+
+@pytest.mark.parametrize(
+    ("phase", "reason"),
+    [
+        ("ordinary_completion", "AGENT_TURN_COMPLETION_PERSISTENCE_UNAVAILABLE"),
+        ("reference_completion", "ACTION_REFERENCE_PERSISTENCE_UNAVAILABLE"),
+        ("decline", "ACTION_DECLINE_PERSISTENCE_UNAVAILABLE"),
+        ("expiry", "ACTION_EXPIRY_PERSISTENCE_UNAVAILABLE"),
+        ("clarification", "ACTION_CLARIFICATION_PERSISTENCE_UNAVAILABLE"),
+    ],
+)
+def test_action_completion_persistence_producers_are_exact(
+    phase: str,
+    reason: str,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    private, public_jwk = key_fixture("current-key")
+    resolved = settings()
+    sessions = MemorySessionStore()
+    session_id = sessions.create("user-123")
+    conversations = MemoryConversationStore(sessions)
+    action_agent = PreparedActionAgent(
+        expires_at=(
+            datetime(2020, 1, 1, tzinfo=UTC)
+            if phase == "expiry"
+            else datetime(2030, 1, 1, tzinfo=UTC)
+        )
+    )
+    agent: AgentRunner = (
+        action_agent
+        if phase in {"reference_completion", "decline", "expiry", "clarification"}
+        else MemoryAgent()
+    )
+    client = TestClient(
+        create_app(
+            resolved,
+            validator=DirectJwtValidator(resolved, CountingJwksSource([public_jwk])),
+            sessions=sessions,
+            conversations=conversations,
+            agent=agent,
+            feedback=MemoryFeedbackStore(sessions, {}),
+        )
+    )
+    headers = {
+        "Authorization": f"Bearer {direct_token(private, 'current-key')}",
+        "X-Session-Id": session_id,
+    }
+    if phase in {"decline", "expiry", "clarification"}:
+        prepared = client.post(
+            "/api/chat",
+            headers={**headers, "Idempotency-Key": f"{phase}-prepare"},
+            json={"message": "prepare refund"},
+        )
+        assert prepared.status_code == 200
+
+    def unavailable(*args: object, **kwargs: object) -> None:
+        del args, kwargs
+        raise pymysql.OperationalError(1142, "private database detail")
+
+    target = {
+        "ordinary_completion": "complete_turn",
+        "reference_completion": "complete_turn",
+        "decline": "complete_action_decline",
+        "expiry": "complete_action_expired",
+        "clarification": "complete_turn",
+    }[phase]
+    monkeypatch.setattr(conversations, target, unavailable)
+    message = {
+        "ordinary_completion": "ordinary request",
+        "reference_completion": "prepare refund",
+        "decline": "decline",
+        "expiry": "anything",
+        "clarification": "maybe",
+    }[phase]
+    with caplog.at_level(logging.WARNING):
+        response = client.post(
+            "/api/chat",
+            headers={**headers, "Idempotency-Key": f"{phase}-failure"},
+            json={"message": message},
+        )
+
+    assert response.status_code == 503
+    assert response.json() == {"detail": "Service unavailable"}
+    assert f"reason_code={reason}" in caplog.text
+    assert "1142" not in response.text
+    assert "private database detail" not in response.text
 
 
 def test_chat_rejects_conflict_identity_substitution_and_private_context() -> None:
@@ -978,6 +1725,24 @@ def test_chat_requires_route_permission_before_conversation_access() -> None:
 
 def test_chat_redacts_mysql_failure() -> None:
     class FailedConversationStore(ConversationStore):
+        def replay_turn(
+            self,
+            *,
+            session_id: str,
+            subject: str,
+            sandbox_id: str | None,
+            correlation_key: str,
+            message: str,
+        ) -> ConversationResult | None:
+            del session_id, subject, sandbox_id, correlation_key, message
+            return None
+
+        def current_pending_action(
+            self, *, session_id: str, subject: str, sandbox_id: str | None
+        ) -> PendingActionReference | None:
+            del session_id, subject, sandbox_id
+            return None
+
         def begin_turn(
             self,
             *,
@@ -998,8 +1763,29 @@ def test_chat_redacts_mysql_failure() -> None:
             outcome: str,
             events: tuple[AgentEvent, ...],
             retrieval_decision: RetrievalDecision | None = None,
+            pending_action: PendingActionPayload | None = None,
         ) -> ConversationResult:
-            del start, response_text, outcome, events, retrieval_decision
+            del start, response_text, outcome, events, retrieval_decision, pending_action
+            raise AssertionError("unreachable")
+
+        def complete_action_decline(
+            self,
+            *,
+            start: TurnStart,
+            pending: PendingActionReference,
+            response_text: str,
+        ) -> ConversationResult:
+            del start, pending, response_text
+            raise AssertionError("unreachable")
+
+        def complete_action_expired(
+            self,
+            *,
+            start: TurnStart,
+            pending: PendingActionReference,
+            response_text: str,
+        ) -> ConversationResult:
+            del start, pending, response_text
             raise AssertionError("unreachable")
 
         def fail_turn(self, *, start: TurnStart, failure_code: str) -> None:
@@ -1125,7 +1911,7 @@ def test_stream_projects_durable_result_and_replay_through_fixed_sse_schema() ->
     )
     assert forbidden.status_code == 403
     assert forbidden.json() == {"detail": "Forbidden"}
-    assert conversations.calls == 2
+    assert conversations.calls == 1
 
 
 def test_stream_withholds_action_claim_and_private_execution_failure() -> None:

@@ -49,6 +49,10 @@ def test_chat_response_is_allowlisted_and_server_ids_are_read_only() -> None:
         "budget_exhausted",
         "provider_denied",
         "retrieval_denied",
+        "action_pending",
+        "action_clarification",
+        "action_declined",
+        "action_expired",
     ]
     citation = contract()["components"]["schemas"]["RetrievalCitation"]
     assert citation["additionalProperties"] is False
@@ -60,7 +64,7 @@ def test_chat_response_is_allowlisted_and_server_ids_are_read_only() -> None:
         "title",
     }
     assert response["properties"]["citations"]["maxItems"] == 3
-    assert set(operation["responses"]) == {"200", "401", "403", "409", "422", "503"}
+    assert set(operation["responses"]) == {"200", "401", "403", "409", "422", "502", "503"}
 
 
 def test_stream_contract_fixes_headers_event_names_and_allowlisted_payloads() -> None:
@@ -223,6 +227,48 @@ def test_retrieval_evidence_schema_is_turn_bound_atomic_and_append_only() -> Non
         source.index("for event in events:")
         < source.index("self._insert_retrieval_decision(")
         < source.index("UPDATE support_turn SET state = 'COMPLETED'")
+    )
+
+
+def test_cb122_pending_action_reference_is_agent_owned_bounded_and_least_privilege() -> None:
+    migration = (
+        ROOT / "infra/mysql/migrations/agent/V007__pending_action_reference.sql"
+    ).read_text(encoding="utf-8")
+    grants = (ROOT / "infra/mysql/grants/V001__migration_access.sql").read_text(encoding="utf-8")
+    payload = contract()
+
+    assert "CREATE TABLE pending_action_reference" in migration
+    assert "UNIQUE KEY uq_pending_action_reference_turn (source_turn_id)" in migration
+    assert (
+        "UNIQUE KEY uq_pending_action_reference_resolution_turn (resolution_turn_id)" in migration
+    )
+    assert "UNIQUE KEY uq_pending_action_reference_active_session (active_session_id)" in migration
+    assert "FOREIGN KEY (source_turn_id, source_trace_id, session_id, user_subject)" in migration
+    assert (
+        "FOREIGN KEY (resolution_turn_id, resolution_trace_id, session_id, user_subject)"
+        in migration
+    )
+    assert "state IN ('PENDING', 'DECLINED', 'EXPIRED')" in migration
+    assert "target_version BIGINT UNSIGNED NOT NULL" in migration
+    assert "CHECK (target_version > 0)" in migration
+    assert "CONFIRMING" not in migration
+    assert "CONFIRMED" not in migration
+    assert "action_receipt_projection" not in migration
+    assert (
+        "GRANT SELECT, INSERT, UPDATE "
+        "(state, resolved_at, resolution_turn_id, resolution_trace_id) "
+        "ON cs_db.pending_action_reference TO 'agent_app'@'%';"
+    ) in grants
+    assert "DELETE ON cs_db.pending_action_reference" not in grants
+    assert "UPDATE (target_version)" not in grants
+    assert "UPDATE ON cs_db.support_event" not in grants
+    assert "DELETE ON cs_db.support_event" not in grants
+    assert payload["info"]["version"] == "CB-122"
+    for route in ("/api/chat", "/api/chat/stream"):
+        responses = payload["paths"][route]["post"]["responses"]
+        assert set(responses) >= {"409", "502", "503"}
+    assert payload["components"]["schemas"]["SseActionReceiptData"]["description"].endswith(
+        "CB-122 never emits it."
     )
 
 

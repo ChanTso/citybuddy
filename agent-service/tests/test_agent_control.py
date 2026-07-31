@@ -1,23 +1,39 @@
 import json
+from collections.abc import Iterator
+from contextlib import contextmanager
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 import httpx
 import pytest
 from citybuddy_agent.agent_control import (
     CATALOG_PRODUCT_SPEC,
+    REFUND_PREPARE_SPEC,
+    TOOL_BOUNDARY_FAILURE_REASONS,
     AgentEvent,
     AttemptBudget,
+    BoundedAgent,
     CatalogProductInput,
     CircuitOpen,
     LiteLlmClient,
+    ModelReply,
     ModelRouter,
     ProviderCircuits,
     ProviderFailure,
     ProviderRoute,
     RuleRouter,
     ToolAdapter,
+    ToolBoundaryFailure,
 )
 from fastapi import HTTPException
+
+
+def future_action_expiry(*, hours: int = 1) -> str:
+    return (
+        (datetime.now(UTC) + timedelta(hours=hours))
+        .isoformat(timespec="microseconds")
+        .replace("+00:00", "Z")
+    )
 
 
 def plan() -> Any:
@@ -240,6 +256,22 @@ class UnavailableObo:
         raise httpx.ConnectError("identity unavailable")
 
 
+class StatusObo:
+    def __init__(self, status: int) -> None:
+        self.status = status
+
+    def exchange(
+        self,
+        direct_token: str,
+        subject: str,
+        session_id: str,
+        scope: str,
+        sandbox_id: str | None = None,
+    ) -> str:
+        del direct_token, subject, session_id, scope, sandbox_id
+        raise HTTPException(status_code=self.status, detail="Identity exchange rejected")
+
+
 def test_tool_adapter_enforces_server_owned_spec_and_bounded_model_view(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -440,3 +472,634 @@ def test_toolspec_schema_forbids_unknown_fields() -> None:
     assert CATALOG_PRODUCT_SPEC.scope == "catalog:read"
     assert CATALOG_PRODUCT_SPEC.risk == "read"
     assert CATALOG_PRODUCT_SPEC.idempotency == "read-only"
+
+
+def test_refund_prepare_uses_exact_obo_correlation_and_validates_untrusted_result(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    obo = RecordingObo()
+    requests: list[dict[str, Any]] = []
+    payload = {
+        "pendingActionId": "00000000-0000-0000-0000-000000000121",
+        "actionType": "REFUND_REQUEST",
+        "userSubject": "user-1",
+        "supportSessionId": "session-1",
+        "traceId": "00000000-0000-0000-0000-000000000123",
+        "turnId": "00000000-0000-0000-0000-000000000122",
+        "requiredScope": "refund:create",
+        "sandboxId": None,
+        "orderId": "00000000-0000-0000-0000-000000000040",
+        "targetVersion": 1,
+        "amountMinor": 400,
+        "currency": "CNY",
+        "state": "PREPARED",
+        "expiresAt": future_action_expiry(),
+        "replayed": False,
+    }
+
+    @contextmanager
+    def stream(method: str, url: str, **kwargs: Any) -> Iterator[httpx.Response]:
+        requests.append({"method": method, "url": url, **kwargs})
+        yield httpx.Response(
+            201,
+            content=json.dumps(payload).encode(),
+            request=httpx.Request(method, url),
+        )
+
+    monkeypatch.setattr(httpx, "stream", stream)
+    result = ToolAdapter("https://commerce.test", obo).execute(
+        name=REFUND_PREPARE_SPEC.name,
+        serialized_arguments=json.dumps(
+            {
+                "orderId": "00000000-0000-0000-0000-000000000040",
+                "amountMinor": 400,
+                "currency": "CNY",
+            }
+        ),
+        direct_token="direct",
+        subject="user-1",
+        session_id="session-1",
+        trace_id="00000000-0000-0000-0000-000000000123",
+        turn_id="00000000-0000-0000-0000-000000000122",
+        budget=AttemptBudget(4, []),
+        events=[],
+    )
+
+    assert obo.calls == [("direct", "user-1", "session-1", "refund:create")]
+    assert result.pending_action is not None
+    assert result.pending_action.pending_action_id == payload["pendingActionId"]
+    assert set(result.model_view) == {
+        "pendingActionId",
+        "actionType",
+        "orderId",
+        "amountMinor",
+        "currency",
+        "state",
+        "expiresAt",
+    }
+    assert requests[0]["url"].endswith("/internal/tools/actions/prepare")
+    assert requests[0]["headers"]["X-Agent-Trace-Id"] == payload["traceId"]
+    assert requests[0]["headers"]["X-Agent-Turn-Id"] == payload["turnId"]
+    assert requests[0]["json"] == {
+        "actionType": "REFUND_REQUEST",
+        "arguments": {
+            "orderId": "00000000-0000-0000-0000-000000000040",
+            "amountMinor": 400,
+            "currency": "CNY",
+        },
+    }
+
+
+@pytest.mark.parametrize(
+    ("damage", "http_status", "status", "reason"),
+    [
+        ({"unknown": True}, 201, 502, "ACTION_PREPARATION_RESPONSE_INVALID"),
+        (
+            {"amountMinor": 9_223_372_036_854_775_808},
+            201,
+            502,
+            "ACTION_PREPARATION_RESPONSE_INVALID",
+        ),
+        (
+            {"expiresAt": future_action_expiry(hours=25)},
+            201,
+            502,
+            "ACTION_PREPARATION_RESPONSE_INVALID",
+        ),
+        (
+            {"amountMinor": 401},
+            201,
+            409,
+            "ACTION_PREPARATION_DURABLE_TRUTH_INCONSISTENT",
+        ),
+        (
+            {"orderId": "00000000-0000-0000-0000-000000000999"},
+            201,
+            409,
+            "ACTION_PREPARATION_DURABLE_TRUTH_INCONSISTENT",
+        ),
+        ({"currency": "AUD"}, 201, 409, "ACTION_PREPARATION_DURABLE_TRUTH_INCONSISTENT"),
+        ({"userSubject": "other-user"}, 201, 409, "ACTION_PREPARATION_DURABLE_TRUTH_INCONSISTENT"),
+        (
+            {"supportSessionId": "other-session"},
+            201,
+            409,
+            "ACTION_PREPARATION_DURABLE_TRUTH_INCONSISTENT",
+        ),
+        (
+            {"traceId": "00000000-0000-0000-0000-000000000999"},
+            201,
+            409,
+            "ACTION_PREPARATION_DURABLE_TRUTH_INCONSISTENT",
+        ),
+        (
+            {"turnId": "00000000-0000-0000-0000-000000000999"},
+            201,
+            409,
+            "ACTION_PREPARATION_DURABLE_TRUTH_INCONSISTENT",
+        ),
+        (
+            {"requiredScope": "refund:other"},
+            201,
+            409,
+            "ACTION_PREPARATION_DURABLE_TRUTH_INCONSISTENT",
+        ),
+        ({"sandboxId": "other-sandbox"}, 201, 409, "ACTION_PREPARATION_DURABLE_TRUTH_INCONSISTENT"),
+        ({"targetVersion": 0}, 201, 409, "ACTION_PREPARATION_DURABLE_TRUTH_INCONSISTENT"),
+        ({"state": "CONSUMED"}, 201, 409, "ACTION_PREPARATION_DURABLE_TRUTH_INCONSISTENT"),
+        ({"replayed": True}, 201, 502, "ACTION_PREPARATION_RESPONSE_INVALID"),
+        ({}, 200, 502, "ACTION_PREPARATION_RESPONSE_INVALID"),
+    ],
+)
+def test_refund_prepare_response_cannot_impersonate_another_failure_producer(
+    damage: dict[str, object],
+    http_status: int,
+    status: int,
+    reason: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    payload: dict[str, object] = {
+        "pendingActionId": "00000000-0000-0000-0000-000000000121",
+        "actionType": "REFUND_REQUEST",
+        "userSubject": "user-1",
+        "supportSessionId": "session-1",
+        "traceId": "00000000-0000-0000-0000-000000000123",
+        "turnId": "00000000-0000-0000-0000-000000000122",
+        "requiredScope": "refund:create",
+        "sandboxId": None,
+        "orderId": "00000000-0000-0000-0000-000000000040",
+        "targetVersion": 1,
+        "amountMinor": 400,
+        "currency": "CNY",
+        "state": "PREPARED",
+        "expiresAt": future_action_expiry(),
+        "replayed": False,
+    }
+    payload.update(damage)
+
+    @contextmanager
+    def stream(method: str, url: str, **kwargs: Any) -> Iterator[httpx.Response]:
+        del kwargs
+        yield httpx.Response(
+            http_status,
+            content=json.dumps(payload).encode(),
+            request=httpx.Request(method, url),
+        )
+
+    monkeypatch.setattr(httpx, "stream", stream)
+    with pytest.raises(ToolBoundaryFailure) as failure:
+        ToolAdapter("https://commerce.test", RecordingObo()).execute(
+            name=REFUND_PREPARE_SPEC.name,
+            serialized_arguments=json.dumps(
+                {
+                    "orderId": "00000000-0000-0000-0000-000000000040",
+                    "amountMinor": 400,
+                    "currency": "CNY",
+                }
+            ),
+            direct_token="direct",
+            subject="user-1",
+            session_id="session-1",
+            trace_id="00000000-0000-0000-0000-000000000123",
+            turn_id="00000000-0000-0000-0000-000000000122",
+            budget=AttemptBudget(4, []),
+            events=[],
+        )
+
+    assert failure.value.status_code == status
+    assert failure.value.reason == reason
+
+
+@pytest.mark.parametrize("shape", ["missing", "duplicate"])
+def test_refund_prepare_success_rejects_missing_or_duplicate_binding_fields(
+    shape: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    payload = {
+        "pendingActionId": "00000000-0000-0000-0000-000000000121",
+        "actionType": "REFUND_REQUEST",
+        "userSubject": "user-1",
+        "supportSessionId": "session-1",
+        "traceId": "00000000-0000-0000-0000-000000000123",
+        "turnId": "00000000-0000-0000-0000-000000000122",
+        "requiredScope": "refund:create",
+        "sandboxId": None,
+        "orderId": "00000000-0000-0000-0000-000000000040",
+        "targetVersion": 1,
+        "amountMinor": 400,
+        "currency": "CNY",
+        "state": "PREPARED",
+        "expiresAt": future_action_expiry(),
+        "replayed": False,
+    }
+    if shape == "missing":
+        del payload["userSubject"]
+        content = json.dumps(payload).encode()
+    else:
+        encoded = json.dumps(payload, separators=(",", ":"))
+        content = encoded.replace(
+            '"userSubject":"user-1"',
+            '"userSubject":"user-1","userSubject":"user-1"',
+        ).encode()
+
+    @contextmanager
+    def stream(method: str, url: str, **kwargs: Any) -> Iterator[httpx.Response]:
+        del kwargs
+        yield httpx.Response(201, content=content, request=httpx.Request(method, url))
+
+    monkeypatch.setattr(httpx, "stream", stream)
+    with pytest.raises(ToolBoundaryFailure) as failure:
+        ToolAdapter("https://commerce.test", RecordingObo()).execute(
+            name=REFUND_PREPARE_SPEC.name,
+            serialized_arguments='{"orderId":"00000000-0000-0000-0000-000000000040","amountMinor":400,"currency":"CNY"}',
+            direct_token="direct",
+            subject="user-1",
+            session_id="session-1",
+            trace_id="00000000-0000-0000-0000-000000000123",
+            turn_id="00000000-0000-0000-0000-000000000122",
+            budget=AttemptBudget(4, []),
+            events=[],
+        )
+
+    assert failure.value.reason == "ACTION_PREPARATION_RESPONSE_INVALID"
+
+
+def test_refund_prepare_requires_exact_non_null_sandbox_binding(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    payload = {
+        "pendingActionId": "00000000-0000-0000-0000-000000000121",
+        "actionType": "REFUND_REQUEST",
+        "userSubject": "user-1",
+        "supportSessionId": "session-1",
+        "traceId": "00000000-0000-0000-0000-000000000123",
+        "turnId": "00000000-0000-0000-0000-000000000122",
+        "requiredScope": "refund:create",
+        "sandboxId": None,
+        "orderId": "00000000-0000-0000-0000-000000000040",
+        "targetVersion": 1,
+        "amountMinor": 400,
+        "currency": "CNY",
+        "state": "PREPARED",
+        "expiresAt": future_action_expiry(),
+        "replayed": False,
+    }
+
+    @contextmanager
+    def stream(method: str, url: str, **kwargs: Any) -> Iterator[httpx.Response]:
+        del kwargs
+        yield httpx.Response(
+            201,
+            content=json.dumps(payload).encode(),
+            request=httpx.Request(method, url),
+        )
+
+    monkeypatch.setattr(httpx, "stream", stream)
+    with pytest.raises(ToolBoundaryFailure) as failure:
+        ToolAdapter("https://commerce.test", RecordingObo()).execute(
+            name=REFUND_PREPARE_SPEC.name,
+            serialized_arguments='{"orderId":"00000000-0000-0000-0000-000000000040","amountMinor":400,"currency":"CNY"}',
+            direct_token="direct",
+            subject="user-1",
+            session_id="session-1",
+            sandbox_id="sandbox-1",
+            trace_id="00000000-0000-0000-0000-000000000123",
+            turn_id="00000000-0000-0000-0000-000000000122",
+            budget=AttemptBudget(4, []),
+            events=[],
+        )
+
+    assert failure.value.status_code == 409
+    assert failure.value.reason == "ACTION_PREPARATION_DURABLE_TRUTH_INCONSISTENT"
+
+
+@pytest.mark.parametrize(
+    ("status", "reason"),
+    [
+        (401, "ACTION_PREPARATION_IDENTITY_UNAUTHENTICATED"),
+        (403, "ACTION_PREPARATION_IDENTITY_FORBIDDEN"),
+    ],
+)
+def test_refund_prepare_identity_denials_have_distinct_server_producers(
+    status: int, reason: str
+) -> None:
+    result = ToolAdapter("https://commerce.test", StatusObo(status)).execute(
+        name=REFUND_PREPARE_SPEC.name,
+        serialized_arguments='{"orderId":"00000000-0000-0000-0000-000000000040","amountMinor":400,"currency":"CNY"}',
+        direct_token="direct",
+        subject="user-1",
+        session_id="session-1",
+        trace_id="00000000-0000-0000-0000-000000000123",
+        turn_id="00000000-0000-0000-0000-000000000122",
+        budget=AttemptBudget(4, []),
+        events=[],
+    )
+
+    assert result.server_reason == reason
+    assert result.model_view == {
+        "outcome": "deny_with_feedback",
+        "reason": "identity_denied",
+    }
+
+
+@pytest.mark.parametrize("obo", [DeniedObo(), UnavailableObo()])
+def test_refund_prepare_identity_unavailable_has_one_exact_producer(obo: Any) -> None:
+    with pytest.raises(ToolBoundaryFailure) as failure:
+        ToolAdapter("https://commerce.test", obo).execute(
+            name=REFUND_PREPARE_SPEC.name,
+            serialized_arguments='{"orderId":"00000000-0000-0000-0000-000000000040","amountMinor":400,"currency":"CNY"}',
+            direct_token="direct",
+            subject="user-1",
+            session_id="session-1",
+            trace_id="00000000-0000-0000-0000-000000000123",
+            turn_id="00000000-0000-0000-0000-000000000122",
+            budget=AttemptBudget(4, []),
+            events=[],
+        )
+
+    assert failure.value.status_code == 503
+    assert failure.value.reason == "ACTION_PREPARATION_IDENTITY_UNAVAILABLE"
+
+
+def test_bounded_agent_carries_exact_denial_producer_without_model_disclosure() -> None:
+    class SequenceModel:
+        def __init__(self) -> None:
+            self.calls = 0
+            self.messages: list[list[dict[str, str]]] = []
+
+        def complete(
+            self,
+            plan: object,
+            messages: list[dict[str, str]],
+            tools: list[dict[str, object]],
+            budget: AttemptBudget,
+            events: list[AgentEvent],
+        ) -> ModelReply:
+            del plan, tools, budget, events
+            self.calls += 1
+            self.messages.append(list(messages))
+            if self.calls == 1:
+                return ModelReply(
+                    content=None,
+                    tool_name=REFUND_PREPARE_SPEC.name,
+                    tool_arguments='{"orderId":"00000000-0000-0000-0000-000000000040","amountMinor":400,"currency":"CNY"}',
+                )
+            return ModelReply(content="The request could not be prepared.")
+
+    model = SequenceModel()
+    result = BoundedAgent(
+        RuleRouter(),
+        ModelRouter(
+            (ProviderRoute("support-standard-primary", "provider-a"),),
+            4,
+        ),
+        model,  # type: ignore[arg-type]
+        ToolAdapter("https://commerce.test", StatusObo(403)),
+    ).run(
+        message="refund my order",
+        direct_token="direct",
+        subject="user-1",
+        session_id="session-1",
+        trace_id="00000000-0000-0000-0000-000000000123",
+        turn_id="00000000-0000-0000-0000-000000000122",
+    )
+
+    reason = "ACTION_PREPARATION_IDENTITY_FORBIDDEN"
+    assert result.request_reasons == (reason,)
+    assert reason not in json.dumps(model.messages)
+    assert '"reason":"identity_denied"' in model.messages[-1][-1]["content"]
+
+
+def test_refund_prepare_replays_once_after_indeterminate_response_loss(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    payload = {
+        "pendingActionId": "00000000-0000-0000-0000-000000000121",
+        "actionType": "REFUND_REQUEST",
+        "userSubject": "user-1",
+        "supportSessionId": "session-1",
+        "traceId": "00000000-0000-0000-0000-000000000123",
+        "turnId": "00000000-0000-0000-0000-000000000122",
+        "requiredScope": "refund:create",
+        "sandboxId": None,
+        "orderId": "00000000-0000-0000-0000-000000000040",
+        "targetVersion": 1,
+        "amountMinor": 400,
+        "currency": "CNY",
+        "state": "PREPARED",
+        "expiresAt": future_action_expiry(),
+        "replayed": True,
+    }
+    requests: list[dict[str, object]] = []
+
+    @contextmanager
+    def stream(method: str, url: str, **kwargs: Any) -> Iterator[httpx.Response]:
+        requests.append({"method": method, "url": url, **kwargs})
+        status = 503 if len(requests) == 1 else 200
+        yield httpx.Response(
+            status,
+            content=b"lost after commit" if status == 503 else json.dumps(payload).encode(),
+            request=httpx.Request(method, url),
+        )
+
+    monkeypatch.setattr(httpx, "stream", stream)
+    events: list[AgentEvent] = []
+    result = ToolAdapter("https://commerce.test", RecordingObo()).execute(
+        name=REFUND_PREPARE_SPEC.name,
+        serialized_arguments=json.dumps(
+            {
+                "orderId": "00000000-0000-0000-0000-000000000040",
+                "amountMinor": 400,
+                "currency": "CNY",
+            }
+        ),
+        direct_token="direct",
+        subject="user-1",
+        session_id="session-1",
+        trace_id="00000000-0000-0000-0000-000000000123",
+        turn_id="00000000-0000-0000-0000-000000000122",
+        budget=AttemptBudget(4, events),
+        events=events,
+    )
+
+    assert result.pending_action is not None
+    assert result.pending_action.replayed is True
+    assert len(requests) == 2
+    assert requests[0]["url"] == requests[1]["url"]
+    assert requests[0]["headers"] == requests[1]["headers"]
+    assert requests[0]["json"] == requests[1]["json"]
+    assert [event.payload["kind"] for event in events if event.event_type == "BUDGET_CHARGED"] == [
+        "identity_http",
+        "tool_http",
+        "tool_http",
+    ]
+
+
+@pytest.mark.parametrize(
+    ("status", "body", "reason", "raises"),
+    [
+        (
+            400,
+            {"category": "VALIDATION", "message": "invalid"},
+            "ACTION_PREPARATION_COMMERCE_VALIDATION_REJECTED",
+            False,
+        ),
+        (401, {"error": "Unauthorized"}, "ACTION_PREPARATION_COMMERCE_UNAUTHENTICATED", False),
+        (403, {"error": "Forbidden"}, "ACTION_PREPARATION_COMMERCE_FORBIDDEN", False),
+        (
+            404,
+            {"category": "NOT_FOUND", "message": "missing"},
+            "ACTION_PREPARATION_TARGET_NOT_FOUND",
+            False,
+        ),
+        (
+            409,
+            {"category": "CONFLICT", "message": "conflict"},
+            "ACTION_PREPARATION_INTENT_CONFLICT",
+            False,
+        ),
+        (
+            409,
+            {"category": "INCONSISTENT_DURABLE_STATE", "message": "damaged"},
+            "ACTION_PREPARATION_DURABLE_TRUTH_INCONSISTENT",
+            False,
+        ),
+        (
+            422,
+            {"category": "VALIDATION", "message": "invalid"},
+            "ACTION_PREPARATION_COMMERCE_VALIDATION_REJECTED",
+            False,
+        ),
+        (
+            408,
+            {"category": "DEPENDENCY_UNAVAILABLE", "message": "timeout"},
+            "ACTION_PREPARATION_COMMERCE_TIMEOUT",
+            True,
+        ),
+        (
+            429,
+            {"category": "INDETERMINATE", "message": "retry"},
+            "ACTION_PREPARATION_COMMERCE_INDETERMINATE",
+            True,
+        ),
+        (
+            502,
+            {"category": "DEPENDENCY_UNAVAILABLE", "message": "unavailable"},
+            "ACTION_PREPARATION_COMMERCE_UNAVAILABLE",
+            True,
+        ),
+        (503, {"error": "Service unavailable"}, "ACTION_PREPARATION_COMMERCE_UNAVAILABLE", True),
+        (504, {"error": "Service unavailable"}, "ACTION_PREPARATION_COMMERCE_TIMEOUT", True),
+    ],
+)
+def test_refund_prepare_rejection_producer_matrix_is_exact(
+    status: int,
+    body: dict[str, object],
+    reason: str,
+    raises: bool,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    @contextmanager
+    def stream(method: str, url: str, **kwargs: Any) -> Iterator[httpx.Response]:
+        del kwargs
+        yield httpx.Response(
+            status,
+            content=json.dumps(body).encode(),
+            request=httpx.Request(method, url),
+        )
+
+    monkeypatch.setattr(httpx, "stream", stream)
+    adapter = ToolAdapter("https://commerce.test", RecordingObo())
+
+    def invoke() -> Any:
+        return adapter.execute(
+            name=REFUND_PREPARE_SPEC.name,
+            serialized_arguments=json.dumps(
+                {
+                    "orderId": "00000000-0000-0000-0000-000000000040",
+                    "amountMinor": 400,
+                    "currency": "CNY",
+                }
+            ),
+            direct_token="direct",
+            subject="user-1",
+            session_id="session-1",
+            trace_id="00000000-0000-0000-0000-000000000123",
+            turn_id="00000000-0000-0000-0000-000000000122",
+            budget=AttemptBudget(4, []),
+            events=[],
+        )
+
+    if raises:
+        with pytest.raises(ToolBoundaryFailure) as failure:
+            invoke()
+        assert failure.value.reason == reason
+    else:
+        result = invoke()
+        assert result.server_reason == reason
+        assert result.model_view == {
+            "outcome": "deny_with_feedback",
+            "reason": "policy_denied",
+        }
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        b"not-json",
+        b'{"category":"CONFLICT","category":"INCONSISTENT_DURABLE_STATE","message":"x"}',
+        json.dumps({"category": "UNKNOWN", "message": "x"}).encode(),
+        json.dumps({"category": "CONFLICT", "message": "x", "extra": True}).encode(),
+        b"{" + b" " * 4096 + b"}",
+    ],
+)
+def test_refund_prepare_malformed_rejection_is_response_invalid(
+    body: bytes, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    @contextmanager
+    def stream(method: str, url: str, **kwargs: Any) -> Iterator[httpx.Response]:
+        del kwargs
+        yield httpx.Response(409, content=body, request=httpx.Request(method, url))
+
+    monkeypatch.setattr(httpx, "stream", stream)
+    with pytest.raises(ToolBoundaryFailure) as failure:
+        ToolAdapter("https://commerce.test", RecordingObo()).execute(
+            name=REFUND_PREPARE_SPEC.name,
+            serialized_arguments='{"orderId":"00000000-0000-0000-0000-000000000040","amountMinor":400,"currency":"CNY"}',
+            direct_token="direct",
+            subject="user-1",
+            session_id="session-1",
+            trace_id="00000000-0000-0000-0000-000000000123",
+            turn_id="00000000-0000-0000-0000-000000000122",
+            budget=AttemptBudget(4, []),
+            events=[],
+        )
+    assert failure.value.reason == "ACTION_PREPARATION_RESPONSE_INVALID"
+
+
+def test_sensitive_tool_failure_producer_inventory_is_closed() -> None:
+    assert TOOL_BOUNDARY_FAILURE_REASONS == {
+        "ACTION_PREPARATION_IDENTITY_UNAUTHENTICATED",
+        "ACTION_PREPARATION_IDENTITY_FORBIDDEN",
+        "ACTION_PREPARATION_IDENTITY_UNAVAILABLE",
+        "ACTION_PREPARATION_COMMERCE_VALIDATION_REJECTED",
+        "ACTION_PREPARATION_COMMERCE_UNAUTHENTICATED",
+        "ACTION_PREPARATION_COMMERCE_FORBIDDEN",
+        "ACTION_PREPARATION_TARGET_NOT_FOUND",
+        "ACTION_PREPARATION_INTENT_CONFLICT",
+        "ACTION_PREPARATION_COMMERCE_UNAVAILABLE",
+        "ACTION_PREPARATION_COMMERCE_TIMEOUT",
+        "ACTION_PREPARATION_COMMERCE_INDETERMINATE",
+        "ACTION_PREPARATION_RESPONSE_INVALID",
+        "ACTION_PREPARATION_DURABLE_TRUTH_INCONSISTENT",
+        "ACTION_SANDBOX_LIVENESS_UNAVAILABLE",
+        "ACTION_SANDBOX_LIVENESS_REJECTED",
+        "ACTION_SESSION_PERSISTENCE_UNAVAILABLE",
+        "ACTION_REPLAY_PERSISTENCE_UNAVAILABLE",
+        "ACTION_REFERENCE_PERSISTENCE_UNAVAILABLE",
+        "ACTION_TURN_RESERVATION_PERSISTENCE_UNAVAILABLE",
+        "ACTION_EXPIRY_PERSISTENCE_UNAVAILABLE",
+        "ACTION_DECLINE_PERSISTENCE_UNAVAILABLE",
+        "ACTION_CLARIFICATION_PERSISTENCE_UNAVAILABLE",
+        "AGENT_TURN_COMPLETION_PERSISTENCE_UNAVAILABLE",
+        "ACTION_CONFIRMATION_UNAVAILABLE",
+    }

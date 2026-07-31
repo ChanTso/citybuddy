@@ -742,11 +742,18 @@ public final class ActionService {
     return new RefundRequest(command.amountMinor(), command.currency(), null);
   }
 
-  private static PendingActionView pendingView(PendingActionRecord pending, boolean replayed) {
+  static PendingActionView pendingView(PendingActionRecord pending, boolean replayed) {
     return new PendingActionView(
         pending.pendingActionId(),
         pending.actionType(),
+        pending.userSubject(),
+        pending.supportSessionId(),
+        pending.traceId(),
+        pending.turnId(),
+        pending.requiredScope(),
+        pending.sandboxId(),
         pending.orderId(),
+        pending.targetOrderVersion(),
         pending.amountMinor(),
         pending.currency(),
         pending.state(),

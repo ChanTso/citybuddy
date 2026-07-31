@@ -70,6 +70,37 @@ def test_openapi_exposes_only_closed_prepare_and_confirm_shapes() -> None:
     arguments = prepare["properties"]["arguments"]
     assert arguments["additionalProperties"] is False
     assert set(arguments["required"]) == {"orderId", "amountMinor", "currency"}
+    pending = document["components"]["schemas"]["PendingAction"]
+    assert pending["additionalProperties"] is False
+    assert set(pending["required"]) == {
+        "pendingActionId",
+        "actionType",
+        "userSubject",
+        "supportSessionId",
+        "traceId",
+        "turnId",
+        "requiredScope",
+        "sandboxId",
+        "orderId",
+        "targetVersion",
+        "amountMinor",
+        "currency",
+        "state",
+        "expiresAt",
+        "replayed",
+    }
+    assert pending["properties"]["requiredScope"]["const"] == "refund:create"
+    assert pending["properties"]["sandboxId"]["type"] == ["string", "null"]
+    assert pending["properties"]["targetVersion"]["minimum"] == 1
+    for private in (
+        "paymentAttemptId",
+        "orderKind",
+        "pendingHash",
+        "actionIdempotencyKey",
+        "createdAt",
+        "argumentCommitment",
+    ):
+        assert private not in pending["properties"]
     receipt = document["components"]["schemas"]["ActionReceipt"]
     assert receipt["additionalProperties"] is False
     assert receipt["properties"]["status"]["const"] == "REQUESTED"
