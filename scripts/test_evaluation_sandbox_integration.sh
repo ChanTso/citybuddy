@@ -4410,6 +4410,73 @@ assert_status 409 "evaluation rejects the same contradictory receipt projection"
 mysql_query root "$root_password" cs_db \
   "UPDATE action_receipt_projection SET receipt_commitment = '$cb123_receipt_commitment' WHERE receipt_id = '$cb123_receipt_id'"
 
+cb123_projection_sandbox="$(mysql_query root "$root_password" cs_db \
+  "SELECT sandbox_id FROM action_receipt_projection WHERE receipt_id = '$cb123_receipt_id'")"
+mysql_query root "$root_password" cs_db \
+  "UPDATE action_receipt_projection SET sandbox_id = 'sandbox-damaged' WHERE receipt_id = '$cb123_receipt_id'"
+assert_status 409 "conversation rejects a receipt projection with a contradictory sandbox" \
+  --request POST "http://127.0.0.1:$agent_port/api/chat" \
+  --header "Authorization: Bearer $payment_token" \
+  --header 'X-Eval-Sandbox-Id: sandbox-payment' \
+  --header "X-Session-Id: $cb123_session" \
+  --header "Idempotency-Key: $cb123_confirmation_key" \
+  --header 'Content-Type: application/json' \
+  --data '{"message":"confirm"}'
+assert_status 409 "evaluation rejects the same contradictory receipt sandbox" \
+  --request GET "http://127.0.0.1:$agent_port/api/eval/evidence/$cb123_confirmation_trace" \
+  --user "evaluation-manager:$management_password" \
+  --header 'X-Eval-Sandbox-Id: sandbox-payment'
+mysql_query root "$root_password" cs_db \
+  "UPDATE action_receipt_projection SET sandbox_id = '$cb123_projection_sandbox' WHERE receipt_id = '$cb123_receipt_id'"
+
+cb123_projection_target_version="$(mysql_query root "$root_password" cs_db \
+  "SELECT target_version FROM action_receipt_projection WHERE receipt_id = '$cb123_receipt_id'")"
+mysql_query root "$root_password" cs_db \
+  "UPDATE action_receipt_projection SET target_version = target_version + 1 WHERE receipt_id = '$cb123_receipt_id'"
+assert_status 409 "conversation rejects a receipt projection with a contradictory target version" \
+  --request POST "http://127.0.0.1:$agent_port/api/chat" \
+  --header "Authorization: Bearer $payment_token" \
+  --header 'X-Eval-Sandbox-Id: sandbox-payment' \
+  --header "X-Session-Id: $cb123_session" \
+  --header "Idempotency-Key: $cb123_confirmation_key" \
+  --header 'Content-Type: application/json' \
+  --data '{"message":"confirm"}'
+assert_status 409 "evaluation rejects the same contradictory receipt target version" \
+  --request GET "http://127.0.0.1:$agent_port/api/eval/evidence/$cb123_confirmation_trace" \
+  --user "evaluation-manager:$management_password" \
+  --header 'X-Eval-Sandbox-Id: sandbox-payment'
+mysql_query root "$root_password" cs_db \
+  "UPDATE action_receipt_projection SET target_version = $cb123_projection_target_version WHERE receipt_id = '$cb123_receipt_id'"
+
+mysql_query root "$root_password" cs_db \
+  "DROP TABLE IF EXISTS cb123_terminal_event_backup; CREATE TABLE cb123_terminal_event_backup AS SELECT * FROM support_event WHERE turn_id = '$cb123_confirmation_turn' AND event_type = 'TURN_COMPLETED'; DELETE FROM support_event WHERE turn_id = '$cb123_confirmation_turn' AND event_type = 'TURN_COMPLETED'"
+assert_status 409 "conversation rejects a completed action missing its terminal event" \
+  --request POST "http://127.0.0.1:$agent_port/api/chat" \
+  --header "Authorization: Bearer $payment_token" \
+  --header 'X-Eval-Sandbox-Id: sandbox-payment' \
+  --header "X-Session-Id: $cb123_session" \
+  --header "Idempotency-Key: $cb123_confirmation_key" \
+  --header 'Content-Type: application/json' \
+  --data '{"message":"confirm"}'
+assert_status 409 "evaluation rejects the same missing action terminal event" \
+  --request GET "http://127.0.0.1:$agent_port/api/eval/evidence/$cb123_confirmation_trace" \
+  --user "evaluation-manager:$management_password" \
+  --header 'X-Eval-Sandbox-Id: sandbox-payment'
+mysql_query root "$root_password" cs_db \
+  "INSERT INTO support_event SELECT * FROM cb123_terminal_event_backup; DROP TABLE cb123_terminal_event_backup"
+assert_status 200 "restored complete receipt closure replays normally" \
+  --request POST "http://127.0.0.1:$agent_port/api/chat" \
+  --header "Authorization: Bearer $payment_token" \
+  --header 'X-Eval-Sandbox-Id: sandbox-payment' \
+  --header "X-Session-Id: $cb123_session" \
+  --header "Idempotency-Key: $cb123_confirmation_key" \
+  --header 'Content-Type: application/json' \
+  --data '{"message":"confirm"}'
+assert_equal "$cb123_confirm_calls_before_local_replay" \
+  "$(curl --silent --show-error "http://127.0.0.1:$proxy_port/fixture/counts" \
+    | jq -r --arg pending "$cb123_pending_id" '.["action-confirm:" + $pending]')" \
+  "closure damage and restoration never call Commerce again"
+
 prepare_cb123_action_case cb123-concurrent action-prepare-small
 cb123_concurrent_key='cb123-concurrent-confirm'
 cb123_concurrent_pids=()

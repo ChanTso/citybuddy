@@ -24,6 +24,7 @@ from .actions import (
     StoredActionReceipt,
     canonical_action_timestamp,
     strict_json_object,
+    validate_completed_action_events,
     validate_pending_action_events,
     validate_pending_action_reference,
     validate_pending_action_resolution,
@@ -902,7 +903,15 @@ class MysqlConversationStore:
             raise ConversationIntegrityError(
                 "Commerce receipt contradicts the stored PendingAction"
             )
-        stored = StoredActionReceipt(receipt, pending.source_turn_id, start.turn_id)
+        stored = StoredActionReceipt(
+            receipt,
+            pending.source_turn_id,
+            pending.source_trace_id,
+            start.turn_id,
+            start.trace_id,
+            pending.sandbox_id,
+            pending.target_version,
+        )
         with self._connect() as connection:
             try:
                 with connection.cursor() as cursor:
@@ -1561,14 +1570,27 @@ class MysqlConversationStore:
             )
             return
         if outcome == "action_completed":
+            stored = cls._load_action_receipt(cursor, turn_id)
             if (
                 action_types != ["ACTION_RECEIPT"]
                 or source_references
                 or resolution_references
                 or len(confirmation_references) != 1
-                or cls._load_action_receipt(cursor, turn_id) is None
+                or stored is None
             ):
                 raise ConversationIntegrityError("Completed action turn evidence is incomplete")
+            try:
+                validate_completed_action_events(
+                    rows,
+                    expected_trace_id=trace_id,
+                    expected_session_id=session_id,
+                    expected_user_subject=subject,
+                    receipt=stored.receipt,
+                )
+            except ActionEvidenceError as exception:
+                raise ConversationIntegrityError(
+                    "Completed action turn event closure is inconsistent"
+                ) from exception
             return
         raise ConversationIntegrityError("Action evidence contradicts the owning turn outcome")
 
@@ -1747,7 +1769,21 @@ class MysqlConversationStore:
             "receiptCommitment": receipt.receipt_commitment,
         }:
             raise ConversationIntegrityError("ActionReceipt event commitment is inconsistent")
-        return StoredActionReceipt(receipt, str(row[2]), str(row[4]))
+        if (
+            not isinstance(row[3], str)
+            or not isinstance(row[5], str)
+            or (row[8] is not None and not isinstance(row[8], str))
+        ):
+            raise ConversationIntegrityError("ActionReceipt projection identity is invalid")
+        return StoredActionReceipt(
+            receipt,
+            str(row[2]),
+            row[3],
+            str(row[4]),
+            row[5],
+            row[8],
+            row[13],
+        )
 
     @classmethod
     def _load_action_receipt_by_pending(
@@ -1803,7 +1839,12 @@ class MysqlConversationStore:
         receipt = stored.receipt
         if (
             state != "CONFIRMED"
+            or stored.source_trace_id != pending.source_trace_id
             or pending.confirmation_turn_id != stored.confirmation_turn_id
+            or pending.confirmation_trace_id != stored.confirmation_trace_id
+            or stored.sandbox_id != sandbox_id
+            or stored.sandbox_id != pending.sandbox_id
+            or stored.target_version != pending.target_version
             or pending.pending_action_id != receipt.pending_action_id
             or pending.action_type != receipt.action_type
             or pending.argument_commitment != receipt.argument_commitment

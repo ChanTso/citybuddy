@@ -313,7 +313,15 @@ class MemoryConversationStore(ConversationStore):
         key, reserved = next(
             item for item in self.pending.items() if item[1][1].turn_id == start.turn_id
         )
-        stored = StoredActionReceipt(receipt, pending.source_turn_id, start.turn_id)
+        stored = StoredActionReceipt(
+            receipt,
+            pending.source_turn_id,
+            pending.source_trace_id,
+            start.turn_id,
+            start.trace_id,
+            pending.sandbox_id,
+            pending.target_version,
+        )
         result = ConversationResult(
             start.conversation_id,
             start.trace_id,

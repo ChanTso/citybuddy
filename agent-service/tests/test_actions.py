@@ -17,6 +17,7 @@ from citybuddy_agent.actions import (
     canonical_action_timestamp,
     confirmation_decision,
     strict_json_object,
+    validate_completed_action_events,
     validate_pending_action_events,
     validate_pending_action_reference,
     validate_pending_action_resolution,
@@ -256,6 +257,85 @@ def test_action_receipt_schema_is_closed_strict_and_complete() -> None:
     unknown = {**document, "unknown": "forbidden"}
     with pytest.raises(ValidationError):
         ActionReceiptPayload.model_validate(strict_json_object(json.dumps(unknown).encode()))
+
+
+def test_completed_action_event_closure_requires_receipt_and_terminal_suffix() -> None:
+    receipt = ActionReceiptPayload.model_validate(
+        {
+            "receiptId": "00000000-0000-0000-0000-000000000211",
+            "pendingActionId": "00000000-0000-0000-0000-000000000121",
+            "actionType": "REFUND_REQUEST",
+            "status": "REQUESTED",
+            "orderId": "00000000-0000-0000-0000-000000000040",
+            "refundId": "00000000-0000-0000-0000-000000000071",
+            "resourceVersion": 1,
+            "amountMinor": 400,
+            "currency": "CNY",
+            "committedAt": "2026-08-01T01:02:03.123456Z",
+            "replayed": False,
+        }
+    )
+    trace_id = "00000000-0000-0000-0000-000000000301"
+
+    def event(sequence: int, event_type: str, payload: object) -> tuple[object, ...]:
+        return (
+            f"00000000-0000-0000-0000-{sequence:012d}",
+            trace_id,
+            "session-1",
+            "user-1",
+            sequence,
+            event_type,
+            json.dumps(payload),
+        )
+
+    rows = [
+        event(1, "USER_INPUT", {"accepted": True}),
+        event(
+            2,
+            "ACTION_RECEIPT",
+            {
+                "receiptId": receipt.receipt_id,
+                "pendingActionId": receipt.pending_action_id,
+                "status": receipt.status,
+                "receiptCommitment": receipt.receipt_commitment,
+            },
+        ),
+        event(3, "AGENT_OUTCOME", {"outcome": "action_completed"}),
+        event(4, "ASSISTANT_RESPONSE", {"outcome": "action_completed"}),
+        event(5, "TURN_COMPLETED", {"outcome": "action_completed"}),
+    ]
+    assert (
+        len(
+            validate_completed_action_events(
+                rows,
+                expected_trace_id=trace_id,
+                expected_session_id="session-1",
+                expected_user_subject="user-1",
+                receipt=receipt,
+            )
+        )
+        == 5
+    )
+    for index in range(len(rows)):
+        damaged = list(rows)
+        del damaged[index]
+        with pytest.raises(ActionEvidenceError):
+            validate_completed_action_events(
+                damaged,
+                expected_trace_id=trace_id,
+                expected_session_id="session-1",
+                expected_user_subject="user-1",
+                receipt=receipt,
+            )
+    duplicate_receipt = [*rows[:2], rows[1], *rows[2:]]
+    with pytest.raises(ActionEvidenceError):
+        validate_completed_action_events(
+            duplicate_receipt,
+            expected_trace_id=trace_id,
+            expected_session_id="session-1",
+            expected_user_subject="user-1",
+            receipt=receipt,
+        )
 
 
 def test_pending_reference_and_source_turn_matrix_binds_every_persisted_field() -> None:

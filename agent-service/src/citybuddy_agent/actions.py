@@ -360,7 +360,11 @@ class PendingActionReference:
 class StoredActionReceipt:
     receipt: ActionReceiptPayload
     source_turn_id: str
+    source_trace_id: str
     confirmation_turn_id: str
+    confirmation_trace_id: str
+    sandbox_id: str | None
+    target_version: int
 
 
 class ActionEvidenceError(ValueError):
@@ -701,6 +705,75 @@ def validate_resolved_action_events(
         )
     ):
         raise ActionEvidenceError("Resolved action event closure is inconsistent")
+    return tuple(events)
+
+
+def validate_completed_action_events(
+    rows: tuple[tuple[object, ...], ...] | list[tuple[object, ...]],
+    *,
+    expected_trace_id: str,
+    expected_session_id: str,
+    expected_user_subject: str,
+    receipt: ActionReceiptPayload,
+) -> tuple[ActionEvidenceEvent, ...]:
+    """Validate the complete ordered confirmation-turn lifecycle around one receipt."""
+    if not 5 <= len(rows) <= MAX_ACTION_SOURCE_TURN_EVENTS:
+        raise ActionEvidenceError("Completed action event cardinality is inconsistent")
+    events: list[ActionEvidenceEvent] = []
+    try:
+        for expected_sequence, row in enumerate(rows, start=1):
+            if (
+                len(row) != 7
+                or tuple(row[1:5])
+                != (
+                    expected_trace_id,
+                    expected_session_id,
+                    expected_user_subject,
+                    expected_sequence,
+                )
+                or not all(isinstance(row[index], str) for index in (0, 1, 2, 3, 5, 6))
+                or _canonical_uuid(row[0]) != row[0]
+            ):
+                raise ActionEvidenceError(
+                    "Completed action event identity or sequence is inconsistent"
+                )
+            events.append(
+                ActionEvidenceEvent(
+                    event_id=str(row[0]),
+                    trace_id=str(row[1]),
+                    session_id=str(row[2]),
+                    user_subject=str(row[3]),
+                    sequence=expected_sequence,
+                    event_type=str(row[5]),
+                    payload=strict_json_object(str(row[6]).encode("utf-8")),
+                )
+            )
+    except (ActionJsonError, TypeError, ValueError) as exception:
+        if isinstance(exception, ActionEvidenceError):
+            raise
+        raise ActionEvidenceError("Completed action event content is invalid") from exception
+    receipt_payload = {
+        "receiptId": receipt.receipt_id,
+        "pendingActionId": receipt.pending_action_id,
+        "status": receipt.status,
+        "receiptCommitment": receipt.receipt_commitment,
+    }
+    if (
+        events[0].event_type != "USER_INPUT"
+        or events[0].payload != {"accepted": True}
+        or events[-4].event_type != "ACTION_RECEIPT"
+        or events[-4].payload != receipt_payload
+        or [event.event_type for event in events[-3:]]
+        != ["AGENT_OUTCOME", "ASSISTANT_RESPONSE", "TURN_COMPLETED"]
+        or any(event.payload != {"outcome": "action_completed"} for event in events[-3:])
+        or any(
+            event is not events[-4]
+            and event.event_type
+            in {"ACTION_PREPARED", "ACTION_DECLINED", "ACTION_EXPIRED", "ACTION_RECEIPT"}
+            for event in events
+        )
+    ):
+        raise ActionEvidenceError("Completed action event closure is inconsistent")
     return tuple(events)
 
 

@@ -46,7 +46,15 @@ def action_completed() -> ConversationResult:
         "turn-1",
         "Receipt-backed explanation.",
         "action_completed",
-        action_receipt=StoredActionReceipt(receipt, "source-turn", "turn-1"),
+        action_receipt=StoredActionReceipt(
+            receipt,
+            "source-turn",
+            "source-trace",
+            "turn-1",
+            "trace-1",
+            None,
+            1,
+        ),
     )
 
 
