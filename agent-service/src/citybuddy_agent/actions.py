@@ -206,19 +206,26 @@ class RefundActionArguments(BaseModel):
         return value
 
 
-class PendingActionPayload(BaseModel):
+class PreparedActionResponse(BaseModel):
     model_config = ConfigDict(extra="forbid", populate_by_name=True, strict=True, frozen=True)
 
     pending_action_id: str = Field(alias="pendingActionId", min_length=36, max_length=36)
-    action_type: Literal["REFUND_REQUEST"] = Field(alias="actionType")
+    action_type: str = Field(alias="actionType", min_length=1, max_length=32)
+    user_subject: str = Field(alias="userSubject", min_length=1, max_length=190)
+    support_session_id: str = Field(alias="supportSessionId", min_length=1, max_length=64)
+    trace_id: str = Field(alias="traceId", min_length=36, max_length=36)
+    turn_id: str = Field(alias="turnId", min_length=36, max_length=36)
+    required_scope: str = Field(alias="requiredScope", min_length=1, max_length=64)
+    sandbox_id: str | None = Field(alias="sandboxId", min_length=1, max_length=64)
     order_id: str = Field(alias="orderId", min_length=36, max_length=36)
+    target_version: int = Field(alias="targetVersion")
     amount_minor: int = Field(alias="amountMinor", ge=1, le=MAX_ACTION_AMOUNT_MINOR)
     currency: str = Field(pattern=r"^[A-Z]{3}$")
-    state: Literal["PREPARED"]
+    state: str = Field(min_length=1, max_length=16)
     expires_at: datetime = Field(alias="expiresAt")
     replayed: bool
 
-    @field_validator("pending_action_id", "order_id")
+    @field_validator("pending_action_id", "trace_id", "turn_id", "order_id")
     @classmethod
     def canonical_uuid(cls, value: str) -> str:
         if str(uuid.UUID(value)) != value:
@@ -243,6 +250,13 @@ class PendingActionPayload(BaseModel):
         return action_argument_commitment(
             self.action_type, self.order_id, self.amount_minor, self.currency
         )
+
+
+class PendingActionPayload(PreparedActionResponse):
+    action_type: Literal["REFUND_REQUEST"] = Field(alias="actionType")
+    required_scope: Literal["refund:create"] = Field(alias="requiredScope")
+    target_version: int = Field(alias="targetVersion", ge=1)
+    state: Literal["PREPARED"]
 
 
 def action_argument_commitment(
@@ -270,6 +284,7 @@ class PendingActionReference:
     action_type: str
     argument_commitment: str
     order_id: str
+    target_version: int
     amount_minor: int
     currency: str
     expires_at: datetime
@@ -326,7 +341,7 @@ def validate_pending_action_reference(
 ) -> tuple[PendingActionReference, str, datetime]:
     """Validate one reference against its independently enumerated source turn."""
     try:
-        if len(row) != 17 or len(source_turn_rows) != 1 or len(source_turn_rows[0]) != 7:
+        if len(row) != 18 or len(source_turn_rows) != 1 or len(source_turn_rows[0]) != 7:
             raise ActionEvidenceError("PendingAction reference cardinality is inconsistent")
         source_turn = source_turn_rows[0]
         if (
@@ -357,29 +372,31 @@ def validate_pending_action_reference(
             or any(character not in "0123456789abcdef" for character in row[8])
             or type(row[10]) is not int
             or row[10] < 1
-            or not isinstance(row[11], str)
-            or len(row[11]) != 3
-            or not row[11].isalpha()
-            or row[11] != row[11].upper()
-            or row[12] not in {"PENDING", "DECLINED", "EXPIRED"}
-            or not isinstance(row[13], datetime)
-            or (row[12] == "PENDING") != (row[14] is None)
-            or (row[14] is not None and not isinstance(row[14], datetime))
-            or (row[12] == "PENDING") != (row[15] is None and row[16] is None)
+            or type(row[11]) is not int
+            or row[11] < 1
+            or not isinstance(row[12], str)
+            or len(row[12]) != 3
+            or not row[12].isalpha()
+            or row[12] != row[12].upper()
+            or row[13] not in {"PENDING", "DECLINED", "EXPIRED"}
+            or not isinstance(row[14], datetime)
+            or (row[13] == "PENDING") != (row[15] is None)
+            or (row[15] is not None and not isinstance(row[15], datetime))
+            or (row[13] == "PENDING") != (row[16] is None and row[17] is None)
         ):
             raise ActionEvidenceError("PendingAction reference content is invalid")
         resolution_turn_id = None
         resolution_trace_id = None
-        if row[12] != "PENDING":
-            resolution_turn_id = _canonical_uuid(row[15])
-            resolution_trace_id = _canonical_uuid(row[16])
+        if row[13] != "PENDING":
+            resolution_turn_id = _canonical_uuid(row[16])
+            resolution_trace_id = _canonical_uuid(row[17])
             if resolution_turn_id == source_turn_id:
                 raise ActionEvidenceError("PendingAction resolution turn is inconsistent")
         expires_at = (
-            row[13].replace(tzinfo=UTC) if row[13].tzinfo is None else row[13].astimezone(UTC)
+            row[14].replace(tzinfo=UTC) if row[14].tzinfo is None else row[14].astimezone(UTC)
         )
         action_type = cast(str, row[7])
-        state = cast(str, row[12])
+        state = cast(str, row[13])
         pending = PendingActionReference(
             pending_action_id=pending_action_id,
             source_turn_id=source_turn_id,
@@ -391,8 +408,9 @@ def validate_pending_action_reference(
             action_type=action_type,
             argument_commitment=row[8],
             order_id=order_id,
-            amount_minor=row[10],
-            currency=row[11],
+            target_version=row[10],
+            amount_minor=row[11],
+            currency=row[12],
             expires_at=expires_at,
             resolution_turn_id=resolution_turn_id,
             resolution_trace_id=resolution_trace_id,
@@ -468,6 +486,7 @@ def validate_pending_action_events(
     pending_action_id: str,
     action_type: str,
     argument_commitment: str,
+    target_version: int,
     expires_at: datetime,
 ) -> tuple[ActionEvidenceEvent, ...]:
     if not 4 <= len(rows) <= MAX_ACTION_SOURCE_TURN_EVENTS:
@@ -508,6 +527,7 @@ def validate_pending_action_events(
         "pendingActionId": pending_action_id,
         "actionType": action_type,
         "argumentCommitment": argument_commitment,
+        "targetVersion": target_version,
         "expiresAt": canonical_action_timestamp(expires_at),
     }
     if (

@@ -430,6 +430,7 @@ class MysqlConversationStore:
                         "pendingActionId": pending_action.pending_action_id,
                         "actionType": pending_action.action_type,
                         "argumentCommitment": pending_action.argument_commitment,
+                        "targetVersion": pending_action.target_version,
                         "expiresAt": canonical_action_timestamp(pending_action.expires_at),
                     }:
                         raise RuntimeError("PendingAction reference and preparation event disagree")
@@ -438,10 +439,11 @@ class MysqlConversationStore:
                             "INSERT INTO pending_action_reference "
                             "(pending_action_id, source_turn_id, source_trace_id, conversation_id, "
                             "session_id, user_subject, sandbox_id, action_type, "
-                            "argument_commitment, order_id, amount_minor, currency, state, "
+                            "argument_commitment, order_id, target_version, amount_minor, "
+                            "currency, state, "
                             "expires_at) VALUES (%s, %s, %s, %s, %s, %s, "
                             "(SELECT sandbox_id FROM support_session WHERE session_id = %s), "
-                            "%s, %s, %s, %s, %s, 'PENDING', %s)",
+                            "%s, %s, %s, %s, %s, %s, 'PENDING', %s)",
                             (
                                 pending_action.pending_action_id,
                                 start.turn_id,
@@ -453,6 +455,7 @@ class MysqlConversationStore:
                                 pending_action.action_type,
                                 pending_action.argument_commitment,
                                 pending_action.order_id,
+                                pending_action.target_version,
                                 pending_action.amount_minor,
                                 pending_action.currency,
                                 pending_action.expires_at,
@@ -757,6 +760,7 @@ class MysqlConversationStore:
                 pending_action_id=pending.pending_action_id,
                 action_type=pending.action_type,
                 argument_commitment=pending.argument_commitment,
+                target_version=pending.target_version,
                 expires_at=persisted_aware,
             )
         except (AttributeError, ActionEvidenceError, ValueError) as exception:
@@ -775,7 +779,7 @@ class MysqlConversationStore:
         cursor.execute(
             "SELECT source_turn_id, source_trace_id, conversation_id, session_id, "
             "user_subject, sandbox_id, action_type, argument_commitment, order_id, "
-            "amount_minor, currency, state, expires_at, resolved_at, "
+            "target_version, amount_minor, currency, state, expires_at, resolved_at, "
             "resolution_turn_id, resolution_trace_id "
             "FROM pending_action_reference WHERE pending_action_id = %s FOR UPDATE",
             (pending.pending_action_id,),
@@ -783,7 +787,7 @@ class MysqlConversationStore:
         row = cursor.fetchone()
         if row is None:
             raise ConversationIntegrityError("PendingAction reference disappeared")
-        if tuple(row[:11]) != (
+        if tuple(row[:12]) != (
             pending.source_turn_id,
             pending.source_trace_id,
             pending.conversation_id,
@@ -793,20 +797,21 @@ class MysqlConversationStore:
             pending.action_type,
             pending.argument_commitment,
             pending.order_id,
+            pending.target_version,
             pending.amount_minor,
             pending.currency,
         ):
             raise ConversationIntegrityError("PendingAction reference is inconsistent")
-        state = str(row[11])
-        expires_at = row[12]
+        state = str(row[12])
+        expires_at = row[13]
         if state not in {"PENDING", "DECLINED", "EXPIRED"} or not isinstance(expires_at, datetime):
             raise ConversationIntegrityError("PendingAction state is inconsistent")
         if (
             state == "PENDING"
-            and (row[13] is not None or row[14] is not None or row[15] is not None)
+            and (row[14] is not None or row[15] is not None or row[16] is not None)
         ) or (
             state in {"DECLINED", "EXPIRED"}
-            and (row[13] is None or row[14] is None or row[15] is None)
+            and (row[14] is None or row[15] is None or row[16] is None)
         ):
             raise ConversationIntegrityError("PendingAction resolution is inconsistent")
         cursor.execute(ACTION_TURN_EVENTS_SQL + " FOR SHARE", (pending.source_turn_id,))
@@ -1074,7 +1079,7 @@ class MysqlConversationStore:
         cursor.execute(
             "SELECT pending_action_id, source_turn_id, source_trace_id, conversation_id, "
             "session_id, user_subject, sandbox_id, action_type, argument_commitment, "
-            "order_id, amount_minor, currency, state, expires_at, resolved_at, "
+            "order_id, target_version, amount_minor, currency, state, expires_at, resolved_at, "
             "resolution_turn_id, resolution_trace_id "
             "FROM pending_action_reference WHERE source_turn_id = %s LIMIT 2",
             (turn_id,),

@@ -3,7 +3,7 @@ import json
 import logging
 import time
 from collections.abc import Mapping
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Any, Literal
 
 import httpx
@@ -11,7 +11,12 @@ import jwt
 import pymysql
 import pytest
 from citybuddy_agent.actions import PendingActionPayload, PendingActionReference
-from citybuddy_agent.agent_control import AgentEvent, AgentRunner, AgentRunResult
+from citybuddy_agent.agent_control import (
+    AgentEvent,
+    AgentRunner,
+    AgentRunResult,
+    ToolBoundaryFailure,
+)
 from citybuddy_agent.application import (
     ACTION_REQUEST_FAILURE_REASONS,
     AgentSettings,
@@ -27,6 +32,7 @@ from citybuddy_agent.conversation import (
     ConversationResult,
     ConversationStore,
     CorrelationConflictError,
+    MysqlConversationStore,
     TurnStart,
 )
 from citybuddy_agent.evaluation import (
@@ -183,6 +189,7 @@ class MemoryConversationStore(ConversationStore):
                 action_type=pending_action.action_type,
                 argument_commitment=pending_action.argument_commitment,
                 order_id=pending_action.order_id,
+                target_version=pending_action.target_version,
                 amount_minor=pending_action.amount_minor,
                 currency=pending_action.currency,
                 expires_at=pending_action.expires_at,
@@ -228,9 +235,10 @@ class MemoryConversationStore(ConversationStore):
 
 
 class MemoryAgent(AgentRunner):
-    def __init__(self) -> None:
+    def __init__(self, *, request_reasons: tuple[str, ...] = ()) -> None:
         self.calls = 0
         self.sandbox_ids: list[str | None] = []
+        self.request_reasons = request_reasons
 
     def run(
         self,
@@ -250,6 +258,7 @@ class MemoryAgent(AgentRunner):
             "Bounded support response.",
             "completed",
             (AgentEvent("AGENT_OUTCOME", {"outcome": "completed"}),),
+            request_reasons=self.request_reasons,
         )
 
 
@@ -260,7 +269,14 @@ class PreparedActionAgent(AgentRunner):
             {
                 "pendingActionId": "00000000-0000-0000-0000-000000000121",
                 "actionType": "REFUND_REQUEST",
+                "userSubject": "user-1",
+                "supportSessionId": "session-1",
+                "traceId": "00000000-0000-0000-0000-000000000123",
+                "turnId": "00000000-0000-0000-0000-000000000122",
+                "requiredScope": "refund:create",
+                "sandboxId": None,
                 "orderId": "00000000-0000-0000-0000-000000000040",
+                "targetVersion": 1,
                 "amountMinor": 400,
                 "currency": "CNY",
                 "state": "PREPARED",
@@ -294,6 +310,7 @@ class PreparedActionAgent(AgentRunner):
                         "pendingActionId": self.pending.pending_action_id,
                         "actionType": self.pending.action_type,
                         "argumentCommitment": self.pending.argument_commitment,
+                        "targetVersion": self.pending.target_version,
                         "expiresAt": self.pending.expires_at.isoformat(
                             timespec="microseconds"
                         ).replace("+00:00", "Z"),
@@ -303,6 +320,25 @@ class PreparedActionAgent(AgentRunner):
             ),
             pending_action=self.pending,
         )
+
+
+class BoundaryFailingAgent(AgentRunner):
+    def __init__(self, failure: ToolBoundaryFailure) -> None:
+        self.failure = failure
+
+    def run(
+        self,
+        *,
+        message: str,
+        direct_token: str,
+        subject: str,
+        session_id: str,
+        trace_id: str,
+        turn_id: str,
+        sandbox_id: str | None = None,
+    ) -> AgentRunResult:
+        del message, direct_token, subject, session_id, trace_id, turn_id, sandbox_id
+        raise self.failure
 
 
 class MemoryFeedbackStore(FeedbackStore):
@@ -363,8 +399,17 @@ def test_action_request_failure_producer_inventory_is_closed() -> None:
         "ACTION_LOCAL_ARBITRATION_CONFLICT",
         "ACTION_STREAM_PROJECTION_INVALID",
         "ACTION_STREAM_UNEXPECTED_FAILURE",
+        "ACTION_PREPARATION_IDENTITY_UNAUTHENTICATED",
+        "ACTION_PREPARATION_IDENTITY_FORBIDDEN",
         "ACTION_PREPARATION_IDENTITY_UNAVAILABLE",
+        "ACTION_PREPARATION_COMMERCE_VALIDATION_REJECTED",
+        "ACTION_PREPARATION_COMMERCE_UNAUTHENTICATED",
+        "ACTION_PREPARATION_COMMERCE_FORBIDDEN",
+        "ACTION_PREPARATION_TARGET_NOT_FOUND",
+        "ACTION_PREPARATION_INTENT_CONFLICT",
         "ACTION_PREPARATION_COMMERCE_UNAVAILABLE",
+        "ACTION_PREPARATION_COMMERCE_TIMEOUT",
+        "ACTION_PREPARATION_COMMERCE_INDETERMINATE",
         "ACTION_PREPARATION_RESPONSE_INVALID",
         "ACTION_PREPARATION_DURABLE_TRUTH_INCONSISTENT",
         "ACTION_SANDBOX_LIVENESS_UNAVAILABLE",
@@ -379,6 +424,87 @@ def test_action_request_failure_producer_inventory_is_closed() -> None:
         "AGENT_TURN_COMPLETION_PERSISTENCE_UNAVAILABLE",
         "ACTION_CONFIRMATION_UNAVAILABLE",
     }
+
+
+def test_action_tool_denial_producer_is_logged_request_locally_without_public_leakage(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    private, public_jwk = key_fixture("current-key")
+    resolved = settings()
+    sessions = MemorySessionStore()
+    session_id = sessions.create("user-123")
+    reason = "ACTION_PREPARATION_COMMERCE_FORBIDDEN"
+    client = TestClient(
+        create_app(
+            resolved,
+            validator=DirectJwtValidator(resolved, CountingJwksSource([public_jwk])),
+            sessions=sessions,
+            conversations=MemoryConversationStore(sessions),
+            agent=MemoryAgent(request_reasons=(reason,)),
+            feedback=MemoryFeedbackStore(sessions, {}),
+        )
+    )
+
+    with caplog.at_level(logging.WARNING):
+        response = client.post(
+            "/api/chat",
+            headers={
+                "Authorization": f"Bearer {direct_token(private, 'current-key')}",
+                "X-Session-Id": session_id,
+                "Idempotency-Key": "prepare-forbidden",
+            },
+            json={"message": "prepare a refund"},
+        )
+
+    assert response.status_code == 200
+    assert response.json()["reply"] == "Bounded support response."
+    assert f"reason_code={reason}" in caplog.text
+    assert reason not in response.text
+
+
+def test_action_prepare_binding_failure_is_409_with_no_pending_closure_or_reason_leak(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    private, public_jwk = key_fixture("current-key")
+    resolved = settings()
+    sessions = MemorySessionStore()
+    session_id = sessions.create("user-123")
+    conversations = MemoryConversationStore(sessions)
+    reason = "ACTION_PREPARATION_DURABLE_TRUTH_INCONSISTENT"
+    client = TestClient(
+        create_app(
+            resolved,
+            validator=DirectJwtValidator(resolved, CountingJwksSource([public_jwk])),
+            sessions=sessions,
+            conversations=conversations,
+            agent=BoundaryFailingAgent(
+                ToolBoundaryFailure(
+                    status_code=409,
+                    reason=reason,
+                    detail="Action preparation conflict",
+                )
+            ),
+            feedback=MemoryFeedbackStore(sessions, {}),
+        )
+    )
+
+    with caplog.at_level(logging.WARNING):
+        response = client.post(
+            "/api/chat",
+            headers={
+                "Authorization": f"Bearer {direct_token(private, 'current-key')}",
+                "X-Session-Id": session_id,
+                "Idempotency-Key": "prepare-damaged",
+            },
+            json={"message": "prepare a refund"},
+        )
+
+    assert response.status_code == 409
+    assert response.json() == {"detail": "Action preparation conflict"}
+    assert f"reason_code={reason}" in caplog.text
+    assert reason not in response.text
+    assert conversations.action_pending is None
+    assert len(conversations.failures) == 1
 
 
 class MemoryEvidenceStore(EvaluationEvidenceStore):
@@ -951,6 +1077,25 @@ def test_obo_client_rechecks_owner_and_server_allowlist(
     assert forged.value.status_code == 403
 
 
+@pytest.mark.parametrize("status", [401, 403])
+def test_obo_client_preserves_identity_rejection_status(
+    status: int, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    sessions = MemorySessionStore()
+    session_id = sessions.create("user-123")
+    client = OboClient(settings(), sessions)
+    monkeypatch.setattr(
+        httpx,
+        "post",
+        lambda *args, **kwargs: httpx.Response(status),  # noqa: ARG005
+    )
+
+    with pytest.raises(HTTPException) as rejected:
+        client.exchange("direct-token", "user-123", session_id, "catalog:read")
+
+    assert rejected.value.status_code == status
+
+
 def test_evaluation_obo_preserves_exact_sandbox_header(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -1050,6 +1195,86 @@ def test_chat_persists_server_owned_result_and_replays_same_intent() -> None:
     assert "order" not in first.json()["reply"].lower()
     assert len(conversations.results) == 1
     assert agent.calls == 1
+
+
+def test_cb122_decline_lock_compares_the_complete_reference_after_target_version(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    expires_at = datetime.now(UTC) + timedelta(minutes=5)
+    pending = PendingActionReference(
+        pending_action_id="00000000-0000-0000-0000-000000000101",
+        source_turn_id="00000000-0000-0000-0000-000000000102",
+        source_trace_id="00000000-0000-0000-0000-000000000103",
+        conversation_id="00000000-0000-0000-0000-000000000104",
+        session_id="session-1",
+        user_subject="user-123",
+        sandbox_id="sandbox-1",
+        action_type="REFUND_REQUEST",
+        argument_commitment="a" * 64,
+        order_id="00000000-0000-0000-0000-000000000105",
+        target_version=7,
+        amount_minor=500,
+        currency="AUD",
+        expires_at=expires_at,
+    )
+
+    class PendingCursor:
+        def __init__(self) -> None:
+            self.execute_calls = 0
+
+        def execute(self, _sql: str, _arguments: tuple[object, ...]) -> None:
+            self.execute_calls += 1
+
+        def fetchone(self) -> tuple[object, ...]:
+            return (
+                pending.source_turn_id,
+                pending.source_trace_id,
+                pending.conversation_id,
+                pending.session_id,
+                pending.user_subject,
+                pending.sandbox_id,
+                pending.action_type,
+                pending.argument_commitment,
+                pending.order_id,
+                pending.target_version,
+                pending.amount_minor,
+                pending.currency,
+                "PENDING",
+                expires_at,
+                None,
+                None,
+                None,
+            )
+
+        @staticmethod
+        def fetchall() -> tuple[()]:
+            return ()
+
+    def accept_source_turn(
+        cls: type[MysqlConversationStore],
+        rows: object,
+        *,
+        pending: PendingActionReference,
+        persisted_expiry: object,
+    ) -> None:
+        del cls, rows, pending, persisted_expiry
+
+    monkeypatch.setattr(
+        MysqlConversationStore,
+        "_validate_pending_source_turn",
+        classmethod(accept_source_turn),
+    )
+    cursor: Any = PendingCursor()
+
+    assert (
+        MysqlConversationStore._lock_matching_pending(
+            cursor,
+            pending,
+            require_expired=False,
+        )
+        == "PENDING"
+    )
+    assert cursor.execute_calls == 2
 
 
 def test_cb122_pending_decline_and_confirmation_unavailable_are_local_and_exact(

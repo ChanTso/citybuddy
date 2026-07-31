@@ -22,6 +22,7 @@ from .actions import (
     validate_pending_action_resolution,
     validate_resolved_action_events,
 )
+from .agent_control import TOOL_BOUNDARY_FAILURE_REASONS
 
 MAX_EVIDENCE_EVENTS = 48
 MAX_FEEDBACK_RECORDS = 8
@@ -440,7 +441,18 @@ class MysqlEvaluationEvidenceStore:
             reference = str(tool)
         elif event_type == "TOOL_DENIED":
             tool = payload.get("tool")
-            if not self._bounded_string(tool, 64) or payload.get("outcome") != "deny_with_feedback":
+            producer = payload.get("producer")
+            if (
+                not self._bounded_string(tool, 64)
+                or payload.get("outcome") != "deny_with_feedback"
+                or (
+                    producer is not None
+                    and (
+                        not isinstance(producer, str)
+                        or producer not in TOOL_BOUNDARY_FAILURE_REASONS
+                    )
+                )
+            ):
                 raise EvaluationEvidenceInvalid
             outcome = "denied"
             reference = str(tool)
@@ -456,10 +468,13 @@ class MysqlEvaluationEvidenceStore:
             reference = str(index_version)
         elif event_type == "ACTION_PREPARED":
             pending_action_id = payload.get("pendingActionId")
+            target_version = payload.get("targetVersion")
             if (
                 not self._bounded_string(pending_action_id, 36)
                 or payload.get("actionType") != "REFUND_REQUEST"
                 or not self._bounded_string(payload.get("argumentCommitment"), 64)
+                or type(target_version) is not int
+                or target_version < 1
                 or not self._bounded_string(payload.get("expiresAt"), 27)
             ):
                 raise EvaluationEvidenceInvalid
@@ -545,7 +560,7 @@ class MysqlEvaluationEvidenceStore:
             cursor.execute(
                 "SELECT pending_action_id, source_turn_id, source_trace_id, conversation_id, "
                 "session_id, user_subject, sandbox_id, action_type, argument_commitment, "
-                "order_id, amount_minor, currency, state, expires_at, resolved_at, "
+                "order_id, target_version, amount_minor, currency, state, expires_at, resolved_at, "
                 "resolution_turn_id, resolution_trace_id "
                 "FROM pending_action_reference WHERE source_turn_id = %s LIMIT 2",
                 (turn_id,),
@@ -563,7 +578,7 @@ class MysqlEvaluationEvidenceStore:
                 expected_subject=subject,
                 expected_sandbox_id=sandbox_id,
             )
-            self._validate_pending_events(event_rows, pending, pending_rows[0][13])
+            self._validate_pending_events(event_rows, pending, pending_rows[0][14])
             if state != "PENDING":
                 self._validate_pending_resolution(cursor, pending=pending, state=state)
             return
@@ -589,7 +604,7 @@ class MysqlEvaluationEvidenceStore:
         cursor.execute(
             "SELECT pending_action_id, source_turn_id, source_trace_id, conversation_id, "
             "session_id, user_subject, sandbox_id, action_type, argument_commitment, "
-            "order_id, amount_minor, currency, state, expires_at, resolved_at, "
+            "order_id, target_version, amount_minor, currency, state, expires_at, resolved_at, "
             "resolution_turn_id, resolution_trace_id "
             "FROM pending_action_reference WHERE pending_action_id = %s LIMIT 2",
             (pending_action_id,),
@@ -604,12 +619,12 @@ class MysqlEvaluationEvidenceStore:
             expected_subject=subject,
             expected_sandbox_id=sandbox_id,
         )
-        if state != expected_state or pending_rows[0][14] is None:
+        if state != expected_state or pending_rows[0][15] is None:
             raise EvaluationEvidenceInvalid
         if pending.resolution_turn_id != turn_id or pending.resolution_trace_id != trace_id:
             raise EvaluationEvidenceInvalid
         cursor.execute(ACTION_TURN_EVENTS_SQL, (pending.source_turn_id,))
-        self._validate_pending_events(cursor.fetchall(), pending, pending_rows[0][13])
+        self._validate_pending_events(cursor.fetchall(), pending, pending_rows[0][14])
         self._validate_pending_resolution(cursor, pending=pending, state=state)
 
     def _validated_pending_reference(
@@ -676,6 +691,7 @@ class MysqlEvaluationEvidenceStore:
                 pending_action_id=pending.pending_action_id,
                 action_type=pending.action_type,
                 argument_commitment=pending.argument_commitment,
+                target_version=pending.target_version,
                 expires_at=expiry,
             )
         except ActionEvidenceError as exception:

@@ -183,7 +183,14 @@ def test_pending_action_schema_is_closed_and_canonical() -> None:
     document: dict[str, object] = {
         "pendingActionId": "00000000-0000-0000-0000-000000000121",
         "actionType": "REFUND_REQUEST",
+        "userSubject": "user-1",
+        "supportSessionId": "session-1",
+        "traceId": "00000000-0000-0000-0000-000000000123",
+        "turnId": "00000000-0000-0000-0000-000000000122",
+        "requiredScope": "refund:create",
+        "sandboxId": "sandbox-1",
         "orderId": "00000000-0000-0000-0000-000000000040",
+        "targetVersion": 1,
         "amountMinor": 400,
         "currency": "CNY",
         "state": "PREPARED",
@@ -196,6 +203,7 @@ def test_pending_action_schema_is_closed_and_canonical() -> None:
         ("unknown", "forbidden"),
         ("amountMinor", True),
         ("expiresAt", "2026-07-28T04:00:00Z"),
+        ("targetVersion", True),
         ("state", "CONSUMED"),
     ):
         damaged = dict(document)
@@ -218,6 +226,7 @@ def test_pending_reference_and_source_turn_matrix_binds_every_persisted_field() 
         "REFUND_REQUEST",
         action_argument_commitment("REFUND_REQUEST", order_id, 400, "CNY"),
         order_id,
+        1,
         400,
         "CNY",
         "PENDING",
@@ -251,16 +260,16 @@ def test_pending_reference_and_source_turn_matrix_binds_every_persisted_field() 
     assert persisted_expiry == expiry
 
     resolved_row = list(row)
-    resolved_row[12] = "DECLINED"
-    resolved_row[14] = expiry
-    resolved_row[15] = "00000000-0000-0000-0000-000000000130"
-    resolved_row[16] = "00000000-0000-0000-0000-000000000131"
+    resolved_row[13] = "DECLINED"
+    resolved_row[15] = expiry
+    resolved_row[16] = "00000000-0000-0000-0000-000000000130"
+    resolved_row[17] = "00000000-0000-0000-0000-000000000131"
     resolved, resolved_state, _ = validate_pending_action_reference(
         tuple(resolved_row), [source_turn], **expected
     )
     assert resolved_state == "DECLINED"
-    assert resolved.resolution_turn_id == resolved_row[15]
-    assert resolved.resolution_trace_id == resolved_row[16]
+    assert resolved.resolution_turn_id == resolved_row[16]
+    assert resolved.resolution_trace_id == resolved_row[17]
 
     damaged_values: dict[int, object] = {
         0: "not-a-uuid",
@@ -274,12 +283,13 @@ def test_pending_reference_and_source_turn_matrix_binds_every_persisted_field() 
         8: "b" * 64,
         9: "00000000-0000-0000-0000-000000000999",
         10: True,
-        11: "AUD",
-        12: "DECLINED",
-        13: "not-a-timestamp",
-        14: expiry,
-        15: "00000000-0000-0000-0000-000000000998",
-        16: "00000000-0000-0000-0000-000000000997",
+        11: True,
+        12: "AUD",
+        13: "DECLINED",
+        14: "not-a-timestamp",
+        15: expiry,
+        16: "00000000-0000-0000-0000-000000000998",
+        17: "00000000-0000-0000-0000-000000000997",
     }
     for index, value in damaged_values.items():
         damaged = list(row)
@@ -321,6 +331,7 @@ def test_resolved_pending_reference_is_anchored_to_one_exact_decision_turn() -> 
         action_type="REFUND_REQUEST",
         argument_commitment="a" * 64,
         order_id="00000000-0000-0000-0000-000000000040",
+        target_version=1,
         amount_minor=400,
         currency="CNY",
         expires_at=expiry,
@@ -390,6 +401,7 @@ def test_pending_event_closure_enumerates_before_content_assertions() -> None:
         "pendingActionId": pending_id,
         "actionType": "REFUND_REQUEST",
         "argumentCommitment": "a" * 64,
+        "targetVersion": 1,
         "expiresAt": canonical_action_timestamp(expiry),
     }
 
@@ -419,6 +431,7 @@ def test_pending_event_closure_enumerates_before_content_assertions() -> None:
         pending_action_id=pending_id,
         action_type="REFUND_REQUEST",
         argument_commitment="a" * 64,
+        target_version=1,
         expires_at=expiry,
     )
     counterexamples = [
@@ -426,6 +439,7 @@ def test_pending_event_closure_enumerates_before_content_assertions() -> None:
         valid[:2] + [row(3, "ACTION_PREPARED", prepared)] + valid[2:],
         [*valid[:2], row(4, "AGENT_OUTCOME", {"outcome": "action_pending"}), *valid[3:]],
         [valid[0], row(2, "ACTION_PREPARED", {**prepared, "expiresAt": "wrong"}), *valid[2:]],
+        [valid[0], row(2, "ACTION_PREPARED", {**prepared, "targetVersion": 2}), *valid[2:]],
         [valid[0], (*valid[1][:6], None), *valid[2:]],
         [
             valid[0],
@@ -446,6 +460,7 @@ def test_pending_event_closure_enumerates_before_content_assertions() -> None:
                 pending_action_id=pending_id,
                 action_type="REFUND_REQUEST",
                 argument_commitment="a" * 64,
+                target_version=1,
                 expires_at=expiry,
             )
 
@@ -473,6 +488,7 @@ def test_pending_event_closure_enumerates_before_content_assertions() -> None:
                     pending_action_id=pending_id,
                     action_type="REFUND_REQUEST",
                     argument_commitment="a" * 64,
+                    target_version=1,
                     expires_at=expiry,
                 )
 

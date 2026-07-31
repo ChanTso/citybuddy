@@ -425,6 +425,11 @@ class OboClient:
             },
             timeout=3.0,
         )
+        if response.status_code in {401, 403}:
+            raise HTTPException(
+                status_code=response.status_code,
+                detail="Identity exchange rejected",
+            )
         if response.status_code != 200:
             raise HTTPException(status_code=502, detail="Identity exchange rejected")
         try:
@@ -757,6 +762,8 @@ def create_app(
                     turn_id=start.turn_id,
                     sandbox_id=principal.sandbox_id,
                 )
+            for reason in agent_result.request_reasons:
+                record_action_request_failure(reason)
             try:
                 return resolved_conversations.complete_turn(
                     start=start,

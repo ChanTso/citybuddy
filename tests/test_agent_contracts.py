@@ -249,6 +249,8 @@ def test_cb122_pending_action_reference_is_agent_owned_bounded_and_least_privile
         in migration
     )
     assert "state IN ('PENDING', 'DECLINED', 'EXPIRED')" in migration
+    assert "target_version BIGINT UNSIGNED NOT NULL" in migration
+    assert "CHECK (target_version > 0)" in migration
     assert "CONFIRMING" not in migration
     assert "CONFIRMED" not in migration
     assert "action_receipt_projection" not in migration
@@ -258,6 +260,7 @@ def test_cb122_pending_action_reference_is_agent_owned_bounded_and_least_privile
         "ON cs_db.pending_action_reference TO 'agent_app'@'%';"
     ) in grants
     assert "DELETE ON cs_db.pending_action_reference" not in grants
+    assert "UPDATE (target_version)" not in grants
     assert "UPDATE ON cs_db.support_event" not in grants
     assert "DELETE ON cs_db.support_event" not in grants
     assert payload["info"]["version"] == "CB-122"

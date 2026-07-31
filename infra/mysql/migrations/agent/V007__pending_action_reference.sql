@@ -78,6 +78,7 @@ CREATE TABLE pending_action_reference (
   action_type VARCHAR(32) NOT NULL,
   argument_commitment CHAR(64) NOT NULL,
   order_id CHAR(36) NOT NULL,
+  target_version BIGINT UNSIGNED NOT NULL,
   amount_minor BIGINT UNSIGNED NOT NULL,
   currency CHAR(3) NOT NULL,
   state VARCHAR(16) NOT NULL,
@@ -111,6 +112,7 @@ CREATE TABLE pending_action_reference (
   CONSTRAINT chk_pending_action_reference_commitment
     CHECK (argument_commitment REGEXP '^[0-9a-f]{64}$'),
   CONSTRAINT chk_pending_action_reference_amount CHECK (amount_minor > 0),
+  CONSTRAINT chk_pending_action_reference_target_version CHECK (target_version > 0),
   CONSTRAINT chk_pending_action_reference_currency CHECK (currency REGEXP '^[A-Z]{3}$'),
   CONSTRAINT chk_pending_action_reference_state
     CHECK (state IN ('PENDING', 'DECLINED', 'EXPIRED')),

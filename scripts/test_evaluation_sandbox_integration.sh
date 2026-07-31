@@ -3667,6 +3667,10 @@ cb122_prepare_turn="$(uv run python scripts/read_json_field.py \
   "$tmp_dir/cb122-prepared.json" turnId)"
 cb122_pending_id="$(mysql_query root "$root_password" cs_db \
   "SELECT pending_action_id FROM pending_action_reference WHERE source_turn_id = '$cb122_prepare_turn'")"
+assert_equal 1 \
+  "$(mysql_query root "$root_password" cs_db \
+    "SELECT reference.target_version = JSON_EXTRACT(event_record.payload_json, '$.targetVersion') AND reference.target_version = (SELECT target_order_version FROM commerce_db.pending_action WHERE pending_action_id = reference.pending_action_id) FROM pending_action_reference reference JOIN support_event event_record ON event_record.turn_id = reference.source_turn_id AND event_record.event_type = 'ACTION_PREPARED' WHERE reference.pending_action_id = '$cb122_pending_id'")" \
+  "CB-122 stores the Commerce target version only as matching local reference and event evidence"
 assert_equal 'PENDING:action_pending:1:1' \
   "$(mysql_query root "$root_password" cs_db \
     "SELECT CONCAT(reference.state, ':', turn_record.outcome, ':', (SELECT COUNT(*) FROM support_event WHERE turn_id = turn_record.turn_id AND event_type = 'ACTION_PREPARED'), ':', (SELECT COUNT(*) FROM pending_action_reference WHERE source_turn_id = turn_record.turn_id)) FROM pending_action_reference reference JOIN support_turn turn_record ON turn_record.turn_id = reference.source_turn_id WHERE reference.pending_action_id = '$cb122_pending_id'")" \
@@ -3906,7 +3910,7 @@ cb122_clarification_turn="$(mysql_query root "$root_password" cs_db \
 cb122_clarification_trace="$(mysql_query root "$root_password" cs_db \
   "SELECT trace_id FROM support_turn WHERE turn_id = '$cb122_clarification_turn'")"
 mysql_query root "$root_password" cs_db \
-  "INSERT INTO pending_action_reference (pending_action_id, source_turn_id, source_trace_id, conversation_id, session_id, user_subject, sandbox_id, action_type, argument_commitment, order_id, amount_minor, currency, state, expires_at, resolved_at, resolution_turn_id, resolution_trace_id) SELECT '00000000-0000-0000-0000-000000000926', turn_record.turn_id, turn_record.trace_id, turn_record.conversation_id, turn_record.session_id, turn_record.user_subject, reference.sandbox_id, reference.action_type, reference.argument_commitment, reference.order_id, reference.amount_minor, reference.currency, 'DECLINED', reference.expires_at, CURRENT_TIMESTAMP(6), '$cb122_prepare_turn', '$cb122_prepare_trace' FROM support_turn turn_record JOIN pending_action_reference reference ON reference.pending_action_id = '$cb122_pending_id' WHERE turn_record.turn_id = '$cb122_clarification_turn'"
+  "INSERT INTO pending_action_reference (pending_action_id, source_turn_id, source_trace_id, conversation_id, session_id, user_subject, sandbox_id, action_type, argument_commitment, order_id, target_version, amount_minor, currency, state, expires_at, resolved_at, resolution_turn_id, resolution_trace_id) SELECT '00000000-0000-0000-0000-000000000926', turn_record.turn_id, turn_record.trace_id, turn_record.conversation_id, turn_record.session_id, turn_record.user_subject, reference.sandbox_id, reference.action_type, reference.argument_commitment, reference.order_id, reference.target_version, reference.amount_minor, reference.currency, 'DECLINED', reference.expires_at, CURRENT_TIMESTAMP(6), '$cb122_prepare_turn', '$cb122_prepare_trace' FROM support_turn turn_record JOIN pending_action_reference reference ON reference.pending_action_id = '$cb122_pending_id' WHERE turn_record.turn_id = '$cb122_clarification_turn'"
 cb122_agent_log_start="$(wc -l <"$tmp_dir/agent.log")"
 assert_status 409 "clarification replay rejects an orphan PendingAction reference" \
   --request POST "http://127.0.0.1:$agent_port/api/chat" \

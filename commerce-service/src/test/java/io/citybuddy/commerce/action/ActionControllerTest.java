@@ -1,5 +1,7 @@
 package io.citybuddy.commerce.action;
 
+import static org.assertj.core.api.Assertions.assertThat;
+import static org.hamcrest.Matchers.nullValue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
@@ -53,7 +55,14 @@ class ActionControllerTest {
             new PendingActionView(
                 ACTION,
                 "REFUND_REQUEST",
+                "user-1",
+                "session-1",
+                "trace-1",
+                TURN,
+                "refund:create",
+                null,
                 ORDER,
+                7,
                 500,
                 "AUD",
                 "PREPARED",
@@ -76,6 +85,13 @@ class ActionControllerTest {
                         .formatted(ORDER)))
         .andExpect(status().isCreated())
         .andExpect(jsonPath("$.pendingActionId").value(ACTION))
+        .andExpect(jsonPath("$.userSubject").value("user-1"))
+        .andExpect(jsonPath("$.supportSessionId").value("session-1"))
+        .andExpect(jsonPath("$.traceId").value("trace-1"))
+        .andExpect(jsonPath("$.turnId").value(TURN))
+        .andExpect(jsonPath("$.requiredScope").value("refund:create"))
+        .andExpect(jsonPath("$.sandboxId").value(nullValue()))
+        .andExpect(jsonPath("$.targetVersion").value(7))
         .andExpect(jsonPath("$.replayed").value(false));
 
     verify(authorizer)
@@ -90,6 +106,46 @@ class ActionControllerTest {
                 new ActionRequestContext(
                     "user-1", "session-1", "trace-1", TURN, null, "refund:create")),
             eq(new PrepareActionCommand("REFUND_REQUEST", ORDER, 500L, "AUD")));
+  }
+
+  @Test
+  void prepareViewProjectsEveryBindingFromTheDurablePendingRecord() {
+    Instant created = Instant.parse("2026-07-27T00:00:00Z");
+    ActionRepository.PendingActionRecord pending =
+        new ActionRepository.PendingActionRecord(
+            ACTION,
+            "action-key",
+            "pending-hash",
+            "REFUND_REQUEST",
+            "argument-hash",
+            "durable-user",
+            "durable-session",
+            "durable-trace",
+            TURN,
+            "refund:create",
+            "durable-sandbox",
+            ORDER,
+            "STANDARD",
+            "00000000-0000-0000-0000-000000000123",
+            9,
+            500,
+            "AUD",
+            "PREPARED",
+            1,
+            created.plusSeconds(900),
+            null,
+            created);
+
+    PendingActionView view = ActionService.pendingView(pending, true);
+
+    assertThat(view.userSubject()).isEqualTo(pending.userSubject());
+    assertThat(view.supportSessionId()).isEqualTo(pending.supportSessionId());
+    assertThat(view.traceId()).isEqualTo(pending.traceId());
+    assertThat(view.turnId()).isEqualTo(pending.turnId());
+    assertThat(view.requiredScope()).isEqualTo(pending.requiredScope());
+    assertThat(view.sandboxId()).isEqualTo(pending.sandboxId());
+    assertThat(view.targetVersion()).isEqualTo(pending.targetOrderVersion());
+    assertThat(view.replayed()).isTrue();
   }
 
   @Test
