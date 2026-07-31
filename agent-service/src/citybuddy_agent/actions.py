@@ -259,6 +259,68 @@ class PendingActionPayload(PreparedActionResponse):
     state: Literal["PREPARED"]
 
 
+class ActionReceiptPayload(BaseModel):
+    """Complete bounded projection of the authoritative Commerce ActionReceipt."""
+
+    model_config = ConfigDict(extra="forbid", populate_by_name=True, strict=True, frozen=True)
+
+    receipt_id: str = Field(alias="receiptId", min_length=36, max_length=36)
+    pending_action_id: str = Field(alias="pendingActionId", min_length=36, max_length=36)
+    action_type: Literal["REFUND_REQUEST"] = Field(alias="actionType")
+    status: Literal["REQUESTED"]
+    order_id: str = Field(alias="orderId", min_length=36, max_length=36)
+    refund_id: str = Field(alias="refundId", min_length=36, max_length=36)
+    resource_version: Literal[1] = Field(alias="resourceVersion")
+    amount_minor: int = Field(alias="amountMinor", ge=1, le=MAX_ACTION_AMOUNT_MINOR)
+    currency: str = Field(pattern=r"^[A-Z]{3}$")
+    committed_at: datetime = Field(alias="committedAt")
+    replayed: bool
+
+    @field_validator("receipt_id", "pending_action_id", "order_id", "refund_id")
+    @classmethod
+    def canonical_uuid(cls, value: str) -> str:
+        if str(uuid.UUID(value)) != value:
+            raise ValueError("Receipt identity must be a canonical UUID")
+        return value
+
+    @field_validator("committed_at", mode="before")
+    @classmethod
+    def canonical_committed_at(cls, value: object) -> datetime:
+        if not isinstance(value, str) or len(value) != 27:
+            raise ValueError("Receipt timestamp must use canonical UTC microseconds")
+        try:
+            parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+        except ValueError as exception:
+            raise ValueError("Receipt timestamp must be ISO-8601") from exception
+        if canonical_action_timestamp(parsed) != value:
+            raise ValueError("Receipt timestamp must use canonical UTC microseconds")
+        return parsed.astimezone(UTC)
+
+    @property
+    def argument_commitment(self) -> str:
+        return action_argument_commitment(
+            self.action_type, self.order_id, self.amount_minor, self.currency
+        )
+
+    @property
+    def receipt_commitment(self) -> str:
+        material = "\x00".join(
+            (
+                self.receipt_id,
+                self.pending_action_id,
+                self.action_type,
+                self.status,
+                self.order_id,
+                self.refund_id,
+                str(self.resource_version),
+                str(self.amount_minor),
+                self.currency,
+                canonical_action_timestamp(self.committed_at),
+            )
+        )
+        return hashlib.sha256(material.encode("utf-8")).hexdigest()
+
+
 def action_argument_commitment(
     action_type: str, order_id: str, amount_minor: int, currency: str
 ) -> str:
@@ -288,8 +350,17 @@ class PendingActionReference:
     amount_minor: int
     currency: str
     expires_at: datetime
+    confirmation_turn_id: str | None = None
+    confirmation_trace_id: str | None = None
     resolution_turn_id: str | None = None
     resolution_trace_id: str | None = None
+
+
+@dataclass(frozen=True)
+class StoredActionReceipt:
+    receipt: ActionReceiptPayload
+    source_turn_id: str
+    confirmation_turn_id: str
 
 
 class ActionEvidenceError(ValueError):
@@ -341,7 +412,7 @@ def validate_pending_action_reference(
 ) -> tuple[PendingActionReference, str, datetime]:
     """Validate one reference against its independently enumerated source turn."""
     try:
-        if len(row) != 18 or len(source_turn_rows) != 1 or len(source_turn_rows[0]) != 7:
+        if len(row) != 20 or len(source_turn_rows) != 1 or len(source_turn_rows[0]) != 7:
             raise ActionEvidenceError("PendingAction reference cardinality is inconsistent")
         source_turn = source_turn_rows[0]
         if (
@@ -378,22 +449,32 @@ def validate_pending_action_reference(
             or len(row[12]) != 3
             or not row[12].isalpha()
             or row[12] != row[12].upper()
-            or row[13] not in {"PENDING", "DECLINED", "EXPIRED"}
-            or not isinstance(row[14], datetime)
-            or (row[13] == "PENDING") != (row[15] is None)
-            or (row[15] is not None and not isinstance(row[15], datetime))
-            or (row[13] == "PENDING") != (row[16] is None and row[17] is None)
+            or row[13] not in {"PENDING", "CONFIRMING", "DECLINED", "EXPIRED", "CONFIRMED"}
+            or not isinstance(row[16], datetime)
+            or (row[13] in {"PENDING", "CONFIRMING"}) != (row[17] is None)
+            or (row[17] is not None and not isinstance(row[17], datetime))
         ):
             raise ActionEvidenceError("PendingAction reference content is invalid")
+        confirmation_turn_id = None
+        confirmation_trace_id = None
+        if row[13] in {"CONFIRMING", "CONFIRMED"}:
+            confirmation_turn_id = _canonical_uuid(row[14])
+            confirmation_trace_id = _canonical_uuid(row[15])
+            if confirmation_turn_id == source_turn_id:
+                raise ActionEvidenceError("PendingAction confirmation turn is inconsistent")
+        elif row[14] is not None or row[15] is not None:
+            raise ActionEvidenceError("PendingAction confirmation binding is inconsistent")
         resolution_turn_id = None
         resolution_trace_id = None
-        if row[13] != "PENDING":
-            resolution_turn_id = _canonical_uuid(row[16])
-            resolution_trace_id = _canonical_uuid(row[17])
+        if row[13] in {"DECLINED", "EXPIRED"}:
+            resolution_turn_id = _canonical_uuid(row[18])
+            resolution_trace_id = _canonical_uuid(row[19])
             if resolution_turn_id == source_turn_id:
                 raise ActionEvidenceError("PendingAction resolution turn is inconsistent")
+        elif row[18] is not None or row[19] is not None:
+            raise ActionEvidenceError("PendingAction resolution binding is inconsistent")
         expires_at = (
-            row[14].replace(tzinfo=UTC) if row[14].tzinfo is None else row[14].astimezone(UTC)
+            row[16].replace(tzinfo=UTC) if row[16].tzinfo is None else row[16].astimezone(UTC)
         )
         action_type = cast(str, row[7])
         state = cast(str, row[13])
@@ -412,6 +493,8 @@ def validate_pending_action_reference(
             amount_minor=row[11],
             currency=row[12],
             expires_at=expires_at,
+            confirmation_turn_id=confirmation_turn_id,
+            confirmation_trace_id=confirmation_trace_id,
             resolution_turn_id=resolution_turn_id,
             resolution_trace_id=resolution_trace_id,
         )

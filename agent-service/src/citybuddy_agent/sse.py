@@ -12,7 +12,7 @@ from .conversation import ConversationResult
 
 TOKEN_CHUNK_SIZE = 64
 MAX_RESPONSE_TEXT = 256
-MAX_PUBLIC_EVENTS = MAX_RESPONSE_TEXT // TOKEN_CHUNK_SIZE + 1
+MAX_PUBLIC_EVENTS = MAX_RESPONSE_TEXT // TOKEN_CHUNK_SIZE + 2
 
 # This normalized lexicon is intentionally bounded defense in depth. Token prose
 # is never action truth; only an ActionReceipt-derived event can carry that state.
@@ -85,6 +85,7 @@ _PUBLIC_COMPLETED_OUTCOMES = {
     "action_clarification",
     "action_declined",
     "action_expired",
+    "action_completed",
 }
 
 
@@ -174,7 +175,29 @@ class SseEgressFilter:
 
     def project_result(self, result: ConversationResult) -> tuple[PublicSseEvent, ...]:
         source: tuple[SseSourceEvent, ...]
-        if result.outcome in _PUBLIC_COMPLETED_OUTCOMES:
+        if result.outcome == "action_completed":
+            if result.action_receipt is None:
+                raise SseProjectionError("completed action has no receipt truth")
+            source = (
+                SseSourceEvent(
+                    "ACTION_RECEIPT",
+                    {
+                        "receiptId": result.action_receipt.receipt.receipt_id,
+                        "status": result.action_receipt.receipt.status,
+                    },
+                ),
+                SseSourceEvent("SAFE_TEXT", {"text": result.response_text}),
+                SseSourceEvent(
+                    "TURN_COMPLETED",
+                    {
+                        "conversationId": result.conversation_id,
+                        "traceId": result.trace_id,
+                        "turnId": result.turn_id,
+                        "outcome": result.outcome,
+                    },
+                ),
+            )
+        elif result.outcome in _PUBLIC_COMPLETED_OUTCOMES:
             source = (
                 SseSourceEvent("SAFE_TEXT", {"text": result.response_text}),
                 SseSourceEvent(
@@ -208,6 +231,7 @@ class SseEgressFilter:
         public: list[PublicSseEvent] = []
         terminal = False
         text_seen = False
+        receipt_seen = False
         for event in source:
             if terminal:
                 raise SseProjectionError("source event follows terminal")
@@ -235,13 +259,17 @@ class SseEgressFilter:
                     )
             elif event.event_type == "TURN_COMPLETED":
                 required = {"conversationId", "traceId", "turnId", "outcome"}
-                if not text_seen or set(event.payload) != required:
+                if set(event.payload) != required:
                     raise SseProjectionError("invalid completed source")
                 if event.payload["outcome"] not in _PUBLIC_COMPLETED_OUTCOMES or not all(
                     isinstance(event.payload[name], str) and event.payload[name]
                     for name in required
                 ):
                     raise SseProjectionError("invalid completed values")
+                if (event.payload["outcome"] == "action_completed") != receipt_seen:
+                    raise SseProjectionError("completed action receipt is inconsistent")
+                if not text_seen:
+                    raise SseProjectionError("completed source has no bounded prose")
                 terminal = True
                 public.append(
                     PublicSseEvent("done", {"sequence": len(public) + 1, **event.payload})
@@ -262,9 +290,22 @@ class SseEgressFilter:
                 terminal = True
                 public.append(PublicSseEvent("error", {"sequence": 1, **event.payload}))
             elif event.event_type == "ACTION_RECEIPT":
-                # CB-120/CB-121 own receipt truth. This slice reserves the public
-                # schema but cannot accept or synthesize a receipt source.
-                raise SseProjectionError("receipt truth is unavailable")
+                if receipt_seen or text_seen or set(event.payload) != {"receiptId", "status"}:
+                    raise SseProjectionError("invalid receipt source")
+                receipt_id = event.payload["receiptId"]
+                if (
+                    not isinstance(receipt_id, str)
+                    or not receipt_id
+                    or event.payload["status"] != "REQUESTED"
+                ):
+                    raise SseProjectionError("invalid receipt values")
+                receipt_seen = True
+                public.append(
+                    PublicSseEvent(
+                        "action_receipt",
+                        {"sequence": len(public) + 1, **event.payload},
+                    )
+                )
             else:
                 raise SseProjectionError("unknown source event")
         if not terminal or not public or len(public) > MAX_PUBLIC_EVENTS:

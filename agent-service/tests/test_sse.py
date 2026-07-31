@@ -1,6 +1,7 @@
 import asyncio
 
 import pytest
+from citybuddy_agent.actions import ActionReceiptPayload, StoredActionReceipt
 from citybuddy_agent.conversation import ConversationResult
 from citybuddy_agent.sse import (
     MAX_PUBLIC_EVENTS,
@@ -23,10 +24,37 @@ def completed() -> ConversationResult:
     )
 
 
+def action_completed() -> ConversationResult:
+    receipt = ActionReceiptPayload.model_validate(
+        {
+            "receiptId": "00000000-0000-0000-0000-000000000211",
+            "pendingActionId": "00000000-0000-0000-0000-000000000121",
+            "actionType": "REFUND_REQUEST",
+            "status": "REQUESTED",
+            "orderId": "00000000-0000-0000-0000-000000000040",
+            "refundId": "00000000-0000-0000-0000-000000000212",
+            "resourceVersion": 1,
+            "amountMinor": 400,
+            "currency": "CNY",
+            "committedAt": "2026-08-01T01:02:03.123456Z",
+            "replayed": True,
+        }
+    )
+    return ConversationResult(
+        "conversation-1",
+        "trace-1",
+        "turn-1",
+        "Receipt-backed explanation.",
+        "action_completed",
+        action_receipt=StoredActionReceipt(receipt, "source-turn", "turn-1"),
+    )
+
+
 def test_filter_bounds_chunks_and_emits_one_ordered_terminal() -> None:
     events = SseEgressFilter().project_result(completed())
 
-    assert len(events) == MAX_PUBLIC_EVENTS
+    assert len(events) == 5
+    assert len(events) <= MAX_PUBLIC_EVENTS
     assert [event.name for event in events] == ["token", "token", "token", "token", "done"]
     assert [event.data["sequence"] for event in events] == [1, 2, 3, 4, 5]
     assert all(len(str(event.data["text"])) == 64 for event in events[:-1])
@@ -37,6 +65,19 @@ def test_filter_bounds_chunks_and_emits_one_ordered_terminal() -> None:
         "turnId",
         "outcome",
     }
+
+
+def test_action_receipt_precedes_optional_prose_and_one_terminal() -> None:
+    events = SseEgressFilter().project_result(action_completed())
+
+    assert [event.name for event in events] == ["action_receipt", "token", "done"]
+    assert [event.data["sequence"] for event in events] == [1, 2, 3]
+    assert events[0].data == {
+        "sequence": 1,
+        "receiptId": "00000000-0000-0000-0000-000000000211",
+        "status": "REQUESTED",
+    }
+    assert events[-1].data["outcome"] == "action_completed"
 
 
 @pytest.mark.parametrize(

@@ -15,6 +15,7 @@ from .actions import (
     PENDING_ACTION_SOURCE_TURN_SQL,
     ActionEvidenceError,
     ActionJsonError,
+    ActionReceiptPayload,
     PendingActionReference,
     strict_json_object,
     validate_pending_action_events,
@@ -37,6 +38,7 @@ TerminalOutcome = Literal[
     "action_clarification",
     "action_declined",
     "action_expired",
+    "action_completed",
     "failed",
 ]
 EventKind = Literal[
@@ -51,6 +53,7 @@ EventKind = Literal[
     "ACTION_PREPARED",
     "ACTION_DECLINED",
     "ACTION_EXPIRED",
+    "ACTION_RECEIPT",
     "AGENT_OUTCOME",
     "ASSISTANT_RESPONSE",
     "TURN_COMPLETED",
@@ -66,17 +69,20 @@ _TERMINAL_OUTCOMES = {
     "action_clarification",
     "action_declined",
     "action_expired",
+    "action_completed",
 }
 _ACTION_TERMINAL_OUTCOMES = {
     "action_pending",
     "action_clarification",
     "action_declined",
     "action_expired",
+    "action_completed",
 }
 _ACTION_EVENT_TYPES = {
     "ACTION_PREPARED",
     "ACTION_DECLINED",
     "ACTION_EXPIRED",
+    "ACTION_RECEIPT",
 }
 _EVENT_TYPES = {
     "USER_INPUT",
@@ -90,6 +96,7 @@ _EVENT_TYPES = {
     "ACTION_PREPARED",
     "ACTION_DECLINED",
     "ACTION_EXPIRED",
+    "ACTION_RECEIPT",
     "AGENT_OUTCOME",
     "ASSISTANT_RESPONSE",
     "TURN_COMPLETED",
@@ -279,11 +286,18 @@ class MysqlEvaluationEvidenceStore:
         event_rows = cursor.fetchall()
         cursor.execute(
             "SELECT pending_action_id FROM pending_action_reference "
-            "WHERE source_turn_id = %s OR resolution_turn_id = %s LIMIT 2",
-            (turn_id, turn_id),
+            "WHERE source_turn_id = %s OR resolution_turn_id = %s "
+            "OR confirmation_turn_id = %s LIMIT 2",
+            (turn_id, turn_id, turn_id),
         )
         reference_rows = cursor.fetchall()
-        return bool(reference_rows) or any(
+        cursor.execute(
+            "SELECT receipt_id FROM action_receipt_projection "
+            "WHERE confirmation_turn_id = %s LIMIT 2",
+            (turn_id,),
+        )
+        projection_rows = cursor.fetchall()
+        return bool(reference_rows or projection_rows) or any(
             row and row[0] in _ACTION_EVENT_TYPES for row in event_rows
         )
 
@@ -490,6 +504,26 @@ class MysqlEvaluationEvidenceStore:
                 raise EvaluationEvidenceInvalid
             outcome = expected
             reference = str(pending_action_id)
+        elif event_type == "ACTION_RECEIPT":
+            receipt_id = payload.get("receiptId")
+            pending_action_id = payload.get("pendingActionId")
+            commitment = payload.get("receiptCommitment")
+            if (
+                set(payload)
+                != {
+                    "receiptId",
+                    "pendingActionId",
+                    "status",
+                    "receiptCommitment",
+                }
+                or not self._bounded_string(receipt_id, 36)
+                or not self._bounded_string(pending_action_id, 36)
+                or payload.get("status") != "REQUESTED"
+                or not self._bounded_string(commitment, 64)
+            ):
+                raise EvaluationEvidenceInvalid
+            outcome = "REQUESTED"
+            reference = str(receipt_id)
         elif event_type in {"AGENT_OUTCOME", "ASSISTANT_RESPONSE", "TURN_COMPLETED"}:
             value = payload.get("outcome")
             if value not in _TERMINAL_OUTCOMES:
@@ -525,7 +559,8 @@ class MysqlEvaluationEvidenceStore:
         terminal_outcome: TerminalOutcome,
     ) -> None:
         has_action_event = any(
-            row[5] in {"ACTION_PREPARED", "ACTION_DECLINED", "ACTION_EXPIRED"} for row in rows
+            row[5] in {"ACTION_PREPARED", "ACTION_DECLINED", "ACTION_EXPIRED", "ACTION_RECEIPT"}
+            for row in rows
         )
         cursor.execute(
             "SELECT pending_action_id FROM pending_action_reference "
@@ -539,20 +574,57 @@ class MysqlEvaluationEvidenceStore:
             (turn_id,),
         )
         resolution_references = cursor.fetchall()
+        cursor.execute(
+            "SELECT pending_action_id FROM pending_action_reference "
+            "WHERE confirmation_turn_id = %s LIMIT 2",
+            (turn_id,),
+        )
+        confirmation_references = cursor.fetchall()
+        cursor.execute(
+            "SELECT receipt_id FROM action_receipt_projection "
+            "WHERE confirmation_turn_id = %s LIMIT 2",
+            (turn_id,),
+        )
+        receipt_projections = cursor.fetchall()
         if terminal_outcome not in _ACTION_TERMINAL_OUTCOMES:
-            if has_action_event or source_references or resolution_references:
+            if (
+                has_action_event
+                or source_references
+                or resolution_references
+                or confirmation_references
+                or receipt_projections
+            ):
                 raise EvaluationEvidenceInvalid
             return
         if terminal_outcome == "action_clarification":
-            if has_action_event or source_references or resolution_references:
+            if (
+                has_action_event
+                or source_references
+                or resolution_references
+                or confirmation_references
+                or receipt_projections
+            ):
                 raise EvaluationEvidenceInvalid
             return
         if terminal_outcome == "action_pending" and (
-            len(source_references) != 1 or resolution_references
+            len(source_references) != 1
+            or resolution_references
+            or confirmation_references
+            or receipt_projections
         ):
             raise EvaluationEvidenceInvalid
         if terminal_outcome in {"action_declined", "action_expired"} and (
-            source_references or len(resolution_references) != 1
+            source_references
+            or len(resolution_references) != 1
+            or confirmation_references
+            or receipt_projections
+        ):
+            raise EvaluationEvidenceInvalid
+        if terminal_outcome == "action_completed" and (
+            source_references
+            or resolution_references
+            or len(confirmation_references) != 1
+            or len(receipt_projections) != 1
         ):
             raise EvaluationEvidenceInvalid
         event_rows = [tuple(row[:7]) for row in rows]
@@ -560,7 +632,8 @@ class MysqlEvaluationEvidenceStore:
             cursor.execute(
                 "SELECT pending_action_id, source_turn_id, source_trace_id, conversation_id, "
                 "session_id, user_subject, sandbox_id, action_type, argument_commitment, "
-                "order_id, target_version, amount_minor, currency, state, expires_at, resolved_at, "
+                "order_id, target_version, amount_minor, currency, state, "
+                "confirmation_turn_id, confirmation_trace_id, expires_at, resolved_at, "
                 "resolution_turn_id, resolution_trace_id "
                 "FROM pending_action_reference WHERE source_turn_id = %s LIMIT 2",
                 (turn_id,),
@@ -578,9 +651,32 @@ class MysqlEvaluationEvidenceStore:
                 expected_subject=subject,
                 expected_sandbox_id=sandbox_id,
             )
-            self._validate_pending_events(event_rows, pending, pending_rows[0][14])
-            if state != "PENDING":
+            self._validate_pending_events(event_rows, pending, pending_rows[0][16])
+            if state in {"DECLINED", "EXPIRED"}:
                 self._validate_pending_resolution(cursor, pending=pending, state=state)
+            elif state in {"CONFIRMING", "CONFIRMED"}:
+                self._validate_pending_confirmation(
+                    cursor,
+                    pending=pending,
+                    state=state,
+                    conversation_id=conversation_id,
+                    session_id=session_id,
+                    subject=subject,
+                    sandbox_id=sandbox_id,
+                )
+            elif state != "PENDING":
+                raise EvaluationEvidenceInvalid
+            return
+        if terminal_outcome == "action_completed":
+            self._validate_completed_action_truth(
+                cursor,
+                rows=rows,
+                turn_id=turn_id,
+                trace_id=trace_id,
+                session_id=session_id,
+                subject=subject,
+                sandbox_id=sandbox_id,
+            )
             return
         try:
             action_payload = strict_json_object(str(rows[1][6]).encode("utf-8"))
@@ -604,7 +700,8 @@ class MysqlEvaluationEvidenceStore:
         cursor.execute(
             "SELECT pending_action_id, source_turn_id, source_trace_id, conversation_id, "
             "session_id, user_subject, sandbox_id, action_type, argument_commitment, "
-            "order_id, target_version, amount_minor, currency, state, expires_at, resolved_at, "
+            "order_id, target_version, amount_minor, currency, state, "
+            "confirmation_turn_id, confirmation_trace_id, expires_at, resolved_at, "
             "resolution_turn_id, resolution_trace_id "
             "FROM pending_action_reference WHERE pending_action_id = %s LIMIT 2",
             (pending_action_id,),
@@ -619,13 +716,180 @@ class MysqlEvaluationEvidenceStore:
             expected_subject=subject,
             expected_sandbox_id=sandbox_id,
         )
-        if state != expected_state or pending_rows[0][15] is None:
+        if state != expected_state or pending_rows[0][17] is None:
             raise EvaluationEvidenceInvalid
         if pending.resolution_turn_id != turn_id or pending.resolution_trace_id != trace_id:
             raise EvaluationEvidenceInvalid
         cursor.execute(ACTION_TURN_EVENTS_SQL, (pending.source_turn_id,))
-        self._validate_pending_events(cursor.fetchall(), pending, pending_rows[0][14])
+        self._validate_pending_events(cursor.fetchall(), pending, pending_rows[0][16])
         self._validate_pending_resolution(cursor, pending=pending, state=state)
+
+    def _validate_pending_confirmation(
+        self,
+        cursor: pymysql.cursors.Cursor,
+        *,
+        pending: PendingActionReference,
+        state: str,
+        conversation_id: str,
+        session_id: str,
+        subject: str,
+        sandbox_id: str,
+    ) -> None:
+        cursor.execute(
+            "SELECT trace_id, conversation_id, session_id, user_subject, state, outcome "
+            "FROM support_turn WHERE turn_id = %s LIMIT 2",
+            (pending.confirmation_turn_id,),
+        )
+        turn_rows = cursor.fetchall()
+        expected_terminal = (
+            ("PROCESSING", None) if state == "CONFIRMING" else ("COMPLETED", "action_completed")
+        )
+        if len(turn_rows) != 1 or tuple(turn_rows[0]) != (
+            pending.confirmation_trace_id,
+            conversation_id,
+            session_id,
+            subject,
+            *expected_terminal,
+        ):
+            raise EvaluationEvidenceInvalid
+        cursor.execute(ACTION_TURN_EVENTS_SQL, (pending.confirmation_turn_id,))
+        confirmation_events = cursor.fetchall()
+        if state == "CONFIRMING":
+            if len(confirmation_events) != 1 or tuple(confirmation_events[0][1:6]) != (
+                pending.confirmation_trace_id,
+                session_id,
+                subject,
+                1,
+                "USER_INPUT",
+            ):
+                raise EvaluationEvidenceInvalid
+            try:
+                payload = strict_json_object(str(confirmation_events[0][6]).encode("utf-8"))
+            except (ActionJsonError, TypeError) as exception:
+                raise EvaluationEvidenceInvalid from exception
+            if payload != {"accepted": True}:
+                raise EvaluationEvidenceInvalid
+            cursor.execute(
+                "SELECT receipt_id FROM action_receipt_projection "
+                "WHERE pending_action_id = %s LIMIT 2",
+                (pending.pending_action_id,),
+            )
+            if cursor.fetchall():
+                raise EvaluationEvidenceInvalid
+            return
+        if state != "CONFIRMED":
+            raise EvaluationEvidenceInvalid
+        self._validate_completed_action_truth(
+            cursor,
+            rows=confirmation_events,
+            turn_id=str(pending.confirmation_turn_id),
+            trace_id=str(pending.confirmation_trace_id),
+            session_id=session_id,
+            subject=subject,
+            sandbox_id=sandbox_id,
+        )
+
+    def _validate_completed_action_truth(
+        self,
+        cursor: pymysql.cursors.Cursor,
+        *,
+        rows: tuple[tuple[object, ...], ...],
+        turn_id: str,
+        trace_id: str,
+        session_id: str,
+        subject: str,
+        sandbox_id: str,
+    ) -> None:
+        receipt_event_rows = [row for row in rows if row[5] == "ACTION_RECEIPT"]
+        if len(receipt_event_rows) != 1:
+            raise EvaluationEvidenceInvalid
+        cursor.execute(
+            "SELECT receipt_id, pending_action_id, source_turn_id, source_trace_id, "
+            "confirmation_turn_id, confirmation_trace_id, session_id, user_subject, "
+            "sandbox_id, action_type, argument_commitment, status, order_id, target_version, "
+            "refund_id, resource_version, amount_minor, currency, committed_at, "
+            "receipt_commitment, published_event_sequence "
+            "FROM action_receipt_projection WHERE confirmation_turn_id = %s LIMIT 2",
+            (turn_id,),
+        )
+        projections = cursor.fetchall()
+        if len(projections) != 1:
+            raise EvaluationEvidenceInvalid
+        projection = projections[0]
+        committed_at = projection[18]
+        if not isinstance(committed_at, datetime):
+            raise EvaluationEvidenceInvalid
+        committed_at = self._utc_timestamp(committed_at)
+        try:
+            receipt = ActionReceiptPayload.model_validate(
+                {
+                    "receiptId": projection[0],
+                    "pendingActionId": projection[1],
+                    "actionType": projection[9],
+                    "status": projection[11],
+                    "orderId": projection[12],
+                    "refundId": projection[14],
+                    "resourceVersion": projection[15],
+                    "amountMinor": projection[16],
+                    "currency": projection[17],
+                    "committedAt": committed_at.isoformat(timespec="microseconds").replace(
+                        "+00:00", "Z"
+                    ),
+                    "replayed": True,
+                }
+            )
+            event_payload = strict_json_object(str(receipt_event_rows[0][6]).encode("utf-8"))
+        except (ActionJsonError, TypeError, ValueError) as exception:
+            raise EvaluationEvidenceInvalid from exception
+        if (
+            tuple(projection[4:9]) != (turn_id, trace_id, session_id, subject, sandbox_id)
+            or projection[10] != receipt.argument_commitment
+            or projection[19] != receipt.receipt_commitment
+            or projection[20] != receipt_event_rows[0][4]
+            or event_payload
+            != {
+                "receiptId": receipt.receipt_id,
+                "pendingActionId": receipt.pending_action_id,
+                "status": receipt.status,
+                "receiptCommitment": receipt.receipt_commitment,
+            }
+        ):
+            raise EvaluationEvidenceInvalid
+        cursor.execute(
+            "SELECT pending_action_id, source_turn_id, source_trace_id, conversation_id, "
+            "session_id, user_subject, sandbox_id, action_type, argument_commitment, "
+            "order_id, target_version, amount_minor, currency, state, confirmation_turn_id, "
+            "confirmation_trace_id, expires_at, resolved_at, resolution_turn_id, "
+            "resolution_trace_id FROM pending_action_reference "
+            "WHERE pending_action_id = %s LIMIT 2",
+            (receipt.pending_action_id,),
+        )
+        pending_rows = cursor.fetchall()
+        if len(pending_rows) != 1:
+            raise EvaluationEvidenceInvalid
+        pending, state = self._validated_pending_reference(
+            cursor,
+            pending_rows[0],
+            expected_session_id=session_id,
+            expected_subject=subject,
+            expected_sandbox_id=sandbox_id,
+        )
+        if (
+            state != "CONFIRMED"
+            or pending.confirmation_turn_id != turn_id
+            or pending.confirmation_trace_id != trace_id
+            or tuple(projection[1:4])
+            != (pending.pending_action_id, pending.source_turn_id, pending.source_trace_id)
+            or projection[13] != pending.target_version
+            or pending.action_type != receipt.action_type
+            or pending.argument_commitment != receipt.argument_commitment
+            or pending.order_id != receipt.order_id
+            or pending.amount_minor != receipt.amount_minor
+            or pending.currency != receipt.currency
+        ):
+            raise EvaluationEvidenceInvalid
+        cursor.execute(ACTION_TURN_EVENTS_SQL, (pending.source_turn_id,))
+        self._validate_pending_events(cursor.fetchall(), pending, pending_rows[0][16])
 
     def _validated_pending_reference(
         self,

@@ -914,14 +914,14 @@ assert_mysql_fails "agent runtime cannot execute DDL" \
   mysql_query agent_app "$agent_app_password" cs_db 'CREATE TABLE forbidden_cb103 (id INT)'
 agent_grants="$(mysql_query agent_app "$agent_app_password" '' 'SHOW GRANTS FOR CURRENT_USER')"
 for table in support_session support_conversation support_turn support_event support_feedback \
-  retrieval_decision retrieval_evidence pending_action_reference; do
+  retrieval_decision retrieval_evidence pending_action_reference action_receipt_projection; do
   grep -Fq "\`cs_db\`.\`$table\`" <<<"$agent_grants"
 done
 assert_equal 'INSERT,SELECT' \
   "$(mysql_query root "$root_password" information_schema \
     "SELECT GROUP_CONCAT(privilege_type ORDER BY privilege_type) FROM table_privileges WHERE grantee = \"'agent_app'@'%'\" AND table_schema = 'cs_db' AND table_name = 'pending_action_reference'")" \
   "agent PendingAction table privileges are exact"
-assert_equal 'resolution_trace_id:UPDATE,resolution_turn_id:UPDATE,resolved_at:UPDATE,state:UPDATE' \
+assert_equal 'confirmation_trace_id:UPDATE,confirmation_turn_id:UPDATE,resolution_trace_id:UPDATE,resolution_turn_id:UPDATE,resolved_at:UPDATE,state:UPDATE' \
   "$(mysql_query root "$root_password" information_schema \
     "SELECT GROUP_CONCAT(CONCAT(column_name, ':', privilege_type) ORDER BY column_name, privilege_type) FROM column_privileges WHERE grantee = \"'agent_app'@'%'\" AND table_schema = 'cs_db' AND table_name = 'pending_action_reference'")" \
   "agent PendingAction mutable-column privileges are exact"
@@ -931,6 +931,16 @@ assert_mysql_fails "agent runtime cannot mutate immutable PendingAction content"
 assert_mysql_fails "agent runtime cannot delete PendingAction references" \
   mysql_query agent_app "$agent_app_password" cs_db \
   "DELETE FROM pending_action_reference WHERE pending_action_id = '00000000-0000-0000-0000-000000000000'"
+assert_equal 'INSERT,SELECT' \
+  "$(mysql_query root "$root_password" information_schema \
+    "SELECT GROUP_CONCAT(privilege_type ORDER BY privilege_type) FROM table_privileges WHERE grantee = \"'agent_app'@'%'\" AND table_schema = 'cs_db' AND table_name = 'action_receipt_projection'")" \
+  "agent ActionReceipt projection privileges are exact"
+assert_mysql_fails "agent runtime cannot update immutable ActionReceipt projections" \
+  mysql_query agent_app "$agent_app_password" cs_db \
+  "UPDATE action_receipt_projection SET status = 'REQUESTED' WHERE receipt_id = '00000000-0000-0000-0000-000000000000'"
+assert_mysql_fails "agent runtime cannot delete immutable ActionReceipt projections" \
+  mysql_query agent_app "$agent_app_password" cs_db \
+  "DELETE FROM action_receipt_projection WHERE receipt_id = '00000000-0000-0000-0000-000000000000'"
 assert_mysql_fails "agent runtime cannot update immutable support events" \
   mysql_query agent_app "$agent_app_password" cs_db \
   "UPDATE support_event SET event_type = 'TURN_FAILED' WHERE event_id = '00000000-0000-0000-0000-000000000000'"
@@ -3859,38 +3869,35 @@ assert_cb122_action_closure_damage "duplicate ACTION_PREPARED evidence"
 mysql_query root "$root_password" cs_db \
   "DELETE FROM support_event WHERE event_id = '00000000-0000-0000-0000-000000000925'"
 
-cb122_agent_log_start="$(wc -l <"$tmp_dir/agent.log")"
 cb122_proxy_calls_before_confirmation="$(curl --silent --show-error \
   "http://127.0.0.1:$proxy_port/fixture/counts" \
   | jq -r --arg session "$cb122_session" '.["action-proxy:" + $session]')"
 cb122_model_calls_before_confirmation="$(curl --silent --show-error \
   "http://127.0.0.1:$proxy_port/fixture/counts" \
   | jq -r '.["confirm:total"] // 0')"
-assert_status 409 "CB-122 exact confirmation is deliberately unavailable" \
+assert_status 200 "non-exact positive wording remains a local clarification" \
   --request POST "http://127.0.0.1:$agent_port/api/chat" \
   --header "Authorization: Bearer $payment_token" \
   --header 'X-Eval-Sandbox-Id: sandbox-payment' \
   --header "X-Session-Id: $cb122_session" \
-  --header 'Idempotency-Key: cb122-confirm-unavailable' \
+  --header 'Idempotency-Key: cb123-non-exact-confirmation' \
   --header 'Content-Type: application/json' \
-  --data '{"message":"confirm"}'
-assert_equal 'Action confirmation unavailable' \
-  "$(uv run python scripts/read_json_field.py "$tmp_dir/http-response.json" detail)" \
-  "confirmation response is bounded and contains no internal reason"
-tail -n "+$((cb122_agent_log_start + 1))" "$tmp_dir/agent.log" \
-  | grep -Fq 'reason_code=ACTION_CONFIRMATION_UNAVAILABLE'
+  --data '{"message":"maybe confirm"}'
+assert_equal action_clarification \
+  "$(uv run python scripts/read_json_field.py "$tmp_dir/http-response.json" outcome)" \
+  "only the closed exact grammar can enter confirmation arbitration"
 assert_equal 'PENDING:0' \
   "$(mysql_query root "$root_password" cs_db \
     "SELECT CONCAT(state, ':', (SELECT COUNT(*) FROM support_event WHERE session_id = '$cb122_session' AND event_type IN ('ACTION_DECLINED', 'ACTION_EXPIRED', 'ACTION_RECEIPT'))) FROM pending_action_reference WHERE pending_action_id = '$cb122_pending_id'")" \
-  "unavailable confirmation has zero local action effect"
+  "non-exact confirmation has zero action-state effect"
 assert_equal "$cb122_proxy_calls_before_confirmation" \
   "$(curl --silent --show-error "http://127.0.0.1:$proxy_port/fixture/counts" \
     | jq -r --arg session "$cb122_session" '.["action-proxy:" + $session]')" \
-  "unavailable confirmation performs no commerce action call"
+  "non-exact confirmation performs no commerce action call"
 assert_equal "$cb122_model_calls_before_confirmation" \
   "$(curl --silent --show-error "http://127.0.0.1:$proxy_port/fixture/counts" \
     | jq -r '.["confirm:total"] // 0')" \
-  "unavailable confirmation performs no model call"
+  "non-exact confirmation performs no model call"
 
 assert_status 200 "ambiguous action input produces one local clarification" \
   --request POST "http://127.0.0.1:$agent_port/api/chat" \
@@ -3952,7 +3959,7 @@ assert_equal 'PENDING:0:FAILED' \
   "denied decline commits no action transition or action event"
 mysql_query root "$root_password" '' \
   "GRANT UPDATE (state, resolved_at, resolution_turn_id, resolution_trace_id) ON cs_db.pending_action_reference TO 'agent_app'@'%'"
-assert_equal 'resolution_trace_id:UPDATE,resolution_turn_id:UPDATE,resolved_at:UPDATE,state:UPDATE' \
+assert_equal 'confirmation_trace_id:UPDATE,confirmation_turn_id:UPDATE,resolution_trace_id:UPDATE,resolution_turn_id:UPDATE,resolved_at:UPDATE,state:UPDATE' \
   "$(mysql_query root "$root_password" information_schema \
     "SELECT GROUP_CONCAT(CONCAT(column_name, ':', privilege_type) ORDER BY column_name, privilege_type) FROM column_privileges WHERE grantee = \"'agent_app'@'%'\" AND table_schema = 'cs_db' AND table_name = 'pending_action_reference'")" \
   "decline failure fixture restores the exact PendingAction column privileges"
@@ -4237,6 +4244,275 @@ assert_equal 'EXPIRED:1:0' \
   "$(mysql_query root "$root_password" cs_db \
     "SELECT CONCAT(reference.state, ':', (SELECT COUNT(*) FROM support_event event_record JOIN support_turn turn_record ON turn_record.turn_id = event_record.turn_id WHERE turn_record.session_id = '$cb122_expiry_session' AND event_record.event_type = 'ACTION_EXPIRED'), ':', (SELECT COUNT(*) FROM support_event event_record JOIN support_turn turn_record ON turn_record.turn_id = event_record.turn_id WHERE turn_record.session_id = '$cb122_expiry_session' AND event_record.event_type = 'ACTION_RECEIPT')) FROM pending_action_reference reference WHERE reference.pending_action_id = '$cb122_expiry_pending_id'")" \
   "expiry writes one exact local event and no receipt"
+
+# CB-123 consumes the verified Commerce Action boundary and publishes its receipt only after
+# the complete local projection/reference/event/turn transaction commits.
+prepare_cb123_action_case() {
+  local case_id="$1"
+  local message="${2:-action-prepare-small}"
+  assert_status 201 "$case_id creates one sandbox-bound support session" \
+    --request POST "http://127.0.0.1:$agent_port/api/sessions" \
+    --header "Authorization: Bearer $payment_token" \
+    --header 'X-Eval-Sandbox-Id: sandbox-payment' \
+    --header 'Content-Type: application/json' \
+    --data '{}'
+  cb123_session="$(uv run python scripts/read_json_field.py \
+    "$tmp_dir/http-response.json" sessionId)"
+  assert_status 200 "$case_id prepares one exact Agent reference" \
+    --request POST "http://127.0.0.1:$agent_port/api/chat" \
+    --header "Authorization: Bearer $payment_token" \
+    --header 'X-Eval-Sandbox-Id: sandbox-payment' \
+    --header "X-Session-Id: $cb123_session" \
+    --header "Idempotency-Key: $case_id-prepare" \
+    --header 'Content-Type: application/json' \
+    --data "{\"message\":\"$message\"}"
+  assert_equal action_pending \
+    "$(uv run python scripts/read_json_field.py "$tmp_dir/http-response.json" outcome)" \
+    "$case_id exposes only the pending result before confirmation"
+  cb123_prepare_turn="$(uv run python scripts/read_json_field.py \
+    "$tmp_dir/http-response.json" turnId)"
+  cb123_prepare_trace="$(uv run python scripts/read_json_field.py \
+    "$tmp_dir/http-response.json" traceId)"
+  cb123_pending_id="$(mysql_query root "$root_password" cs_db \
+    "SELECT pending_action_id FROM pending_action_reference WHERE source_turn_id = '$cb123_prepare_turn'")"
+  assert_equal 'PENDING:0:0' \
+    "$(mysql_query root "$root_password" cs_db \
+      "SELECT CONCAT(state, ':', (SELECT COUNT(*) FROM action_receipt_projection WHERE pending_action_id = '$cb123_pending_id'), ':', (SELECT COUNT(*) FROM support_event WHERE session_id = '$cb123_session' AND event_type = 'ACTION_RECEIPT')) FROM pending_action_reference WHERE pending_action_id = '$cb123_pending_id'")" \
+    "$case_id starts with no local receipt truth"
+}
+
+assert_cb123_confirmation_checkpoint() {
+  local label="$1"
+  assert_equal 'CONFIRMING:PROCESSING:0:0:0' \
+    "$(mysql_query root "$root_password" cs_db \
+      "SELECT CONCAT(reference.state, ':', turn_record.state, ':', (SELECT COUNT(*) FROM action_receipt_projection WHERE pending_action_id = reference.pending_action_id), ':', (SELECT COUNT(*) FROM support_event WHERE turn_id = turn_record.turn_id AND event_type = 'ACTION_RECEIPT'), ':', (SELECT COUNT(*) FROM support_turn WHERE turn_id = turn_record.turn_id AND outcome = 'action_completed')) FROM pending_action_reference reference JOIN support_turn turn_record ON turn_record.turn_id = reference.confirmation_turn_id AND turn_record.trace_id = reference.confirmation_trace_id WHERE reference.pending_action_id = '$cb123_pending_id'")" \
+    "$label leaves one recoverable claim and zero local success truth"
+}
+
+assert_cb123_commerce_closure_once() {
+  local label="$1"
+  assert_equal '1:1:1' \
+    "$(mysql_query root "$root_password" commerce_db \
+      "SELECT CONCAT((SELECT COUNT(*) FROM action_receipt WHERE pending_action_id = '$cb123_pending_id'), ':', (SELECT COUNT(*) FROM mock_refund WHERE request_idempotency_key = CONCAT('action:', '$cb123_pending_id')), ':', (SELECT COUNT(*) FROM commerce_outbox WHERE aggregate_type = 'REFUND' AND aggregate_id = (SELECT refund_id FROM action_receipt WHERE pending_action_id = '$cb123_pending_id')))")" \
+    "$label keeps one authoritative receipt/refund/Outbox closure"
+}
+
+recover_cb123_action() {
+  local label="$1"
+  local key="$2"
+  assert_status 200 "$label recovers the same claimed confirmation" \
+    --request POST "http://127.0.0.1:$agent_port/api/chat" \
+    --header "Authorization: Bearer $payment_token" \
+    --header 'X-Eval-Sandbox-Id: sandbox-payment' \
+    --header "X-Session-Id: $cb123_session" \
+    --header "Idempotency-Key: $key" \
+    --header 'Content-Type: application/json' \
+    --data '{"message":"confirm"}'
+  cb123_receipt_id="$(jq -er '.actionReceipt.receiptId | select(type == "string")' \
+    "$tmp_dir/http-response.json")"
+  cb123_confirmation_turn="$(uv run python scripts/read_json_field.py \
+    "$tmp_dir/http-response.json" turnId)"
+  cb123_confirmation_trace="$(uv run python scripts/read_json_field.py \
+    "$tmp_dir/http-response.json" traceId)"
+  assert_equal 'action_completed:CONFIRMED:1:1:1' \
+    "$(mysql_query root "$root_password" cs_db \
+      "SELECT CONCAT(turn_record.outcome, ':', reference.state, ':', (SELECT COUNT(*) FROM action_receipt_projection WHERE pending_action_id = reference.pending_action_id AND receipt_id = '$cb123_receipt_id'), ':', (SELECT COUNT(*) FROM support_event WHERE turn_id = turn_record.turn_id AND event_type = 'ACTION_RECEIPT'), ':', (SELECT COUNT(*) FROM support_event WHERE turn_id = turn_record.turn_id AND event_type = 'TURN_COMPLETED')) FROM pending_action_reference reference JOIN support_turn turn_record ON turn_record.turn_id = reference.confirmation_turn_id WHERE reference.pending_action_id = '$cb123_pending_id'")" \
+    "$label commits one immutable local receipt closure"
+  assert_cb123_commerce_closure_once "$label"
+}
+
+prepare_cb123_action_case cb123-malformed action-prepare
+cb123_confirmation_key='cb123-malformed-confirm'
+cb123_log_start="$(wc -l <"$tmp_dir/agent.log")"
+assert_status 502 "deep receipt after Commerce commit is a fixed typed non-success" \
+  --request POST "http://127.0.0.1:$agent_port/api/chat" \
+  --header "Authorization: Bearer $payment_token" \
+  --header 'X-Eval-Sandbox-Id: sandbox-payment' \
+  --header "X-Session-Id: $cb123_session" \
+  --header "Idempotency-Key: $cb123_confirmation_key" \
+  --header 'Content-Type: application/json' \
+  --data '{"message":"confirm"}'
+assert_equal 'Invalid action confirmation response' \
+  "$(uv run python scripts/read_json_field.py "$tmp_dir/http-response.json" detail)" \
+  "malformed receipt exposes only the bounded public result"
+tail -n "+$((cb123_log_start + 1))" "$tmp_dir/agent.log" \
+  | grep -Fq 'reason_code=ACTION_CONFIRMATION_RESPONSE_INVALID'
+assert_cb123_confirmation_checkpoint "malformed committed receipt response"
+assert_cb123_commerce_closure_once "malformed committed receipt response"
+assert_equal 1 \
+  "$(curl --silent --show-error "http://127.0.0.1:$proxy_port/fixture/counts" \
+    | jq -r --arg pending "$cb123_pending_id" '.["action-confirm:" + $pending]')" \
+  "mandatory malformed witness performs one upstream confirmation before recovery"
+assert_status 409 "decline cannot overtake a durable confirmation claim" \
+  --request POST "http://127.0.0.1:$agent_port/api/chat" \
+  --header "Authorization: Bearer $payment_token" \
+  --header 'X-Eval-Sandbox-Id: sandbox-payment' \
+  --header "X-Session-Id: $cb123_session" \
+  --header 'Idempotency-Key: cb123-malformed-decline' \
+  --header 'Content-Type: application/json' \
+  --data '{"message":"decline"}'
+assert_cb123_confirmation_checkpoint "decline arbitration"
+stop_process agent_pid "$agent_pid"
+start_agent true "http://127.0.0.1:$proxy_port"
+recover_cb123_action "restart after malformed committed receipt" "$cb123_confirmation_key"
+assert_equal 2 \
+  "$(curl --silent --show-error "http://127.0.0.1:$proxy_port/fixture/counts" \
+    | jq -r --arg pending "$cb123_pending_id" '.["action-confirm:" + $pending]')" \
+  "recovery uses the same fixed idempotent Commerce boundary exactly once"
+cb123_confirm_calls_before_local_replay=2
+assert_status 200 "complete local receipt closure replays before OBO and Commerce" \
+  --request POST "http://127.0.0.1:$agent_port/api/chat/stream" \
+  --header "Authorization: Bearer $payment_token" \
+  --header 'X-Eval-Sandbox-Id: sandbox-payment' \
+  --header "X-Session-Id: $cb123_session" \
+  --header "Idempotency-Key: $cb123_confirmation_key" \
+  --header 'Content-Type: application/json' \
+  --data '{"message":"confirm"}'
+cp "$tmp_dir/http-response.json" "$tmp_dir/cb123-receipt-replay.sse"
+test "$(grep -c '^event: action_receipt$' "$tmp_dir/cb123-receipt-replay.sse")" = 1
+test "$(grep -c '^event: done$' "$tmp_dir/cb123-receipt-replay.sse")" = 1
+test "$(grep -n '^event: action_receipt$' "$tmp_dir/cb123-receipt-replay.sse" | cut -d: -f1)" \
+  -lt "$(grep -n '^event: token$' "$tmp_dir/cb123-receipt-replay.sse" | head -1 | cut -d: -f1)"
+assert_equal "$cb123_confirm_calls_before_local_replay" \
+  "$(curl --silent --show-error "http://127.0.0.1:$proxy_port/fixture/counts" \
+    | jq -r --arg pending "$cb123_pending_id" '.["action-confirm:" + $pending]')" \
+  "receipt-first replay makes no further Commerce call"
+assert_status 200 "evaluation validates the complete CB-123 receipt closure" \
+  --request GET "http://127.0.0.1:$agent_port/api/eval/evidence/$cb123_confirmation_trace" \
+  --user "evaluation-manager:$management_password" \
+  --header 'X-Eval-Sandbox-Id: sandbox-payment'
+uv run python scripts/check_agent_evaluation_evidence.py "$tmp_dir/http-response.json" \
+  --trace "$cb123_confirmation_trace" --session "$cb123_session" \
+  --outcome action_completed --require-event ACTION_RECEIPT
+assert_status 200 "evaluation preserves CB-123 source evidence after confirmation" \
+  --request GET "http://127.0.0.1:$agent_port/api/eval/evidence/$cb123_prepare_trace" \
+  --user "evaluation-manager:$management_password" \
+  --header 'X-Eval-Sandbox-Id: sandbox-payment'
+uv run python scripts/check_agent_evaluation_evidence.py "$tmp_dir/http-response.json" \
+  --trace "$cb123_prepare_trace" --session "$cb123_session" \
+  --outcome action_pending --require-event ACTION_PREPARED
+cb123_receipt_commitment="$(mysql_query root "$root_password" cs_db \
+  "SELECT receipt_commitment FROM action_receipt_projection WHERE receipt_id = '$cb123_receipt_id'")"
+mysql_query root "$root_password" cs_db \
+  "UPDATE action_receipt_projection SET receipt_commitment = REPEAT('f', 64) WHERE receipt_id = '$cb123_receipt_id'"
+assert_status 409 "conversation rejects contradictory immutable receipt projection" \
+  --request POST "http://127.0.0.1:$agent_port/api/chat" \
+  --header "Authorization: Bearer $payment_token" \
+  --header 'X-Eval-Sandbox-Id: sandbox-payment' \
+  --header "X-Session-Id: $cb123_session" \
+  --header "Idempotency-Key: $cb123_confirmation_key" \
+  --header 'Content-Type: application/json' \
+  --data '{"message":"confirm"}'
+assert_status 409 "evaluation rejects the same contradictory receipt projection" \
+  --request GET "http://127.0.0.1:$agent_port/api/eval/evidence/$cb123_confirmation_trace" \
+  --user "evaluation-manager:$management_password" \
+  --header 'X-Eval-Sandbox-Id: sandbox-payment'
+mysql_query root "$root_password" cs_db \
+  "UPDATE action_receipt_projection SET receipt_commitment = '$cb123_receipt_commitment' WHERE receipt_id = '$cb123_receipt_id'"
+
+prepare_cb123_action_case cb123-concurrent action-prepare-small
+cb123_concurrent_key='cb123-concurrent-confirm'
+cb123_concurrent_pids=()
+for index in 1 2; do
+  (
+    request_status "$tmp_dir/cb123-concurrent-$index.json" \
+      --request POST "http://127.0.0.1:$agent_port/api/chat" \
+      --header "Authorization: Bearer $payment_token" \
+      --header 'X-Eval-Sandbox-Id: sandbox-payment' \
+      --header "X-Session-Id: $cb123_session" \
+      --header "Idempotency-Key: $cb123_concurrent_key" \
+      --header 'Content-Type: application/json' \
+      --data '{"message":"confirm"}' \
+      >"$tmp_dir/cb123-concurrent-$index.status"
+  ) &
+  cb123_concurrent_pids+=("$!")
+done
+for pid in "${cb123_concurrent_pids[@]}"; do
+  wait "$pid"
+done
+for index in 1 2; do
+  assert_equal 200 "$(cat "$tmp_dir/cb123-concurrent-$index.status")" \
+    "concurrent same-key confirmation $index converges"
+done
+assert_equal 1 \
+  "$(jq -s '[.[].turnId] | unique | length' \
+    "$tmp_dir/cb123-concurrent-1.json" "$tmp_dir/cb123-concurrent-2.json")" \
+  "concurrent same-key confirmations return one durable turn"
+assert_equal 1 \
+  "$(jq -s '[.[].actionReceipt.receiptId] | unique | length' \
+    "$tmp_dir/cb123-concurrent-1.json" "$tmp_dir/cb123-concurrent-2.json")" \
+  "concurrent same-key confirmations return one ActionReceipt"
+cb123_receipt_id="$(jq -er '.actionReceipt.receiptId' \
+  "$tmp_dir/cb123-concurrent-1.json")"
+cb123_confirmation_turn="$(jq -er '.turnId' "$tmp_dir/cb123-concurrent-1.json")"
+assert_equal 'action_completed:CONFIRMED:1:1:1' \
+  "$(mysql_query root "$root_password" cs_db \
+    "SELECT CONCAT(turn_record.outcome, ':', reference.state, ':', (SELECT COUNT(*) FROM action_receipt_projection WHERE pending_action_id = reference.pending_action_id AND receipt_id = '$cb123_receipt_id'), ':', (SELECT COUNT(*) FROM support_event WHERE turn_id = turn_record.turn_id AND event_type = 'ACTION_RECEIPT'), ':', (SELECT COUNT(*) FROM support_event WHERE turn_id = turn_record.turn_id AND event_type = 'TURN_COMPLETED')) FROM pending_action_reference reference JOIN support_turn turn_record ON turn_record.turn_id = reference.confirmation_turn_id WHERE reference.pending_action_id = '$cb123_pending_id'")" \
+  "concurrent same-key confirmation commits one complete local closure"
+assert_cb123_commerce_closure_once "concurrent same-key confirmation"
+cb123_concurrent_calls="$(curl --silent --show-error \
+  "http://127.0.0.1:$proxy_port/fixture/counts" \
+  | jq -r --arg pending "$cb123_pending_id" '.["action-confirm:" + $pending]')"
+assert_status 200 "concurrent same-key result replays receipt-first" \
+  --request POST "http://127.0.0.1:$agent_port/api/chat" \
+  --header "Authorization: Bearer $payment_token" \
+  --header 'X-Eval-Sandbox-Id: sandbox-payment' \
+  --header "X-Session-Id: $cb123_session" \
+  --header "Idempotency-Key: $cb123_concurrent_key" \
+  --header 'Content-Type: application/json' \
+  --data '{"message":"confirm"}'
+assert_equal "$cb123_concurrent_calls" \
+  "$(curl --silent --show-error "http://127.0.0.1:$proxy_port/fixture/counts" \
+    | jq -r --arg pending "$cb123_pending_id" '.["action-confirm:" + $pending]')" \
+  "concurrent same-key receipt-first replay makes no further Commerce call"
+
+verify_cb123_local_rollback() {
+  local label="$1"
+  local key="$2"
+  cb123_log_start="$(wc -l <"$tmp_dir/agent.log")"
+  assert_status 503 "$label is bounded and rolls back the local success transaction" \
+    --request POST "http://127.0.0.1:$agent_port/api/chat" \
+    --header "Authorization: Bearer $payment_token" \
+    --header 'X-Eval-Sandbox-Id: sandbox-payment' \
+    --header "X-Session-Id: $cb123_session" \
+    --header "Idempotency-Key: $key" \
+    --header 'Content-Type: application/json' \
+    --data '{"message":"confirm"}'
+  tail -n "+$((cb123_log_start + 1))" "$tmp_dir/agent.log" \
+    | grep -Fq 'reason_code=ACTION_RECEIPT_PERSISTENCE_UNAVAILABLE'
+  assert_cb123_confirmation_checkpoint "$label"
+  assert_cb123_commerce_closure_once "$label"
+}
+
+prepare_cb123_action_case cb123-projection-failure
+mysql_query root "$root_password" '' \
+  "REVOKE INSERT ON cs_db.action_receipt_projection FROM 'agent_app'@'%'"
+verify_cb123_local_rollback "projection insert denial" cb123-projection-confirm
+mysql_query root "$root_password" '' \
+  "GRANT INSERT ON cs_db.action_receipt_projection TO 'agent_app'@'%'"
+recover_cb123_action "projection insert restoration" cb123-projection-confirm
+
+prepare_cb123_action_case cb123-reference-failure
+mysql_query root "$root_password" cs_db \
+  "CREATE TRIGGER cb123_reject_reference_confirm BEFORE UPDATE ON pending_action_reference FOR EACH ROW SET NEW.state = IF(NEW.state = 'CONFIRMED', 'INVALID', NEW.state)"
+verify_cb123_local_rollback "reference confirmation failure" cb123-reference-confirm
+mysql_query root "$root_password" cs_db 'DROP TRIGGER cb123_reject_reference_confirm'
+recover_cb123_action "reference confirmation restoration" cb123-reference-confirm
+
+prepare_cb123_action_case cb123-event-failure
+mysql_query root "$root_password" cs_db \
+  "CREATE TRIGGER cb123_reject_receipt_event BEFORE INSERT ON support_event FOR EACH ROW SET NEW.sequence = IF(NEW.event_type = 'ACTION_RECEIPT', 0, NEW.sequence)"
+verify_cb123_local_rollback "ACTION_RECEIPT event failure" cb123-event-confirm
+mysql_query root "$root_password" cs_db 'DROP TRIGGER cb123_reject_receipt_event'
+recover_cb123_action "ACTION_RECEIPT event restoration" cb123-event-confirm
+
+prepare_cb123_action_case cb123-turn-failure
+mysql_query root "$root_password" cs_db \
+  "CREATE TRIGGER cb123_reject_turn_commit BEFORE UPDATE ON support_turn FOR EACH ROW SET NEW.outcome = IF(NEW.outcome = 'action_completed', 'invalid', NEW.outcome)"
+verify_cb123_local_rollback "terminal turn commit failure" cb123-turn-confirm
+mysql_query root "$root_password" cs_db 'DROP TRIGGER cb123_reject_turn_commit'
+recover_cb123_action "terminal turn commit restoration" cb123-turn-confirm
+
 stop_process agent_pid "$agent_pid"
 stop_process model_pid "$model_pid"
 stop_process commerce_pid "$commerce_pid"

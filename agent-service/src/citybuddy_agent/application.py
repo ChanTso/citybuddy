@@ -19,11 +19,22 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel, ConfigDict, Field
 
-from .actions import ConfirmationDecision, confirmation_decision
+from .actions import (
+    ACTION_SCOPE,
+    ActionJsonError,
+    ActionReceiptPayload,
+    ConfirmationDecision,
+    PendingActionReference,
+    bounded_http_post,
+    confirmation_decision,
+    strict_json_object,
+)
 from .agent_control import (
     TOOL_BOUNDARY_FAILURE_REASONS,
     AgentEvent,
     AgentRunner,
+    AttemptBudget,
+    AttemptBudgetExhausted,
     BoundedAgent,
     LiteLlmClient,
     ModelRouter,
@@ -328,6 +339,13 @@ class CitationResponse(BaseModel):
     title: str
 
 
+class ActionReceiptResponse(BaseModel):
+    model_config = ConfigDict(frozen=True)
+
+    receipt_id: str = Field(serialization_alias="receiptId")
+    status: Literal["REQUESTED"]
+
+
 class ChatResponse(BaseModel):
     model_config = ConfigDict(frozen=True)
 
@@ -337,6 +355,9 @@ class ChatResponse(BaseModel):
     reply: str
     outcome: str
     citations: tuple[CitationResponse, ...] = ()
+    action_receipt: ActionReceiptResponse | None = Field(
+        default=None, serialization_alias="actionReceipt"
+    )
 
 
 class FeedbackRequest(BaseModel):
@@ -442,6 +463,138 @@ class OboClient:
         return token
 
 
+class ActionConfirmationBoundary(Protocol):
+    def confirm(
+        self,
+        *,
+        direct_token: str,
+        pending: PendingActionReference,
+        budget: AttemptBudget,
+    ) -> ActionReceiptPayload: ...
+
+
+class HttpActionConfirmationBoundary:
+    """Resolve one claimed action only through the fixed authenticated Commerce boundary."""
+
+    def __init__(self, base_url: str, obo: OboClient) -> None:
+        self._base_url = base_url.rstrip("/")
+        self._obo = obo
+
+    def confirm(
+        self,
+        *,
+        direct_token: str,
+        pending: PendingActionReference,
+        budget: AttemptBudget,
+    ) -> ActionReceiptPayload:
+        while True:
+            try:
+                budget.charge("identity_http", ACTION_SCOPE)
+            except AttemptBudgetExhausted as exception:
+                raise ToolBoundaryFailure(
+                    status_code=503,
+                    reason="ACTION_CONFIRMATION_INDETERMINATE",
+                    detail="Action confirmation indeterminate",
+                ) from exception
+            try:
+                obo = self._obo.exchange(
+                    direct_token,
+                    pending.user_subject,
+                    pending.session_id,
+                    ACTION_SCOPE,
+                    pending.sandbox_id,
+                )
+            except HTTPException as exception:
+                if exception.status_code in {401, 403}:
+                    raise ToolBoundaryFailure(
+                        status_code=403,
+                        reason="ACTION_CONFIRMATION_IDENTITY_REJECTED",
+                        detail="Forbidden",
+                    ) from exception
+                raise ToolBoundaryFailure(
+                    status_code=503,
+                    reason="ACTION_CONFIRMATION_IDENTITY_UNAVAILABLE",
+                    detail="Service unavailable",
+                ) from exception
+            except (httpx.TimeoutException, httpx.NetworkError) as exception:
+                raise ToolBoundaryFailure(
+                    status_code=503,
+                    reason="ACTION_CONFIRMATION_IDENTITY_UNAVAILABLE",
+                    detail="Service unavailable",
+                ) from exception
+            try:
+                budget.charge("tool_http", "actions.refund.confirm")
+            except AttemptBudgetExhausted as exception:
+                raise ToolBoundaryFailure(
+                    status_code=503,
+                    reason="ACTION_CONFIRMATION_INDETERMINATE",
+                    detail="Action confirmation indeterminate",
+                ) from exception
+            headers = {
+                "Authorization": f"Bearer {obo}",
+                "X-Support-Session-Id": pending.session_id,
+                "X-Agent-Trace-Id": pending.source_trace_id,
+                "X-Agent-Turn-Id": pending.source_turn_id,
+            }
+            if pending.sandbox_id is not None:
+                headers["X-Eval-Sandbox-Id"] = pending.sandbox_id
+            try:
+                response = bounded_http_post(
+                    f"{self._base_url}/internal/tools/actions/{pending.pending_action_id}/confirm",
+                    headers=headers,
+                    json={},
+                    timeout=3.0,
+                )
+            except (httpx.TimeoutException, httpx.NetworkError):
+                continue
+            except (ActionJsonError, ValueError) as exception:
+                raise ToolBoundaryFailure(
+                    status_code=502,
+                    reason="ACTION_CONFIRMATION_RESPONSE_INVALID",
+                    detail="Invalid action confirmation response",
+                ) from exception
+            if response.status_code == 200:
+                try:
+                    receipt = ActionReceiptPayload.model_validate(
+                        strict_json_object(response.content)
+                    )
+                except (ActionJsonError, TypeError, ValueError) as exception:
+                    raise ToolBoundaryFailure(
+                        status_code=502,
+                        reason="ACTION_CONFIRMATION_RESPONSE_INVALID",
+                        detail="Invalid action confirmation response",
+                    ) from exception
+                if (
+                    receipt.pending_action_id != pending.pending_action_id
+                    or receipt.action_type != pending.action_type
+                    or receipt.order_id != pending.order_id
+                    or receipt.amount_minor != pending.amount_minor
+                    or receipt.currency != pending.currency
+                    or receipt.argument_commitment != pending.argument_commitment
+                ):
+                    raise ToolBoundaryFailure(
+                        status_code=502,
+                        reason="ACTION_CONFIRMATION_RESPONSE_INVALID",
+                        detail="Invalid action confirmation response",
+                    )
+                return receipt
+            if response.status_code in {401, 403, 404}:
+                raise ToolBoundaryFailure(
+                    status_code=403,
+                    reason="ACTION_CONFIRMATION_REJECTED",
+                    detail="Forbidden",
+                )
+            if response.status_code in {400, 409, 422}:
+                raise ToolBoundaryFailure(
+                    status_code=409,
+                    reason="ACTION_CONFIRMATION_CONFLICT",
+                    detail="Action confirmation conflict",
+                )
+            if response.status_code in {408, 429, 502, 503, 504}:
+                continue
+            raise RuntimeError("Unexpected action confirmation response")
+
+
 def create_app(
     settings: AgentSettings | None = None,
     *,
@@ -452,6 +605,7 @@ def create_app(
     feedback: FeedbackStore | None = None,
     evidence: EvaluationEvidenceStore | None = None,
     liveness: SandboxLiveness | None = None,
+    actions: ActionConfirmationBoundary | None = None,
 ) -> FastAPI:
     """Construct the app, enabling identity routes only with complete runtime configuration."""
     resolved = settings or AgentSettings()
@@ -542,6 +696,10 @@ def create_app(
     else:
         resolved_agent = agent
     app.state.obo_client = resolved_obo
+    resolved_actions = actions or HttpActionConfirmationBoundary(
+        resolved.commerce_tools_url, resolved_obo
+    )
+    app.state.actions = resolved_actions
     app.state.agent = resolved_agent
 
     def authorize(
@@ -659,7 +817,7 @@ def create_app(
         if replay is not None:
             return replay
         try:
-            pending = resolved_conversations.current_pending_action(
+            current_action = resolved_conversations.current_action_reference(
                 session_id=session_id,
                 subject=principal.subject,
                 sandbox_id=principal.sandbox_id,
@@ -670,13 +828,52 @@ def create_app(
                 reason="ACTION_REFERENCE_PERSISTENCE_UNAVAILABLE",
                 detail="Service unavailable",
             ) from exception
+        pending = current_action.reference if current_action is not None else None
         decision = confirmation_decision(request.message)
+        if (
+            current_action is not None
+            and current_action.state == "CONFIRMING"
+            and decision is not ConfirmationDecision.CONFIRM
+        ):
+            raise ActionArbitrationConflictError
         if pending is not None and decision is ConfirmationDecision.CONFIRM:
-            raise ToolBoundaryFailure(
-                status_code=409,
-                reason="ACTION_CONFIRMATION_UNAVAILABLE",
-                detail="Action confirmation unavailable",
+            try:
+                start = resolved_conversations.begin_or_resume_confirmation_turn(
+                    session_id=session_id,
+                    subject=principal.subject,
+                    sandbox_id=principal.sandbox_id,
+                    correlation_key=correlation_key,
+                    message=request.message,
+                    pending=pending,
+                )
+            except pymysql.MySQLError as exception:
+                raise ToolBoundaryFailure(
+                    status_code=503,
+                    reason="ACTION_TURN_RESERVATION_PERSISTENCE_UNAVAILABLE",
+                    detail="Service unavailable",
+                ) from exception
+            if start.replay is not None:
+                return start.replay
+            action_events: list[AgentEvent] = []
+            receipt = resolved_actions.confirm(
+                direct_token=token,
+                pending=pending,
+                budget=AttemptBudget(resolved.attempt_budget, action_events),
             )
+            try:
+                return resolved_conversations.complete_action_receipt(
+                    start=start,
+                    pending=pending,
+                    receipt=receipt,
+                    response_text="The refund request was accepted.",
+                    events=tuple(action_events),
+                )
+            except pymysql.MySQLError as exception:
+                raise ToolBoundaryFailure(
+                    status_code=503,
+                    reason="ACTION_RECEIPT_PERSISTENCE_UNAVAILABLE",
+                    detail="Action confirmation indeterminate",
+                ) from exception
         require_liveness(principal, token)
         try:
             start = resolved_conversations.begin_turn(
@@ -866,6 +1063,14 @@ def create_app(
                     title=evidence.title,
                 )
                 for evidence in result.retrieval_evidence
+            ),
+            action_receipt=(
+                ActionReceiptResponse(
+                    receipt_id=result.action_receipt.receipt.receipt_id,
+                    status=result.action_receipt.receipt.status,
+                )
+                if result.action_receipt is not None
+                else None
             ),
         )
 

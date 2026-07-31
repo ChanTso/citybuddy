@@ -1,6 +1,6 @@
 {
   "openapi": "3.1.0",
-  "info": {"title": "CityBuddy agent API", "version": "CB-122"},
+  "info": {"title": "CityBuddy agent API", "version": "CB-123"},
   "paths": {
     "/api/sessions": {
       "post": {
@@ -79,7 +79,8 @@
                     "turnId",
                     "reply",
                     "outcome",
-                    "citations"
+                    "citations",
+                    "actionReceipt"
                   ],
                   "properties": {
                     "conversationId": {"type": "string", "format": "uuid", "readOnly": true},
@@ -96,7 +97,8 @@
                         "action_pending",
                         "action_clarification",
                         "action_declined",
-                        "action_expired"
+                        "action_expired",
+                        "action_completed"
                       ]
                     },
                     "citations": {
@@ -104,6 +106,13 @@
                       "maxItems": 3,
                       "items": {"$ref": "#/components/schemas/RetrievalCitation"},
                       "description": "Source references projected only from sufficient retrieval evidence committed with this turn."
+                    },
+                    "actionReceipt": {
+                      "oneOf": [
+                        {"$ref": "#/components/schemas/ActionReceiptSummary"},
+                        {"type": "null"}
+                      ],
+                      "description": "Present only for a locally committed immutable ActionReceipt closure."
                     }
                   }
                 }
@@ -283,6 +292,15 @@
           "title": {"type": "string", "minLength": 1, "maxLength": 200}
         }
       },
+      "ActionReceiptSummary": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["receiptId", "status"],
+        "properties": {
+          "receiptId": {"type": "string", "format": "uuid", "readOnly": true},
+          "status": {"type": "string", "enum": ["REQUESTED"]}
+        }
+      },
       "SseTokenData": {
         "type": "object",
         "additionalProperties": false,
@@ -298,18 +316,18 @@
         "additionalProperties": false,
         "required": ["sequence", "receiptId", "status"],
         "properties": {
-          "sequence": {"type": "integer", "minimum": 1, "maximum": 5},
+          "sequence": {"type": "integer", "minimum": 1, "maximum": 6},
           "receiptId": {"type": "string", "format": "uuid", "readOnly": true},
-          "status": {"type": "string", "enum": ["SUCCEEDED"]}
+          "status": {"type": "string", "enum": ["REQUESTED"]}
         },
-        "description": "The only public action-status carrier, reserved for verified ActionReceipt truth in CB-123; CB-122 never emits it."
+        "description": "The only public action-status carrier, emitted from verified local ActionReceipt projection truth before optional prose."
       },
       "SseDoneData": {
         "type": "object",
         "additionalProperties": false,
         "required": ["sequence", "conversationId", "traceId", "turnId", "outcome"],
         "properties": {
-          "sequence": {"type": "integer", "minimum": 1, "maximum": 5},
+          "sequence": {"type": "integer", "minimum": 1, "maximum": 6},
           "conversationId": {"type": "string", "format": "uuid", "readOnly": true},
           "traceId": {"type": "string", "format": "uuid", "readOnly": true},
           "turnId": {"type": "string", "format": "uuid", "readOnly": true},
@@ -320,7 +338,8 @@
               "action_pending",
               "action_clarification",
               "action_declined",
-              "action_expired"
+              "action_expired",
+              "action_completed"
             ]
           }
         }

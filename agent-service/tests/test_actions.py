@@ -8,6 +8,7 @@ import pytest
 from citybuddy_agent.actions import (
     ActionEvidenceError,
     ActionJsonError,
+    ActionReceiptPayload,
     ConfirmationDecision,
     PendingActionPayload,
     PendingActionReference,
@@ -41,9 +42,13 @@ class ReferenceInventoryCursor:
         self,
         source_references: tuple[tuple[object, ...], ...] = (),
         resolution_references: tuple[tuple[object, ...], ...] = (),
+        confirmation_references: tuple[tuple[object, ...], ...] = (),
+        receipt_projections: tuple[tuple[object, ...], ...] = (),
     ) -> None:
         self.source_references = source_references
         self.resolution_references = resolution_references
+        self.confirmation_references = confirmation_references
+        self.receipt_projections = receipt_projections
         self.query = ""
 
     def execute(self, query: str, parameters: tuple[object, ...]) -> None:
@@ -53,8 +58,13 @@ class ReferenceInventoryCursor:
     def fetchall(self) -> tuple[tuple[object, ...], ...]:
         if "WHERE source_turn_id = %s LIMIT 2" in self.query:
             return self.source_references
-        assert "WHERE resolution_turn_id = %s LIMIT 2" in self.query
-        return self.resolution_references
+        if "WHERE resolution_turn_id = %s LIMIT 2" in self.query:
+            return self.resolution_references
+        if "FROM pending_action_reference" in self.query:
+            assert "WHERE confirmation_turn_id = %s LIMIT 2" in self.query
+            return self.confirmation_references
+        assert "FROM action_receipt_projection" in self.query
+        return self.receipt_projections
 
 
 class ActionTruthInventoryCursor:
@@ -66,16 +76,20 @@ class ActionTruthInventoryCursor:
         self.events = events
         self.references = references
         self.query = ""
+        self.queries: list[str] = []
 
     def execute(self, query: str, parameters: tuple[object, ...]) -> None:
         del parameters
         self.query = query
+        self.queries.append(query)
 
     def fetchall(self) -> tuple[tuple[object, ...], ...]:
         if "FROM support_event" in self.query:
             return self.events
-        assert "FROM pending_action_reference" in self.query
-        return self.references
+        if "FROM pending_action_reference" in self.query:
+            return self.references
+        assert "FROM action_receipt_projection" in self.query
+        return ()
 
 
 @pytest.mark.parametrize(
@@ -101,7 +115,9 @@ def test_evaluation_action_scope_is_enumerated_before_terminal_outcome_validatio
         )
         is expected
     )
-    assert "source_turn_id = %s OR resolution_turn_id = %s" in cursor.query
+    assert any(
+        "source_turn_id = %s OR resolution_turn_id = %s" in query for query in cursor.queries
+    )
 
 
 @pytest.mark.parametrize("outcome", ["completed", "action_clarification"])
@@ -212,6 +228,36 @@ def test_pending_action_schema_is_closed_and_canonical() -> None:
             PendingActionPayload.model_validate(strict_json_object(json.dumps(damaged).encode()))
 
 
+def test_action_receipt_schema_is_closed_strict_and_complete() -> None:
+    document: dict[str, object] = {
+        "receiptId": "00000000-0000-0000-0000-000000000211",
+        "pendingActionId": "00000000-0000-0000-0000-000000000121",
+        "actionType": "REFUND_REQUEST",
+        "status": "REQUESTED",
+        "orderId": "00000000-0000-0000-0000-000000000040",
+        "refundId": "00000000-0000-0000-0000-000000000071",
+        "resourceVersion": 1,
+        "amountMinor": 400,
+        "currency": "CNY",
+        "committedAt": "2026-08-01T01:02:03.123456Z",
+        "replayed": False,
+    }
+    receipt = ActionReceiptPayload.model_validate(strict_json_object(json.dumps(document).encode()))
+    assert receipt.committed_at == datetime(2026, 8, 1, 1, 2, 3, 123456, tzinfo=UTC)
+    for key in document:
+        missing = dict(document)
+        del missing[key]
+        with pytest.raises(ValidationError):
+            ActionReceiptPayload.model_validate(strict_json_object(json.dumps(missing).encode()))
+        wrong_type = dict(document)
+        wrong_type[key] = None
+        with pytest.raises(ValidationError):
+            ActionReceiptPayload.model_validate(strict_json_object(json.dumps(wrong_type).encode()))
+    unknown = {**document, "unknown": "forbidden"}
+    with pytest.raises(ValidationError):
+        ActionReceiptPayload.model_validate(strict_json_object(json.dumps(unknown).encode()))
+
+
 def test_pending_reference_and_source_turn_matrix_binds_every_persisted_field() -> None:
     expiry = datetime(2026, 7, 28, 4, 0, 0, 123456, tzinfo=UTC)
     order_id = "00000000-0000-0000-0000-000000000040"
@@ -230,6 +276,8 @@ def test_pending_reference_and_source_turn_matrix_binds_every_persisted_field() 
         400,
         "CNY",
         "PENDING",
+        None,
+        None,
         expiry,
         None,
         None,
@@ -261,15 +309,15 @@ def test_pending_reference_and_source_turn_matrix_binds_every_persisted_field() 
 
     resolved_row = list(row)
     resolved_row[13] = "DECLINED"
-    resolved_row[15] = expiry
-    resolved_row[16] = "00000000-0000-0000-0000-000000000130"
-    resolved_row[17] = "00000000-0000-0000-0000-000000000131"
+    resolved_row[17] = expiry
+    resolved_row[18] = "00000000-0000-0000-0000-000000000130"
+    resolved_row[19] = "00000000-0000-0000-0000-000000000131"
     resolved, resolved_state, _ = validate_pending_action_reference(
         tuple(resolved_row), [source_turn], **expected
     )
     assert resolved_state == "DECLINED"
-    assert resolved.resolution_turn_id == resolved_row[16]
-    assert resolved.resolution_trace_id == resolved_row[17]
+    assert resolved.resolution_turn_id == resolved_row[18]
+    assert resolved.resolution_trace_id == resolved_row[19]
 
     damaged_values: dict[int, object] = {
         0: "not-a-uuid",
@@ -286,10 +334,12 @@ def test_pending_reference_and_source_turn_matrix_binds_every_persisted_field() 
         11: True,
         12: "AUD",
         13: "DECLINED",
-        14: "not-a-timestamp",
-        15: expiry,
-        16: "00000000-0000-0000-0000-000000000998",
-        17: "00000000-0000-0000-0000-000000000997",
+        14: "00000000-0000-0000-0000-000000000998",
+        15: "00000000-0000-0000-0000-000000000997",
+        16: "not-a-timestamp",
+        17: expiry,
+        18: "00000000-0000-0000-0000-000000000998",
+        19: "00000000-0000-0000-0000-000000000997",
     }
     for index, value in damaged_values.items():
         damaged = list(row)

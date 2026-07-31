@@ -1,8 +1,8 @@
 # CityBuddy implementation index
 
-**Document version:** v0.36\
-**Verification date:** 2026-07-29\
-**Repository phase:** CB-122 Agent PendingAction reference, local decisions, and evidence closure verified; CB-123 is the sole ready slice
+**Document version:** v0.37\
+**Verification date:** 2026-08-01\
+**Repository phase:** CB-123 Agent confirmation arbitration, ActionReceipt projection, and turn commit in progress
 
 ## How to use this index
 
@@ -130,7 +130,7 @@ The linked slice name is the canonical detailed specification. Target outcomes a
 | [CB-118 — Commerce PendingAction and atomic ActionReceipt transaction](docs/slices/CB-118.md) | P1 | `VERIFIED` | `CB-116`, `CB-117`, `CB-082` |
 | [CB-121 — Agent confirmation, receipt projection, and turn commit](docs/slices/CB-121.md) | P1 | `BLOCKED` | `CB-118`, `CB-082` |
 | [CB-122 — Agent PendingAction reference, local decisions, and evidence closure](docs/slices/CB-122.md) | P1 | `VERIFIED` | `CB-118`, `CB-082` |
-| [CB-123 — Agent confirmation arbitration, ActionReceipt projection, and turn commit](docs/slices/CB-123.md) | P1 | `READY` | `CB-122`, `CB-118`, `CB-082` |
+| [CB-123 — Agent confirmation arbitration, ActionReceipt projection, and turn commit](docs/slices/CB-123.md) | P1 | `IN_PROGRESS` | `CB-122`, `CB-118`, `CB-082` |
 | [CB-130 — Memory watermarks, prompt/PII, and tiered output safety](docs/slices/CB-130.md) | P1 | `PLANNED` | `CB-113`, `CB-123` |
 | [CB-131 — Authoritative handoff tickets and agent projection](docs/slices/CB-131.md) | P1 | `PLANNED` | `CB-130` |
 | `CB-132 — Reviewed failure-candidate capture and authenticated export` | P1 | `PLANNED` | `CB-131` |

@@ -41,6 +41,7 @@ def test_chat_response_is_allowlisted_and_server_ids_are_read_only() -> None:
         "reply",
         "outcome",
         "citations",
+        "actionReceipt",
     }
     for name in ("conversationId", "traceId", "turnId"):
         assert response["properties"][name]["readOnly"] is True
@@ -53,6 +54,7 @@ def test_chat_response_is_allowlisted_and_server_ids_are_read_only() -> None:
         "action_clarification",
         "action_declined",
         "action_expired",
+        "action_completed",
     ]
     citation = contract()["components"]["schemas"]["RetrievalCitation"]
     assert citation["additionalProperties"] is False
@@ -256,20 +258,52 @@ def test_cb122_pending_action_reference_is_agent_owned_bounded_and_least_privile
     assert "action_receipt_projection" not in migration
     assert (
         "GRANT SELECT, INSERT, UPDATE "
-        "(state, resolved_at, resolution_turn_id, resolution_trace_id) "
+        "(state, confirmation_turn_id, confirmation_trace_id, resolved_at, "
+        "resolution_turn_id, resolution_trace_id) "
         "ON cs_db.pending_action_reference TO 'agent_app'@'%';"
     ) in grants
     assert "DELETE ON cs_db.pending_action_reference" not in grants
     assert "UPDATE (target_version)" not in grants
     assert "UPDATE ON cs_db.support_event" not in grants
     assert "DELETE ON cs_db.support_event" not in grants
-    assert payload["info"]["version"] == "CB-122"
+    assert payload["info"]["version"] == "CB-123"
     for route in ("/api/chat", "/api/chat/stream"):
         responses = payload["paths"][route]["post"]["responses"]
         assert set(responses) >= {"409", "502", "503"}
-    assert payload["components"]["schemas"]["SseActionReceiptData"]["description"].endswith(
-        "CB-122 never emits it."
+    assert (
+        "verified local ActionReceipt projection truth"
+        in payload["components"]["schemas"]["SseActionReceiptData"]["description"]
     )
+
+
+def test_cb123_action_receipt_projection_is_atomic_immutable_and_least_privilege() -> None:
+    migration = (
+        ROOT / "infra/mysql/migrations/agent/V008__action_receipt_projection.sql"
+    ).read_text(encoding="utf-8")
+    grants = (ROOT / "infra/mysql/grants/V001__migration_access.sql").read_text(encoding="utf-8")
+    payload = contract()
+
+    assert "state IN ('PENDING', 'CONFIRMING', 'DECLINED', 'EXPIRED', 'CONFIRMED')" in migration
+    assert "CREATE TABLE action_receipt_projection" in migration
+    assert "UNIQUE KEY uq_action_receipt_projection_pending (pending_action_id)" in migration
+    assert "UNIQUE KEY uq_action_receipt_projection_confirmation_turn" in migration
+    assert (
+        "FOREIGN KEY (confirmation_turn_id, confirmation_trace_id, session_id, user_subject)"
+        in migration
+    )
+    assert "'ACTION_RECEIPT'" in migration
+    assert "'action_completed'" in migration
+    assert "GRANT SELECT, INSERT ON cs_db.action_receipt_projection TO 'agent_app'@'%';" in grants
+    assert "UPDATE ON cs_db.action_receipt_projection" not in grants
+    assert "DELETE ON cs_db.action_receipt_projection" not in grants
+    response = payload["paths"]["/api/chat"]["post"]["responses"]["200"]["content"][
+        "application/json"
+    ]["schema"]
+    assert "actionReceipt" in response["required"]
+    assert "action_completed" in response["properties"]["outcome"]["enum"]
+    assert payload["components"]["schemas"]["SseActionReceiptData"]["properties"]["status"][
+        "enum"
+    ] == ["REQUESTED"]
 
 
 def test_commerce_tool_contract_is_exact_obo_and_bounded_view() -> None:

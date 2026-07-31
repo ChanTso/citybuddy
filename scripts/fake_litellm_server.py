@@ -20,6 +20,7 @@ commerce_base_url = ""
 
 def scenario(message: str) -> str:
     for value in (
+        "action-prepare-small",
         "tool-success",
         "tool-malformed",
         "tool-unknown",
@@ -136,14 +137,15 @@ async def complete(request: Request) -> JSONResponse:
         return JSONResponse(status_code=503, content={"error": "transient"})
     if selected == "budget-exhaustion":
         return JSONResponse(content=tool_message("unknown.tool", "{}"))
-    if selected == "action-prepare" and not has_tool_feedback:
+    if selected in {"action-prepare", "action-prepare-small"} and not has_tool_feedback:
+        amount_minor = 50 if selected == "action-prepare-small" else 400
         return JSONResponse(
             content=tool_message(
                 "actions.refund.prepare",
                 json.dumps(
                     {
                         "orderId": "00000000-0000-0000-0000-000000000105",
-                        "amountMinor": 400,
+                        "amountMinor": amount_minor,
                         "currency": "CNY",
                     },
                     separators=(",", ":"),
@@ -219,6 +221,42 @@ async def action_prepare_proxy(request: Request) -> Response:
     if counts["action-proxy:lost-after-upstream"] == 0:
         counts["action-proxy:lost-after-upstream"] += 1
         return JSONResponse(status_code=503, content={"error": "response lost after upstream"})
+    return Response(
+        content=upstream.content,
+        status_code=upstream.status_code,
+        media_type=upstream.headers.get("content-type", "application/json"),
+    )
+
+
+@app.post("/internal/tools/actions/{pending_action_id}/confirm")
+async def action_confirm_proxy(pending_action_id: str, request: Request) -> Response:
+    """Commit upstream once, then expose one bounded malformed response for recovery evidence."""
+    if not commerce_base_url:
+        return JSONResponse(status_code=503, content={"error": "proxy is not configured"})
+    forwarded_headers = {
+        name: value
+        for name, value in request.headers.items()
+        if name
+        in {
+            "authorization",
+            "content-type",
+            "x-support-session-id",
+            "x-eval-sandbox-id",
+            "x-agent-trace-id",
+            "x-agent-turn-id",
+        }
+    }
+    async with httpx.AsyncClient(timeout=5.0) as client:
+        upstream = await client.post(
+            f"{commerce_base_url}/internal/tools/actions/{pending_action_id}/confirm",
+            headers=forwarded_headers,
+            content=await request.body(),
+        )
+    counts[f"action-confirm:{pending_action_id}"] += 1
+    if upstream.status_code == 200 and counts["action-confirm:malformed-after-upstream"] == 0:
+        counts["action-confirm:malformed-after-upstream"] += 1
+        malformed = b'{"receipt":' + (b"[" * 17) + b"0" + (b"]" * 17) + b"}"
+        return Response(content=malformed, status_code=200, media_type="application/json")
     return Response(
         content=upstream.content,
         status_code=upstream.status_code,

@@ -3,6 +3,8 @@ import json
 import logging
 import time
 from collections.abc import Mapping
+from contextlib import contextmanager
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from typing import Any, Literal
 
@@ -10,11 +12,17 @@ import httpx
 import jwt
 import pymysql
 import pytest
-from citybuddy_agent.actions import PendingActionPayload, PendingActionReference
+from citybuddy_agent.actions import (
+    ActionReceiptPayload,
+    PendingActionPayload,
+    PendingActionReference,
+    StoredActionReceipt,
+)
 from citybuddy_agent.agent_control import (
     AgentEvent,
     AgentRunner,
     AgentRunResult,
+    AttemptBudget,
     ToolBoundaryFailure,
 )
 from citybuddy_agent.application import (
@@ -22,12 +30,14 @@ from citybuddy_agent.application import (
     AgentSettings,
     DirectJwtValidator,
     DirectPrincipal,
+    HttpActionConfirmationBoundary,
     HttpSandboxLiveness,
     OboClient,
     SessionStore,
     create_app,
 )
 from citybuddy_agent.conversation import (
+    ActionReferenceSnapshot,
     ConversationOwnershipError,
     ConversationResult,
     ConversationStore,
@@ -91,6 +101,7 @@ class MemoryConversationStore(ConversationStore):
         self.pending: dict[tuple[str, str], tuple[str, TurnStart]] = {}
         self.failures: list[tuple[str, str]] = []
         self.action_pending: PendingActionReference | None = None
+        self.action_state = "PENDING"
         self.calls = 0
 
     def replay_turn(
@@ -124,6 +135,18 @@ class MemoryConversationStore(ConversationStore):
             raise ConversationOwnershipError
         return self.action_pending
 
+    def current_action_reference(
+        self, *, session_id: str, subject: str, sandbox_id: str | None
+    ) -> ActionReferenceSnapshot | None:
+        pending = self.current_pending_action(
+            session_id=session_id,
+            subject=subject,
+            sandbox_id=sandbox_id,
+        )
+        if pending is None:
+            return None
+        return ActionReferenceSnapshot(pending, self.action_state)  # type: ignore[arg-type]
+
     def begin_turn(
         self,
         *,
@@ -153,6 +176,55 @@ class MemoryConversationStore(ConversationStore):
         )
         self.pending[key] = (message, start)
         return start
+
+    def begin_or_resume_confirmation_turn(
+        self,
+        *,
+        session_id: str,
+        subject: str,
+        sandbox_id: str | None,
+        correlation_key: str,
+        message: str,
+        pending: PendingActionReference,
+    ) -> TurnStart:
+        key = (session_id, correlation_key)
+        existing_result = self.results.get(key)
+        if existing_result is not None:
+            if existing_result[0] != message:
+                raise CorrelationConflictError
+            result = existing_result[1]
+            return TurnStart(
+                result.conversation_id,
+                result.trace_id,
+                result.turn_id,
+                replay=result,
+            )
+        existing_start = self.pending.get(key)
+        if existing_start is not None:
+            if existing_start[0] != message:
+                raise CorrelationConflictError
+            return replace(
+                existing_start[1],
+                confirmation_pending_id=pending.pending_action_id,
+            )
+        start = self.begin_turn(
+            session_id=session_id,
+            subject=subject,
+            sandbox_id=sandbox_id,
+            correlation_key=correlation_key,
+            message=message,
+        )
+        if start.replay is not None:
+            return start
+        if self.action_pending != pending or self.action_state not in {"PENDING", "CONFIRMING"}:
+            raise RuntimeError("test PendingAction arbitration is inconsistent")
+        self.action_state = "CONFIRMING"
+        self.action_pending = replace(
+            pending,
+            confirmation_turn_id=start.turn_id,
+            confirmation_trace_id=start.trace_id,
+        )
+        return replace(start, confirmation_pending_id=pending.pending_action_id)
 
     def complete_turn(
         self,
@@ -194,6 +266,7 @@ class MemoryConversationStore(ConversationStore):
                 currency=pending_action.currency,
                 expires_at=pending_action.expires_at,
             )
+            self.action_state = "PENDING"
         del self.pending[key]
         return result
 
@@ -226,6 +299,38 @@ class MemoryConversationStore(ConversationStore):
             outcome="action_expired",
             events=(),
         )
+
+    def complete_action_receipt(
+        self,
+        *,
+        start: TurnStart,
+        pending: PendingActionReference,
+        receipt: ActionReceiptPayload,
+        response_text: str,
+        events: tuple[AgentEvent, ...] = (),
+    ) -> ConversationResult:
+        del events
+        key, reserved = next(
+            item for item in self.pending.items() if item[1][1].turn_id == start.turn_id
+        )
+        stored = StoredActionReceipt(receipt, pending.source_turn_id, start.turn_id)
+        result = ConversationResult(
+            start.conversation_id,
+            start.trace_id,
+            start.turn_id,
+            response_text,
+            "action_completed",
+            action_receipt=stored,
+        )
+        self.results[key] = (reserved[0], result)
+        self.action_state = "CONFIRMED"
+        self.action_pending = replace(
+            pending,
+            confirmation_turn_id=start.turn_id,
+            confirmation_trace_id=start.trace_id,
+        )
+        del self.pending[key]
+        return result
 
     def fail_turn(self, *, start: TurnStart, failure_code: str) -> None:
         self.failures.append((start.turn_id, failure_code))
@@ -320,6 +425,85 @@ class PreparedActionAgent(AgentRunner):
             ),
             pending_action=self.pending,
         )
+
+
+class MemoryActionConfirmationBoundary:
+    def __init__(self) -> None:
+        self.calls = 0
+
+    def confirm(
+        self,
+        *,
+        direct_token: str,
+        pending: PendingActionReference,
+        budget: object,
+    ) -> ActionReceiptPayload:
+        del direct_token, budget
+        self.calls += 1
+        return ActionReceiptPayload.model_validate(
+            {
+                "receiptId": "00000000-0000-0000-0000-000000000211",
+                "pendingActionId": pending.pending_action_id,
+                "actionType": pending.action_type,
+                "status": "REQUESTED",
+                "orderId": pending.order_id,
+                "refundId": "00000000-0000-0000-0000-000000000212",
+                "resourceVersion": 1,
+                "amountMinor": pending.amount_minor,
+                "currency": pending.currency,
+                "committedAt": "2026-08-01T01:02:03.123456Z",
+                "replayed": False,
+            }
+        )
+
+
+def confirmation_pending(
+    *, session_id: str = "session-1", sandbox_id: str | None = "sandbox-1"
+) -> PendingActionReference:
+    prepared = PreparedActionAgent().pending
+    return PendingActionReference(
+        pending_action_id=prepared.pending_action_id,
+        source_turn_id=prepared.turn_id,
+        source_trace_id=prepared.trace_id,
+        conversation_id="00000000-0000-0000-0000-000000000124",
+        session_id=session_id,
+        user_subject="user-1",
+        sandbox_id=sandbox_id,
+        action_type=prepared.action_type,
+        argument_commitment=prepared.argument_commitment,
+        order_id=prepared.order_id,
+        target_version=prepared.target_version,
+        amount_minor=prepared.amount_minor,
+        currency=prepared.currency,
+        expires_at=prepared.expires_at,
+    )
+
+
+def confirmation_receipt(pending: PendingActionReference) -> ActionReceiptPayload:
+    return ActionReceiptPayload.model_validate(
+        {
+            "receiptId": "00000000-0000-0000-0000-000000000211",
+            "pendingActionId": pending.pending_action_id,
+            "actionType": pending.action_type,
+            "status": "REQUESTED",
+            "orderId": pending.order_id,
+            "refundId": "00000000-0000-0000-0000-000000000212",
+            "resourceVersion": 1,
+            "amountMinor": pending.amount_minor,
+            "currency": pending.currency,
+            "committedAt": "2026-08-01T01:02:03.123456Z",
+            "replayed": True,
+        }
+    )
+
+
+def httpx_stream(callback: Any) -> Any:
+    @contextmanager
+    def stream(method: str, url: str, **kwargs: Any) -> Any:
+        assert method == "POST"
+        yield callback(url, **kwargs)
+
+    return stream
 
 
 class BoundaryFailingAgent(AgentRunner):
@@ -422,7 +606,13 @@ def test_action_request_failure_producer_inventory_is_closed() -> None:
         "ACTION_DECLINE_PERSISTENCE_UNAVAILABLE",
         "ACTION_CLARIFICATION_PERSISTENCE_UNAVAILABLE",
         "AGENT_TURN_COMPLETION_PERSISTENCE_UNAVAILABLE",
-        "ACTION_CONFIRMATION_UNAVAILABLE",
+        "ACTION_RECEIPT_PERSISTENCE_UNAVAILABLE",
+        "ACTION_CONFIRMATION_IDENTITY_REJECTED",
+        "ACTION_CONFIRMATION_IDENTITY_UNAVAILABLE",
+        "ACTION_CONFIRMATION_INDETERMINATE",
+        "ACTION_CONFIRMATION_RESPONSE_INVALID",
+        "ACTION_CONFIRMATION_REJECTED",
+        "ACTION_CONFIRMATION_CONFLICT",
     }
 
 
@@ -594,6 +784,87 @@ def test_evaluation_evidence_normalizes_mysql_timestamps_to_utc() -> None:
 
     assert normalized.isoformat() == "2026-07-18T12:00:00+00:00"
     assert normalized.tzinfo is UTC
+
+
+@pytest.mark.parametrize(
+    ("state", "expected_validator"),
+    (("DECLINED", "resolution"), ("CONFIRMED", "confirmation")),
+)
+def test_evaluation_pending_source_validates_its_later_durable_closure(
+    monkeypatch: pytest.MonkeyPatch,
+    state: str,
+    expected_validator: str,
+) -> None:
+    pending = replace(
+        confirmation_pending(),
+        confirmation_turn_id="00000000-0000-0000-0000-000000000225",
+        confirmation_trace_id="00000000-0000-0000-0000-000000000226",
+        resolution_turn_id="00000000-0000-0000-0000-000000000227",
+        resolution_trace_id="00000000-0000-0000-0000-000000000228",
+    )
+    persisted: list[object] = [None] * 20
+    persisted[16] = pending.expires_at
+
+    class Cursor:
+        def __init__(self) -> None:
+            self.results = iter(
+                (
+                    ((pending.pending_action_id,),),
+                    (),
+                    (),
+                    (),
+                    (tuple(persisted),),
+                )
+            )
+
+        def execute(self, _query: str, _parameters: object) -> None:
+            return None
+
+        def fetchall(self) -> tuple[tuple[object, ...], ...]:
+            return next(self.results)
+
+    observed: list[str] = []
+    store = MysqlEvaluationEvidenceStore(evaluation_settings())
+    monkeypatch.setattr(
+        store,
+        "_validated_pending_reference",
+        lambda *_args, **_kwargs: (pending, state),
+    )
+    monkeypatch.setattr(store, "_validate_pending_events", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(
+        store,
+        "_validate_pending_resolution",
+        lambda *_args, **_kwargs: observed.append("resolution"),
+    )
+    monkeypatch.setattr(
+        store,
+        "_validate_pending_confirmation",
+        lambda *_args, **_kwargs: observed.append("confirmation"),
+    )
+
+    store._validate_action_truth(
+        Cursor(),  # type: ignore[arg-type]
+        rows=(
+            (
+                "event",
+                pending.source_trace_id,
+                pending.session_id,
+                pending.user_subject,
+                1,
+                "ACTION_PREPARED",
+                "{}",
+            ),
+        ),
+        trace_id=pending.source_trace_id,
+        turn_id=pending.source_turn_id,
+        session_id=pending.session_id,
+        subject=pending.user_subject,
+        sandbox_id=str(pending.sandbox_id),
+        conversation_id=pending.conversation_id,
+        terminal_outcome="action_pending",
+    )
+
+    assert observed == [expected_validator]
 
 
 def settings() -> AgentSettings:
@@ -1189,7 +1460,9 @@ def test_chat_persists_server_owned_result_and_replays_same_intent() -> None:
         "reply",
         "outcome",
         "citations",
+        "actionReceipt",
     }
+    assert first.json()["actionReceipt"] is None
     assert first.json()["citations"] == []
     assert first.json()["outcome"] == "completed"
     assert "order" not in first.json()["reply"].lower()
@@ -1240,6 +1513,8 @@ def test_cb122_decline_lock_compares_the_complete_reference_after_target_version
                 pending.amount_minor,
                 pending.currency,
                 "PENDING",
+                None,
+                None,
                 expires_at,
                 None,
                 None,
@@ -1277,14 +1552,13 @@ def test_cb122_decline_lock_compares_the_complete_reference_after_target_version
     assert cursor.execute_calls == 2
 
 
-def test_cb122_pending_decline_and_confirmation_unavailable_are_local_and_exact(
-    caplog: pytest.LogCaptureFixture,
-) -> None:
+def test_cb123_exact_confirmation_commits_and_replays_one_receipt() -> None:
     private, public_jwk = key_fixture("current-key")
     sessions = MemorySessionStore()
     session_id = sessions.create("user-123")
     conversations = MemoryConversationStore(sessions)
     agent = PreparedActionAgent()
+    actions = MemoryActionConfirmationBoundary()
     client = TestClient(
         create_app(
             settings(),
@@ -1292,6 +1566,7 @@ def test_cb122_pending_decline_and_confirmation_unavailable_are_local_and_exact(
             sessions=sessions,
             conversations=conversations,
             agent=agent,
+            actions=actions,
         )
     )
     headers = {
@@ -1304,36 +1579,396 @@ def test_cb122_pending_decline_and_confirmation_unavailable_are_local_and_exact(
         headers={**headers, "Idempotency-Key": "prepare"},
         json={"message": "prepare refund"},
     )
-    calls_after_prepare = conversations.calls
-    with caplog.at_level(logging.WARNING):
-        confirmation = client.post(
-            "/api/chat",
-            headers={**headers, "Idempotency-Key": "confirm"},
-            json={"message": "confirm"},
-        )
+    confirmation = client.post(
+        "/api/chat",
+        headers={**headers, "Idempotency-Key": "confirm"},
+        json={"message": "confirm"},
+    )
+    replay = client.post(
+        "/api/chat",
+        headers={**headers, "Idempotency-Key": "confirm"},
+        json={"message": "confirm"},
+    )
 
     assert prepared.status_code == 200
     assert prepared.json()["outcome"] == "action_pending"
-    assert confirmation.status_code == 409
-    assert confirmation.json() == {"detail": "Action confirmation unavailable"}
-    assert conversations.calls == calls_after_prepare
+    assert confirmation.status_code == 200
+    assert confirmation.json()["outcome"] == "action_completed"
+    assert confirmation.json()["actionReceipt"] == {
+        "receiptId": "00000000-0000-0000-0000-000000000211",
+        "status": "REQUESTED",
+    }
+    assert replay.json() == confirmation.json()
     assert conversations.action_pending is not None
+    assert conversations.action_state == "CONFIRMED"
     assert agent.calls == 1
-    assert "reason_code=ACTION_CONFIRMATION_UNAVAILABLE" in caplog.text
-    assert "ACTION_CONFIRMATION_UNAVAILABLE" not in confirmation.text
+    assert actions.calls == 1
 
-    declined = client.post(
-        "/api/chat/stream",
-        headers={**headers, "Idempotency-Key": "decline"},
-        json={"message": "decline"},
+
+@pytest.mark.parametrize(
+    ("reason", "status_code", "detail"),
+    [
+        ("ACTION_CONFIRMATION_IDENTITY_REJECTED", 403, "Forbidden"),
+        ("ACTION_CONFIRMATION_IDENTITY_UNAVAILABLE", 503, "Service unavailable"),
+        ("ACTION_CONFIRMATION_INDETERMINATE", 503, "Action confirmation indeterminate"),
+        ("ACTION_CONFIRMATION_RESPONSE_INVALID", 502, "Invalid action confirmation response"),
+        ("ACTION_CONFIRMATION_REJECTED", 403, "Forbidden"),
+        ("ACTION_CONFIRMATION_CONFLICT", 409, "Action confirmation conflict"),
+    ],
+)
+def test_cb123_confirmation_producers_are_request_local_and_do_not_leak(
+    reason: str,
+    status_code: int,
+    detail: str,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    class FailingConfirmationBoundary:
+        def confirm(self, **kwargs: object) -> ActionReceiptPayload:
+            del kwargs
+            raise ToolBoundaryFailure(status_code=status_code, reason=reason, detail=detail)
+
+    private, public_jwk = key_fixture("current-key")
+    sessions = MemorySessionStore()
+    session_id = sessions.create("user-123")
+    conversations = MemoryConversationStore(sessions)
+    client = TestClient(
+        create_app(
+            settings(),
+            validator=DirectJwtValidator(settings(), CountingJwksSource([public_jwk])),
+            sessions=sessions,
+            conversations=conversations,
+            agent=PreparedActionAgent(),
+            actions=FailingConfirmationBoundary(),
+        )
     )
-    assert declined.status_code == 200
-    assert declined.text.count("event: token\n") == 1
-    assert declined.text.count("event: done\n") == 1
-    assert '"outcome":"action_declined"' in declined.text
-    assert "event: action_receipt" not in declined.text
-    assert conversations.action_pending is None
-    assert agent.calls == 1
+    headers = {
+        "Authorization": f"Bearer {direct_token(private, 'current-key')}",
+        "X-Session-Id": session_id,
+    }
+    assert (
+        client.post(
+            "/api/chat",
+            headers={**headers, "Idempotency-Key": f"prepare-{reason}"},
+            json={"message": "prepare refund"},
+        ).status_code
+        == 200
+    )
+
+    with caplog.at_level(logging.WARNING):
+        response = client.post(
+            "/api/chat",
+            headers={**headers, "Idempotency-Key": f"confirm-{reason}"},
+            json={"message": "confirm"},
+        )
+
+    assert response.status_code == status_code
+    assert response.json() == {"detail": detail}
+    assert f"reason_code={reason}" in caplog.text
+    assert reason not in response.text
+    assert all(
+        f"reason_code={other}" not in caplog.text
+        for other in {
+            "ACTION_CONFIRMATION_IDENTITY_REJECTED",
+            "ACTION_CONFIRMATION_IDENTITY_UNAVAILABLE",
+            "ACTION_CONFIRMATION_INDETERMINATE",
+            "ACTION_CONFIRMATION_RESPONSE_INVALID",
+            "ACTION_CONFIRMATION_REJECTED",
+            "ACTION_CONFIRMATION_CONFLICT",
+        }
+        - {reason}
+    )
+    assert conversations.action_state == "CONFIRMING"
+    assert (session_id, f"confirm-{reason}") not in conversations.results
+
+
+@pytest.mark.parametrize(
+    ("case", "expected_status", "expected_reason"),
+    [
+        ("identity-rejected", 403, "ACTION_CONFIRMATION_IDENTITY_REJECTED"),
+        ("identity-unavailable", 503, "ACTION_CONFIRMATION_IDENTITY_UNAVAILABLE"),
+        ("budget-exhausted", 503, "ACTION_CONFIRMATION_INDETERMINATE"),
+        ("response-invalid", 502, "ACTION_CONFIRMATION_RESPONSE_INVALID"),
+        ("commerce-rejected", 403, "ACTION_CONFIRMATION_REJECTED"),
+        ("commerce-conflict", 409, "ACTION_CONFIRMATION_CONFLICT"),
+    ],
+)
+def test_cb123_http_confirmation_boundary_has_closed_producer_classification(
+    case: str,
+    expected_status: int,
+    expected_reason: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    pending = confirmation_pending(sandbox_id=None)
+
+    class ClassifiedObo:
+        def exchange(self, *args: object) -> str:
+            del args
+            if case == "identity-rejected":
+                raise HTTPException(status_code=403, detail="private identity detail")
+            if case == "identity-unavailable":
+                raise HTTPException(status_code=503, detail="private dependency detail")
+            return "obo"
+
+    response_status = {
+        "response-invalid": 200,
+        "commerce-rejected": 404,
+        "commerce-conflict": 409,
+    }.get(case, 200)
+    response_content = b"{}" if case == "response-invalid" else b'{"ignored":true}'
+    monkeypatch.setattr(
+        httpx,
+        "stream",
+        httpx_stream(
+            lambda url, **kwargs: httpx.Response(
+                response_status,
+                content=response_content,
+            )
+        ),
+    )
+
+    with pytest.raises(ToolBoundaryFailure) as rejected:
+        HttpActionConfirmationBoundary(
+            "https://commerce.test",
+            ClassifiedObo(),  # type: ignore[arg-type]
+        ).confirm(
+            direct_token="direct",
+            pending=pending,
+            budget=AttemptBudget(0 if case == "budget-exhausted" else 2, []),
+        )
+
+    assert (rejected.value.status_code, rejected.value.reason) == (
+        expected_status,
+        expected_reason,
+    )
+
+
+def test_cb123_response_loss_reuses_fixed_confirm_result_boundary_with_fresh_obo(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    pending = confirmation_pending()
+    receipt = confirmation_receipt(pending)
+
+    class FreshObo:
+        def __init__(self) -> None:
+            self.calls: list[tuple[object, ...]] = []
+
+        def exchange(self, *args: object) -> str:
+            self.calls.append(args)
+            return f"obo-{len(self.calls)}"
+
+    requests: list[dict[str, Any]] = []
+
+    def post(url: str, **kwargs: Any) -> httpx.Response:
+        requests.append({"url": url, **kwargs})
+        if len(requests) == 1:
+            raise httpx.ReadTimeout("response lost after authoritative commit")
+        return httpx.Response(200, json=receipt.model_dump(by_alias=True, mode="json"))
+
+    monkeypatch.setattr(httpx, "stream", httpx_stream(post))
+    obo = FreshObo()
+    events: list[AgentEvent] = []
+    observed = HttpActionConfirmationBoundary(
+        "https://commerce.test",
+        obo,  # type: ignore[arg-type]
+    ).confirm(
+        direct_token="direct",
+        pending=pending,
+        budget=AttemptBudget(4, events),
+    )
+
+    assert observed.receipt_commitment == receipt.receipt_commitment
+    assert obo.calls == [
+        ("direct", "user-1", "session-1", "refund:create", "sandbox-1"),
+        ("direct", "user-1", "session-1", "refund:create", "sandbox-1"),
+    ]
+    assert {request["url"] for request in requests} == {
+        f"https://commerce.test/internal/tools/actions/{pending.pending_action_id}/confirm"
+    }
+    assert [request["headers"]["Authorization"] for request in requests] == [
+        "Bearer obo-1",
+        "Bearer obo-2",
+    ]
+    assert [event.payload["kind"] for event in events] == [
+        "identity_http",
+        "tool_http",
+        "identity_http",
+        "tool_http",
+    ]
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        b'{"receiptId":"a","receiptId":"b"}',
+        b'{"unexpected":' + (b"[" * 17) + b"0" + (b"]" * 17) + b"}",
+        b"{" + (b" " * 4096) + b"}",
+    ],
+)
+def test_cb123_confirmation_rejects_duplicate_deep_and_oversized_receipts(
+    monkeypatch: pytest.MonkeyPatch,
+    payload: bytes,
+) -> None:
+    pending = confirmation_pending(sandbox_id=None)
+
+    class FixedObo:
+        def exchange(self, *args: object) -> str:
+            del args
+            return "obo"
+
+    monkeypatch.setattr(
+        httpx,
+        "stream",
+        httpx_stream(lambda url, **kwargs: httpx.Response(200, content=payload)),
+    )
+
+    with pytest.raises(ToolBoundaryFailure) as rejected:
+        HttpActionConfirmationBoundary(
+            "https://commerce.test",
+            FixedObo(),  # type: ignore[arg-type]
+        ).confirm(
+            direct_token="direct",
+            pending=pending,
+            budget=AttemptBudget(2, []),
+        )
+
+    assert rejected.value.status_code == 502
+    assert rejected.value.reason == "ACTION_CONFIRMATION_RESPONSE_INVALID"
+    assert rejected.value.detail == "Invalid action confirmation response"
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("pendingActionId", "00000000-0000-0000-0000-000000000999"),
+        ("actionType", "OTHER"),
+        ("orderId", "00000000-0000-0000-0000-000000000999"),
+        ("amountMinor", 401),
+        ("currency", "USD"),
+    ],
+)
+def test_cb123_confirmation_rejects_every_contradictory_reference_binding(
+    monkeypatch: pytest.MonkeyPatch,
+    field: str,
+    value: object,
+) -> None:
+    pending = confirmation_pending(sandbox_id=None)
+    payload = confirmation_receipt(pending).model_dump(by_alias=True, mode="json")
+    payload[field] = value
+
+    class FixedObo:
+        def exchange(self, *args: object) -> str:
+            del args
+            return "obo"
+
+    monkeypatch.setattr(
+        httpx,
+        "stream",
+        httpx_stream(lambda url, **kwargs: httpx.Response(200, json=payload)),
+    )
+
+    with pytest.raises(ToolBoundaryFailure) as rejected:
+        HttpActionConfirmationBoundary(
+            "https://commerce.test",
+            FixedObo(),  # type: ignore[arg-type]
+        ).confirm(
+            direct_token="direct",
+            pending=pending,
+            budget=AttemptBudget(2, []),
+        )
+
+    assert (rejected.value.status_code, rejected.value.reason) == (
+        502,
+        "ACTION_CONFIRMATION_RESPONSE_INVALID",
+    )
+
+
+def test_cb123_malformed_committed_response_recovers_same_turn_before_liveness(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    class MalformedOnceBoundary(MemoryActionConfirmationBoundary):
+        def confirm(
+            self,
+            *,
+            direct_token: str,
+            pending: PendingActionReference,
+            budget: object,
+        ) -> ActionReceiptPayload:
+            self.calls += 1
+            if self.calls == 1:
+                raise ToolBoundaryFailure(
+                    status_code=502,
+                    reason="ACTION_CONFIRMATION_RESPONSE_INVALID",
+                    detail="Invalid action confirmation response",
+                )
+            return confirmation_receipt(pending)
+
+    private, public_jwk = key_fixture("current-key")
+    resolved = evaluation_settings()
+    sessions = MemorySessionStore()
+    conversations = MemoryConversationStore(sessions)
+    liveness = MemoryLiveness()
+    actions = MalformedOnceBoundary()
+    client = TestClient(
+        create_app(
+            resolved,
+            validator=DirectJwtValidator(resolved, CountingJwksSource([public_jwk])),
+            sessions=sessions,
+            conversations=conversations,
+            agent=PreparedActionAgent(),
+            actions=actions,
+            liveness=liveness,
+        )
+    )
+    token = direct_token(
+        private,
+        "current-key",
+        token_type="eval_direct_user",
+        extra={"sandbox": "sandbox-1"},
+    )
+    base_headers = {
+        "Authorization": f"Bearer {token}",
+        "X-Eval-Sandbox-Id": "sandbox-1",
+    }
+    session_response = client.post("/api/sessions", headers=base_headers, json={})
+    session_id = session_response.json()["sessionId"]
+    headers = {**base_headers, "X-Session-Id": session_id}
+    assert (
+        client.post(
+            "/api/chat",
+            headers={**headers, "Idempotency-Key": "prepare-recovery"},
+            json={"message": "prepare refund"},
+        ).status_code
+        == 200
+    )
+    liveness_calls_before_confirmation = len(liveness.calls)
+    liveness.active = False
+
+    first = client.post(
+        "/api/chat",
+        headers={**headers, "Idempotency-Key": "confirm-recovery"},
+        json={"message": "confirm"},
+    )
+    claimed = conversations.pending[(session_id, "confirm-recovery")][1]
+    recovered = client.post(
+        "/api/chat",
+        headers={**headers, "Idempotency-Key": "confirm-recovery"},
+        json={"message": "confirm"},
+    )
+    replay = client.post(
+        "/api/chat",
+        headers={**headers, "Idempotency-Key": "confirm-recovery"},
+        json={"message": "confirm"},
+    )
+
+    assert first.status_code == 502
+    assert first.json() == {"detail": "Invalid action confirmation response"}
+    assert "reason_code=ACTION_CONFIRMATION_RESPONSE_INVALID" in caplog.text
+    assert recovered.status_code == 200
+    assert recovered.json()["outcome"] == "action_completed"
+    assert recovered.json()["turnId"] == claimed.turn_id
+    assert replay.json() == recovered.json()
+    assert actions.calls == 2
+    assert len(liveness.calls) == liveness_calls_before_confirmation
 
 
 def test_action_liveness_unavailable_has_request_local_reason_without_public_leak(
@@ -1468,7 +2103,7 @@ def test_action_authentication_authorization_and_ownership_producers_do_not_impe
     [
         ("session", "ACTION_SESSION_PERSISTENCE_UNAVAILABLE"),
         ("replay_turn", "ACTION_REPLAY_PERSISTENCE_UNAVAILABLE"),
-        ("current_pending_action", "ACTION_REFERENCE_PERSISTENCE_UNAVAILABLE"),
+        ("current_action_reference", "ACTION_REFERENCE_PERSISTENCE_UNAVAILABLE"),
         ("begin_turn", "ACTION_TURN_RESERVATION_PERSISTENCE_UNAVAILABLE"),
     ],
 )
@@ -1743,6 +2378,25 @@ def test_chat_redacts_mysql_failure() -> None:
             del session_id, subject, sandbox_id
             return None
 
+        def current_action_reference(
+            self, *, session_id: str, subject: str, sandbox_id: str | None
+        ) -> ActionReferenceSnapshot | None:
+            del session_id, subject, sandbox_id
+            return None
+
+        def begin_or_resume_confirmation_turn(
+            self,
+            *,
+            session_id: str,
+            subject: str,
+            sandbox_id: str | None,
+            correlation_key: str,
+            message: str,
+            pending: PendingActionReference,
+        ) -> TurnStart:
+            del session_id, subject, sandbox_id, correlation_key, message, pending
+            raise AssertionError("unreachable")
+
         def begin_turn(
             self,
             *,
@@ -1786,6 +2440,18 @@ def test_chat_redacts_mysql_failure() -> None:
             response_text: str,
         ) -> ConversationResult:
             del start, pending, response_text
+            raise AssertionError("unreachable")
+
+        def complete_action_receipt(
+            self,
+            *,
+            start: TurnStart,
+            pending: PendingActionReference,
+            receipt: ActionReceiptPayload,
+            response_text: str,
+            events: tuple[AgentEvent, ...] = (),
+        ) -> ConversationResult:
+            del start, pending, receipt, response_text, events
             raise AssertionError("unreachable")
 
         def fail_turn(self, *, start: TurnStart, failure_code: str) -> None:
