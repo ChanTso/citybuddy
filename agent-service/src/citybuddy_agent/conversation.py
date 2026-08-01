@@ -30,7 +30,7 @@ from .actions import (
     validate_pending_action_resolution,
     validate_resolved_action_events,
 )
-from .agent_control import AgentEvent
+from .agent_control import TOOL_BOUNDARY_FAILURE_REASONS, AgentEvent
 from .retrieval import RetrievalDecision, RetrievalEvidence
 
 
@@ -1586,6 +1586,7 @@ class MysqlConversationStore:
                     expected_session_id=session_id,
                     expected_user_subject=subject,
                     receipt=stored.receipt,
+                    tool_failure_reasons=TOOL_BOUNDARY_FAILURE_REASONS,
                 )
             except ActionEvidenceError as exception:
                 raise ConversationIntegrityError(

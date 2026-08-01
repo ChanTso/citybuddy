@@ -121,6 +121,18 @@ def test_evaluation_action_scope_is_enumerated_before_terminal_outcome_validatio
     )
 
 
+def test_evaluation_event_projection_rejects_duplicate_payload_keys() -> None:
+    store = object.__new__(MysqlEvaluationEvidenceStore)
+
+    with pytest.raises(EvaluationEvidenceInvalid):
+        store._project_event(  # noqa: SLF001
+            1,
+            "BUDGET_CHARGED",
+            '{"attempt":1,"attempt":2,"limit":4,"kind":"identity_http"}',
+            datetime.now(UTC),
+        )
+
+
 @pytest.mark.parametrize("outcome", ["completed", "action_clarification"])
 @pytest.mark.parametrize("reference_kind", ["source", "resolution"])
 def test_evaluation_rejects_action_reference_on_non_owning_turn(
@@ -290,8 +302,9 @@ def test_completed_action_event_closure_requires_receipt_and_terminal_suffix() -
 
     rows = [
         event(1, "USER_INPUT", {"accepted": True}),
+        event(2, "BUDGET_CHARGED", {"attempt": 1, "limit": 4, "kind": "identity_http"}),
         event(
-            2,
+            3,
             "ACTION_RECEIPT",
             {
                 "receiptId": receipt.receipt_id,
@@ -300,9 +313,9 @@ def test_completed_action_event_closure_requires_receipt_and_terminal_suffix() -
                 "receiptCommitment": receipt.receipt_commitment,
             },
         ),
-        event(3, "AGENT_OUTCOME", {"outcome": "action_completed"}),
-        event(4, "ASSISTANT_RESPONSE", {"outcome": "action_completed"}),
-        event(5, "TURN_COMPLETED", {"outcome": "action_completed"}),
+        event(4, "AGENT_OUTCOME", {"outcome": "action_completed"}),
+        event(5, "ASSISTANT_RESPONSE", {"outcome": "action_completed"}),
+        event(6, "TURN_COMPLETED", {"outcome": "action_completed"}),
     ]
     assert (
         len(
@@ -312,9 +325,10 @@ def test_completed_action_event_closure_requires_receipt_and_terminal_suffix() -
                 expected_session_id="session-1",
                 expected_user_subject="user-1",
                 receipt=receipt,
+                tool_failure_reasons=frozenset(),
             )
         )
-        == 5
+        == 6
     )
     for index in range(len(rows)):
         damaged = list(rows)
@@ -326,8 +340,20 @@ def test_completed_action_event_closure_requires_receipt_and_terminal_suffix() -
                 expected_session_id="session-1",
                 expected_user_subject="user-1",
                 receipt=receipt,
+                tool_failure_reasons=frozenset(),
             )
-    duplicate_receipt = [*rows[:2], rows[1], *rows[2:]]
+    damaged_budget = list(rows)
+    damaged_budget[1] = event(2, "BUDGET_CHARGED", {})
+    with pytest.raises(ActionEvidenceError):
+        validate_completed_action_events(
+            damaged_budget,
+            expected_trace_id=trace_id,
+            expected_session_id="session-1",
+            expected_user_subject="user-1",
+            receipt=receipt,
+            tool_failure_reasons=frozenset(),
+        )
+    duplicate_receipt = [*rows[:3], rows[2], *rows[3:]]
     with pytest.raises(ActionEvidenceError):
         validate_completed_action_events(
             duplicate_receipt,
@@ -335,6 +361,121 @@ def test_completed_action_event_closure_requires_receipt_and_terminal_suffix() -
             expected_session_id="session-1",
             expected_user_subject="user-1",
             receipt=receipt,
+            tool_failure_reasons=frozenset(),
+        )
+
+
+@pytest.mark.parametrize(
+    ("event_type", "duplicate_payload"),
+    [
+        (
+            "ACTION_RECEIPT",
+            '{"receiptId":"00000000-0000-0000-0000-000000000211",'
+            '"receiptId":"00000000-0000-0000-0000-000000000211",'
+            '"pendingActionId":"00000000-0000-0000-0000-000000000121",'
+            '"status":"REQUESTED","receiptCommitment":"' + "a" * 64 + '"}',
+        ),
+        (
+            "ACTION_RECEIPT",
+            '{"receiptId":"00000000-0000-0000-0000-000000000210",'
+            '"receiptId":"00000000-0000-0000-0000-000000000211",'
+            '"pendingActionId":"00000000-0000-0000-0000-000000000121",'
+            '"status":"REQUESTED","receiptCommitment":"' + "a" * 64 + '"}',
+        ),
+        (
+            "ACTION_PREPARED",
+            '{"pendingActionId":"00000000-0000-0000-0000-000000000121",'
+            '"actionType":"REFUND_REQUEST","argumentCommitment":"'
+            + "a"
+            * 64
+            + '","targetVersion":1,"targetVersion":1,'
+            '"expiresAt":"2026-07-28T04:00:00.123456Z"}',
+        ),
+        (
+            "ACTION_PREPARED",
+            '{"pendingActionId":"00000000-0000-0000-0000-000000000121",'
+            '"actionType":"REFUND_REQUEST","argumentCommitment":"'
+            + "a"
+            * 64
+            + '","targetVersion":2,"targetVersion":1,'
+            '"expiresAt":"2026-07-28T04:00:00.123456Z"}',
+        ),
+    ],
+)
+def test_conversation_and_evaluation_share_duplicate_key_rejection(
+    event_type: str, duplicate_payload: str
+) -> None:
+    trace_id = "00000000-0000-0000-0000-000000000301"
+    receipt = ActionReceiptPayload.model_validate(
+        {
+            "receiptId": "00000000-0000-0000-0000-000000000211",
+            "pendingActionId": "00000000-0000-0000-0000-000000000121",
+            "actionType": "REFUND_REQUEST",
+            "status": "REQUESTED",
+            "orderId": "00000000-0000-0000-0000-000000000040",
+            "refundId": "00000000-0000-0000-0000-000000000071",
+            "resourceVersion": 1,
+            "amountMinor": 400,
+            "currency": "CNY",
+            "committedAt": "2026-08-01T01:02:03.123456Z",
+            "replayed": False,
+        }
+    )
+
+    def row(sequence: int, kind: str, payload: str) -> tuple[object, ...]:
+        return (
+            f"00000000-0000-0000-0000-{sequence:012d}",
+            trace_id,
+            "session-1",
+            "user-1",
+            sequence,
+            kind,
+            payload,
+        )
+
+    if event_type == "ACTION_RECEIPT":
+        rows = [
+            row(1, "USER_INPUT", '{"accepted":true}'),
+            row(2, "BUDGET_CHARGED", '{"attempt":1,"limit":4,"kind":"identity_http"}'),
+            row(3, event_type, duplicate_payload),
+            row(4, "AGENT_OUTCOME", '{"outcome":"action_completed"}'),
+            row(5, "ASSISTANT_RESPONSE", '{"outcome":"action_completed"}'),
+            row(6, "TURN_COMPLETED", '{"outcome":"action_completed"}'),
+        ]
+        with pytest.raises(ActionEvidenceError):
+            validate_completed_action_events(
+                rows,
+                expected_trace_id=trace_id,
+                expected_session_id="session-1",
+                expected_user_subject="user-1",
+                receipt=receipt,
+                tool_failure_reasons=frozenset(),
+            )
+    else:
+        rows = [
+            row(1, "USER_INPUT", '{"accepted":true}'),
+            row(2, event_type, duplicate_payload),
+            row(3, "AGENT_OUTCOME", '{"outcome":"action_pending"}'),
+            row(4, "ASSISTANT_RESPONSE", '{"outcome":"action_pending"}'),
+            row(5, "TURN_COMPLETED", '{"outcome":"action_pending"}'),
+        ]
+        with pytest.raises(ActionEvidenceError):
+            validate_pending_action_events(
+                rows,
+                expected_trace_id=trace_id,
+                expected_session_id="session-1",
+                expected_user_subject="user-1",
+                pending_action_id="00000000-0000-0000-0000-000000000121",
+                action_type="REFUND_REQUEST",
+                argument_commitment="a" * 64,
+                target_version=1,
+                expires_at=datetime(2026, 7, 28, 4, 0, 0, 123456, tzinfo=UTC),
+            )
+
+    store = object.__new__(MysqlEvaluationEvidenceStore)
+    with pytest.raises(EvaluationEvidenceInvalid):
+        store._project_event(  # noqa: SLF001
+            1, event_type, duplicate_payload, datetime.now(UTC)
         )
 
 

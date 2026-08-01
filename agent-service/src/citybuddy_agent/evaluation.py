@@ -2,9 +2,8 @@
 
 from __future__ import annotations
 
-import json
 from datetime import UTC, datetime
-from typing import Literal, Protocol, cast
+from typing import Literal, Protocol
 
 import pymysql
 from pydantic import AwareDatetime, BaseModel, ConfigDict, Field
@@ -22,6 +21,7 @@ from .actions import (
     validate_pending_action_reference,
     validate_pending_action_resolution,
     validate_resolved_action_events,
+    validate_support_event_payload,
 )
 from .agent_control import TOOL_BOUNDARY_FAILURE_REASONS
 
@@ -101,16 +101,6 @@ _EVENT_TYPES = {
     "ASSISTANT_RESPONSE",
     "TURN_COMPLETED",
     "TURN_FAILED",
-}
-_ATTEMPT_KINDS = {"model_http", "reranker_http", "identity_http", "tool_http"}
-_CIRCUIT_STATES = {"open", "opened", "probe-rejected", "half-open", "closed"}
-_MODEL_RESULTS = {
-    "ok",
-    "denied",
-    "transient",
-    "rerank-ok",
-    "rerank-denied",
-    "rerank-transient",
 }
 
 
@@ -396,152 +386,35 @@ class MysqlEvaluationEvidenceStore:
     @staticmethod
     def _payload(value: object) -> dict[str, object]:
         try:
-            decoded = json.loads(value) if isinstance(value, str) else value
-        except json.JSONDecodeError as exception:
+            if isinstance(value, str):
+                return strict_json_object(value.encode("utf-8"))
+            if isinstance(value, bytes):
+                return strict_json_object(value)
+        except (ActionJsonError, UnicodeError) as exception:
             raise EvaluationEvidenceInvalid from exception
-        if not isinstance(decoded, dict):
+        if not isinstance(value, dict) or not all(isinstance(key, str) for key in value):
             raise EvaluationEvidenceInvalid
-        return decoded
+        return value
 
     def _project_event(
         self, sequence: int, event_type: str, raw_payload: object, occurred_at: datetime
     ) -> EvidenceEventResponse:
         payload = self._payload(raw_payload)
-        outcome: str | None = None
-        reference: str | None = None
-        attempt: int | None = None
-        attempt_limit: int | None = None
-        if event_type == "USER_INPUT":
-            if payload.get("accepted") is not True:
-                raise EvaluationEvidenceInvalid
-            outcome = "accepted"
-        elif event_type == "ROUTING_DECISION":
-            tier = payload.get("tier")
-            limit = payload.get("attemptLimit")
-            if tier != "standard" or not self._bounded_int(limit, 1, 32):
-                raise EvaluationEvidenceInvalid
-            outcome = str(tier)
-            attempt_limit = cast(int, limit)
-        elif event_type == "BUDGET_CHARGED":
-            attempt_value = payload.get("attempt")
-            limit = payload.get("limit")
-            kind = payload.get("kind")
-            if (
-                not self._bounded_int(attempt_value, 1, 32)
-                or not self._bounded_int(limit, 1, 32)
-                or cast(int, attempt_value) > cast(int, limit)
-                or kind not in _ATTEMPT_KINDS
-            ):
-                raise EvaluationEvidenceInvalid
-            outcome = str(kind)
-            attempt = cast(int, attempt_value)
-            attempt_limit = cast(int, limit)
-        elif event_type == "CIRCUIT_OUTCOME":
-            state = payload.get("state")
-            if state not in _CIRCUIT_STATES:
-                raise EvaluationEvidenceInvalid
-            outcome = str(state)
-        elif event_type == "MODEL_OUTCOME":
-            result = payload.get("result")
-            if result not in _MODEL_RESULTS:
-                raise EvaluationEvidenceInvalid
-            outcome = str(result)
-        elif event_type == "TOOL_LIFECYCLE":
-            tool = payload.get("tool")
-            state = payload.get("state")
-            if not self._bounded_string(tool, 64) or state not in {"requested", "succeeded"}:
-                raise EvaluationEvidenceInvalid
-            outcome = str(state)
-            reference = str(tool)
-        elif event_type == "TOOL_DENIED":
-            tool = payload.get("tool")
-            producer = payload.get("producer")
-            if (
-                not self._bounded_string(tool, 64)
-                or payload.get("outcome") != "deny_with_feedback"
-                or (
-                    producer is not None
-                    and (
-                        not isinstance(producer, str)
-                        or producer not in TOOL_BOUNDARY_FAILURE_REASONS
-                    )
-                )
-            ):
-                raise EvaluationEvidenceInvalid
-            outcome = "denied"
-            reference = str(tool)
-        elif event_type == "RETRIEVAL_DECISION":
-            index_version = payload.get("indexVersion")
-            decision_outcome = payload.get("outcome")
-            if not self._bounded_string(index_version, 64) or decision_outcome not in {
-                "SUFFICIENT",
-                "INSUFFICIENT",
-            }:
-                raise EvaluationEvidenceInvalid
-            outcome = str(decision_outcome)
-            reference = str(index_version)
-        elif event_type == "ACTION_PREPARED":
-            pending_action_id = payload.get("pendingActionId")
-            target_version = payload.get("targetVersion")
-            if (
-                not self._bounded_string(pending_action_id, 36)
-                or payload.get("actionType") != "REFUND_REQUEST"
-                or not self._bounded_string(payload.get("argumentCommitment"), 64)
-                or type(target_version) is not int
-                or target_version < 1
-                or not self._bounded_string(payload.get("expiresAt"), 27)
-            ):
-                raise EvaluationEvidenceInvalid
-            outcome = "prepared"
-            reference = str(pending_action_id)
-        elif event_type in {"ACTION_DECLINED", "ACTION_EXPIRED"}:
-            pending_action_id = payload.get("pendingActionId")
-            expected = "declined" if event_type == "ACTION_DECLINED" else "expired"
-            if (
-                not self._bounded_string(pending_action_id, 36)
-                or payload.get("outcome") != expected
-            ):
-                raise EvaluationEvidenceInvalid
-            outcome = expected
-            reference = str(pending_action_id)
-        elif event_type == "ACTION_RECEIPT":
-            receipt_id = payload.get("receiptId")
-            pending_action_id = payload.get("pendingActionId")
-            commitment = payload.get("receiptCommitment")
-            if (
-                set(payload)
-                != {
-                    "receiptId",
-                    "pendingActionId",
-                    "status",
-                    "receiptCommitment",
-                }
-                or not self._bounded_string(receipt_id, 36)
-                or not self._bounded_string(pending_action_id, 36)
-                or payload.get("status") != "REQUESTED"
-                or not self._bounded_string(commitment, 64)
-            ):
-                raise EvaluationEvidenceInvalid
-            outcome = "REQUESTED"
-            reference = str(receipt_id)
-        elif event_type in {"AGENT_OUTCOME", "ASSISTANT_RESPONSE", "TURN_COMPLETED"}:
-            value = payload.get("outcome")
-            if value not in _TERMINAL_OUTCOMES:
-                raise EvaluationEvidenceInvalid
-            outcome = str(value)
-        elif event_type == "TURN_FAILED":
-            if not self._bounded_string(payload.get("code"), 64):
-                raise EvaluationEvidenceInvalid
-            outcome = "failed"
-        else:
-            raise EvaluationEvidenceInvalid
+        try:
+            validated = validate_support_event_payload(
+                event_type,
+                payload,
+                tool_failure_reasons=TOOL_BOUNDARY_FAILURE_REASONS,
+            )
+        except ActionEvidenceError as exception:
+            raise EvaluationEvidenceInvalid from exception
         return EvidenceEventResponse(
             sequence=sequence,
             event_kind=event_type,  # type: ignore[arg-type]
-            outcome=outcome,
-            reference=reference,
-            attempt=attempt,
-            attempt_limit=attempt_limit,
+            outcome=validated.outcome,
+            reference=validated.reference,
+            attempt=validated.attempt,
+            attempt_limit=validated.attempt_limit,
             occurred_at=occurred_at,
         )
 

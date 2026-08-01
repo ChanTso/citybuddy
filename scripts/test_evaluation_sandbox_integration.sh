@@ -4464,6 +4464,28 @@ assert_status 409 "evaluation rejects the same missing action terminal event" \
   --header 'X-Eval-Sandbox-Id: sandbox-payment'
 mysql_query root "$root_password" cs_db \
   "INSERT INTO support_event SELECT * FROM cb123_terminal_event_backup; DROP TABLE cb123_terminal_event_backup"
+mysql_query root "$root_password" cs_db \
+  "DROP TABLE IF EXISTS cb123_budget_event_backup; CREATE TABLE cb123_budget_event_backup AS SELECT * FROM support_event WHERE turn_id = '$cb123_confirmation_turn' AND event_type = 'BUDGET_CHARGED' LIMIT 1"
+assert_equal 1 \
+  "$(mysql_query root "$root_password" cs_db \
+    "SELECT COUNT(*) FROM cb123_budget_event_backup")" \
+  "completed confirmation persists one independently corruptible budget event"
+mysql_query root "$root_password" cs_db \
+  "UPDATE support_event event_row JOIN cb123_budget_event_backup backup ON backup.event_id = event_row.event_id SET event_row.payload_json = JSON_OBJECT()"
+assert_status 409 "conversation rejects malformed intermediate confirmation evidence" \
+  --request POST "http://127.0.0.1:$agent_port/api/chat" \
+  --header "Authorization: Bearer $payment_token" \
+  --header 'X-Eval-Sandbox-Id: sandbox-payment' \
+  --header "X-Session-Id: $cb123_session" \
+  --header "Idempotency-Key: $cb123_confirmation_key" \
+  --header 'Content-Type: application/json' \
+  --data '{"message":"confirm"}'
+assert_status 409 "evaluation rejects the same malformed intermediate confirmation evidence" \
+  --request GET "http://127.0.0.1:$agent_port/api/eval/evidence/$cb123_confirmation_trace" \
+  --user "evaluation-manager:$management_password" \
+  --header 'X-Eval-Sandbox-Id: sandbox-payment'
+mysql_query root "$root_password" cs_db \
+  "UPDATE support_event event_row JOIN cb123_budget_event_backup backup ON backup.event_id = event_row.event_id SET event_row.payload_json = backup.payload_json; DROP TABLE cb123_budget_event_backup"
 assert_status 200 "restored complete receipt closure replays normally" \
   --request POST "http://127.0.0.1:$agent_port/api/chat" \
   --header "Authorization: Bearer $payment_token" \

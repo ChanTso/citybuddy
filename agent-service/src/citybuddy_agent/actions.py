@@ -372,6 +372,158 @@ class ActionEvidenceError(ValueError):
 
 
 @dataclass(frozen=True)
+class ValidatedSupportEventPayload:
+    outcome: str
+    reference: str | None = None
+    attempt: int | None = None
+    attempt_limit: int | None = None
+
+
+_SUPPORT_TERMINAL_OUTCOMES = {
+    "completed",
+    "budget_exhausted",
+    "provider_denied",
+    "retrieval_denied",
+    "action_pending",
+    "action_clarification",
+    "action_declined",
+    "action_expired",
+    "action_completed",
+}
+_SUPPORT_ATTEMPT_KINDS = {"model_http", "reranker_http", "identity_http", "tool_http"}
+_SUPPORT_CIRCUIT_STATES = {"open", "opened", "probe-rejected", "half-open", "closed"}
+_SUPPORT_MODEL_RESULTS = {
+    "ok",
+    "denied",
+    "transient",
+    "rerank-ok",
+    "rerank-denied",
+    "rerank-transient",
+}
+
+
+def _bounded_support_int(value: object, minimum: int, maximum: int) -> bool:
+    return type(value) is int and minimum <= value <= maximum
+
+
+def _bounded_support_string(value: object, maximum: int) -> bool:
+    return isinstance(value, str) and 1 <= len(value) <= maximum
+
+
+def validate_support_event_payload(
+    event_type: str,
+    payload: Mapping[str, object],
+    *,
+    tool_failure_reasons: frozenset[str],
+) -> ValidatedSupportEventPayload:
+    """Apply the one shared semantic contract for persisted support-event payloads."""
+    if event_type == "USER_INPUT":
+        if payload.get("accepted") is not True:
+            raise ActionEvidenceError("Support input event is invalid")
+        return ValidatedSupportEventPayload("accepted")
+    if event_type == "ROUTING_DECISION":
+        tier = payload.get("tier")
+        limit = payload.get("attemptLimit")
+        if tier != "standard" or not _bounded_support_int(limit, 1, 32):
+            raise ActionEvidenceError("Support routing event is invalid")
+        return ValidatedSupportEventPayload(str(tier), attempt_limit=cast(int, limit))
+    if event_type == "BUDGET_CHARGED":
+        attempt = payload.get("attempt")
+        limit = payload.get("limit")
+        kind = payload.get("kind")
+        if (
+            not _bounded_support_int(attempt, 1, 32)
+            or not _bounded_support_int(limit, 1, 32)
+            or cast(int, attempt) > cast(int, limit)
+            or kind not in _SUPPORT_ATTEMPT_KINDS
+        ):
+            raise ActionEvidenceError("Support budget event is invalid")
+        return ValidatedSupportEventPayload(
+            str(kind), attempt=cast(int, attempt), attempt_limit=cast(int, limit)
+        )
+    if event_type == "CIRCUIT_OUTCOME":
+        state = payload.get("state")
+        if state not in _SUPPORT_CIRCUIT_STATES:
+            raise ActionEvidenceError("Support circuit event is invalid")
+        return ValidatedSupportEventPayload(str(state))
+    if event_type == "MODEL_OUTCOME":
+        result = payload.get("result")
+        if result not in _SUPPORT_MODEL_RESULTS:
+            raise ActionEvidenceError("Support model event is invalid")
+        return ValidatedSupportEventPayload(str(result))
+    if event_type == "TOOL_LIFECYCLE":
+        tool = payload.get("tool")
+        state = payload.get("state")
+        if not _bounded_support_string(tool, 64) or state not in {"requested", "succeeded"}:
+            raise ActionEvidenceError("Support tool lifecycle event is invalid")
+        return ValidatedSupportEventPayload(str(state), reference=str(tool))
+    if event_type == "TOOL_DENIED":
+        tool = payload.get("tool")
+        producer = payload.get("producer")
+        if (
+            not _bounded_support_string(tool, 64)
+            or payload.get("outcome") != "deny_with_feedback"
+            or (
+                producer is not None
+                and (not isinstance(producer, str) or producer not in tool_failure_reasons)
+            )
+        ):
+            raise ActionEvidenceError("Support tool denial event is invalid")
+        return ValidatedSupportEventPayload("denied", reference=str(tool))
+    if event_type == "RETRIEVAL_DECISION":
+        index_version = payload.get("indexVersion")
+        outcome = payload.get("outcome")
+        if not _bounded_support_string(index_version, 64) or outcome not in {
+            "SUFFICIENT",
+            "INSUFFICIENT",
+        }:
+            raise ActionEvidenceError("Support retrieval event is invalid")
+        return ValidatedSupportEventPayload(str(outcome), reference=str(index_version))
+    if event_type == "ACTION_PREPARED":
+        pending_action_id = payload.get("pendingActionId")
+        target_version = payload.get("targetVersion")
+        if (
+            not _bounded_support_string(pending_action_id, 36)
+            or payload.get("actionType") != "REFUND_REQUEST"
+            or not _bounded_support_string(payload.get("argumentCommitment"), 64)
+            or type(target_version) is not int
+            or target_version < 1
+            or not _bounded_support_string(payload.get("expiresAt"), 27)
+        ):
+            raise ActionEvidenceError("Support prepared-action event is invalid")
+        return ValidatedSupportEventPayload("prepared", reference=str(pending_action_id))
+    if event_type in {"ACTION_DECLINED", "ACTION_EXPIRED"}:
+        pending_action_id = payload.get("pendingActionId")
+        expected = "declined" if event_type == "ACTION_DECLINED" else "expired"
+        if not _bounded_support_string(pending_action_id, 36) or payload.get("outcome") != expected:
+            raise ActionEvidenceError("Support resolved-action event is invalid")
+        return ValidatedSupportEventPayload(expected, reference=str(pending_action_id))
+    if event_type == "ACTION_RECEIPT":
+        receipt_id = payload.get("receiptId")
+        pending_action_id = payload.get("pendingActionId")
+        commitment = payload.get("receiptCommitment")
+        if (
+            set(payload) != {"receiptId", "pendingActionId", "status", "receiptCommitment"}
+            or not _bounded_support_string(receipt_id, 36)
+            or not _bounded_support_string(pending_action_id, 36)
+            or payload.get("status") != "REQUESTED"
+            or not _bounded_support_string(commitment, 64)
+        ):
+            raise ActionEvidenceError("Support receipt event is invalid")
+        return ValidatedSupportEventPayload("REQUESTED", reference=str(receipt_id))
+    if event_type in {"AGENT_OUTCOME", "ASSISTANT_RESPONSE", "TURN_COMPLETED"}:
+        outcome = payload.get("outcome")
+        if outcome not in _SUPPORT_TERMINAL_OUTCOMES:
+            raise ActionEvidenceError("Support terminal event is invalid")
+        return ValidatedSupportEventPayload(str(outcome))
+    if event_type == "TURN_FAILED":
+        if not _bounded_support_string(payload.get("code"), 64):
+            raise ActionEvidenceError("Support failed-turn event is invalid")
+        return ValidatedSupportEventPayload("failed")
+    raise ActionEvidenceError("Support event type is invalid")
+
+
+@dataclass(frozen=True)
 class ActionEvidenceEvent:
     event_id: str
     trace_id: str
@@ -715,6 +867,7 @@ def validate_completed_action_events(
     expected_session_id: str,
     expected_user_subject: str,
     receipt: ActionReceiptPayload,
+    tool_failure_reasons: frozenset[str],
 ) -> tuple[ActionEvidenceEvent, ...]:
     """Validate the complete ordered confirmation-turn lifecycle around one receipt."""
     if not 5 <= len(rows) <= MAX_ACTION_SOURCE_TURN_EVENTS:
@@ -737,6 +890,10 @@ def validate_completed_action_events(
                 raise ActionEvidenceError(
                     "Completed action event identity or sequence is inconsistent"
                 )
+            payload = strict_json_object(str(row[6]).encode("utf-8"))
+            validate_support_event_payload(
+                str(row[5]), payload, tool_failure_reasons=tool_failure_reasons
+            )
             events.append(
                 ActionEvidenceEvent(
                     event_id=str(row[0]),
@@ -745,7 +902,7 @@ def validate_completed_action_events(
                     user_subject=str(row[3]),
                     sequence=expected_sequence,
                     event_type=str(row[5]),
-                    payload=strict_json_object(str(row[6]).encode("utf-8")),
+                    payload=payload,
                 )
             )
     except (ActionJsonError, TypeError, ValueError) as exception:
