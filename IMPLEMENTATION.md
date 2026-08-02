@@ -1,7 +1,7 @@
 # CityBuddy implementation index
 
-**Document version:** v0.39\
-**Verification date:** 2026-08-02\
+**Document version:** v0.40\
+**Verification date:** 2026-08-03\
 **Repository phase:** CB-140 portfolio web demonstration and README truth verified; CB-150 is the
 sole ready slice. CB-121 and CB-123 remain blocked, and CB-130 through CB-132 remain deferred vNext
 evolution.
@@ -87,7 +87,8 @@ Cross-slice target architecture, preflight conclusions, service/data ownership, 
 
 The owner-approved portfolio P0/P1 route terminates at `CB-152`. `CB-900`, `CB-910`, and `CB-920`
 remain deferred outlines outside this Goal and must not be promoted, expanded, or used to create
-post-`CB-152` work. `CB-150` retains its minimal optional no-op trace-sink scope, and `CB-152` must
+post-`CB-152` work. The approved `CB-150` scope is limited to Agent metrics and an optional,
+default-no-op Agent trace sink; it does not add Auth or Commerce metrics. `CB-152` must
 close with real load, latency, and quality evidence measured and environment-labelled in the local
 Docker Compose topology. `CB-114` and `CB-115` are deferred vNext evolution and do not reactivate
 automatically after `CB-152`. `CB-130`, `CB-131`, and `CB-132` are also retained only as vNext
@@ -142,7 +143,7 @@ The linked slice name is the canonical detailed specification. Target outcomes a
 | [CB-131 — Authoritative handoff tickets and agent projection](docs/slices/CB-131.md) | P1 | `DEFERRED` | Explicit vNext promotion only |
 | `CB-132 — Reviewed failure-candidate capture and authenticated export` | P1 | `DEFERRED` | Explicit vNext promotion only |
 | [CB-140 — Portfolio web demonstration and README truth](docs/slices/CB-140.md) | P1 | `VERIFIED` | `CB-020`, `CB-030`, `CB-060`, `CB-082`, `CB-091`, `CB-118`, `CB-122` |
-| [CB-150 — Minimal metrics and optional no-op trace sink](docs/slices/CB-150.md) | P1 | `READY` | `CB-140` |
+| [CB-150 — Agent metrics and optional no-op trace sink](docs/slices/CB-150.md) | P1 | `READY` | `CB-140` |
 | [CB-151 — Verified-path demo reset and fault drills](docs/slices/CB-151.md) | P1 | `PLANNED` | `CB-150` |
 | [CB-152 — Verified-path load, latency, and quality evidence](docs/slices/CB-152.md) | P1 | `PLANNED` | `CB-151` |
 | `CB-900 — Multimodal intake and object storage outline` | P2 | `DEFERRED` | Explicit promotion only |
