@@ -556,7 +556,7 @@ Slice status, priority, dependencies, and ordering live only in [IMPLEMENTATION.
 | `CB-131` | Retained vNext design for Commerce-owned authoritative handoff ticket/SLA/Outbox, controlled `handoff_packet`, agent projection, `HUMAN_PENDING`, and open-ticket sensitive-write prohibition; not part of the current portfolio route. |
 | `CB-132` | Retained vNext evolution for reviewed/masked/synthetic failure-candidate capture and authenticated bundle export; not part of the current portfolio route. |
 | `CB-140` | Minimal portfolio web plus factual README for login, products, seckill reservation/status, support chat, and PendingAction prepare/clarification/decline/expiry. No successful confirmation, receipt card, cart, full store, or workstation. |
-| `CB-150` | Minimal metrics for verified paths and an optional no-op-capable trace mirror that never becomes business or evidence truth. |
+| `CB-150` | Agent-only operational metrics for verified paths and an optional default-no-op Agent trace sink that never becomes business or evidence truth. |
 | `CB-151` | Scripted reset/demo and phase-bound fault drills only for verified identity, catalog, ordering/seckill, payment/refund, RAG, chat, and PendingAction prepare/decline/expiry paths. |
 | `CB-152` | Environment/dataset/duration-labelled JMeter seckill QPS and concurrency correctness; Locust/Mock-LLM ordinary-chat, RAG, and PendingAction-prepare P99; RAG HitRate@5/MRR; FAQ cache hit/model-call savings; and the first evidenced bottleneck in the local Docker Compose topology. No unimplemented or real-provider claims. |
 | `CB-900` | Future multimodal boundary only. |
@@ -731,4 +731,30 @@ real-provider capability. This route decision changes no production code, tests,
 OpenAPI, README, schema, persisted data, service/language owner, truth owner, security boundary, or
 transaction boundary; README changes belong to the later CB-140 implementation lane.
 
-Current Level 3 conflicts: **none unresolved as of 2026-08-02**.
+**Resolved scope refinement — 2026-08-03 (CB-150 Agent-only observability):** The current portfolio
+scope of CB-150 contains only `agent-service` operational metrics and an optional Agent trace sink.
+The current route adds no metrics dependency, registry, scrape endpoint, operation instrumentation,
+or trace implementation to `auth-service` or `commerce-service`. CB-152 obtains transaction QPS and
+client latency from JMeter and Locust, reconciles transaction correctness against authoritative
+Commerce durable truth, and calculates RAG quality offline. Of its five portfolio measurement
+outputs, only FAQ cache hit rate and model-call saving require in-service counters, and those
+counters belong to Agent. Java instrumentation would not add a portfolio measurement output, but
+would materially enlarge the implementation and regression surface.
+
+Agent metrics remain a purely observational side channel. They are neither business truth nor
+evaluation truth, and loss, duplication, or outage must not change business responses, durable
+state, or evidence. Metric names and labels are bounded and must not contain high-cardinality
+identity or business values. The Agent trace sink remains optional, default `Noop`, bounded in queue
+and timeout, zero-retry, and neither evidence nor business truth.
+
+CB-152 must not reintroduce Auth or Commerce metrics or Java instrumentation. Its first-bottleneck
+analysis may use JMeter/Locust client latency, errors and throughput; authoritative durable state;
+Docker/container CPU, memory and I/O observations; and Agent metrics. If that evidence cannot
+uniquely identify the first bottleneck, the result is `indeterminate`; missing Java server metrics
+does not invalidate a run.
+
+This refinement changes no service/language ownership, business transaction, API, schema, grant,
+route order, portfolio measurement output, or CB-151 demo scope. It changes no production code,
+test, dependency, lockfile, README, CI, private repository, or service evaluation artifact.
+
+Current Level 3 conflicts: **none unresolved as of 2026-08-03**.
