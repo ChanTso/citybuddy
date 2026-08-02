@@ -16,12 +16,13 @@ The target service set is:
 |---|---|---|
 | `auth-service` | Java 21 / Spring Boot 3.5 | Login, RS256 user tokens, service-authenticated token exchange, OBO tokens, JWKS publication and key rotation, and evaluation-only test identities. |
 | `commerce-service` | Java 21 / Spring Boot 3.5 | Products, inventory, orders, seckill admission and ordering, mock payment, refund, support tickets, CRM and FAQ truth, internal tool APIs, and evaluation-only state APIs. |
-| `agent-service` | Python 3.11 / FastAPI / Pydantic | Customer-support APIs, a single ReAct agent, deterministic control signals, model policy, tool mediation, action confirmation, retrieval, safety, SSE egress, and authoritative support evidence. |
+| `agent-service` | Python 3.11 / FastAPI / Pydantic | Customer-support APIs, a single ReAct agent, deterministic control signals, model policy, tool mediation, local PendingAction preparation/clarification/decline/expiry, retrieval, safety, SSE egress, and authoritative support evidence. Agent successful confirmation is vNext, not part of the current portfolio route. |
 | `knowledge-indexer` | Python 3.11 | Asynchronous FAQ and product indexing, source-version ordering, tombstones, rebuilds, and versioned Elasticsearch alias changes. RocketMQ consumption remains gated by the Python client spike. |
-| `web` | React / TypeScript / Vite | A later minimal demonstration surface for login, products, seckill status, support chat, and action receipts. |
+| `web` | React / TypeScript / Vite | A minimal portfolio demonstration surface for login, products, seckill reservation status, support chat, and PendingAction preparation/clarification/decline/expiry. It does not render successful confirmation or receipt state. |
 | `litellm-proxy` | LiteLLM Proxy | OpenAI-compatible provider access, key isolation, rate limiting, same-tier provider failover, one bounded network retry, and usage/cost records. It never makes business-tier routing decisions. |
 
-The repository contains executable CB-000 skeletons for the five declared code modules. Their listed business responsibilities remain target contracts, not implemented or deployed capabilities.
+The route outcome catalog and IMPLEMENTATION index distinguish verified, current-route, and vNext
+responsibilities. A responsibility listed here is not by itself an implementation or deployment claim.
 
 <a id="contracts-preflight"></a>
 
@@ -134,16 +135,26 @@ Token classes are distinguished explicitly by a token-purpose/type claim or an e
 - `ModelRouter` is the only business policy decision-maker for model tier, escalation, and budget. LiteLLM may only retry/fail over inside the selected tier.
 - One shared `attempt_budget` spans model, LiteLLM, HTTP, and tool attempts. Circuit breakers are provider-scoped, do not open before a minimum request count, and use bounded half-open probes. Provider fallback stays within the tier selected by `ModelRouter`.
 - `ToolAdapter` returns structured `deny_with_feedback` results. The single main Agent, constrained by ToolSpec and deterministic signals, handles missing slots, RAG/tool choice, clarification, and refusal. CityBuddy does not train or introduce a separate intent classifier.
-- `MemoryPacker` may combine a commerce-owned read-only CRM view, recent turns, and a summary protected by a monotonic `summary_until_turn` watermark. Model input is separated into `SYSTEM`, `TOOLS`, `USER`, `UNTRUSTED RETRIEVED`, and `UNTRUSTED TOOL DATA`; citations may point only to allowlisted evidence sources.
+- In the retained vNext design, `MemoryPacker` may combine a commerce-owned read-only CRM view, recent turns, and a summary protected by a monotonic `summary_until_turn` watermark. Memory packing, summary watermarks, and the associated PII/prompt policy are not part of the current portfolio route. Existing model input remains separated into `SYSTEM`, `TOOLS`, `USER`, `UNTRUSTED RETRIEVED`, and `UNTRUSTED TOOL DATA`; citations may point only to allowlisted evidence sources.
 - ToolSpec defines each tool's schema, risk tier, fixed scope, timeout, idempotency behavior, and model-visible output. The model cannot expand a scope or bypass confirmation.
 - Read and ordinary write tools are checked at `commerce-service`. Sensitive actions first create a PendingAction in `commerce_db`; `agent-service` stores only the identifier and presents a text confirmation request.
 - Confirmation is not a front-end security primitive. In one commerce transaction, the service validates the PendingAction's argument hash, resource version, expiry, ownership, and unconsumed state; consumes it once; executes the business mutation; and persists an ActionReceipt.
-- A successful ActionReceipt is the action truth and the turn-level commit point. `agent-service` persists its evidence projection and emits `action_receipt`. Any later model or network retry may regenerate explanation text only and must not execute the tool again.
-- Public SSE `token` prose is non-authoritative explanation text and never constitutes action-state truth. The only public action-state carrier is an `action_receipt` event derived from authoritative ActionReceipt truth. Later web and client slices render action status only from `action_receipt`, never by classifying or interpreting `token` prose.
+- A successful Commerce ActionReceipt remains immutable action truth under verified CB-118. The
+  Agent-side projection, `action_completed` turn commit, public `action_receipt`, and explanation
+  replay boundary are not implemented and are outside the current portfolio route.
+- Public SSE `token` prose is non-authoritative explanation text and never constitutes action-state
+  truth. Because the current Agent route has no authoritative receipt projection, current web and
+  clients must not render successful action or receipt status at all. A future vNext client may do
+  so only from an implemented `action_receipt`, never by classifying or interpreting `token` prose.
 - Output is risk-tiered. Ordinary knowledge/chitchat may stream through a small buffer. A normalized, documented, bounded action-claim lexicon blocks known unreceipted action-success forms as defense in depth, but it is not a complete natural-language classifier and uncovered wording may remain in non-authoritative `token` prose. A secondary text/tool consistency guard may block contradictions but never replaces receipt truth. Asynchronous grounding can create evidence or a follow-up candidate, but there is no mainline SSE retraction.
 - The server derives the write idempotency key from `turn_id`, tool identity, and argument hash. A repeated key returns the existing action result or receipt.
-- Internal agent events may include text deltas, tool lifecycle, retrieval and guard details, receipts, errors, and completion. The public SSE egress filter exposes only `token`, `action_receipt`, `done`, and `error`.
-- Human handoff is a bounded ticket flow, not a full agent workstation. Explicit user request, repeated unresolved intent, sustained negative sentiment, or high risk may trigger it; low retrieval confidence alone leads to clarification or denial. While the support session is in `HUMAN_PENDING` mode and its authoritative ticket remains open, sensitive writes are prohibited; any SLA delay message rechecks the durable ticket state.
+- Internal agent events may include the currently implemented text, tool, retrieval, guard, error,
+  PendingAction preparation/decline/expiry, and completion evidence. Although the frozen public SSE
+  schema reserves `action_receipt`, the current Agent route never emits it because no verified local
+  receipt projection exists.
+- Human handoff remains retained vNext design, not current-route behavior. If reactivated, it is a
+  bounded ticket flow rather than a full agent workstation: Commerce owns the ticket/SLA/Outbox,
+  Agent stores a projection, and an open authoritative ticket guards sensitive writes.
 - `cs_db` plus the evaluation-only evidence API is the authoritative support-evidence channel. Langfuse may be enabled only as an optional observability profile with a no-op fallback; it can mirror traces but never becomes an assertion source or prompt authority. Prompt definitions remain versioned with the code.
 - CI and tests never receive a real model-provider key. Model calls must be replaceable by deterministic fakes or mocks.
 
@@ -180,7 +191,13 @@ Token classes are distinguished explicitly by a token-purpose/type claim or an e
 
 ### 4.8 Explicit non-goals for the current mainline
 
-The current route does not include multimodal input, image/audio/video storage, a full shopping site or cart, a multi-page commerce product, a full human-agent workstation, multi-agent orchestration, a decomposer model, long-term vector memory, a second vector database, a service gateway or registry, Kubernetes, production return of evaluation evidence, automatic code changes by an evaluator, or a recovery scanner that can repeat committed actions.
+The current route does not include Agent successful confirmation, Agent ActionReceipt projection,
+`action_completed` Turn commit, receipt cards, MemoryPacker summary/watermarks, the CB-130 PII/prompt
+lane, handoff tickets, failure-candidate export, multimodal input, image/audio/video storage, a full
+shopping site or cart, a multi-page commerce product, a full human-agent workstation, multi-agent
+orchestration, a decomposer model, long-term vector memory, a second vector database, a service
+gateway or registry, Kubernetes, production return of evaluation evidence, automatic code changes
+by an evaluator, or a recovery scanner that can repeat committed actions.
 
 <a id="contracts-service-data-ownership"></a>
 
@@ -270,8 +287,8 @@ Paths below are stable contract families. Full request/response fields are defer
 | `commerce-service` → `auth-service` | `POST /internal/eval/test-principals/provision` | Dedicated service authentication for `commerce-service`; evaluation profile only | Sandbox id, case correlation, TTL, minimum test-subject attributes, idempotency key | Creates or returns the same TTL-bound provisioning record and opaque test-user handle; returns no credential | Invalid service identity, conflicting duplicate, invalid TTL/subject, dead/revoked correlation, or production profile rejects | `CB-100` |
 | `commerce-service` → `auth-service` | `POST /internal/eval/test-principals/{handle}/revoke` | Dedicated service authentication for `commerce-service`; evaluation profile only | Opaque handle, sandbox/case correlation where required, idempotency key | Idempotently revokes or confirms invalidation of the auth-owned provisioning record | Any other service identity, mismatched handle/correlation, invalid credential, or production profile rejects | `CB-100` |
 | Authorized evaluator → `auth-service` | `POST /auth/eval/test-token` | Independent evaluation API credential; evaluation profile only | `X-Eval-Sandbox-Id`, opaque test-user handle; handle must match an unexpired auth-owned provisioning record | Returns an explicitly typed test direct-user JWT carrying the bound sandbox claim | Arbitrary sandbox id, wrong handle, expired/revoked record, mismatch, invalid credential, or production profile rejects | `CB-100` |
-| `web` or evaluator → `agent-service` | `POST /api/chat` | Direct user JWT | Fixed issuer/user-facing audience/type, principal/permission; `X-Session-Id` support session owned by user; trace headers; eval also supplies matching sandbox header | Returns one complete response plus any user-visible receipt | Wrong issuer/audience/type, forged/cross-user support session, sandbox mismatch, policy block, or exhausted attempts rejects | conversation lifecycle in `CB-080`; bounded control in `CB-081`; eval enforcement in `CB-101`; action reference/local decisions in `CB-122`; confirmation/receipt/turn integration in `CB-123` |
-| `web` or evaluator → `agent-service` | `POST /api/chat/stream` | Direct user JWT | Same direct-user and support-session rules as `/api/chat` | SSE emits only `token`, `action_receipt`, `done`, and `error`; `token` is non-authoritative prose and clients derive action status only from `action_receipt` | Same identity/session/sandbox failures; no raw tool/retrieval output | `CB-082`; local action evidence in `CB-122`; confirmation/receipt/turn integration in `CB-123` |
+| `web` or evaluator → `agent-service` | `POST /api/chat` | Direct user JWT | Fixed issuer/user-facing audience/type, principal/permission; `X-Session-Id` support session owned by user; trace headers; eval also supplies matching sandbox header | Returns one complete current-route response; exact Agent confirmation is a fixed non-success and no receipt is returned | Wrong issuer/audience/type, forged/cross-user support session, sandbox mismatch, policy block, or exhausted attempts rejects | conversation lifecycle in `CB-080`; bounded control in `CB-081`; eval enforcement in `CB-101`; action reference/local decisions in `CB-122`; CB-123 receipt integration retained only as blocked vNext design |
+| `web` or evaluator → `agent-service` | `POST /api/chat/stream` | Direct user JWT | Same direct-user and support-session rules as `/api/chat` | Current-route SSE emits `token`, `done`, and `error`; the frozen schema reserves `action_receipt`, but no current verified Agent producer may emit it and clients render no success/receipt state | Same identity/session/sandbox failures; no raw tool/retrieval output or synthetic receipt | `CB-082`; local action evidence in `CB-122`; CB-123 receipt integration retained only as blocked vNext design |
 | `web` → `agent-service` | `POST /api/feedback` | Direct user JWT | User principal, support session, trace; ownership must match persisted support evidence | Persists authorized feedback in `cs_db` | Wrong issuer/audience/type, unknown trace, forged/cross-user session, or ownership failure rejects | `CB-082` |
 | Authorized evaluator → `agent-service` | `GET /api/eval/evidence/{traceId}` | Independent evaluation API credential; evaluation profile only | Sandbox and trace must be associated | Returns authoritative allowed support evidence from `cs_db` | Production not found; cross-sandbox/unknown trace/invalid credential rejects | `CB-103` |
 | `web` → `commerce-service` | `GET /api/products`, `GET /api/products/{productId}` | Direct user JWT or explicit public-read policy | For authenticated routes: fixed issuer/user audience/direct type, principal/permission; no body identity trust | Returns published product data with live commerce fields | Wrong issuer/audience/type, forbidden resource/profile, or missing product rejects | `CB-030` |
@@ -439,6 +456,12 @@ sequenceDiagram
 
 ### 7.3 PendingAction, atomic confirmation, ActionReceipt, and retry boundary
 
+The diagram below retains the complete vNext end-state boundary. In the current portfolio route,
+CB-118 implements the Commerce prepare/confirm/ActionReceipt transaction and CB-122 implements only
+Agent preparation, clarification, decline, and expiry. The Agent confirmation, local receipt/event
+projection, `action_completed` turn commit, and public receipt path shown below are not implemented
+and are not scheduled in the current route.
+
 ```mermaid
 sequenceDiagram
     actor U as User
@@ -529,13 +552,13 @@ Slice status, priority, dependencies, and ordering live only in [IMPLEMENTATION.
 | `CB-121` | Agent confirmation, receipt projection, turn commit point, and model/network retry that regenerates text without commerce re-execution. |
 | `CB-122` | Agent-owned PendingAction reference, total bounded action parsing, complete conversation/evaluation event closure, and deterministic clarification/decline/expiry with exact confirmation fixed unavailable and no commerce confirm effect. |
 | `CB-123` | Exact confirmation arbitration, fresh OBO, complete untrusted receipt validation, atomic immutable ActionReceipt projection/event/turn commit, and receipt-first loss/restart/concurrent replay without a second commerce mutation. |
-| `CB-130` | Summary watermarks, prompt construction, PII handling, and tiered output safety. |
-| `CB-131` | Commerce-owned authoritative handoff ticket/SLA/Outbox, controlled `handoff_packet`, agent projection, `HUMAN_PENDING`, and open-ticket sensitive-write prohibition. |
-| `CB-132` | Reviewed/masked/synthetic failure-candidate capture and authenticated bundle export while raw `cs_db` evidence remains in CityBuddy. |
-| `CB-140` | Login, products, seckill/reservation status, support chat, and receipt cards. No cart, multi-page store, or workstation. |
-| `CB-150` | Metrics and an optional no-op-capable trace sink that never becomes business or evidence truth. |
-| `CB-151` | Scripted reset/demo and repeatable transaction, messaging, dependency, sandbox, and agent fault drills. |
-| `CB-152` | Real, environment-labelled JMeter transaction/seckill load plus Locust/Mock-LLM agent-framework load, latency, and quality evidence from the local Docker Compose topology. Real-provider claims require separate real-provider evidence and may not be inferred from local or mock measurements. |
+| `CB-130` | Retained vNext design for summary watermarks, prompt construction, PII handling, and tiered output safety; not part of the current portfolio route. |
+| `CB-131` | Retained vNext design for Commerce-owned authoritative handoff ticket/SLA/Outbox, controlled `handoff_packet`, agent projection, `HUMAN_PENDING`, and open-ticket sensitive-write prohibition; not part of the current portfolio route. |
+| `CB-132` | Retained vNext evolution for reviewed/masked/synthetic failure-candidate capture and authenticated bundle export; not part of the current portfolio route. |
+| `CB-140` | Minimal portfolio web plus factual README for login, products, seckill reservation/status, support chat, and PendingAction prepare/clarification/decline/expiry. No successful confirmation, receipt card, cart, full store, or workstation. |
+| `CB-150` | Minimal metrics for verified paths and an optional no-op-capable trace mirror that never becomes business or evidence truth. |
+| `CB-151` | Scripted reset/demo and phase-bound fault drills only for verified identity, catalog, ordering/seckill, payment/refund, RAG, chat, and PendingAction prepare/decline/expiry paths. |
+| `CB-152` | Environment/dataset/duration-labelled JMeter seckill QPS and concurrency correctness; Locust/Mock-LLM ordinary-chat, RAG, and PendingAction-prepare P99; RAG HitRate@5/MRR; FAQ cache hit/model-call savings; and the first evidenced bottleneck in the local Docker Compose topology. No unimplemented or real-provider claims. |
 | `CB-900` | Future multimodal boundary only. |
 | `CB-910` | Future recovery scanner and observed-failure-driven resilience only. |
 | `CB-920` | Optional experiments and expanded views; no result assumed. |
@@ -561,11 +584,12 @@ Slice status, priority, dependencies, and ordering live only in [IMPLEMENTATION.
 | Risk | Guardrail and owner |
 |---|---|
 | Dependency/version drift | Each owning slice pins exact patches and image digests in build files/lockfiles. Markdown keeps only the compatibility boundary. Renovation is accepted only with real build/contract tests. |
-| Retry amplification across agent, proxy, HTTP, and MQ | One bounded attempt budget is propagated. `ModelRouter` owns tier changes; LiteLLM gets at most one transient/network retry and same-tier fallback. Side-effect retries return existing receipts/results. Owned by `CB-081` and `CB-123`. |
+| Retry amplification across agent, proxy, HTTP, and MQ | One bounded attempt budget is propagated. `ModelRouter` owns tier changes; LiteLLM gets at most one transient/network retry and same-tier fallback. Commerce-side side-effect retries return existing results under CB-118; Agent successful confirmation retry is outside the current route. Owned by `CB-081` and `CB-118`. |
 | Redis or Elasticsearch treated as business truth | Contract tests and reconciliation always compare against MySQL. User-visible order/action success requires durable MySQL state or ActionReceipt. Owned by transaction slices. |
 | Cross-database or cross-service data leakage | Bootstrap/migration/runtime identity separation, `auth_app`/`commerce_app`/`agent_app` grants, no cross-database joins, API-only boundaries, token-derived ownership, private data excluded from RAG, and staged negative tests in `CB-010`, `CB-020`, `CB-030`, and later agent migrations. |
 | Evaluation sandbox leakage, orphaned test identity, or late asynchronous effects | Commerce-orchestrated auth provisioning/revoke, opaque TTL-bound handles, idempotent normal completion, fail-closed activation/compensation, TTL/janitor backstop, header/claim equality, ACTIVE/DEAD registry, SQL/repository filters, sandbox-scoped evaluation reads, introduction-point consumer liveness checks, and sandbox-bound callbacks. Identity, lifecycle, reads, zero-carrier baseline, and callbacks are owned by `CB-100` through `CB-105`; every future slice introducing an evaluation-reachable asynchronous carrier owns its guard. |
-| Model text contradicts action state | ActionReceipt is authoritative; only its `action_receipt` projection carries public action status, while `token` remains non-authoritative explanation. A bounded action-claim lexicon is defense in depth rather than a complete classifier, and clients never infer status from prose. Owned by `CB-082`, `CB-123`, and `CB-130`. |
+| Model text contradicts action state | Commerce ActionReceipt remains authoritative, but the current Agent route has no receipt projection. `token` remains non-authoritative explanation, the bounded action-claim lexicon remains defense in depth, and current clients render no successful action/receipt status. Owned in the current route by `CB-082` and the CB-140 no-fabrication boundary. |
+| Prepared sensitive action lacks Agent success closure | A sensitive action can be prepared, clarified, declined, or expired through Agent, but successful Agent confirmation and local ActionReceipt/Turn closure are not part of the current portfolio route. Commerce CB-118 authority remains available behind its verified boundary; Agent CB-122 local state must never be presented as successful execution. |
 | Private or provider credentials in repository/CI | Environment/secret injection, safe examples, redaction tests, Gitleaks, deterministic model fakes, and no real provider key in CI. Owned from `CB-000` onward. |
 | Evidence or observability divergence | `commerce_db` and `cs_db` remain authoritative for their domains; optional Langfuse tracing is a mirror and may degrade to a no-op sink. Owned by `CB-080`, `CB-102`, `CB-103`, and `CB-150`. |
 
@@ -665,4 +689,46 @@ output. The impact radius is the CB-118 internal view/OpenAPI and tests plus CB-
 evidence, producer attribution, and V007. Operational and migration cost is limited to the
 unreleased Agent evidence column; no deployed Commerce data migration or new endpoint is required.
 
-Current Level 3 conflicts: **none unresolved as of 2026-07-30**.
+**Resolved Level 3 portfolio-route decision — 2026-08-02 (stop Agent success mainline and deliver
+verified portfolio evidence):** The repository owner accepted CB-123's final blocker and stop
+boundary. PR #68's final reviewed implementation allowed evaluation evidence to accept a valid
+`BUDGET_CHARGED` event inserted after `ACTION_RECEIPT` with the terminal suffix shifted, while the
+conversation closure rejected the same durable damage. That violated the required shared complete
+completed-action event lifecycle closure. CB-123 remains permanently `BLOCKED`; PR #68 stays closed,
+is not reopened, and grants no implementation, test, review, CI, closeout, resume-ready, or
+verification credit. It is retained only as failed design and counterexample evidence. This decision
+is not a CB-123 replacement and creates no replacement slice. CB-121 likewise remains permanently
+`BLOCKED` with its existing history unchanged.
+
+The current portfolio Goal no longer implements Agent successful confirmation, Agent ActionReceipt
+projection, `ACTION_RECEIPT`, `action_completed` Turn commit, receipt cards, or post-commerce Agent
+receipt recovery. Verified Commerce CB-118 authority is unchanged: Commerce may prepare/confirm one
+sensitive refund and atomically persist the immutable ActionReceipt under its existing transaction,
+authorization, idempotency, and truth boundaries. Verified Agent CB-122 authority is also unchanged:
+Agent may validate and project `PREPARED`, clarify, decline, expire, and close that local evidence,
+while exact confirmation remains a fixed side-effect-free non-success. Residual risk is explicit: a
+sensitive action can be prepared, clarified, declined, or expired through Agent, but successful
+Agent confirmation and local ActionReceipt/Turn closure are not part of the current portfolio route.
+No UI, README, metric, demo, or measurement may present those absent capabilities as success.
+
+CB-130 memory/PII, CB-131 handoff, and CB-132 candidate export are removed from the current route and
+retained only as vNext evolution. Their retained design creates no current dependency or activation;
+a future Goal requires separate owner approval and fresh dependency/contract review. The current
+route turns to portfolio delivery: CB-140 builds the minimal web and factual README only from
+verified CB-020 login, CB-030 products, CB-060 public seckill reservation/status, CB-082 chat/SSE,
+CB-091 RAG, CB-118 Commerce PendingAction authority, and CB-122 Agent-local PendingAction outcomes.
+CB-150 depends only on CB-140, CB-151 only on CB-150, and CB-152 only on CB-151. No current downstream
+slice depends on CB-123, CB-130, CB-131, or CB-132.
+
+CB-150 is limited to minimal metrics for implemented paths and an optional no-op trace mirror.
+CB-151 resets and demonstrates only verified identity, catalog, ordering/seckill, payment/refund,
+RAG, chat, and PendingAction prepare/decline/expiry behavior. CB-152 measures only
+JMeter seckill QPS/concurrency correctness; Locust/Mock-LLM ordinary-chat, RAG, and PendingAction
+prepare P99; RAG HitRate@5/MRR; FAQ cache hit/model-call savings; and the environment, dataset,
+duration, and first evidenced bottleneck. It must not measure or claim Agent successful confirmation,
+Agent receipt Turn commit, MemoryPacker summary, handoff, failure-candidate export, deployment, or
+real-provider capability. This route decision changes no production code, tests, migration, grant,
+OpenAPI, README, schema, persisted data, service/language owner, truth owner, security boundary, or
+transaction boundary; README changes belong to the later CB-140 implementation lane.
+
+Current Level 3 conflicts: **none unresolved as of 2026-08-02**.
