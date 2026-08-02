@@ -7,6 +7,8 @@
     "node": ">=24 <25"
   },
   "scripts": {
+    "dev": "vite",
+    "preview": "vite preview",
     "format": "prettier --write .",
     "format:check": "prettier --check .",
     "lint": "eslint .",
