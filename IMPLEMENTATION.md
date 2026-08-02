@@ -1,9 +1,9 @@
 # CityBuddy implementation index
 
-**Document version:** v0.37\
+**Document version:** v0.38\
 **Verification date:** 2026-08-02\
-**Repository phase:** CB-123 is blocked; no slice is ready or in progress pending an owner-approved
-Level 3 portfolio-route disposition.
+**Repository phase:** The owner-approved Level 3 portfolio route leaves CB-121 and CB-123 blocked,
+defers CB-130 through CB-132 as vNext evolution, and makes CB-140 the sole ready slice.
 
 ## How to use this index
 
@@ -20,7 +20,9 @@ CityBuddy targets local-commerce transactions and text-only AI customer support 
 
 The repository contains the verified local-runtime foundations, identity vertical slice, product catalog vertical slice, standard-ordering vertical slice, seckill reservation, durable-order, cancellation, mock-payment, refund, and reconciliation mainline, support conversation lifecycle, bounded agent/tool control, filtered SSE, append-only feedback, versioned hybrid public-knowledge retrieval, calibrated durable retrieval evidence, evaluation identity and sandbox lifecycles, sandbox-bound evaluation payment callbacks, commerce-owned FAQ publication truth with transactional Outbox, incremental FAQ knowledge synchronization, versioned FAQ caching, and validated knowledge rebuild with an atomic forward alias switch:
 
-- executable non-business skeletons for `auth-service`, `commerce-service`, `agent-service`, `knowledge-indexer`, and `web`;
+- the original executable module skeletons for `auth-service`, `commerce-service`, `agent-service`,
+  `knowledge-indexer`, and `web`; verified slices have filled the four service modules with the
+  business behavior listed below, while `web` remains the minimal skeleton until CB-140;
 - one Maven reactor and wrapper, one locked `uv` workspace, and one npm lockfile;
 - one pinned, health-gated MySQL instance with isolated migration/runtime identities, separate migration histories, and non-default-role grant delegation;
 - two pinned, authenticated, health-gated Redis instances with distinct URLs, credentials, containers, and named volumes: Commerce uses AOF plus `noeviction`, while Support uses bounded `volatile-lfu` for TTL-bearing cache data;
@@ -37,7 +39,7 @@ The repository contains the verified local-runtime foundations, identity vertica
 - an executable six-family asynchronous-entry inventory proving zero current evaluation-reachable carriers, real evaluation-token rejection at production commerce controllers, payload non-carriage, and real-Broker rejection of reserved sandbox metadata before current production handlers;
 - evaluation mock-payment attempts bound to sandbox fixture orders, independently authenticated callback context with exact sandbox/session/trace/operation correlation, in-transaction active-liveness fencing, atomic callback/payment/order/ledger/audit truth, idempotent replay, and business-truth-anchored bidirectional audit/state completeness reconciliation;
 - direct-user durable support chat over server-owned sessions, with owner isolation, deterministic idempotent replay, atomic conversation/turn truth, and ordered append-only event evidence in `cs_db`;
-- one Agent-owned, non-authoritative PendingAction reference and local evidence closure, with complete validation of the Commerce `PREPARED` response bindings, local clarification/decline/expiry decisions, local-closure-first replay, shared conversation/evaluation action-evidence validation, and request-local action producer attribution; exact confirmation remains a fixed, side-effect-free non-success until CB-123;
+- one Agent-owned, non-authoritative PendingAction reference and local evidence closure, with complete validation of the Commerce `PREPARED` response bindings, local clarification/decline/expiry decisions, local-closure-first replay, shared conversation/evaluation action-evidence validation, and request-local action producer attribution; exact Agent confirmation remains a fixed, side-effect-free non-success and is outside the current portfolio route;
 - one bounded ReAct agent with deterministic routing signals, server-owned business-tier selection, one shared attempt budget, provider-isolated finite circuit breakers, role-alias-only fake-provider routing, executable fixed ToolSpec mediation, just-in-time exact-scope OBO, and ordered durable routing/model/budget/circuit/tool/terminal evidence;
 - filtered owner-scoped SSE over the same durable turn truth, with fixed public event schemas, bounded safety buffering, single-terminal ordering, disconnect-safe replay, and owner-scoped append-only feedback in `cs_db`;
 - commerce-owned product and CRM truth, authenticated published-product reads, a non-authoritative Redis cache with bounded penetration and hot-key protection, and transactional Outbox plus idempotent RocketMQ invalidation;
@@ -81,12 +83,14 @@ Cross-slice target architecture, preflight conclusions, service/data ownership, 
 
 ## Complete route
 
-The owner-approved continuous P0/P1 route terminates at `CB-152`. `CB-900`, `CB-910`, and `CB-920`
+The owner-approved portfolio P0/P1 route terminates at `CB-152`. `CB-900`, `CB-910`, and `CB-920`
 remain deferred outlines outside this Goal and must not be promoted, expanded, or used to create
 post-`CB-152` work. `CB-150` retains its minimal optional no-op trace-sink scope, and `CB-152` must
 close with real load, latency, and quality evidence measured and environment-labelled in the local
 Docker Compose topology. `CB-114` and `CB-115` are deferred vNext evolution and do not reactivate
-automatically after `CB-152`.
+automatically after `CB-152`. `CB-130`, `CB-131`, and `CB-132` are also retained only as vNext
+evolution; the current route does not implement Agent successful confirmation, Agent ActionReceipt
+projection or turn commit, memory/PII, handoff tickets, or failure-candidate export.
 
 The linked slice name is the canonical detailed specification. Target outcomes are retained separately in the [route outcome catalog](docs/CONTRACTS.md#contracts-route-outcomes).
 
@@ -132,13 +136,13 @@ The linked slice name is the canonical detailed specification. Target outcomes a
 | [CB-121 — Agent confirmation, receipt projection, and turn commit](docs/slices/CB-121.md) | P1 | `BLOCKED` | `CB-118`, `CB-082` |
 | [CB-122 — Agent PendingAction reference, local decisions, and evidence closure](docs/slices/CB-122.md) | P1 | `VERIFIED` | `CB-118`, `CB-082` |
 | [CB-123 — Agent confirmation arbitration, ActionReceipt projection, and turn commit](docs/slices/CB-123.md) | P1 | `BLOCKED` | `CB-122`, `CB-118`, `CB-082` |
-| [CB-130 — Memory watermarks, prompt/PII, and tiered output safety](docs/slices/CB-130.md) | P1 | `PLANNED` | `CB-113`, `CB-123` |
-| [CB-131 — Authoritative handoff tickets and agent projection](docs/slices/CB-131.md) | P1 | `PLANNED` | `CB-130` |
-| `CB-132 — Reviewed failure-candidate capture and authenticated export` | P1 | `PLANNED` | `CB-131` |
-| `CB-140 — Minimal web demonstration` | P1 | `PLANNED` | `CB-020`, `CB-030`, `CB-061`, `CB-082`, `CB-091`, `CB-123` |
-| `CB-150 — Metrics and optional no-op trace sink` | P1 | `PLANNED` | `CB-105`, `CB-132`, `CB-140` |
-| `CB-151 — Scripted reset/demo and repeatable fault drills` | P1 | `PLANNED` | `CB-150` |
-| `CB-152 — Load, latency, and quality evidence` | P1 | `PLANNED` | `CB-151` |
+| [CB-130 — Memory watermarks, prompt/PII, and tiered output safety](docs/slices/CB-130.md) | P1 | `DEFERRED` | Explicit vNext promotion only |
+| [CB-131 — Authoritative handoff tickets and agent projection](docs/slices/CB-131.md) | P1 | `DEFERRED` | Explicit vNext promotion only |
+| `CB-132 — Reviewed failure-candidate capture and authenticated export` | P1 | `DEFERRED` | Explicit vNext promotion only |
+| [CB-140 — Portfolio web demonstration and README truth](docs/slices/CB-140.md) | P1 | `READY` | `CB-020`, `CB-030`, `CB-060`, `CB-082`, `CB-091`, `CB-118`, `CB-122` |
+| [CB-150 — Minimal metrics and optional no-op trace sink](docs/slices/CB-150.md) | P1 | `PLANNED` | `CB-140` |
+| [CB-151 — Verified-path demo reset and fault drills](docs/slices/CB-151.md) | P1 | `PLANNED` | `CB-150` |
+| [CB-152 — Verified-path load, latency, and quality evidence](docs/slices/CB-152.md) | P1 | `PLANNED` | `CB-151` |
 | `CB-900 — Multimodal intake and object storage outline` | P2 | `DEFERRED` | Explicit promotion only |
 | `CB-910 — Action recovery scanning and advanced resilience outline` | P2 | `DEFERRED` | Explicit promotion only |
 | `CB-920 — Advanced retrieval, provider-cache experiments, and expanded operations views` | P2 | `DEFERRED` | Explicit promotion only |
