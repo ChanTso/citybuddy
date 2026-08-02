@@ -1,4 +1,5 @@
 import { decodePublicError } from './decoders';
+import { parseStrictJson } from './strictJson';
 
 const MAX_JSON_BYTES = 64 * 1024;
 
@@ -54,13 +55,13 @@ async function readBoundedBody(
 async function bodyAsUnknown(response: Response): Promise<unknown> {
   const text = await readBoundedBody(response);
   try {
-    return JSON.parse(text) as unknown;
+    return parseStrictJson(text);
   } catch {
     throw new ApiFailure('malformed');
   }
 }
 
-function failureKind(status: number): ApiFailureKind {
+export function failureKind(status: number): ApiFailureKind {
   if (status === 401) return 'unauthorized';
   if (status === 403) return 'forbidden';
   if (status === 409) return 'conflict';
@@ -94,6 +95,8 @@ export async function requestJson<T>(
   try {
     return decode(await bodyAsUnknown(response));
   } catch (error) {
+    if (response.status >= 400)
+      throw new ApiFailure(failureKind(response.status));
     if (error instanceof ApiFailure) throw error;
     throw new ApiFailure('malformed');
   }
