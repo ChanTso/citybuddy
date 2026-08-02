@@ -290,6 +290,35 @@ describe('CityBuddy portfolio surface', () => {
     expect(await screen.findByText('服务端状态：ORDERED')).toBeVisible();
   });
 
+  it('aborts an active reservation mutation when the component unmounts', async () => {
+    let reservationSignal!: AbortSignal;
+    mockedSubmitReservation.mockImplementation(
+      (_token, _activity, _key, _body, signal) =>
+        new Promise((_resolve, reject) => {
+          reservationSignal = signal;
+          signal.addEventListener(
+            'abort',
+            () => reject(new DOMException('Aborted', 'AbortError')),
+            { once: true },
+          );
+        }),
+    );
+    const view = render(<App />);
+    await signIn();
+    fireEvent.change(screen.getByLabelText('活动编号'), {
+      target: { value: 'tea-drop' },
+    });
+    fireEvent.change(screen.getByLabelText('活动版本'), {
+      target: { value: '2' },
+    });
+    fireEvent.submit(screen.getByLabelText('活动编号').closest('form')!);
+    await waitFor(() => expect(mockedSubmitReservation).toHaveBeenCalledOnce());
+
+    expect(reservationSignal.aborted).toBe(false);
+    view.unmount();
+    expect(reservationSignal.aborted).toBe(true);
+  });
+
   it('polls without overlap and stops at the first server terminal', async () => {
     mockedSubmitReservation.mockResolvedValue({
       ...ordered,
@@ -528,5 +557,72 @@ describe('CityBuddy portfolio surface', () => {
       ),
     ).toBeVisible();
     expect(screen.queryByText(/receipt/i)).not.toBeInTheDocument();
+  });
+
+  it('aborts an active chat stream and clears its session on logout', async () => {
+    let streamSignal!: AbortSignal;
+    mockedStreamChat.mockImplementation(
+      (_token, _session, _key, _message, signal) =>
+        new Promise((_resolve, reject) => {
+          streamSignal = signal;
+          signal.addEventListener(
+            'abort',
+            () => reject(new DOMException('Aborted', 'AbortError')),
+            { once: true },
+          );
+        }),
+    );
+    render(<App />);
+    await signIn();
+    fireEvent.click(screen.getByLabelText('流式回复'));
+    fireEvent.change(screen.getByLabelText('消息或澄清说明'), {
+      target: { value: 'stream until logout' },
+    });
+    fireEvent.submit(screen.getByLabelText('消息或澄清说明').closest('form')!);
+    await waitFor(() => expect(mockedStreamChat).toHaveBeenCalledOnce());
+
+    expect(streamSignal.aborted).toBe(false);
+    fireEvent.click(screen.getByRole('button', { name: '退出登录' }));
+    expect(streamSignal.aborted).toBe(true);
+    expect(screen.getByRole('heading', { name: '登录本地演示' })).toBeVisible();
+  });
+
+  it('keeps reservation, chat, and decline forms keyboard-focusable and submit-complete', async () => {
+    mockedSendChat
+      .mockResolvedValueOnce(response('action_pending', 'Waiting.'))
+      .mockResolvedValueOnce(response('action_declined', 'Declined.'));
+    render(<App />);
+    await signIn();
+
+    const activity = screen.getByLabelText('活动编号');
+    const activityVersion = screen.getByLabelText('活动版本');
+    fireEvent.change(activity, { target: { value: 'tea-drop' } });
+    fireEvent.change(activityVersion, { target: { value: '2' } });
+    activity.focus();
+    expect(activity).toHaveFocus();
+    expect(activity.tabIndex).toBe(0);
+    fireEvent.keyDown(activity, { key: 'Enter', code: 'Enter' });
+    fireEvent.submit(activity.closest('form')!);
+    expect(await screen.findByText('服务端状态：ORDERED')).toBeVisible();
+
+    const message = screen.getByLabelText('消息或澄清说明');
+    fireEvent.change(message, { target: { value: 'prepare' } });
+    const send = screen.getByRole('button', { name: '发送' });
+    send.focus();
+    expect(send).toHaveFocus();
+    expect(send.tabIndex).toBe(0);
+    fireEvent.keyDown(send, { key: 'Enter', code: 'Enter' });
+    fireEvent.submit(message.closest('form')!);
+    const decline = await screen.findByRole('button', { name: '拒绝此动作' });
+
+    decline.focus();
+    expect(decline).toHaveFocus();
+    expect(decline.tabIndex).toBe(0);
+    fireEvent.keyDown(decline, { key: 'Enter', code: 'Enter' });
+    fireEvent.submit(decline.closest('form')!);
+    expect(
+      await screen.findByText('服务端已返回拒绝终态；动作未执行。'),
+    ).toBeVisible();
+    expect(mockedSendChat.mock.calls[1][3]).toBe('decline');
   });
 });
