@@ -1,9 +1,10 @@
 # CityBuddy implementation index
 
-**Document version:** v0.38\
+**Document version:** v0.39\
 **Verification date:** 2026-08-02\
-**Repository phase:** The owner-approved Level 3 portfolio route leaves CB-121 and CB-123 blocked,
-defers CB-130 through CB-132 as vNext evolution, and makes CB-140 the sole ready slice.
+**Repository phase:** CB-140 portfolio web demonstration and README truth verified; CB-150 is the
+sole ready slice. CB-121 and CB-123 remain blocked, and CB-130 through CB-132 remain deferred vNext
+evolution.
 
 ## How to use this index
 
@@ -22,7 +23,8 @@ The repository contains the verified local-runtime foundations, identity vertica
 
 - the original executable module skeletons for `auth-service`, `commerce-service`, `agent-service`,
   `knowledge-indexer`, and `web`; verified slices have filled the four service modules with the
-  business behavior listed below, while `web` remains the minimal skeleton until CB-140;
+  business behavior listed below and replaced the web skeleton with the minimal CB-140 portfolio
+  demonstration;
 - one Maven reactor and wrapper, one locked `uv` workspace, and one npm lockfile;
 - one pinned, health-gated MySQL instance with isolated migration/runtime identities, separate migration histories, and non-default-role grant delegation;
 - two pinned, authenticated, health-gated Redis instances with distinct URLs, credentials, containers, and named volumes: Commerce uses AOF plus `noeviction`, while Support uses bounded `volatile-lfu` for TTL-bearing cache data;
@@ -139,8 +141,8 @@ The linked slice name is the canonical detailed specification. Target outcomes a
 | [CB-130 — Memory watermarks, prompt/PII, and tiered output safety](docs/slices/CB-130.md) | P1 | `DEFERRED` | Explicit vNext promotion only |
 | [CB-131 — Authoritative handoff tickets and agent projection](docs/slices/CB-131.md) | P1 | `DEFERRED` | Explicit vNext promotion only |
 | `CB-132 — Reviewed failure-candidate capture and authenticated export` | P1 | `DEFERRED` | Explicit vNext promotion only |
-| [CB-140 — Portfolio web demonstration and README truth](docs/slices/CB-140.md) | P1 | `READY` | `CB-020`, `CB-030`, `CB-060`, `CB-082`, `CB-091`, `CB-118`, `CB-122` |
-| [CB-150 — Minimal metrics and optional no-op trace sink](docs/slices/CB-150.md) | P1 | `PLANNED` | `CB-140` |
+| [CB-140 — Portfolio web demonstration and README truth](docs/slices/CB-140.md) | P1 | `VERIFIED` | `CB-020`, `CB-030`, `CB-060`, `CB-082`, `CB-091`, `CB-118`, `CB-122` |
+| [CB-150 — Minimal metrics and optional no-op trace sink](docs/slices/CB-150.md) | P1 | `READY` | `CB-140` |
 | [CB-151 — Verified-path demo reset and fault drills](docs/slices/CB-151.md) | P1 | `PLANNED` | `CB-150` |
 | [CB-152 — Verified-path load, latency, and quality evidence](docs/slices/CB-152.md) | P1 | `PLANNED` | `CB-151` |
 | `CB-900 — Multimodal intake and object storage outline` | P2 | `DEFERRED` | Explicit promotion only |
