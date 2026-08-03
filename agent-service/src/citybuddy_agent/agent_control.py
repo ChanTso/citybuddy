@@ -35,6 +35,18 @@ from .knowledge import (
     KnowledgeSearchInput,
     KnowledgeSearchOutput,
 )
+from .metrics import (
+    BackendDecision,
+    CityBuddyMetrics,
+    FaqLevel,
+    FaqResult,
+    NoopCityBuddyMetrics,
+    Operation,
+    OperationOutcome,
+    ProviderOutcome,
+    ProviderRole,
+    SafeCityBuddyMetrics,
+)
 from .retrieval import (
     RerankCandidate,
     RerankOutput,
@@ -45,6 +57,7 @@ from .retrieval import (
     decide_retrieval,
     insufficient_decision,
 )
+from .tracing import NoopTraceSink, OperationObservation, TraceSink
 
 
 @dataclass(frozen=True)
@@ -341,9 +354,15 @@ class ModelReply:
 class LiteLlmClient:
     """Call a LiteLLM-compatible endpoint using role aliases only."""
 
-    def __init__(self, url: str, circuits: ProviderCircuits) -> None:
+    def __init__(
+        self,
+        url: str,
+        circuits: ProviderCircuits,
+        metrics: CityBuddyMetrics | None = None,
+    ) -> None:
         self._url = url.rstrip("/")
         self._circuits = circuits
+        self._metrics = SafeCityBuddyMetrics(metrics or NoopCityBuddyMetrics())
 
     def complete(
         self,
@@ -355,30 +374,41 @@ class LiteLlmClient:
     ) -> ModelReply:
         transient_retry_available = True
         last_failure: ProviderFailure | CircuitOpen | None = None
-        for route in plan.routes:
+        for route_index, route in enumerate(plan.routes):
+            metric_role = ProviderRole.PRIMARY if route_index == 0 else ProviderRole.FALLBACK
             attempts_for_route = 0
             while True:
                 transient_failure: ProviderFailure | None = None
                 admitted = False
+                attempt_outcome: ProviderOutcome | None = None
                 budget.charge("model_http", route.provider_key)
                 attempts_for_route += 1
                 try:
                     self._circuits.admit(route.provider_key, events)
                     admitted = True
+                    attempt_outcome = ProviderOutcome.ERROR
                     response = httpx.post(
                         f"{self._url}/v1/chat/completions",
                         json={"model": route.role_alias, "messages": messages, "tools": tools},
                         timeout=2.0,
                     )
                     if response.status_code in {408, 429, 502, 503, 504}:
+                        attempt_outcome = ProviderOutcome.TRANSIENT
                         raise ProviderFailure(transient=True)
                     if response.status_code != 200:
+                        attempt_outcome = ProviderOutcome.DENIED
                         raise ProviderFailure(transient=False)
                     try:
                         payload = response.json()
                     except ValueError as exception:
+                        attempt_outcome = ProviderOutcome.INVALID
                         raise ProviderFailure(transient=False) from exception
-                    reply = self._parse(payload)
+                    try:
+                        reply = self._parse(payload)
+                    except ProviderFailure:
+                        attempt_outcome = ProviderOutcome.INVALID
+                        raise
+                    attempt_outcome = ProviderOutcome.SUCCESS
                     self._circuits.success(route.provider_key, events)
                     events.append(
                         AgentEvent(
@@ -392,6 +422,7 @@ class LiteLlmClient:
                     )
                     return reply
                 except (httpx.TimeoutException, httpx.NetworkError):
+                    attempt_outcome = ProviderOutcome.TRANSIENT
                     transient_failure = ProviderFailure(transient=True)
                 except CircuitOpen as failure:
                     last_failure = failure
@@ -411,6 +442,8 @@ class LiteLlmClient:
                         raise
                     transient_failure = failure
                 finally:
+                    if attempt_outcome is not None:
+                        self._metrics.record_provider_attempt(metric_role, attempt_outcome)
                     if admitted:
                         self._circuits.release_probe(route.provider_key)
                 if transient_failure is None:
@@ -446,10 +479,12 @@ class LiteLlmClient:
         route = plan.reranker_route
         for attempt in range(2):
             admitted = False
+            attempt_outcome: ProviderOutcome | None = None
             budget.charge("reranker_http", route.provider_key)
             try:
                 self._circuits.admit(route.provider_key, events)
                 admitted = True
+                attempt_outcome = ProviderOutcome.ERROR
                 response = httpx.post(
                     f"{self._url}/v1/chat/completions",
                     json={
@@ -464,14 +499,22 @@ class LiteLlmClient:
                     timeout=2.0,
                 )
                 if response.status_code in {408, 429, 502, 503, 504}:
+                    attempt_outcome = ProviderOutcome.TRANSIENT
                     raise ProviderFailure(transient=True)
                 if response.status_code != 200:
+                    attempt_outcome = ProviderOutcome.DENIED
                     raise ProviderFailure(transient=False)
                 try:
                     payload = response.json()
                 except ValueError as exception:
+                    attempt_outcome = ProviderOutcome.INVALID
                     raise ProviderFailure(transient=False) from exception
-                output = self._parse_rerank(payload)
+                try:
+                    output = self._parse_rerank(payload)
+                except ProviderFailure:
+                    attempt_outcome = ProviderOutcome.INVALID
+                    raise
+                attempt_outcome = ProviderOutcome.SUCCESS
                 self._circuits.success(route.provider_key, events)
                 events.append(
                     AgentEvent(
@@ -485,12 +528,15 @@ class LiteLlmClient:
                 )
                 return output
             except (httpx.TimeoutException, httpx.NetworkError):
+                attempt_outcome = ProviderOutcome.TRANSIENT
                 failure = ProviderFailure(transient=True)
             except CircuitOpen:
                 failure = ProviderFailure(transient=True)
             except ProviderFailure as exception:
                 failure = exception
             finally:
+                if attempt_outcome is not None:
+                    self._metrics.record_provider_attempt(ProviderRole.RERANKER, attempt_outcome)
                 if admitted:
                     self._circuits.release_probe(route.provider_key)
             if not failure.transient:
@@ -660,6 +706,7 @@ class ToolResult:
     retrieval_decision: RetrievalDecision | None = None
     pending_action: PendingActionPayload | None = None
     server_reason: str | None = None
+    operation_outcome: OperationOutcome | None = None
 
 
 class ToolAdapter:
@@ -671,6 +718,8 @@ class ToolAdapter:
         reranker: Reranker | None = None,
         calibration: SufficiencyCalibration | None = None,
         faq_cache: FaqCache | None = None,
+        metrics: CityBuddyMetrics | None = None,
+        trace_sink: TraceSink | None = None,
     ) -> None:
         self._base_url = base_url.rstrip("/")
         self._obo = obo
@@ -678,6 +727,8 @@ class ToolAdapter:
         self._reranker = reranker
         self._calibration = calibration
         self._faq_cache = faq_cache
+        self._metrics = SafeCityBuddyMetrics(metrics or NoopCityBuddyMetrics())
+        self._trace_sink = trace_sink or NoopTraceSink()
         self._specs = {
             CATALOG_PRODUCT_SPEC.name: CATALOG_PRODUCT_SPEC,
             KNOWLEDGE_SEARCH_SPEC.name: KNOWLEDGE_SEARCH_SPEC,
@@ -704,6 +755,66 @@ class ToolAdapter:
         turn_id: str | None = None,
         public_query: str | None = None,
     ) -> ToolResult:
+        operation = {
+            KNOWLEDGE_SEARCH_SPEC.name: Operation.KNOWLEDGE_SEARCH,
+            REFUND_PREPARE_SPEC.name: Operation.PENDING_ACTION_PREPARE,
+        }.get(name)
+        if operation is None:
+            return self._execute(
+                name=name,
+                serialized_arguments=serialized_arguments,
+                direct_token=direct_token,
+                subject=subject,
+                session_id=session_id,
+                budget=budget,
+                events=events,
+                plan=plan,
+                knowledge_allowed=knowledge_allowed,
+                sandbox_id=sandbox_id,
+                trace_id=trace_id,
+                turn_id=turn_id,
+                public_query=public_query,
+            )
+        with OperationObservation(operation, self._metrics, self._trace_sink) as observation:
+            try:
+                result = self._execute(
+                    name=name,
+                    serialized_arguments=serialized_arguments,
+                    direct_token=direct_token,
+                    subject=subject,
+                    session_id=session_id,
+                    budget=budget,
+                    events=events,
+                    plan=plan,
+                    knowledge_allowed=knowledge_allowed,
+                    sandbox_id=sandbox_id,
+                    trace_id=trace_id,
+                    turn_id=turn_id,
+                    public_query=public_query,
+                )
+            except ToolBoundaryFailure as exception:
+                observation.outcome = self._boundary_operation_outcome(operation, exception)
+                raise
+            observation.outcome = result.operation_outcome or OperationOutcome.ERROR
+            return result
+
+    def _execute(
+        self,
+        *,
+        name: str,
+        serialized_arguments: str,
+        direct_token: str,
+        subject: str,
+        session_id: str,
+        budget: AttemptBudget,
+        events: list[AgentEvent],
+        plan: ModelPlan | None = None,
+        knowledge_allowed: bool = True,
+        sandbox_id: str | None = None,
+        trace_id: str | None = None,
+        turn_id: str | None = None,
+        public_query: str | None = None,
+    ) -> ToolResult:
         spec = self._specs.get(name)
         if spec is None:
             return self._deny(name, "unknown_tool", events)
@@ -711,11 +822,21 @@ class ToolAdapter:
             decoded = strict_json_object(serialized_arguments.encode("utf-8"))
             arguments = spec.input_schema.model_validate(decoded)
         except (ActionJsonError, ValidationError, TypeError, UnicodeError):
-            return self._deny(name, "invalid_arguments", events)
+            return self._deny(
+                name,
+                "invalid_arguments",
+                events,
+                operation_outcome=OperationOutcome.INVALID,
+            )
         events.append(AgentEvent("TOOL_LIFECYCLE", {"tool": name, "state": "requested"}))
         if spec.authority == "elasticsearch":
             if not knowledge_allowed:
-                return self._deny(name, "retrieval_already_decided", events)
+                return self._deny(
+                    name,
+                    "retrieval_already_decided",
+                    events,
+                    operation_outcome=OperationOutcome.DENIED,
+                )
             if (
                 (self._knowledge is None and self._faq_cache is None)
                 or self._reranker is None
@@ -723,20 +844,40 @@ class ToolAdapter:
                 or plan is None
                 or not isinstance(arguments, KnowledgeSearchInput)
             ):
-                return self._deny(name, "knowledge_unavailable", events)
+                return self._deny(
+                    name,
+                    "knowledge_unavailable",
+                    events,
+                    operation_outcome=OperationOutcome.UNAVAILABLE,
+                )
             bounded_knowledge = (
                 self._faq_cache.lookup(public_query)
                 if self._faq_cache is not None and public_query is not None
                 else None
             )
+            if self._faq_cache is None or public_query is None:
+                self._metrics.record_faq_lookup(FaqLevel.MAPPING, FaqResult.BYPASS)
             cache_hit = bounded_knowledge is not None
             if bounded_knowledge is None:
                 if self._knowledge is None:
-                    return self._deny(name, "knowledge_unavailable", events)
+                    return self._deny(
+                        name,
+                        "knowledge_unavailable",
+                        events,
+                        operation_outcome=OperationOutcome.UNAVAILABLE,
+                    )
+                self._metrics.record_backend_decision(BackendDecision.ELASTICSEARCH_ISSUED)
                 try:
                     bounded_knowledge = self._knowledge.search(arguments, budget.charge)
                 except KnowledgeSearchFailure as error:
-                    return self._deny(name, error.code, events)
+                    return self._deny(
+                        name,
+                        error.code,
+                        events,
+                        operation_outcome=OperationOutcome.UNAVAILABLE,
+                    )
+            else:
+                self._metrics.record_backend_decision(BackendDecision.CACHE_SERVED)
             if not bounded_knowledge.results:
                 decision = insufficient_decision(
                     index_version=bounded_knowledge.index_version,
@@ -787,6 +928,7 @@ class ToolAdapter:
                 outcome="ok",
                 model_view=decision.model_dump(by_alias=True, mode="json"),
                 retrieval_decision=decision,
+                operation_outcome=OperationOutcome.SUFFICIENT,
             )
         if spec.scope is None:
             raise RuntimeError("Commerce ToolSpec omitted its exact scope")
@@ -804,6 +946,7 @@ class ToolAdapter:
                         "identity_denied",
                         events,
                         server_reason="ACTION_PREPARATION_IDENTITY_UNAUTHENTICATED",
+                        operation_outcome=OperationOutcome.DENIED,
                     )
                 if exception.status_code == 403:
                     return self._deny(
@@ -811,6 +954,7 @@ class ToolAdapter:
                         "identity_denied",
                         events,
                         server_reason="ACTION_PREPARATION_IDENTITY_FORBIDDEN",
+                        operation_outcome=OperationOutcome.DENIED,
                     )
                 raise ToolBoundaryFailure(
                     status_code=503,
@@ -894,6 +1038,7 @@ class ToolAdapter:
                     "policy_denied",
                     events,
                     server_reason=reason,
+                    operation_outcome=self._prepare_reason_outcome(reason),
                 )
             raise ToolBoundaryFailure(
                 status_code=429 if response.status_code == 429 else 503,
@@ -993,6 +1138,13 @@ class ToolAdapter:
             outcome="ok",
             model_view=model_view,
             pending_action=pending_action,
+            operation_outcome=(
+                OperationOutcome.REPLAY
+                if isinstance(bounded, PreparedActionResponse) and bounded.replayed
+                else OperationOutcome.SUCCESS
+            )
+            if spec is REFUND_PREPARE_SPEC
+            else None,
         )
 
     def _prepare_with_bounded_replay(
@@ -1037,6 +1189,38 @@ class ToolAdapter:
                 continue
             return response
         raise RuntimeError("Bounded action preparation replay did not terminate")
+
+    @staticmethod
+    def _prepare_reason_outcome(reason: str) -> OperationOutcome:
+        if reason in {
+            "ACTION_PREPARATION_IDENTITY_UNAUTHENTICATED",
+            "ACTION_PREPARATION_IDENTITY_FORBIDDEN",
+            "ACTION_PREPARATION_COMMERCE_UNAUTHENTICATED",
+            "ACTION_PREPARATION_COMMERCE_FORBIDDEN",
+        }:
+            return OperationOutcome.DENIED
+        if reason == "ACTION_PREPARATION_COMMERCE_VALIDATION_REJECTED":
+            return OperationOutcome.REJECTED
+        if reason == "ACTION_PREPARATION_TARGET_NOT_FOUND":
+            return OperationOutcome.NOT_FOUND
+        if reason in {
+            "ACTION_PREPARATION_INTENT_CONFLICT",
+            "ACTION_PREPARATION_DURABLE_TRUTH_INCONSISTENT",
+        }:
+            return OperationOutcome.CONFLICT
+        if reason == "ACTION_PREPARATION_COMMERCE_INDETERMINATE":
+            return OperationOutcome.INDETERMINATE
+        if reason == "ACTION_PREPARATION_RESPONSE_INVALID":
+            return OperationOutcome.INVALID
+        return OperationOutcome.UNAVAILABLE
+
+    @classmethod
+    def _boundary_operation_outcome(
+        cls, operation: Operation, exception: ToolBoundaryFailure
+    ) -> OperationOutcome:
+        if operation is Operation.PENDING_ACTION_PREPARE:
+            return cls._prepare_reason_outcome(exception.reason)
+        return OperationOutcome.ERROR
 
     @staticmethod
     def _classify_prepare_rejection(response: BoundedHttpResponse | httpx.Response) -> str:
@@ -1124,6 +1308,7 @@ class ToolAdapter:
         events: list[AgentEvent],
         *,
         server_reason: str | None = None,
+        operation_outcome: OperationOutcome | None = None,
     ) -> ToolResult:
         payload: dict[str, object] = {
             "tool": name[:64],
@@ -1144,6 +1329,7 @@ class ToolAdapter:
             outcome="deny_with_feedback",
             model_view={"outcome": "deny_with_feedback", "reason": reason},
             server_reason=server_reason,
+            operation_outcome=operation_outcome,
         )
 
     @staticmethod
@@ -1187,6 +1373,7 @@ class ToolAdapter:
             outcome="deny_with_feedback",
             model_view={"outcome": "deny_with_feedback", "reason": decision.reason},
             retrieval_decision=decision,
+            operation_outcome=OperationOutcome.INSUFFICIENT,
         )
 
 

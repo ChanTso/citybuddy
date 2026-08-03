@@ -11,6 +11,7 @@ from citybuddy_agent.faq_cache import (
     RedisFaqCache,
     normalized_query_hash,
 )
+from citybuddy_agent.metrics import FaqLevel, FaqResult, NoopCityBuddyMetrics
 from redis import Redis
 from redis.exceptions import (
     ConnectionError,
@@ -118,13 +119,27 @@ def state_hash(**overrides: str) -> list[str]:
 
 def snapshot(
     *, answer_overrides: dict[str, str] | None = None, state_overrides: dict[str, str] | None = None
-) -> list[list[str]]:
-    return [state_hash(**(state_overrides or {})), answer_hash(**(answer_overrides or {}))]
+) -> list[object]:
+    return [
+        "hit",
+        state_hash(**(state_overrides or {})),
+        answer_hash(**(answer_overrides or {})),
+    ]
 
 
-def cache_with(fake: FakeRedis) -> RedisFaqCache:
+class RecordingMetrics(NoopCityBuddyMetrics):
+    def __init__(self) -> None:
+        self.lookups: list[tuple[FaqLevel, FaqResult]] = []
+
+    def record_faq_lookup(self, level: FaqLevel, result: FaqResult) -> None:
+        self.lookups.append((level, result))
+
+
+def cache_with(fake: FakeRedis, metrics: NoopCityBuddyMetrics | None = None) -> RedisFaqCache:
     return RedisFaqCache(
-        "redis://agent_cache:secret@redis-support:6379/0", client=cast(Redis, fake)
+        "redis://agent_cache:secret@redis-support:6379/0",
+        client=cast(Redis, fake),
+        metrics=metrics,
     )
 
 
@@ -199,3 +214,71 @@ def test_mapping_population_uses_only_hash_and_exact_source_identity() -> None:
     assert "faq-refund" in serialized_call
     assert not cache_with(FakeRedis(1)).populate_mapping("query", "FAQ/private", 7)
     assert not cache_with(FakeRedis(1)).populate_mapping("query", "faq-refund", 0)
+
+
+@pytest.mark.parametrize(
+    ("raw", "expected"),
+    [
+        (["mapping_miss"], [(FaqLevel.MAPPING, FaqResult.MISS)]),
+        (["mapping_invalid"], [(FaqLevel.MAPPING, FaqResult.INVALID)]),
+        (
+            ["answer_miss"],
+            [
+                (FaqLevel.MAPPING, FaqResult.HIT),
+                (FaqLevel.ANSWER, FaqResult.MISS),
+            ],
+        ),
+        (
+            ["answer_invalid"],
+            [
+                (FaqLevel.MAPPING, FaqResult.HIT),
+                (FaqLevel.ANSWER, FaqResult.INVALID),
+            ],
+        ),
+        (
+            snapshot(),
+            [
+                (FaqLevel.MAPPING, FaqResult.HIT),
+                (FaqLevel.ANSWER, FaqResult.HIT),
+            ],
+        ),
+    ],
+)
+def test_lookup_discriminator_records_one_mapping_and_only_reached_answer(
+    raw: object, expected: list[tuple[FaqLevel, FaqResult]]
+) -> None:
+    metrics = RecordingMetrics()
+
+    cache_with(FakeRedis(raw), metrics).lookup("Refund policy")
+
+    assert metrics.lookups == expected
+
+
+def test_bypass_unavailable_and_unknown_shape_are_not_misses() -> None:
+    bypass = RecordingMetrics()
+    unavailable = RecordingMetrics()
+    unknown = RecordingMetrics()
+
+    assert cache_with(FakeRedis(["hit"]), bypass).lookup("\x00") is None
+    assert cache_with(FakeRedis(ConnectionError("private")), unavailable).lookup("query") is None
+    assert cache_with(FakeRedis({"future": "shape"}), unknown).lookup("query") is None
+
+    assert bypass.lookups == [(FaqLevel.MAPPING, FaqResult.BYPASS)]
+    assert unavailable.lookups == [(FaqLevel.MAPPING, FaqResult.UNAVAILABLE)]
+    assert unknown.lookups == [(FaqLevel.MAPPING, FaqResult.INVALID)]
+
+
+def test_exploding_metrics_recorder_does_not_change_lookup_result_or_delete_effect() -> None:
+    class ExplodingMetrics(RecordingMetrics):
+        def record_faq_lookup(self, level: FaqLevel, result: FaqResult) -> None:
+            raise RuntimeError("private recorder failure")
+
+    expected_fake = FakeRedis(snapshot())
+    exploding_fake = FakeRedis(snapshot())
+
+    expected = cache_with(expected_fake).lookup("Refund policy")
+    actual = cache_with(exploding_fake, ExplodingMetrics()).lookup("Refund policy")
+
+    assert actual == expected
+    assert exploding_fake.deleted == expected_fake.deleted
+    assert exploding_fake.eval_calls == expected_fake.eval_calls

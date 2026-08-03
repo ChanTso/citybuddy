@@ -12,6 +12,7 @@ from citybuddy_agent.agent_control import (
     TOOL_BOUNDARY_FAILURE_REASONS,
     AgentEvent,
     AttemptBudget,
+    AttemptBudgetExhausted,
     BoundedAgent,
     CatalogProductInput,
     CircuitOpen,
@@ -25,7 +26,9 @@ from citybuddy_agent.agent_control import (
     ToolAdapter,
     ToolBoundaryFailure,
 )
+from citybuddy_agent.metrics import PrometheusCityBuddyMetrics
 from fastapi import HTTPException
+from prometheus_client.parser import text_string_to_metric_families
 
 
 def future_action_expiry(*, hours: int = 1) -> str:
@@ -48,6 +51,15 @@ def plan() -> Any:
 
 def completion(content: str = "bounded response") -> httpx.Response:
     return httpx.Response(200, json={"choices": [{"message": {"content": content}}]})
+
+
+def provider_samples(metrics: PrometheusCityBuddyMetrics) -> dict[tuple[str, str], float]:
+    samples: dict[tuple[str, str], float] = {}
+    for family in text_string_to_metric_families(metrics.render().decode("utf-8")):
+        for sample in family.samples:
+            if sample.name == "citybuddy_agent_model_request_attempts_total":
+                samples[(sample.labels["role"], sample.labels["outcome"])] = sample.value
+    return samples
 
 
 def test_rule_and_model_routers_keep_signals_separate_from_tier_policy() -> None:
@@ -77,9 +89,11 @@ def test_litellm_transient_retry_and_same_tier_fallback_share_one_budget(
     monkeypatch.setattr(httpx, "post", post)
     events: list[AgentEvent] = []
     budget = AttemptBudget(8, events)
+    metrics = PrometheusCityBuddyMetrics()
     client = LiteLlmClient(
         "https://proxy.test",
         ProviderCircuits(minimum_requests=2, open_seconds=10, half_open_probes=1),
+        metrics,
     )
 
     reply = client.complete(plan(), [{"role": "user", "content": "hello"}], [], budget, events)
@@ -97,6 +111,10 @@ def test_litellm_transient_retry_and_same_tier_fallback_share_one_budget(
         "provider-a",
         "provider-b",
     }
+    assert provider_samples(metrics) == {
+        ("primary", "transient"): 2,
+        ("fallback", "success"): 1,
+    }
 
 
 def test_litellm_does_not_retry_non_transient_provider_denial(
@@ -113,9 +131,11 @@ def test_litellm_does_not_retry_non_transient_provider_denial(
     monkeypatch.setattr(httpx, "post", post)
     events: list[AgentEvent] = []
     budget = AttemptBudget(8, events)
+    metrics = PrometheusCityBuddyMetrics()
     client = LiteLlmClient(
         "https://proxy.test",
         ProviderCircuits(minimum_requests=2, open_seconds=10, half_open_probes=1),
+        metrics,
     )
 
     with pytest.raises(ProviderFailure) as denied:
@@ -124,6 +144,7 @@ def test_litellm_does_not_retry_non_transient_provider_denial(
     assert denied.value.transient is False
     assert calls == 1
     assert budget.used == 1
+    assert provider_samples(metrics) == {("primary", "denied"): 1}
 
 
 def test_litellm_does_not_retry_invalid_provider_payload(
@@ -139,11 +160,13 @@ def test_litellm_does_not_retry_invalid_provider_payload(
 
     monkeypatch.setattr(httpx, "post", post)
     events: list[AgentEvent] = []
+    metrics = PrometheusCityBuddyMetrics()
 
     with pytest.raises(ProviderFailure) as denied:
         LiteLlmClient(
             "https://proxy.test",
             ProviderCircuits(minimum_requests=2, open_seconds=10, half_open_probes=1),
+            metrics,
         ).complete(
             plan(),
             [{"role": "user", "content": "hello"}],
@@ -154,6 +177,92 @@ def test_litellm_does_not_retry_invalid_provider_payload(
 
     assert denied.value.transient is False
     assert calls == 1
+    assert provider_samples(metrics) == {("primary", "invalid"): 1}
+
+
+def test_three_route_plan_aggregates_every_nonfirst_actual_attempt_as_fallback(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    requests: list[str] = []
+    responses = [httpx.Response(503), httpx.Response(503), completion("fallback-three")]
+
+    def post(*args: Any, **kwargs: Any) -> httpx.Response:
+        del args
+        requests.append(kwargs["json"]["model"])
+        return responses.pop(0)
+
+    monkeypatch.setattr(httpx, "post", post)
+    routes = tuple(
+        ProviderRoute(f"support-route-{index}", f"provider-{index}") for index in range(3)
+    )
+    selected = ModelRouter(routes, 8).plan(RuleRouter().signals("hello"))
+    metrics = PrometheusCityBuddyMetrics()
+    events: list[AgentEvent] = []
+    client = LiteLlmClient(
+        "https://proxy.test",
+        ProviderCircuits(minimum_requests=1, open_seconds=10, half_open_probes=1),
+        metrics,
+    )
+
+    reply = client.complete(
+        selected,
+        [{"role": "user", "content": "hello"}],
+        [],
+        AttemptBudget(8, events),
+        events,
+    )
+
+    assert reply.content == "fallback-three"
+    assert requests == ["support-route-0", "support-route-1", "support-route-2"]
+    assert provider_samples(metrics) == {
+        ("primary", "transient"): 1,
+        ("fallback", "transient"): 1,
+        ("fallback", "success"): 1,
+    }
+    assert "provider-0" not in metrics.render().decode("utf-8")
+    assert "support-route-1" not in metrics.render().decode("utf-8")
+
+
+def test_budget_and_circuit_rejection_before_http_record_zero_attempts(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls = 0
+
+    def post(*args: Any, **kwargs: Any) -> httpx.Response:
+        nonlocal calls
+        del args, kwargs
+        calls += 1
+        return completion()
+
+    monkeypatch.setattr(httpx, "post", post)
+    metrics = PrometheusCityBuddyMetrics()
+    events: list[AgentEvent] = []
+    circuits = ProviderCircuits(minimum_requests=1, open_seconds=10, half_open_probes=1)
+    circuits.transient_failure("provider-a", events)
+    client = LiteLlmClient("https://proxy.test", circuits, metrics)
+    one_route = ModelRouter((ProviderRoute("primary", "provider-a"),), 1).plan(
+        RuleRouter().signals("hello")
+    )
+
+    with pytest.raises(ProviderFailure):
+        client.complete(
+            one_route,
+            [{"role": "user", "content": "hello"}],
+            [],
+            AttemptBudget(1, events),
+            events,
+        )
+    with pytest.raises(AttemptBudgetExhausted):
+        client.complete(
+            one_route,
+            [{"role": "user", "content": "hello"}],
+            [],
+            AttemptBudget(0, events),
+            events,
+        )
+
+    assert calls == 0
+    assert provider_samples(metrics) == {}
 
 
 def test_provider_circuits_are_isolated_bounded_and_half_open() -> None:

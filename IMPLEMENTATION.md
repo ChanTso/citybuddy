@@ -145,7 +145,7 @@ The linked slice name is the canonical detailed specification. Target outcomes a
 | [CB-131 — Authoritative handoff tickets and agent projection](docs/slices/CB-131.md) | P1 | `DEFERRED` | Explicit vNext promotion only |
 | `CB-132 — Reviewed failure-candidate capture and authenticated export` | P1 | `DEFERRED` | Explicit vNext promotion only |
 | [CB-140 — Portfolio web demonstration and README truth](docs/slices/CB-140.md) | P1 | `VERIFIED` | `CB-020`, `CB-030`, `CB-060`, `CB-082`, `CB-091`, `CB-118`, `CB-122` |
-| [CB-150 — Agent metrics and optional no-op trace sink](docs/slices/CB-150.md) | P1 | `READY` | `CB-140` |
+| [CB-150 — Agent metrics and optional no-op trace sink](docs/slices/CB-150.md) | P1 | `IN_PROGRESS` | `CB-140` |
 | [CB-151 — Verified-path demo reset and fault drills](docs/slices/CB-151.md) | P1 | `PLANNED` | `CB-150` |
 | [CB-152 — Verified-path load, latency, and quality evidence](docs/slices/CB-152.md) | P1 | `PLANNED` | `CB-151` |
 | `CB-900 — Multimodal intake and object storage outline` | P2 | `DEFERRED` | Explicit promotion only |

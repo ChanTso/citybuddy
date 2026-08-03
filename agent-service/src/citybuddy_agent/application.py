@@ -7,7 +7,8 @@ import secrets
 import time
 import uuid
 from base64 import b64decode
-from collections.abc import Mapping
+from collections.abc import AsyncIterator, Mapping
+from contextlib import asynccontextmanager
 from datetime import UTC, datetime
 from typing import Any, Literal, Protocol
 
@@ -16,7 +17,7 @@ import jwt
 import pymysql
 from fastapi import FastAPI, Header, HTTPException, Request
 from fastapi.exceptions import RequestValidationError
-from fastapi.responses import JSONResponse, StreamingResponse
+from fastapi.responses import JSONResponse, Response, StreamingResponse
 from pydantic import BaseModel, ConfigDict, Field
 
 from .actions import ConfirmationDecision, confirmation_decision
@@ -60,8 +61,21 @@ from .feedback import (
     MysqlFeedbackStore,
 )
 from .knowledge import ElasticsearchKnowledgeSearch
+from .metrics import (
+    PROMETHEUS_CONTENT_TYPE,
+    MetricsRuntime,
+    Operation,
+    OperationOutcome,
+    SafeCityBuddyMetrics,
+    create_metrics_runtime,
+)
 from .retrieval import load_calibration
 from .sse import SseEgressFilter, SseProjectionError, stream_events
+from .tracing import (
+    OperationObservation,
+    TraceSink,
+    create_trace_sink,
+)
 
 SESSION_PERMISSION = "support:session:create"
 CHAT_PERMISSION = "support:chat"
@@ -132,6 +146,8 @@ class AgentSettings(BaseModel):
     circuit_half_open_probes: int = 1
     clock_skew_seconds: int = 30
     jwks_cache_seconds: int = 60
+    metrics_enabled: bool = False
+    trace_export_url: str = ""
 
 
 class DirectPrincipal(BaseModel):
@@ -452,11 +468,44 @@ def create_app(
     feedback: FeedbackStore | None = None,
     evidence: EvaluationEvidenceStore | None = None,
     liveness: SandboxLiveness | None = None,
+    metrics_runtime: MetricsRuntime | None = None,
+    trace_sink: TraceSink | None = None,
 ) -> FastAPI:
     """Construct the app, enabling identity routes only with complete runtime configuration."""
     resolved = settings or AgentSettings()
-    app = FastAPI(title=resolved.service_name, docs_url=None, redoc_url=None)
+    resolved_metrics_runtime = metrics_runtime or create_metrics_runtime(resolved.metrics_enabled)
+    resolved_metrics = SafeCityBuddyMetrics(resolved_metrics_runtime.recorder)
+    resolved_trace_sink = trace_sink or create_trace_sink(
+        resolved.trace_export_url, resolved_metrics
+    )
+
+    @asynccontextmanager
+    async def lifespan(application: FastAPI) -> AsyncIterator[None]:
+        del application
+        try:
+            yield
+        finally:
+            resolved_trace_sink.close()
+
+    app = FastAPI(
+        title=resolved.service_name,
+        docs_url=None,
+        redoc_url=None,
+        lifespan=lifespan,
+    )
     app.state.settings = resolved
+
+    if resolved.metrics_enabled:
+
+        @app.get("/internal/metrics/prometheus", include_in_schema=False)
+        def prometheus_metrics() -> Response:
+            headers = {"Cache-Control": "no-store"}
+            try:
+                payload = resolved_metrics_runtime.render()
+            except Exception:
+                return Response(status_code=503, headers=headers)
+            headers["Content-Type"] = PROMETHEUS_CONTENT_TYPE
+            return Response(content=payload, headers=headers)
 
     @app.exception_handler(RequestValidationError)
     async def invalid_request(request: Request, exception: RequestValidationError) -> JSONResponse:
@@ -513,6 +562,7 @@ def create_app(
                 open_seconds=resolved.circuit_open_seconds,
                 half_open_probes=resolved.circuit_half_open_probes,
             ),
+            resolved_metrics,
         )
         resolved_agent = BoundedAgent(
             RuleRouter(),
@@ -536,7 +586,11 @@ def create_app(
                 else None,
                 model_client,
                 load_calibration(),
-                RedisFaqCache(resolved.support_redis_url) if resolved.support_redis_url else None,
+                RedisFaqCache(resolved.support_redis_url, metrics=resolved_metrics)
+                if resolved.support_redis_url
+                else None,
+                resolved_metrics,
+                resolved_trace_sink,
             ),
         )
     else:
@@ -622,13 +676,14 @@ def create_app(
         else:
             resolved_sessions.verify_owner(session_id, principal.subject, principal.sandbox_id)
 
-    def execute_turn(
+    def _execute_turn(
         request: ChatRequest,
         *,
         token: str,
         principal: DirectPrincipal,
         session_id: str,
         correlation_key: str,
+        observation: OperationObservation,
     ) -> ConversationResult:
         try:
             verify_session(session_id, principal)
@@ -657,6 +712,7 @@ def create_app(
                 detail="Service unavailable",
             ) from exception
         if replay is not None:
+            observation.outcome = OperationOutcome.REPLAY
             return replay
         try:
             pending = resolved_conversations.current_pending_action(
@@ -693,56 +749,89 @@ def create_app(
                 detail="Service unavailable",
             ) from exception
         if start.replay is not None:
+            observation.outcome = OperationOutcome.REPLAY
             return start.replay
         try:
             if pending is not None:
                 if pending.expires_at <= datetime.now(UTC):
-                    try:
-                        return resolved_conversations.complete_action_expired(
-                            start=start,
-                            pending=pending,
-                            response_text="The prepared action expired and was not executed.",
-                        )
-                    except pymysql.MySQLError as exception:
-                        raise ToolBoundaryFailure(
-                            status_code=503,
-                            reason="ACTION_EXPIRY_PERSISTENCE_UNAVAILABLE",
-                            detail="Service unavailable",
-                        ) from exception
+                    with OperationObservation(
+                        Operation.PENDING_ACTION_EXPIRY,
+                        resolved_metrics,
+                        resolved_trace_sink,
+                    ) as local_observation:
+                        try:
+                            result = resolved_conversations.complete_action_expired(
+                                start=start,
+                                pending=pending,
+                                response_text="The prepared action expired and was not executed.",
+                            )
+                        except ActionArbitrationConflictError:
+                            local_observation.outcome = OperationOutcome.CONFLICT
+                            raise
+                        except pymysql.MySQLError as exception:
+                            local_observation.outcome = OperationOutcome.UNAVAILABLE
+                            raise ToolBoundaryFailure(
+                                status_code=503,
+                                reason="ACTION_EXPIRY_PERSISTENCE_UNAVAILABLE",
+                                detail="Service unavailable",
+                            ) from exception
+                        local_observation.outcome = OperationOutcome.EXPIRED
+                        return result
                 if decision is ConfirmationDecision.DECLINE:
+                    with OperationObservation(
+                        Operation.PENDING_ACTION_DECLINE,
+                        resolved_metrics,
+                        resolved_trace_sink,
+                    ) as local_observation:
+                        try:
+                            result = resolved_conversations.complete_action_decline(
+                                start=start,
+                                pending=pending,
+                                response_text=(
+                                    "The prepared action was declined and was not executed."
+                                ),
+                            )
+                        except ActionArbitrationConflictError:
+                            local_observation.outcome = OperationOutcome.CONFLICT
+                            raise
+                        except pymysql.MySQLError as exception:
+                            local_observation.outcome = OperationOutcome.UNAVAILABLE
+                            raise ToolBoundaryFailure(
+                                status_code=503,
+                                reason="ACTION_DECLINE_PERSISTENCE_UNAVAILABLE",
+                                detail="Service unavailable",
+                            ) from exception
+                        local_observation.outcome = OperationOutcome.DECLINED
+                        return result
+                with OperationObservation(
+                    Operation.PENDING_ACTION_CLARIFICATION,
+                    resolved_metrics,
+                    resolved_trace_sink,
+                ) as local_observation:
                     try:
-                        return resolved_conversations.complete_action_decline(
+                        result = resolved_conversations.complete_turn(
                             start=start,
-                            pending=pending,
-                            response_text="The prepared action was declined and was not executed.",
+                            response_text=(
+                                "Please reply with an exact confirmation or decline for the "
+                                "prepared refund request."
+                            ),
+                            outcome="action_clarification",
+                            events=(
+                                AgentEvent(
+                                    "AGENT_OUTCOME",
+                                    {"outcome": "action_clarification"},
+                                ),
+                            ),
                         )
                     except pymysql.MySQLError as exception:
+                        local_observation.outcome = OperationOutcome.UNAVAILABLE
                         raise ToolBoundaryFailure(
                             status_code=503,
-                            reason="ACTION_DECLINE_PERSISTENCE_UNAVAILABLE",
+                            reason="ACTION_CLARIFICATION_PERSISTENCE_UNAVAILABLE",
                             detail="Service unavailable",
                         ) from exception
-                try:
-                    return resolved_conversations.complete_turn(
-                        start=start,
-                        response_text=(
-                            "Please reply with an exact confirmation or decline for the "
-                            "prepared refund request."
-                        ),
-                        outcome="action_clarification",
-                        events=(
-                            AgentEvent(
-                                "AGENT_OUTCOME",
-                                {"outcome": "action_clarification"},
-                            ),
-                        ),
-                    )
-                except pymysql.MySQLError as exception:
-                    raise ToolBoundaryFailure(
-                        status_code=503,
-                        reason="ACTION_CLARIFICATION_PERSISTENCE_UNAVAILABLE",
-                        detail="Service unavailable",
-                    ) from exception
+                    local_observation.outcome = OperationOutcome.CLARIFICATION
+                    return result
             if principal.sandbox_id is None:
                 agent_result = resolved_agent.run(
                     message=request.message,
@@ -793,6 +882,57 @@ def create_app(
                     type(original).__name__,
                 )
             raise
+
+    def execute_turn(
+        request: ChatRequest,
+        *,
+        token: str,
+        principal: DirectPrincipal,
+        session_id: str,
+        correlation_key: str,
+    ) -> ConversationResult:
+        with OperationObservation(
+            Operation.CHAT_TURN, resolved_metrics, resolved_trace_sink
+        ) as observation:
+            try:
+                result = _execute_turn(
+                    request,
+                    token=token,
+                    principal=principal,
+                    session_id=session_id,
+                    correlation_key=correlation_key,
+                    observation=observation,
+                )
+            except ConversationOwnershipError:
+                observation.outcome = OperationOutcome.DENIED
+                raise
+            except (
+                CorrelationConflictError,
+                TurnInProgressError,
+                ConversationIntegrityError,
+                ActionArbitrationConflictError,
+            ):
+                observation.outcome = OperationOutcome.CONFLICT
+                raise
+            except ToolBoundaryFailure as exception:
+                if exception.status_code in {401, 403}:
+                    observation.outcome = OperationOutcome.DENIED
+                elif exception.status_code == 409:
+                    observation.outcome = OperationOutcome.CONFLICT
+                else:
+                    observation.outcome = OperationOutcome.UNAVAILABLE
+                raise
+            observation.outcome = {
+                "completed": OperationOutcome.SUCCESS,
+                "action_pending": OperationOutcome.PENDING,
+                "action_clarification": OperationOutcome.CLARIFICATION,
+                "action_declined": OperationOutcome.DECLINED,
+                "action_expired": OperationOutcome.EXPIRED,
+                "retrieval_denied": OperationOutcome.RETRIEVAL_DENIED,
+                "budget_exhausted": OperationOutcome.BUDGET_EXHAUSTED,
+                "provider_denied": OperationOutcome.PROVIDER_DENIED,
+            }.get(result.outcome, OperationOutcome.ERROR)
+            return result
 
     @app.post("/api/sessions", response_model=SessionResponse, status_code=201)
     def create_session(
