@@ -558,7 +558,7 @@ Slice status, priority, dependencies, and ordering live only in [IMPLEMENTATION.
 | `CB-140` | Minimal portfolio web plus factual README for login, products, seckill reservation/status, support chat, and PendingAction prepare/clarification/decline/expiry. No successful confirmation, receipt card, cart, full store, or workstation. |
 | `CB-150` | Agent-only operational metrics for verified paths and an optional default-no-op Agent trace sink that never becomes business or evidence truth. |
 | `CB-151` | Scripted reset/demo and phase-bound fault drills only for verified identity, catalog, ordering/seckill, payment/refund, RAG, chat, and PendingAction prepare/decline/expiry paths. |
-| `CB-152` | Environment/dataset/duration-labelled JMeter seckill QPS and concurrency correctness; Locust/Mock-LLM ordinary-chat, RAG, and PendingAction-prepare P99; RAG HitRate@5/MRR; FAQ cache hit/model-call savings; and the first evidenced bottleneck in the local Docker Compose topology. No unimplemented or real-provider claims. |
+| `CB-152` | Five environment/dataset/duration-labelled outputs: JMeter seckill QPS and concurrency correctness; Locust/Mock-LLM ordinary-chat, RAG, and PendingAction-prepare P99; RAG HitRate@5/MRR; FAQ mapping/answer cache hit rates; and Elasticsearch knowledge-search avoidance. Separately identify the first evidenced bottleneck in the local Docker Compose topology, or `indeterminate`. No unimplemented or real-provider claims. |
 | `CB-900` | Future multimodal boundary only. |
 | `CB-910` | Future recovery scanner and observed-failure-driven resilience only. |
 | `CB-920` | Optional experiments and expanded views; no result assumed. |
@@ -724,12 +724,13 @@ CB-150 is limited to minimal metrics for implemented paths and an optional no-op
 CB-151 resets and demonstrates only verified identity, catalog, ordering/seckill, payment/refund,
 RAG, chat, and PendingAction prepare/decline/expiry behavior. CB-152 measures only
 JMeter seckill QPS/concurrency correctness; Locust/Mock-LLM ordinary-chat, RAG, and PendingAction
-prepare P99; RAG HitRate@5/MRR; FAQ cache hit/model-call savings; and the environment, dataset,
-duration, and first evidenced bottleneck. It must not measure or claim Agent successful confirmation,
-Agent receipt Turn commit, MemoryPacker summary, handoff, failure-candidate export, deployment, or
-real-provider capability. This route decision changes no production code, tests, migration, grant,
-OpenAPI, README, schema, persisted data, service/language owner, truth owner, security boundary, or
-transaction boundary; README changes belong to the later CB-140 implementation lane.
+prepare P99; RAG HitRate@5/MRR; FAQ mapping/answer cache hit rates; Elasticsearch knowledge-search
+avoidance; and the environment, dataset, duration, and first evidenced bottleneck. It must not
+measure or claim Agent successful confirmation, Agent receipt Turn commit, MemoryPacker summary,
+handoff, failure-candidate export, deployment, or real-provider capability. This route decision
+changes no production code, tests, migration, grant, OpenAPI, README, schema, persisted data,
+service/language owner, truth owner, security boundary, or transaction boundary; README changes
+belong to the later CB-140 implementation lane.
 
 **Resolved scope refinement — 2026-08-03 (CB-150 Agent-only observability):** The current portfolio
 scope of CB-150 contains only `agent-service` operational metrics and an optional Agent trace sink.
@@ -737,9 +738,11 @@ The current route adds no metrics dependency, registry, scrape endpoint, operati
 or trace implementation to `auth-service` or `commerce-service`. CB-152 obtains transaction QPS and
 client latency from JMeter and Locust, reconciles transaction correctness against authoritative
 Commerce durable truth, and calculates RAG quality offline. Of its five portfolio measurement
-outputs, only FAQ cache hit rate and model-call saving require in-service counters, and those
-counters belong to Agent. Java instrumentation would not add a portfolio measurement output, but
-would materially enlarge the implementation and regression surface.
+outputs, only FAQ cache hit rates and Elasticsearch knowledge-search avoidance require in-service
+counters, and those counters belong to Agent. Provider-attempt counters may remain Agent runtime
+diagnostics but do not produce a cache-saving portfolio result. Java instrumentation would not add
+a portfolio measurement output, but would materially enlarge the implementation and regression
+surface.
 
 Agent metrics remain a purely observational side channel. They are neither business truth nor
 evaluation truth, and loss, duplication, or outage must not change business responses, durable
@@ -756,5 +759,38 @@ does not invalidate a run.
 This refinement changes no service/language ownership, business transaction, API, schema, grant,
 route order, portfolio measurement output, or CB-151 demo scope. It changes no production code,
 test, dependency, lockfile, README, CI, private repository, or service evaluation artifact.
+
+**Resolved metric correction — 2026-08-03 (FAQ cache saves Elasticsearch lookup, not model
+calls):** The current Agent execution order is model decision → `knowledge.search` tool request →
+FAQ cache or Elasticsearch choice → reranker → final model response. A valid FAQ cache hit avoids
+only the Elasticsearch knowledge search. It does not avoid the initial model decision, the reranker
+request, or the final model response request. The former model-call-saving formula
+`avoided / (avoided + issued)` has no current producer and is removed from the portfolio measurement
+route.
+
+The replacement portfolio result is Elasticsearch knowledge-search avoidance:
+`cache_served / (cache_served + elasticsearch_issued)`. Each eligible non-replayed
+`knowledge.search` execution that reaches and completes the backend choice contributes exactly one
+bounded Agent decision: `cache_served` for a valid cache hit with zero Elasticsearch search, or
+`elasticsearch_issued` when miss, bypass, unavailable, or invalid cache handling actually invokes
+the logical Elasticsearch knowledge search. Replay, rejection or malformed tool input
+before the choice, budget/circuit denial before the choice, and a path with neither usable cache nor
+an issued Elasticsearch search are excluded from this denominator and remain visible through
+operation outcomes.
+
+FAQ mapping and answer hit rates remain separate and use `hit / (hit + miss)`; bypass,
+unavailable, and invalid remain separately reported. Actual primary, fallback, and reranker attempt
+counters may remain bounded Agent diagnostics, but do not enter the Elasticsearch-avoidance
+denominator, do not support a model-saving claim, and do not become the fifth portfolio number.
+CB-150 must not change the CB-112 execution chain, add a pre-model shortcut, bypass the existing
+reranker/sufficiency or evidence contracts, or use cached answers to skip the Agent loop merely to
+manufacture a saving.
+
+CB-152 must not reintroduce model-call saving, count replay/denial as a cache saving, estimate
+provider saving from cold/warm traffic, or report counterfactual model savings without a real
+producer. Its five outputs remain JMeter seckill QPS/concurrency correctness; Locust Agent-path P99;
+RAG HitRate@5/MRR; FAQ mapping/answer hit rates; and Elasticsearch knowledge-search avoidance. This
+correction changes no ownership, API, transaction, retrieval policy, cache behavior, route order,
+Agent-only metrics scope, trace scope, or measurement count.
 
 Current Level 3 conflicts: **none unresolved as of 2026-08-03**.
