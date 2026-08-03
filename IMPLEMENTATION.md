@@ -1,6 +1,6 @@
 # CityBuddy implementation index
 
-**Document version:** v0.40\
+**Document version:** v0.41\
 **Verification date:** 2026-08-03\
 **Repository phase:** CB-140 portfolio web demonstration and README truth verified; CB-150 is the
 sole ready slice. CB-121 and CB-123 remain blocked, and CB-130 through CB-132 remain deferred vNext
@@ -88,7 +88,9 @@ Cross-slice target architecture, preflight conclusions, service/data ownership, 
 The owner-approved portfolio P0/P1 route terminates at `CB-152`. `CB-900`, `CB-910`, and `CB-920`
 remain deferred outlines outside this Goal and must not be promoted, expanded, or used to create
 post-`CB-152` work. The approved `CB-150` scope is limited to Agent metrics and an optional,
-default-no-op Agent trace sink; it does not add Auth or Commerce metrics. `CB-152` must
+default-no-op Agent trace sink; it does not add Auth or Commerce metrics. Its cache measurements are
+FAQ mapping/answer hit rates and Elasticsearch knowledge-search avoidance; provider-attempt counters
+remain diagnostic and do not produce a model-call-saving result. `CB-152` must
 close with real load, latency, and quality evidence measured and environment-labelled in the local
 Docker Compose topology. `CB-114` and `CB-115` are deferred vNext evolution and do not reactivate
 automatically after `CB-152`. `CB-130`, `CB-131`, and `CB-132` are also retained only as vNext
