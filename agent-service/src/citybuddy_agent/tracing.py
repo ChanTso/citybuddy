@@ -18,6 +18,7 @@ from .metrics import (
     CityBuddyMetrics,
     Operation,
     OperationOutcome,
+    SafeCityBuddyMetrics,
     TraceExportOutcome,
 )
 
@@ -98,7 +99,7 @@ class NoopTraceSink:
 class BoundedHttpTraceSink:
     def __init__(self, url: str, metrics: CityBuddyMetrics) -> None:
         self._url = validate_trace_url(url)
-        self._metrics = metrics
+        self._metrics = SafeCityBuddyMetrics(metrics)
         self._queue: queue.Queue[bytes] = queue.Queue(maxsize=TRACE_QUEUE_SIZE)
         self._closed = False
         self._lock = threading.Lock()

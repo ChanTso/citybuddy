@@ -454,6 +454,7 @@ start_agent() {
   AGENT_EVALUATION_ENABLED="$evaluation_enabled" \
   AGENT_EVALUATION_CLIENT_ID=evaluation-manager \
   AGENT_EVALUATION_CLIENT_SECRET="$management_password" \
+  CITYBUDDY_METRICS_ENABLED=true \
   CITYBUDDY_ENVIRONMENT=integration \
   IDENTITY_ISSUER=https://identity.citybuddy.test \
   IDENTITY_USER_AUDIENCE=citybuddy-web \
@@ -4237,6 +4238,23 @@ assert_equal 'EXPIRED:1:0' \
   "$(mysql_query root "$root_password" cs_db \
     "SELECT CONCAT(reference.state, ':', (SELECT COUNT(*) FROM support_event event_record JOIN support_turn turn_record ON turn_record.turn_id = event_record.turn_id WHERE turn_record.session_id = '$cb122_expiry_session' AND event_record.event_type = 'ACTION_EXPIRED'), ':', (SELECT COUNT(*) FROM support_event event_record JOIN support_turn turn_record ON turn_record.turn_id = event_record.turn_id WHERE turn_record.session_id = '$cb122_expiry_session' AND event_record.event_type = 'ACTION_RECEIPT')) FROM pending_action_reference reference WHERE reference.pending_action_id = '$cb122_expiry_pending_id'")" \
   "expiry writes one exact local event and no receipt"
+curl --fail --silent --show-error \
+  "http://127.0.0.1:$agent_port/internal/metrics/prometheus" \
+  >"$tmp_dir/cb150-agent-metrics.txt"
+for expected_metric in \
+  'citybuddy_agent_operation_requests_total{operation="pending_action_prepare",outcome="success"} 1.0' \
+  'citybuddy_agent_operation_requests_total{operation="pending_action_expiry",outcome="unavailable"} 1.0' \
+  'citybuddy_agent_operation_requests_total{operation="pending_action_expiry",outcome="expired"} 1.0' \
+  'citybuddy_agent_operation_requests_total{operation="chat_turn",outcome="pending"} 1.0' \
+  'citybuddy_agent_operation_requests_total{operation="chat_turn",outcome="unavailable"} 1.0' \
+  'citybuddy_agent_operation_requests_total{operation="chat_turn",outcome="expired"} 1.0'; do
+  grep -Fq "$expected_metric" "$tmp_dir/cb150-agent-metrics.txt"
+done
+if grep -Eq 'confirmation|traceId|sessionId|turnId|pendingActionId|python_gc|process_' \
+  "$tmp_dir/cb150-agent-metrics.txt"; then
+  echo "Agent metrics exposed an out-of-scope operation, identifier, or default collector." >&2
+  exit 1
+fi
 stop_process agent_pid "$agent_pid"
 stop_process model_pid "$model_pid"
 stop_process commerce_pid "$commerce_pid"

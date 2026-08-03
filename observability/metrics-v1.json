@@ -50,7 +50,14 @@
         {"operation": "pending_action_expiry", "outcome": "conflict"},
         {"operation": "pending_action_expiry", "outcome": "error"}
       ],
-      "producerIds": ["agent.operation_requests"],
+      "producerIds": [
+        "agent.tool.knowledge_search",
+        "agent.chat_turn",
+        "agent.tool.pending_action_prepare",
+        "agent.pending_action.clarification",
+        "agent.pending_action.decline",
+        "agent.pending_action.expiry"
+      ],
       "cb152Usage": "Diagnostic operation volume by bounded outcome."
     },
     {
@@ -102,7 +109,14 @@
         {"operation": "pending_action_expiry", "outcome": "conflict"},
         {"operation": "pending_action_expiry", "outcome": "error"}
       ],
-      "producerIds": ["agent.operation_duration"],
+      "producerIds": [
+        "agent.tool.knowledge_search",
+        "agent.chat_turn",
+        "agent.tool.pending_action_prepare",
+        "agent.pending_action.clarification",
+        "agent.pending_action.decline",
+        "agent.pending_action.expiry"
+      ],
       "cb152Usage": "Diagnostic server-side operation duration; client P99 remains authoritative."
     },
     {
@@ -121,7 +135,7 @@
         {"level": "answer", "result": "miss"},
         {"level": "answer", "result": "invalid"}
       ],
-      "producerIds": ["agent.faq_cache_lookup"],
+      "producerIds": ["agent.redis_faq.lookup", "agent.tool.faq_bypass"],
       "cb152Usage": "Separate mapping and answer hit rates use hit/(hit+miss)."
     },
     {
@@ -134,7 +148,7 @@
         {"decision": "cache_served"},
         {"decision": "elasticsearch_issued"}
       ],
-      "producerIds": ["agent.knowledge_backend_choice"],
+      "producerIds": ["agent.tool.knowledge_backend_choice"],
       "cb152Usage": "Elasticsearch avoidance uses cache_served/(cache_served+elasticsearch_issued)."
     },
     {
@@ -160,7 +174,7 @@
         {"role": "reranker", "outcome": "invalid"},
         {"role": "reranker", "outcome": "error"}
       ],
-      "producerIds": ["agent.provider_http_attempt"],
+      "producerIds": ["agent.model.complete", "agent.model.rerank"],
       "cb152Usage": "Diagnostics only; never a cache-saving formula."
     },
     {
@@ -174,7 +188,7 @@
         {"outcome": "failed"},
         {"outcome": "dropped"}
       ],
-      "producerIds": ["agent.trace_export"],
+      "producerIds": ["agent.trace.export"],
       "cb152Usage": "Diagnostic custom trace mirror delivery only."
     }
   ],

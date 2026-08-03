@@ -75,15 +75,41 @@ def test_inventory_schema_runtime_labels_and_cardinality_are_closed() -> None:
     assert {metric["type"] for metric in document["metrics"]} == {"counter", "histogram"}
     names = [metric["name"] for metric in document["metrics"]]
     assert len(names) == len(set(names))
-    producers = [producer for metric in document["metrics"] for producer in metric["producerIds"]]
-    assert len(producers) == len(set(producers))
     for metric in document["metrics"]:
         labels = metric["allowedLabelSets"]
         assert labels
+        assert metric["producerIds"]
+        assert len(metric["producerIds"]) == len(set(metric["producerIds"]))
         assert all(list(label) == metric["labelNames"] for label in labels)
         assert len(labels) == len({tuple(label.items()) for label in labels})
 
     by_name = {metric["name"]: metric for metric in document["metrics"]}
+    operation_producers = {
+        "agent.tool.knowledge_search",
+        "agent.chat_turn",
+        "agent.tool.pending_action_prepare",
+        "agent.pending_action.clarification",
+        "agent.pending_action.decline",
+        "agent.pending_action.expiry",
+    }
+    assert set(by_name["citybuddy_agent_operation_requests_total"]["producerIds"]) == (
+        operation_producers
+    )
+    assert set(by_name["citybuddy_agent_operation_duration_seconds"]["producerIds"]) == (
+        operation_producers
+    )
+    assert set(by_name["citybuddy_agent_faq_cache_lookups_total"]["producerIds"]) == {
+        "agent.redis_faq.lookup",
+        "agent.tool.faq_bypass",
+    }
+    assert by_name["citybuddy_knowledge_backend_decisions_total"]["producerIds"] == [
+        "agent.tool.knowledge_backend_choice"
+    ]
+    assert set(by_name["citybuddy_agent_model_request_attempts_total"]["producerIds"]) == {
+        "agent.model.complete",
+        "agent.model.rerank",
+    }
+    assert by_name["citybuddy_agent_trace_exports_total"]["producerIds"] == ["agent.trace.export"]
     operation_labels = {(operation.value, outcome.value) for operation, outcome in OPERATION_LABELS}
     assert allowed(by_name["citybuddy_agent_operation_requests_total"]) == operation_labels
     assert allowed(by_name["citybuddy_agent_operation_duration_seconds"]) == operation_labels
@@ -317,3 +343,12 @@ def test_dependency_boundary_adds_only_prometheus_to_agent_and_preserves_otel_ow
     assert 'name = "opentelemetry-sdk"\nversion = "1.43.0"' in lock
     for path in (REPOSITORY / "agent-service" / "src").rglob("*.py"):
         assert "opentelemetry" not in path.read_text("utf-8").casefold()
+    java_builds = [
+        REPOSITORY / "pom.xml",
+        REPOSITORY / "auth-service" / "pom.xml",
+        REPOSITORY / "commerce-service" / "pom.xml",
+    ]
+    for path in java_builds:
+        java_build = path.read_text("utf-8").casefold()
+        assert "micrometer-registry-prometheus" not in java_build
+        assert "opentelemetry" not in java_build

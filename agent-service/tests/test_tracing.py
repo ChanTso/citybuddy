@@ -13,7 +13,6 @@ from citybuddy_agent.metrics import (
     NoopCityBuddyMetrics,
     Operation,
     OperationOutcome,
-    SafeCityBuddyMetrics,
     TraceExportOutcome,
 )
 from citybuddy_agent.tracing import (
@@ -291,10 +290,7 @@ def test_trace_metrics_failure_never_escapes_worker_or_close(
         yield FakeStreamResponse(204, b"")
 
     monkeypatch.setattr(httpx, "stream", stream)
-    sink = BoundedHttpTraceSink(
-        "http://trace.test/export",
-        SafeCityBuddyMetrics(ExplodingMetrics()),
-    )
+    sink = BoundedHttpTraceSink("http://trace.test/export", ExplodingMetrics())
     sink.emit(envelope())
     time.sleep(0.03)
     sink.close()

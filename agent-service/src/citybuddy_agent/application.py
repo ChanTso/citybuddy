@@ -922,16 +922,17 @@ def create_app(
                 else:
                     observation.outcome = OperationOutcome.UNAVAILABLE
                 raise
-            observation.outcome = {
-                "completed": OperationOutcome.SUCCESS,
-                "action_pending": OperationOutcome.PENDING,
-                "action_clarification": OperationOutcome.CLARIFICATION,
-                "action_declined": OperationOutcome.DECLINED,
-                "action_expired": OperationOutcome.EXPIRED,
-                "retrieval_denied": OperationOutcome.RETRIEVAL_DENIED,
-                "budget_exhausted": OperationOutcome.BUDGET_EXHAUSTED,
-                "provider_denied": OperationOutcome.PROVIDER_DENIED,
-            }.get(result.outcome, OperationOutcome.ERROR)
+            if observation.outcome is not OperationOutcome.REPLAY:
+                observation.outcome = {
+                    "completed": OperationOutcome.SUCCESS,
+                    "action_pending": OperationOutcome.PENDING,
+                    "action_clarification": OperationOutcome.CLARIFICATION,
+                    "action_declined": OperationOutcome.DECLINED,
+                    "action_expired": OperationOutcome.EXPIRED,
+                    "retrieval_denied": OperationOutcome.RETRIEVAL_DENIED,
+                    "budget_exhausted": OperationOutcome.BUDGET_EXHAUSTED,
+                    "provider_denied": OperationOutcome.PROVIDER_DENIED,
+                }.get(result.outcome, OperationOutcome.ERROR)
             return result
 
     @app.post("/api/sessions", response_model=SessionResponse, status_code=201)
