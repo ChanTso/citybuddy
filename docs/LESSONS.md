@@ -337,3 +337,11 @@ This file records only factual pitfalls supported by merged pull-request, commit
 
 - 现象：本地顺序执行的 aggregate closeout 与配置化的分布式 CI matrix 可能因依赖启动健康对环境敏感而给出不同结果。
 - 结论：必须如实记录两边证据；归因不唯一的本地失败不能重标为外部基础设施，也不能仅为获得绿灯而原样重跑。任何证据替代都必须由所有者限定到单一切片，不能成为后续 closeout 的通用先例。Closeout 必须在同一 diff 中同时更新权威路线表，以及同文件中声明当前 phase 或 verified capability 的全部叙述，否则一个文档会呈现相互矛盾的仓库事实。
+
+## CB-150 — Agent metrics and optional no-op trace sink
+
+- 现象：evaluation expiry 场景中的首次新逻辑 prepare 已由 fake proxy 转发给 Commerce 并提交，但代理随后丢弃响应；Agent 使用同一 session、turn、operation 与请求体做有界 replay 后稳定取得 `replayed=true`。最初 scrape oracle 却把这一逻辑 operation 断言成 `pending_action_prepare/success`。同一集成脚本还曾把合法、首字符为 `-` 的 opaque session 作为分离的命令行参数值传入，导致解析器把身份数据误认成选项。
+- 证据链接：[slice PR #74](https://github.com/ChanTso/citybuddy/pull/74)、[causal-oracle commit `82eed58`](https://github.com/ChanTso/citybuddy/commit/82eed58feb04d8a22407b771bb33063477e634ab)
+- 根因：外围 integration oracle 从“上游第一次已执行”推断 success，没有沿生产 producer 使用的最终 ToolResult classification 追踪同一个逻辑 operation；response-loss 后的稳定 replay 真值与传输尝试被混为两个 outcome。命令编排则把 opaque 协议值当成了普通 shell 单词，没有覆盖其完整合法字母表与参数解析边界。
+- 解决：保持 production metrics、counter、outcome mapping 与六条精确 scrape 语义不变，只把 prepare 的 integration oracle 对齐为唯一的 `replay = 1.0`；其余五条指标、business-first 断言与 privacy fail-closed guard 保持严格。全部 9 个直接 session 调用点改用 `--session-id="$value"` 绑定形式，并以 leading-dash session 的真实 evidence/audit helper 回归固定行为。focused tests、fresh evaluation integration、完整 `make ci`、完整 GitHub required workflow 与两轮 complete-diff review 构成 closeout 证据。
+- 结论：可观测性必须继承业务执行链最终稳定分类，不能由外围观察者根据某次已发生的尝试重新命名一个逻辑 operation；response loss、retry 与 replay 也不能制造双计数。opaque CLI 值必须按其完整合法字母表作为数据绑定，并机械枚举所有调用点，不能依赖“通常不会以短横线开头”的样本。
