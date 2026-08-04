@@ -73,6 +73,107 @@ TRIGGERS = (
     "cb151_fail_decline_event",
     "cb151_fail_expiry_event",
 )
+DRILL_SPECS: dict[str, dict[str, object]] = {
+    "F1-identity-owner-denial": {
+        "phase": "reservation owner-scoped status read",
+        "trigger": "second synthetic user reads the exact named reservation",
+        "expectedPublic": "404 concealed",
+        "authoritativePreState": "reservation state and projection version",
+        "authoritativePostState": "byte-equivalent reservation state and projection version",
+        "sideEffectAssertion": "zero authoritative mutation",
+        "restoration": "none; identity remains unchanged",
+        "postRestorationControl": "owner status read returns the exact reservation",
+        "maximumSeconds": 15,
+    },
+    "F2-catalog-cache-authority": {
+        "phase": "published product cache read",
+        "trigger": "replace one exact product/version Redis key with a forged derived value",
+        "expectedPublic": "200 authoritative product",
+        "authoritativePreState": "MySQL product tuple and exact Redis key state",
+        "authoritativePostState": "MySQL tuple unchanged",
+        "sideEffectAssertion": "forged value is never reported as business truth",
+        "restoration": "restore the exact captured Redis value and bounded remaining TTL in finally",
+        "postRestorationControl": "normal product read returns the authoritative product",
+        "maximumSeconds": 20,
+    },
+    "F3-seckill-convergence": {
+        "phase": "reservation same-intent replay",
+        "trigger": "repeat the exact run key, activity version, and quantity",
+        "expectedPublic": "stable replay/convergence",
+        "authoritativePreState": "original reservation identity",
+        "authoritativePostState": "same reservation identity with cardinality one",
+        "sideEffectAssertion": "zero duplicate reservation",
+        "restoration": "none; idempotent request",
+        "postRestorationControl": "owner status read returns the same reservation",
+        "maximumSeconds": 30,
+    },
+    "F4-payment-refund-replay": {
+        "phase": "committed payment and refund replay/conflicting reuse",
+        "trigger": "exact replay followed by one-field amount conflict",
+        "expectedPublic": "200 replay then 409 conflict",
+        "authoritativePreState": "one payment attempt and one refund",
+        "authoritativePostState": "same one payment attempt and one refund",
+        "sideEffectAssertion": "zero conflicting mutation",
+        "restoration": "none; deterministic idempotency boundary",
+        "postRestorationControl": "committed replay remains available",
+        "maximumSeconds": 30,
+    },
+    "F5-rag-boundaries": {
+        "phase": "knowledge.search after exact Elasticsearch stop",
+        "trigger": "stop only the active demo project's Elasticsearch service",
+        "expectedPublic": "200 retrieval_denied with zero citations",
+        "authoritativePreState": "exact knowledge alias inventory",
+        "authoritativePostState": "durable retrieval reason knowledge_unavailable and alias equality",
+        "sideEffectAssertion": "zero fabricated evidence",
+        "restoration": "start the same service/publication and rebind only the recorded Agent if needed",
+        "postRestorationControl": "sufficient RAG completes with citations",
+        "maximumSeconds": 120,
+    },
+    "F6-chat-provider": {
+        "phase": "approved model provider request",
+        "trigger": "existing fake-provider provider-failure scenario",
+        "expectedPublic": "200 provider_denied",
+        "authoritativePreState": "fake-provider scenario counter",
+        "authoritativePostState": "counter advanced and durable turn outcome provider_denied",
+        "sideEffectAssertion": "zero business mutation",
+        "restoration": "none; deterministic one-request fixture",
+        "postRestorationControl": "ordinary chat completes",
+        "maximumSeconds": 30,
+    },
+    "F7a-action-prepare": {
+        "phase": "PendingAction reference insert",
+        "trigger": "named trigger cb151_fail_reference_insert",
+        "expectedPublic": "503 Service unavailable",
+        "authoritativePreState": "no reference or ACTION_PREPARED for the new session",
+        "authoritativePostState": "no reference or ACTION_PREPARED for the new session",
+        "sideEffectAssertion": "zero partial local action truth",
+        "restoration": "drop the exact named trigger and compare canonical baseline",
+        "postRestorationControl": "normal prepare creates one PendingAction reference",
+        "maximumSeconds": 30,
+    },
+    "F7b-action-decline": {
+        "phase": "PendingAction decline reference/event mutation",
+        "trigger": "exact column REVOKE then named trigger cb151_fail_decline_event",
+        "expectedPublic": "503 Service unavailable for each sub-drill",
+        "authoritativePreState": "PENDING reference and zero ACTION_DECLINED",
+        "authoritativePostState": "PENDING reference and zero ACTION_DECLINED",
+        "sideEffectAssertion": "zero partial decline closure",
+        "restoration": "exact column GRANT / exact trigger drop plus canonical baseline comparison",
+        "postRestorationControl": "normal decline succeeds after each sub-drill",
+        "maximumSeconds": 60,
+    },
+    "F7c-action-expiry": {
+        "phase": "PendingAction expiry event mutation after database deadline",
+        "trigger": "named trigger cb151_fail_expiry_event",
+        "expectedPublic": "503 Service unavailable",
+        "authoritativePreState": "expired-at-deadline PENDING reference and zero ACTION_EXPIRED",
+        "authoritativePostState": "PENDING reference and zero ACTION_EXPIRED",
+        "sideEffectAssertion": "zero partial expiry closure",
+        "restoration": "drop the exact named trigger and compare canonical baseline",
+        "postRestorationControl": "normal expiry succeeds",
+        "maximumSeconds": 90,
+    },
+}
 JAVA_RUNTIME_IMAGE = (
     "maven:3.9.11-eclipse-temurin-21@"
     "sha256:6fdc855a6ed81d288ca7ca37ac6ff5e9308b612485c0801d70b25a858c83d237"
@@ -81,6 +182,10 @@ JAVA_RUNTIME_IMAGE = (
 
 class DemoError(RuntimeError):
     """A bounded operator error safe to include in machine-readable output."""
+
+
+class ReservationConvergencePending(DemoError):
+    """A valid public reservation snapshot has not yet matched durable truth."""
 
 
 @dataclass(frozen=True)
@@ -283,7 +388,7 @@ def compose(run: ActiveRun, *arguments: str, timeout: float = 600) -> str:
 
 def compose_port(run: ActiveRun, service: str, container_port: int) -> int:
     output = compose(run, "port", service, str(container_port), timeout=30)
-    match = re.search(r":([0-9]{1,5})$", output)
+    match = re.fullmatch(r"127\.0\.0\.1:([0-9]{1,5})", output)
     if match is None:
         raise DemoError(f"could not resolve dynamic port for {service}")
     port = int(match.group(1))
@@ -1000,7 +1105,7 @@ def start_model(run: ActiveRun, commerce_port: int) -> tuple[int, int]:
     try:
         wait_http(f"http://127.0.0.1:{port}/fixture/counts", (200,), process)
     except BaseException:
-        stop_process(process.pid, "fake_litellm_server.py")
+        stop_spawned_process(process.pid, "fake_litellm_server.py")
         raise
     return process.pid, port
 
@@ -1020,9 +1125,9 @@ def rebind_agent_to_dependency_ports(
     if not isinstance(current, dict):
         raise DemoError("runtime manifest omitted the exact Agent process")
     write_json(run.manifest_file, manifest)
-    stop_process(int(current["pid"]), str(current["marker"]))
+    stop_process(current)
     agent_pid, ports["agent"] = start_agent(run, run.private(), ports)
-    manifest["processes"]["agent"] = {"marker": "citybuddy-agent", "pid": agent_pid}
+    manifest["processes"]["agent"] = process_fingerprint(agent_pid, "citybuddy-agent")
     manifest["ports"] = ports
     manifest["baseUrls"]["agent"] = f"http://127.0.0.1:{ports['agent']}"
     manifest["baseUrls"]["webEnv"]["CITYBUDDY_AGENT_TARGET"] = f"http://127.0.0.1:{ports['agent']}"
@@ -1066,7 +1171,7 @@ def start_agent(run: ActiveRun, private: dict[str, str], ports: dict[str, int]) 
     try:
         wait_http(f"http://127.0.0.1:{port}/internal/metrics/prometheus", (200,), process)
     except BaseException:
-        stop_process(process.pid, "citybuddy-agent")
+        stop_spawned_process(process.pid, "citybuddy-agent")
         raise
     return process.pid, port
 
@@ -1309,10 +1414,7 @@ def setup() -> ActiveRun:
         )
         write_json(run.manifest_file, manifest)
         model_pid, ports["model"] = start_model(run, ports["evaluationCommerce"])
-        manifest["processes"]["fakeLlm"] = {
-            "marker": "fake_litellm_server.py",
-            "pid": model_pid,
-        }
+        manifest["processes"]["fakeLlm"] = process_fingerprint(model_pid, "fake_litellm_server.py")
         manifest["baseUrls"]["fakeLlm"] = f"http://127.0.0.1:{ports['model']}"
         write_json(run.manifest_file, manifest)
         rebuild_knowledge(run, private, ports)
@@ -1329,7 +1431,7 @@ def setup() -> ActiveRun:
             timeout=180,
         )
         agent_pid, ports["agent"] = start_agent(run, private, ports)
-        manifest["processes"]["agent"] = {"marker": "citybuddy-agent", "pid": agent_pid}
+        manifest["processes"]["agent"] = process_fingerprint(agent_pid, "citybuddy-agent")
         manifest["baseUrls"].update(
             {
                 "agent": f"http://127.0.0.1:{ports['agent']}",
@@ -1535,6 +1637,191 @@ def durable_count(run: ActiveRun, database: str, query: str, expected: int) -> N
         raise DemoError(f"durable assertion expected {expected}, got {value or 'empty'}")
 
 
+def require_chat_outcome(
+    body: object, outcome: str, *, citations: bool | None = None
+) -> dict[str, Any]:
+    if not isinstance(body, dict) or set(body) != {
+        "citations",
+        "conversationId",
+        "outcome",
+        "reply",
+        "traceId",
+        "turnId",
+    }:
+        raise DemoError("chat response did not match the closed public schema")
+    if body.get("outcome") != outcome or not all(
+        isinstance(body.get(field), str) and body.get(field)
+        for field in ("conversationId", "reply", "traceId", "turnId")
+    ):
+        raise DemoError(f"chat response did not produce exact outcome {outcome}")
+    response_citations = body.get("citations")
+    if not isinstance(response_citations, list):
+        raise DemoError("chat citations did not match the public schema")
+    if citations is True and not response_citations:
+        raise DemoError("chat response omitted required citations")
+    if citations is False and response_citations:
+        raise DemoError("chat response fabricated citations")
+    return cast(dict[str, Any], body)
+
+
+def require_reservation_view(
+    run: ActiveRun, body: object, *, reservation_id: str, activity_id: str
+) -> dict[str, Any]:
+    fields = {
+        "activityId",
+        "activityProjectionVersion",
+        "decisionCode",
+        "durableOrderCreated",
+        "orderId",
+        "projectionVersion",
+        "quantity",
+        "replay",
+        "reservationId",
+        "state",
+    }
+    if not isinstance(body, dict) or set(body) != fields:
+        raise DemoError("reservation status did not match the closed public schema")
+    if (
+        body.get("reservationId") != reservation_id
+        or body.get("activityId") != activity_id
+        or body.get("quantity") != 1
+        or body.get("activityProjectionVersion") != 1
+        or body.get("state") not in {"PENDING", "ADMITTED", "REJECTED", "ORDERED", "CANCELLED"}
+        or not isinstance(body.get("projectionVersion"), int)
+        or not isinstance(body.get("replay"), bool)
+        or not isinstance(body.get("durableOrderCreated"), bool)
+    ):
+        raise DemoError("reservation status returned the wrong public identity or state")
+    durable_raw = mysql_query(
+        run,
+        "commerce_db",
+        f"""
+SELECT JSON_OBJECT(
+  'activityId', activity_id,
+  'activityProjectionVersion', activity_projection_version,
+  'decisionCode', decision_code,
+  'durableOrderCreated', IF(state IN ('ORDERED', 'CANCELLED'), TRUE, FALSE),
+  'orderId', order_id,
+  'projectionVersion', projection_version,
+  'quantity', quantity,
+  'reservationId', reservation_id,
+  'state', state)
+FROM seckill_reservation
+WHERE reservation_id = '{reservation_id}' AND user_subject = 'cb151-user';
+""",
+    )
+    try:
+        durable = json.loads(durable_raw)
+    except json.JSONDecodeError as error:
+        raise DemoError("reservation durable truth was missing or malformed") from error
+    for field in fields - {"replay"}:
+        if durable.get(field) != body.get(field):
+            raise ReservationConvergencePending(
+                f"reservation public/durable truth diverged at {field}"
+            )
+    return cast(dict[str, Any], body)
+
+
+def wait_for_reservation_view(
+    run: ActiveRun,
+    *,
+    url: str,
+    token: str,
+    reservation_id: str,
+    activity_id: str,
+    maximum_seconds: int = 10,
+) -> dict[str, Any]:
+    deadline = time.monotonic() + maximum_seconds
+    last_mismatch: ReservationConvergencePending | None = None
+    while time.monotonic() < deadline:
+        response = request(
+            "GET",
+            url,
+            expected=200,
+            headers={"Authorization": f"Bearer {token}"},
+        )
+        try:
+            return require_reservation_view(
+                run,
+                response.body,
+                reservation_id=reservation_id,
+                activity_id=activity_id,
+            )
+        except ReservationConvergencePending as error:
+            last_mismatch = error
+        time.sleep(0.1)
+    detail = str(last_mismatch) if last_mismatch is not None else "no valid status read"
+    raise DemoError(f"reservation public/durable truth did not converge: {detail}")
+
+
+def require_refund_view(
+    run: ActiveRun, body: object, *, refund_id: str, order_id: str
+) -> dict[str, Any]:
+    fields = {
+        "currency",
+        "eligibleAmountMinor",
+        "failureCode",
+        "orderId",
+        "orderKind",
+        "paymentAttemptId",
+        "refundId",
+        "refundedAmountMinor",
+        "replayed",
+        "requestedAmountMinor",
+        "state",
+        "stateVersion",
+    }
+    if not isinstance(body, dict) or set(body) != fields:
+        raise DemoError("refund status did not match the closed public schema")
+    if (
+        body.get("refundId") != refund_id
+        or body.get("orderId") != order_id
+        or body.get("orderKind") != "STANDARD"
+        or body.get("eligibleAmountMinor") != 1500
+        or body.get("requestedAmountMinor") != 500
+        or body.get("currency") != "CNY"
+        or body.get("state") != "REQUESTED"
+        or body.get("stateVersion") != 1
+        or body.get("refundedAmountMinor") != 0
+        or body.get("failureCode") is not None
+        or not isinstance(body.get("replayed"), bool)
+    ):
+        raise DemoError("refund status returned the wrong public requested truth")
+    durable_raw = mysql_query(
+        run,
+        "commerce_db",
+        f"""
+SELECT JSON_OBJECT(
+  'currency', currency,
+  'eligibleAmountMinor', eligible_amount_minor,
+  'failureCode', failure_code,
+  'orderId', order_id,
+  'orderKind', order_kind,
+  'paymentAttemptId', payment_attempt_id,
+  'refundId', refund_id,
+  'refundedAmountMinor', refunded_amount_minor,
+  'requestedAmountMinor', requested_amount_minor,
+  'state', state,
+  'stateVersion', state_version)
+FROM mock_refund
+WHERE refund_id = '{refund_id}' AND user_subject = 'cb151-user';
+""",
+    )
+    try:
+        durable = json.loads(durable_raw)
+    except json.JSONDecodeError as error:
+        raise DemoError("refund durable truth was missing or malformed") from error
+    for field in fields - {"replayed"}:
+        if durable.get(field) != body.get(field):
+            raise DemoError(f"refund public/durable truth diverged at {field}")
+    return cast(dict[str, Any], body)
+
+
+def require_confirmation_unavailable(response: Response) -> None:
+    if response.status != 409 or response.body != {"detail": "Action confirmation unavailable"}:
+        raise DemoError("exact confirmation did not return the fixed unavailable response")
+
+
 def decode_catalog_cache(value: str | None) -> dict[str, Any]:
     try:
         payload = json.loads(value) if value is not None else None
@@ -1560,6 +1847,7 @@ def timed_step(steps: list[dict[str, Any]], step_id: str, operation: Any) -> Any
 
 def replay_demo(run: ActiveRun, previous: dict[str, Any]) -> dict[str, Any]:
     manifest = run.manifest()
+    private = run.private()
     commerce = manifest["baseUrls"]["commerce"]
     token = login(run)
     steps: list[dict[str, Any]] = []
@@ -1601,6 +1889,69 @@ def replay_demo(run: ActiveRun, previous: dict[str, Any]) -> dict[str, Any]:
         raise DemoError("seckill repeat diverged from the durable reservation")
     timed_step(
         steps,
+        "seckill-status-convergence",
+        lambda: wait_for_reservation_view(
+            run,
+            url=f"{commerce}/api/reservations/{previous['reservationId']}",
+            token=token,
+            reservation_id=str(previous["reservationId"]),
+            activity_id=str(manifest["fixtures"]["seckillActivity"]),
+        ),
+    )
+    payment = timed_step(
+        steps,
+        "payment-replay",
+        lambda: request(
+            "POST",
+            f"{commerce}/api/orders/{previous['orderId']}/mock-payment",
+            expected=200,
+            headers={
+                "Authorization": f"Bearer {token}",
+                "Idempotency-Key": f"payment-{run.run_id}",
+            },
+            body={"amountMinor": 1500, "currency": "CNY"},
+        ),
+    ).body
+    if not payment.get("replayed") or payment.get("attemptId") != previous["paymentAttemptId"]:
+        raise DemoError("payment repeat did not replay exact durable truth")
+    payment_callback = timed_step(
+        steps,
+        "payment-callback-replay",
+        lambda: callback(
+            run,
+            order_id=str(previous["orderId"]),
+            amount=1500,
+            currency="CNY",
+            correlation_id=str(payment["callbackCorrelationId"]),
+            key=f"callback-{run.run_id}",
+        ),
+    ).body
+    if payment_callback.get("state") != "SUCCEEDED":
+        raise DemoError("payment callback repeat did not return committed truth")
+    refund = timed_step(
+        steps,
+        "refund-replay",
+        lambda: request(
+            "POST",
+            f"{commerce}/api/orders/{previous['orderId']}/refunds",
+            expected=200,
+            headers={
+                "Authorization": f"Bearer {token}",
+                "Idempotency-Key": f"refund-{run.run_id}",
+            },
+            body={"amountMinor": 500, "currency": "CNY"},
+        ),
+    ).body
+    if not refund.get("replayed"):
+        raise DemoError("refund repeat did not replay exact durable truth")
+    require_refund_view(
+        run,
+        refund,
+        refund_id=str(previous["refundId"]),
+        order_id=str(previous["orderId"]),
+    )
+    ordinary = timed_step(
+        steps,
         "chat-replay",
         lambda: agent_chat(
             run,
@@ -1609,6 +1960,139 @@ def replay_demo(run: ActiveRun, previous: dict[str, Any]) -> dict[str, Any]:
             f"ordinary-{run.run_id}",
             "hello from the bounded CityBuddy demo",
         ),
+    ).body
+    require_chat_outcome(ordinary, "completed", citations=False)
+    sufficient = timed_step(
+        steps,
+        "rag-sufficient-replay",
+        lambda: agent_chat(
+            run,
+            token,
+            previous["ordinarySessionId"],
+            f"rag-sufficient-{run.run_id}",
+            "retrieval-sufficient refund policy",
+        ),
+    ).body
+    require_chat_outcome(sufficient, "completed", citations=True)
+    insufficient = timed_step(
+        steps,
+        "rag-insufficient-replay",
+        lambda: agent_chat(
+            run,
+            token,
+            previous["ordinarySessionId"],
+            f"rag-insufficient-{run.run_id}",
+            "retrieval-insufficient refund policy",
+        ),
+    ).body
+    require_chat_outcome(insufficient, "retrieval_denied", citations=False)
+
+    action_token = private["ACTION_TOKEN"]
+    decline_session = str(previous["declineSessionId"])
+    prepare = timed_step(
+        steps,
+        "action-prepare-replay",
+        lambda: agent_chat(
+            run,
+            action_token,
+            decline_session,
+            f"action-prepare-{run.run_id}",
+            "action-prepare",
+            sandbox=ACTION_SANDBOX,
+        ),
+    ).body
+    require_chat_outcome(prepare, "action_pending", citations=False)
+    confirmation = timed_step(
+        steps,
+        "action-confirmation-unavailable-repeat",
+        lambda: agent_chat(
+            run,
+            action_token,
+            decline_session,
+            f"action-confirm-{run.run_id}",
+            "confirm",
+            sandbox=ACTION_SANDBOX,
+            expected=409,
+        ),
+    )
+    require_confirmation_unavailable(confirmation)
+    clarification = timed_step(
+        steps,
+        "action-clarification-replay",
+        lambda: agent_chat(
+            run,
+            action_token,
+            decline_session,
+            f"action-clarify-{run.run_id}",
+            "maybe change it",
+            sandbox=ACTION_SANDBOX,
+        ),
+    ).body
+    require_chat_outcome(clarification, "action_clarification", citations=False)
+    declined = timed_step(
+        steps,
+        "action-decline-replay",
+        lambda: agent_chat(
+            run,
+            action_token,
+            decline_session,
+            f"action-decline-{run.run_id}",
+            "decline",
+            sandbox=ACTION_SANDBOX,
+        ),
+    ).body
+    require_chat_outcome(declined, "action_declined", citations=False)
+
+    expiry_session = str(previous["expirySessionId"])
+    expiry_prepare = timed_step(
+        steps,
+        "action-expiry-prepare-replay",
+        lambda: agent_chat(
+            run,
+            action_token,
+            expiry_session,
+            f"expiry-prepare-{run.run_id}",
+            "action-prepare",
+            sandbox=ACTION_SANDBOX,
+        ),
+    ).body
+    require_chat_outcome(expiry_prepare, "action_pending", citations=False)
+    expired = timed_step(
+        steps,
+        "action-expiry-replay",
+        lambda: agent_chat(
+            run,
+            action_token,
+            expiry_session,
+            f"expiry-resolve-{run.run_id}",
+            "anything",
+            sandbox=ACTION_SANDBOX,
+        ),
+    ).body
+    require_chat_outcome(expired, "action_expired", citations=False)
+    durable_count(
+        run,
+        "cs_db",
+        f"SELECT COUNT(*) FROM support_event WHERE session_id = '{decline_session}' AND event_type = 'ACTION_DECLINED';",
+        1,
+    )
+    durable_count(
+        run,
+        "cs_db",
+        f"SELECT COUNT(*) FROM support_event WHERE session_id = '{expiry_session}' AND event_type = 'ACTION_EXPIRED';",
+        1,
+    )
+    durable_count(
+        run,
+        "cs_db",
+        f"SELECT COUNT(*) FROM support_event WHERE session_id IN ('{decline_session}', '{expiry_session}') AND event_type = 'ACTION_RECEIPT';",
+        0,
+    )
+    durable_count(
+        run,
+        "commerce_db",
+        f"SELECT COUNT(*) FROM mock_payment_callback c JOIN mock_payment_attempt a ON a.attempt_id = c.attempt_id WHERE a.order_id = '{previous['orderId']}';",
+        1,
     )
     result = {**previous, "repeat": True, "steps": steps}
     write_json(run.artifacts / "demo-repeat.json", result)
@@ -1690,11 +2174,12 @@ def demo() -> dict[str, Any]:
     timed_step(
         steps,
         "reservation-owner-status",
-        lambda: request(
-            "GET",
-            f"{commerce}/api/reservations/{reservation_id}",
-            expected=200,
-            headers={"Authorization": f"Bearer {token}"},
+        lambda: wait_for_reservation_view(
+            run,
+            url=f"{commerce}/api/reservations/{reservation_id}",
+            token=token,
+            reservation_id=reservation_id,
+            activity_id=str(manifest["fixtures"]["seckillActivity"]),
         ),
     )
     timed_step(
@@ -1751,7 +2236,7 @@ def demo() -> dict[str, Any]:
             body={"amountMinor": 500, "currency": "CNY"},
         ),
     ).body
-    timed_step(
+    refund_status = timed_step(
         steps,
         "refund-status",
         lambda: request(
@@ -1760,10 +2245,11 @@ def demo() -> dict[str, Any]:
             expected=200,
             headers={"Authorization": f"Bearer {token}"},
         ),
-    )
+    ).body
+    require_refund_view(run, refund_status, refund_id=str(refund["refundId"]), order_id=order_id)
 
     ordinary_session = timed_step(steps, "ordinary-session", lambda: agent_session(run, token))
-    timed_step(
+    ordinary = timed_step(
         steps,
         "ordinary-chat",
         lambda: agent_chat(
@@ -1773,39 +2259,44 @@ def demo() -> dict[str, Any]:
             f"ordinary-{run.run_id}",
             "hello from the bounded CityBuddy demo",
         ),
-    )
-    sufficient = timed_step(
-        steps,
-        "rag-sufficient",
-        lambda: agent_chat(
-            run,
-            token,
-            ordinary_session,
-            f"rag-sufficient-{run.run_id}",
-            "retrieval-sufficient refund policy",
-        ),
     ).body
-    if sufficient["outcome"] != "completed" or not sufficient["citations"]:
-        raise DemoError("RAG sufficient path omitted its public evidence references")
+    require_chat_outcome(ordinary, "completed", citations=False)
+    require_chat_outcome(
+        timed_step(
+            steps,
+            "rag-sufficient",
+            lambda: agent_chat(
+                run,
+                token,
+                ordinary_session,
+                f"rag-sufficient-{run.run_id}",
+                "retrieval-sufficient refund policy",
+            ),
+        ).body,
+        "completed",
+        citations=True,
+    )
     durable_count(
         run,
         "cs_db",
         f"SELECT COUNT(*) FROM support_turn t JOIN retrieval_decision d ON d.turn_id = t.turn_id WHERE t.correlation_key = 'rag-sufficient-{run.run_id}' AND t.state = 'COMPLETED' AND d.sufficiency_outcome = 'SUFFICIENT' AND d.reason_code = 'sufficient' AND d.evidence_count = (SELECT COUNT(*) FROM retrieval_evidence e WHERE e.decision_id = d.decision_id) AND d.evidence_count > 0;",
         1,
     )
-    insufficient = timed_step(
-        steps,
-        "rag-insufficient",
-        lambda: agent_chat(
-            run,
-            token,
-            ordinary_session,
-            f"rag-insufficient-{run.run_id}",
-            "retrieval-insufficient refund policy",
-        ),
-    ).body
-    if insufficient["outcome"] != "retrieval_denied" or insufficient["citations"]:
-        raise DemoError("RAG insufficient path fabricated evidence or the wrong outcome")
+    require_chat_outcome(
+        timed_step(
+            steps,
+            "rag-insufficient",
+            lambda: agent_chat(
+                run,
+                token,
+                ordinary_session,
+                f"rag-insufficient-{run.run_id}",
+                "retrieval-insufficient refund policy",
+            ),
+        ).body,
+        "retrieval_denied",
+        citations=False,
+    )
 
     action_token = private["ACTION_TOKEN"]
     decline_session = timed_step(
@@ -1813,22 +2304,24 @@ def demo() -> dict[str, Any]:
         "action-session",
         lambda: agent_session(run, action_token, sandbox=ACTION_SANDBOX),
     )
-    prepared = timed_step(
-        steps,
-        "action-prepare",
-        lambda: agent_chat(
-            run,
-            action_token,
-            decline_session,
-            f"action-prepare-{run.run_id}",
+    prepared = require_chat_outcome(
+        timed_step(
+            steps,
             "action-prepare",
-            sandbox=ACTION_SANDBOX,
-        ),
-    ).body
-    if prepared["outcome"] != "action_pending":
-        raise DemoError("PendingAction prepare did not produce pending truth")
+            lambda: agent_chat(
+                run,
+                action_token,
+                decline_session,
+                f"action-prepare-{run.run_id}",
+                "action-prepare",
+                sandbox=ACTION_SANDBOX,
+            ),
+        ).body,
+        "action_pending",
+        citations=False,
+    )
     pending_id = pending_id_for_turn(run, str(prepared["turnId"]))
-    timed_step(
+    confirmation = timed_step(
         steps,
         "action-confirmation-unavailable",
         lambda: agent_chat(
@@ -1841,55 +2334,68 @@ def demo() -> dict[str, Any]:
             expected=409,
         ),
     )
-    clarification = timed_step(
-        steps,
-        "action-clarification",
-        lambda: agent_chat(
-            run,
-            action_token,
-            decline_session,
-            f"action-clarify-{run.run_id}",
-            "maybe change it",
-            sandbox=ACTION_SANDBOX,
-        ),
-    ).body
-    if clarification["outcome"] != "action_clarification":
-        raise DemoError("PendingAction clarification diverged")
-    declined = timed_step(
-        steps,
-        "action-decline",
-        lambda: agent_chat(
-            run,
-            action_token,
-            decline_session,
-            f"action-decline-{run.run_id}",
-            "decline",
-            sandbox=ACTION_SANDBOX,
-        ),
-    ).body
-    if declined["outcome"] != "action_declined":
-        raise DemoError("PendingAction decline diverged")
+    require_confirmation_unavailable(confirmation)
+    require_chat_outcome(
+        timed_step(
+            steps,
+            "action-clarification",
+            lambda: agent_chat(
+                run,
+                action_token,
+                decline_session,
+                f"action-clarify-{run.run_id}",
+                "maybe change it",
+                sandbox=ACTION_SANDBOX,
+            ),
+        ).body,
+        "action_clarification",
+        citations=False,
+    )
+    require_chat_outcome(
+        timed_step(
+            steps,
+            "action-decline",
+            lambda: agent_chat(
+                run,
+                action_token,
+                decline_session,
+                f"action-decline-{run.run_id}",
+                "decline",
+                sandbox=ACTION_SANDBOX,
+            ),
+        ).body,
+        "action_declined",
+        citations=False,
+    )
 
     expiry_session = agent_session(run, action_token, sandbox=ACTION_SANDBOX)
-    expiry_prepare = agent_chat(
-        run,
-        action_token,
-        expiry_session,
-        f"expiry-prepare-{run.run_id}",
-        "action-prepare",
-        sandbox=ACTION_SANDBOX,
-    ).body
+    expiry_prepare = require_chat_outcome(
+        agent_chat(
+            run,
+            action_token,
+            expiry_session,
+            f"expiry-prepare-{run.run_id}",
+            "action-prepare",
+            sandbox=ACTION_SANDBOX,
+        ).body,
+        "action_pending",
+        citations=False,
+    )
     expiry_pending_id = pending_id_for_turn(run, str(expiry_prepare["turnId"]))
     started = time.monotonic()
     wait_for_action_expiry(run, expiry_pending_id)
-    expired = agent_chat(
-        run,
-        action_token,
-        expiry_session,
-        f"expiry-resolve-{run.run_id}",
-        "anything",
-        sandbox=ACTION_SANDBOX,
-    ).body
+    require_chat_outcome(
+        agent_chat(
+            run,
+            action_token,
+            expiry_session,
+            f"expiry-resolve-{run.run_id}",
+            "anything",
+            sandbox=ACTION_SANDBOX,
+        ).body,
+        "action_expired",
+        citations=False,
+    )
     steps.append(
         {
             "durationMs": int((time.monotonic() - started) * 1000),
@@ -1897,8 +2403,6 @@ def demo() -> dict[str, Any]:
             "status": "passed",
         }
     )
-    if expired["outcome"] != "action_expired":
-        raise DemoError("PendingAction expiry diverged")
     durable_count(
         run,
         "cs_db",
@@ -1908,7 +2412,9 @@ def demo() -> dict[str, Any]:
 
     result = {
         "declinedPendingActionId": pending_id,
+        "declineSessionId": decline_session,
         "expiryPendingActionId": expiry_pending_id,
+        "expirySessionId": expiry_session,
         "ordinarySessionId": ordinary_session,
         "orderId": order_id,
         "paymentAttemptId": payment["attemptId"],
@@ -1926,23 +2432,44 @@ def demo() -> dict[str, Any]:
 @contextlib.contextmanager
 def injected_sql_fault(run: ActiveRun, create: str, restore: str) -> Iterator[None]:
     mysql_query(run, "", create)
+    primary: BaseException | None = None
     try:
         yield
+    except BaseException as error:
+        primary = error
     finally:
-        mysql_query(run, "", restore)
+        try:
+            mysql_query(run, "", restore)
+        except BaseException as restoration_error:
+            if primary is not None:
+                raise DemoError(
+                    "fault operation failed and its exact runtime restoration also failed"
+                ) from primary
+            raise restoration_error
+    if primary is not None:
+        raise primary
 
 
 def fault_step(results: list[dict[str, Any]], drill_id: str, operation: Any) -> Any:
     started = time.monotonic()
-    result = operation()
-    results.append(
-        {
-            "durationMs": int((time.monotonic() - started) * 1000),
-            "id": drill_id,
-            "restored": True,
-            "status": "passed",
-        }
-    )
+    observed = operation()
+    duration_ms = int((time.monotonic() - started) * 1000)
+    spec = DRILL_SPECS[drill_id]
+    maximum_seconds = spec["maximumSeconds"]
+    if not isinstance(maximum_seconds, int):
+        raise DemoError(f"fault drill {drill_id} has an invalid maximum duration")
+    maximum_ms = maximum_seconds * 1000
+    if duration_ms > maximum_ms:
+        raise DemoError(f"fault drill {drill_id} exceeded its frozen maximum duration")
+    result = {
+        **spec,
+        "durationMs": duration_ms,
+        "id": drill_id,
+        "observed": observed,
+        "restored": True,
+        "status": "passed",
+    }
+    results.append(result)
     return result
 
 
@@ -1963,7 +2490,7 @@ def action_prepare_for_fault(run: ActiveRun, suffix: str) -> tuple[str, str]:
     return session, pending_id_for_turn(run, str(response["turnId"]))
 
 
-def drill_owner_denial(run: ActiveRun, demo_result: Mapping[str, Any]) -> None:
+def drill_owner_denial(run: ActiveRun, demo_result: Mapping[str, Any]) -> dict[str, object]:
     other = login(run, other=True)
     reservation = str(demo_result["reservationId"])
     before = mysql_query(
@@ -1971,7 +2498,7 @@ def drill_owner_denial(run: ActiveRun, demo_result: Mapping[str, Any]) -> None:
         "commerce_db",
         f"SELECT CONCAT(state, ':', projection_version) FROM seckill_reservation WHERE reservation_id = '{reservation}';",
     )
-    request(
+    denied = request(
         "GET",
         f"{run.manifest()['baseUrls']['commerce']}/api/reservations/{reservation}",
         expected=404,
@@ -1985,15 +2512,27 @@ def drill_owner_denial(run: ActiveRun, demo_result: Mapping[str, Any]) -> None:
     if before != after:
         raise DemoError("owner denial changed authoritative reservation truth")
     owner = login(run)
-    request(
+    control = request(
         "GET",
         f"{run.manifest()['baseUrls']['commerce']}/api/reservations/{reservation}",
         expected=200,
         headers={"Authorization": f"Bearer {owner}"},
     )
+    require_reservation_view(
+        run,
+        control.body,
+        reservation_id=reservation,
+        activity_id=str(run.manifest()["fixtures"]["seckillActivity"]),
+    )
+    return {
+        "authoritativePostState": after,
+        "authoritativePreState": before,
+        "controlStatus": control.status,
+        "publicStatus": denied.status,
+    }
 
 
-def drill_catalog_cache(run: ActiveRun) -> None:
+def drill_catalog_cache(run: ActiveRun) -> dict[str, object]:
     manifest = run.manifest()
     product = manifest["fixtures"]["standardProduct"]
     key = f"catalog:product:{product}:1"
@@ -2003,54 +2542,84 @@ def drill_catalog_cache(run: ActiveRun) -> None:
         "commerce_db",
         f"SELECT CONCAT(product_id, ':', price_minor, ':', stock_quantity, ':', publication_version) FROM product WHERE product_id = '{product}';",
     )
-    cache.set(
-        key,
-        json.dumps(
-            {
-                "available": True,
-                "currency": "CNY",
-                "description": "forged derived value",
-                "name": "forged",
-                "priceMinor": 1,
-                "productId": "cb151-wrong-product",
-                "publicationVersion": 1,
-                "stockQuantity": 1,
-            },
-            separators=(",", ":"),
-        ),
-        ex=30,
-    )
+    baseline_value = cast(str | None, cache.get(key))
+    baseline_pttl_value = cache.pttl(key)
+    if not isinstance(baseline_pttl_value, int):
+        raise DemoError("catalog cache baseline TTL is not an integer")
+    baseline_pttl = baseline_pttl_value
+    baseline_deadline = time.monotonic() + max(0, baseline_pttl) / 1000
     token = login(run)
-    public = request(
+    public_status = 0
+    try:
+        cache.set(
+            key,
+            json.dumps(
+                {
+                    "available": True,
+                    "currency": "CNY",
+                    "description": "forged derived value",
+                    "name": "forged",
+                    "priceMinor": 1,
+                    "productId": "cb151-wrong-product",
+                    "publicationVersion": 1,
+                    "stockQuantity": 1,
+                },
+                separators=(",", ":"),
+            ),
+            ex=30,
+        )
+        public_response = request(
+            "GET",
+            f"{manifest['baseUrls']['commerce']}/api/products/{product}",
+            expected=200,
+            headers={"Authorization": f"Bearer {token}"},
+        )
+        public_status = public_response.status
+        public = public_response.body
+        cached_product = decode_catalog_cache(cast(str | None, cache.get(key)))
+        authoritative_after = mysql_query(
+            run,
+            "commerce_db",
+            f"SELECT CONCAT(product_id, ':', price_minor, ':', stock_quantity, ':', publication_version) FROM product WHERE product_id = '{product}';",
+        )
+        if (
+            public["productId"] != product
+            or public["priceMinor"] != 750
+            or cached_product.get("productId") != product
+            or cached_product.get("priceMinor") != 750
+            or authoritative_after != authoritative_before
+        ):
+            raise DemoError("catalog cache fault did not fall back to authoritative MySQL truth")
+    finally:
+        if baseline_value is None:
+            cache.delete(key)
+        elif baseline_pttl == -1:
+            cache.set(key, baseline_value)
+        elif baseline_pttl > 0:
+            remaining_ms = max(1, int((baseline_deadline - time.monotonic()) * 1000))
+            cache.psetex(key, remaining_ms, baseline_value)
+        else:
+            cache.delete(key)
+    if cast(str | None, cache.get(key)) != baseline_value:
+        raise DemoError("catalog cache fault did not restore the exact captured key value")
+    control = request(
         "GET",
         f"{manifest['baseUrls']['commerce']}/api/products/{product}",
         expected=200,
         headers={"Authorization": f"Bearer {token}"},
-    ).body
-    cached_product = decode_catalog_cache(cast(str | None, cache.get(key)))
-    authoritative_after = mysql_query(
-        run,
-        "commerce_db",
-        f"SELECT CONCAT(product_id, ':', price_minor, ':', stock_quantity, ':', publication_version) FROM product WHERE product_id = '{product}';",
     )
-    if (
-        public["productId"] != product
-        or public["priceMinor"] != 750
-        or not isinstance(cached_product, dict)
-        or cached_product.get("productId") != product
-        or cached_product.get("priceMinor") != 750
-        or authoritative_after != authoritative_before
-    ):
-        raise DemoError("catalog cache fault did not fall back to authoritative MySQL truth")
-    request(
-        "GET",
-        f"{manifest['baseUrls']['commerce']}/api/products/{product}",
-        expected=200,
-        headers={"Authorization": f"Bearer {token}"},
-    )
+    if control.body.get("productId") != product or control.body.get("priceMinor") != 750:
+        raise DemoError("catalog cache post-restoration control diverged")
+    return {
+        "authoritativeProduct": authoritative_before,
+        "baselinePresent": baseline_value is not None,
+        "controlStatus": control.status,
+        "publicStatus": public_status,
+        "restoredValueExact": True,
+    }
 
 
-def drill_seckill_convergence(run: ActiveRun, demo_result: Mapping[str, Any]) -> None:
+def drill_seckill_convergence(run: ActiveRun, demo_result: Mapping[str, Any]) -> dict[str, object]:
     manifest = run.manifest()
     token = login(run)
     response = request(
@@ -2071,15 +2640,22 @@ def drill_seckill_convergence(run: ActiveRun, demo_result: Mapping[str, Any]) ->
         f"SELECT COUNT(*) FROM seckill_reservation WHERE reservation_id = '{response['reservationId']}';",
         1,
     )
-    request(
-        "GET",
-        f"{manifest['baseUrls']['commerce']}/api/reservations/{response['reservationId']}",
-        expected=200,
-        headers={"Authorization": f"Bearer {token}"},
+    control = wait_for_reservation_view(
+        run,
+        url=f"{manifest['baseUrls']['commerce']}/api/reservations/{response['reservationId']}",
+        token=token,
+        reservation_id=str(response["reservationId"]),
+        activity_id=str(manifest["fixtures"]["seckillActivity"]),
     )
+    return {
+        "controlStatus": 200,
+        "controlState": control["state"],
+        "publicReservationId": response["reservationId"],
+        "reservationCount": 1,
+    }
 
 
-def drill_payment_refund(run: ActiveRun, demo_result: Mapping[str, Any]) -> None:
+def drill_payment_refund(run: ActiveRun, demo_result: Mapping[str, Any]) -> dict[str, object]:
     manifest = run.manifest()
     commerce = manifest["baseUrls"]["commerce"]
     token = login(run)
@@ -2118,6 +2694,12 @@ def drill_payment_refund(run: ActiveRun, demo_result: Mapping[str, Any]) -> None
     ).body
     if not refund_replay["replayed"]:
         raise DemoError("refund replay did not return committed truth")
+    require_refund_view(
+        run,
+        refund_replay,
+        refund_id=str(demo_result["refundId"]),
+        order_id=order_id,
+    )
     request(
         "POST",
         f"{commerce}/api/orders/{order_id}/refunds",
@@ -2140,21 +2722,30 @@ def drill_payment_refund(run: ActiveRun, demo_result: Mapping[str, Any]) -> None
         f"SELECT COUNT(*) FROM mock_refund WHERE order_id = '{order_id}';",
         1,
     )
+    return {
+        "conflictStatuses": [409, 409],
+        "paymentAttemptCount": 1,
+        "paymentReplay": True,
+        "refundCount": 1,
+        "refundReplay": True,
+    }
 
 
-def drill_rag(run: ActiveRun) -> None:
+def drill_rag(run: ActiveRun) -> dict[str, object]:
     manifest = run.manifest()
     token = login(run)
     session = agent_session(run, token)
-    insufficient = agent_chat(
-        run,
-        token,
-        session,
-        f"fault-rag-insufficient-{run.run_id}",
-        "retrieval-insufficient refund policy",
-    ).body
-    if insufficient["outcome"] != "retrieval_denied" or insufficient["citations"]:
-        raise DemoError("RAG insufficiency fault fabricated evidence")
+    insufficient = require_chat_outcome(
+        agent_chat(
+            run,
+            token,
+            session,
+            f"fault-rag-insufficient-{run.run_id}",
+            "retrieval-insufficient refund policy",
+        ).body,
+        "retrieval_denied",
+        citations=False,
+    )
     original_elasticsearch_port = int(manifest["ports"]["elasticsearch"])
     alias_url = f"http://127.0.0.1:{original_elasticsearch_port}/_alias/knowledge_docs_read"
     before = json.dumps(request("GET", alias_url, expected=200).body, sort_keys=True)
@@ -2166,10 +2757,34 @@ def drill_rag(run: ActiveRun) -> None:
             session,
             f"fault-rag-unavailable-{run.run_id}",
             "retrieval-sufficient dependency unavailable refund policy",
-            expected=(200, 503),
+            expected=200,
         )
-        if unavailable.status == 200 and unavailable.body.get("outcome") != "retrieval_denied":
-            raise DemoError("RAG dependency failure was not bounded")
+        require_chat_outcome(unavailable.body, "retrieval_denied", citations=False)
+        durable_unavailable = mysql_query(
+            run,
+            "cs_db",
+            f"""
+SELECT CONCAT(
+  t.state,
+  ':',
+  t.outcome,
+  ':',
+  (SELECT COUNT(*) FROM retrieval_decision d WHERE d.turn_id = t.turn_id),
+  ':',
+  (SELECT COUNT(*)
+   FROM support_event e
+   WHERE e.turn_id = t.turn_id
+     AND e.event_type = 'TOOL_DENIED'
+     AND JSON_UNQUOTE(JSON_EXTRACT(e.payload_json, '$.tool')) = 'knowledge.search'
+     AND JSON_UNQUOTE(JSON_EXTRACT(e.payload_json, '$.reason')) = 'knowledge_unavailable'
+     AND JSON_UNQUOTE(JSON_EXTRACT(e.payload_json, '$.outcome')) = 'deny_with_feedback'))
+FROM support_turn t
+WHERE t.session_id = '{session}'
+  AND t.correlation_key = 'fault-rag-unavailable-{run.run_id}';
+""",
+        )
+        if durable_unavailable != "COMPLETED:retrieval_denied:0:1":
+            raise DemoError("RAG dependency failure did not reach its exact durable producer")
     finally:
         compose(run, *ELASTICSEARCH_RESTORE_ARGS, timeout=120)
     restored_elasticsearch_port = compose_port(run, "elasticsearch", 9200)
@@ -2181,41 +2796,83 @@ def drill_rag(run: ActiveRun) -> None:
     after = json.dumps(request("GET", alias_url, expected=200).body, sort_keys=True)
     if before != after:
         raise DemoError("Elasticsearch restoration changed the exact alias inventory")
-    control = agent_chat(
-        run,
-        token,
-        session,
-        f"fault-rag-control-{run.run_id}",
-        "retrieval-sufficient restored refund policy",
-    ).body
-    if control["outcome"] != "completed" or not control["citations"]:
-        raise DemoError("RAG post-restoration control did not recover")
+    control = require_chat_outcome(
+        agent_chat(
+            run,
+            token,
+            session,
+            f"fault-rag-control-{run.run_id}",
+            "retrieval-sufficient restored refund policy",
+        ).body,
+        "completed",
+        citations=True,
+    )
+    return {
+        "aliasEqual": before == after,
+        "controlOutcome": control["outcome"],
+        "dependencyDurableState": durable_unavailable,
+        "dependencyPublicOutcome": unavailable.body["outcome"],
+        "insufficientOutcome": insufficient["outcome"],
+    }
 
 
-def drill_provider(run: ActiveRun) -> None:
+def drill_provider(run: ActiveRun) -> dict[str, object]:
     token = login(run)
     session = agent_session(run, token)
-    denied = agent_chat(
+    counts_url = f"{run.manifest()['baseUrls']['fakeLlm']}/fixture/counts"
+    before = request("GET", counts_url, expected=200).body
+    before_count = int(before.get("provider-failure:total", 0))
+    denied = require_chat_outcome(
+        agent_chat(
+            run,
+            token,
+            session,
+            f"fault-provider-{run.run_id}",
+            "provider-failure",
+        ).body,
+        "provider_denied",
+        citations=False,
+    )
+    after = request("GET", counts_url, expected=200).body
+    after_count = int(after.get("provider-failure:total", 0))
+    if after_count <= before_count:
+        raise DemoError("chat provider drill did not reach the named fake-provider producer")
+    durable = mysql_query(
         run,
-        token,
-        session,
-        f"fault-provider-{run.run_id}",
-        "provider-failure",
-    ).body
-    if denied["outcome"] != "provider_denied":
-        raise DemoError("chat provider failure did not produce the bounded denial")
-    control = agent_chat(
-        run,
-        token,
-        session,
-        f"fault-provider-control-{run.run_id}",
-        "ordinary restored chat",
-    ).body
-    if control["outcome"] != "completed":
-        raise DemoError("chat provider post-fault control did not recover")
+        "cs_db",
+        f"""
+SELECT CONCAT(t.state, ':', t.outcome, ':', COUNT(e.event_id))
+FROM support_turn t
+JOIN support_event e ON e.turn_id = t.turn_id
+  AND e.event_type = 'AGENT_OUTCOME'
+  AND JSON_UNQUOTE(JSON_EXTRACT(e.payload_json, '$.outcome')) = 'provider_denied'
+WHERE t.session_id = '{session}' AND t.correlation_key = 'fault-provider-{run.run_id}'
+GROUP BY t.state, t.outcome;
+""",
+    )
+    if durable != "COMPLETED:provider_denied:1":
+        raise DemoError("chat provider drill did not persist its exact durable producer outcome")
+    control = require_chat_outcome(
+        agent_chat(
+            run,
+            token,
+            session,
+            f"fault-provider-control-{run.run_id}",
+            "ordinary restored chat",
+        ).body,
+        "completed",
+        citations=False,
+    )
+    return {
+        "controlOutcome": control["outcome"],
+        "durableOutcome": durable,
+        "fakeProviderCountAfter": after_count,
+        "fakeProviderCountBefore": before_count,
+        "publicOutcome": denied["outcome"],
+    }
 
 
-def drill_action_prepare(run: ActiveRun) -> None:
+def drill_action_prepare(run: ActiveRun) -> dict[str, object]:
     private = run.private()
     token = private["ACTION_TOKEN"]
     session = agent_session(run, token, sandbox=ACTION_SANDBOX)
@@ -2224,7 +2881,7 @@ def drill_action_prepare(run: ActiveRun) -> None:
         "CREATE TRIGGER cs_db.cb151_fail_reference_insert BEFORE INSERT ON cs_db.pending_action_reference FOR EACH ROW SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'controlled cb151 reference failure';",
         "DROP TRIGGER cs_db.cb151_fail_reference_insert;",
     ):
-        agent_chat(
+        failure = agent_chat(
             run,
             token,
             session,
@@ -2233,6 +2890,8 @@ def drill_action_prepare(run: ActiveRun) -> None:
             sandbox=ACTION_SANDBOX,
             expected=503,
         )
+        if failure.body != {"detail": "Service unavailable"}:
+            raise DemoError("PendingAction prepare fault returned an unrelated 503 producer")
         durable_count(
             run,
             "cs_db",
@@ -2246,10 +2905,15 @@ def drill_action_prepare(run: ActiveRun) -> None:
             0,
         )
     assert_fault_baseline(run)
-    action_prepare_for_fault(run, "reference-control")
+    _, control_pending = action_prepare_for_fault(run, "reference-control")
+    return {
+        "controlPendingActionId": control_pending,
+        "postState": "references=0:preparedEvents=0",
+        "publicStatus": failure.status,
+    }
 
 
-def drill_action_decline(run: ActiveRun) -> None:
+def drill_action_decline(run: ActiveRun) -> dict[str, object]:
     private = run.private()
     token = private["ACTION_TOKEN"]
     session, pending = action_prepare_for_fault(run, "grant-decline")
@@ -2258,7 +2922,7 @@ def drill_action_decline(run: ActiveRun) -> None:
         "REVOKE UPDATE (state, resolved_at, resolution_turn_id, resolution_trace_id) ON cs_db.pending_action_reference FROM 'agent_app'@'%';",
         "GRANT UPDATE (state, resolved_at, resolution_turn_id, resolution_trace_id) ON cs_db.pending_action_reference TO 'agent_app'@'%';",
     ):
-        agent_chat(
+        grant_failure = agent_chat(
             run,
             token,
             session,
@@ -2267,6 +2931,8 @@ def drill_action_decline(run: ActiveRun) -> None:
             sandbox=ACTION_SANDBOX,
             expected=503,
         )
+        if grant_failure.body != {"detail": "Service unavailable"}:
+            raise DemoError("PendingAction decline grant fault returned an unrelated 503 producer")
         state = mysql_query(
             run,
             "cs_db",
@@ -2275,16 +2941,18 @@ def drill_action_decline(run: ActiveRun) -> None:
         if state != "PENDING:0":
             raise DemoError("decline grant fault left partial local truth")
     assert_fault_baseline(run)
-    control = agent_chat(
-        run,
-        token,
-        session,
-        f"fault-decline-control-{run.run_id}",
-        "decline",
-        sandbox=ACTION_SANDBOX,
-    ).body
-    if control["outcome"] != "action_declined":
-        raise DemoError("decline grant restoration control failed")
+    control = require_chat_outcome(
+        agent_chat(
+            run,
+            token,
+            session,
+            f"fault-decline-control-{run.run_id}",
+            "decline",
+            sandbox=ACTION_SANDBOX,
+        ).body,
+        "action_declined",
+        citations=False,
+    )
 
     trigger_session, trigger_pending = action_prepare_for_fault(run, "trigger-decline")
     with injected_sql_fault(
@@ -2292,7 +2960,7 @@ def drill_action_decline(run: ActiveRun) -> None:
         "CREATE TRIGGER cs_db.cb151_fail_decline_event BEFORE INSERT ON cs_db.support_event FOR EACH ROW SET NEW.sequence = IF(NEW.event_type = 'ACTION_DECLINED', 0, NEW.sequence);",
         "DROP TRIGGER cs_db.cb151_fail_decline_event;",
     ):
-        agent_chat(
+        trigger_failure = agent_chat(
             run,
             token,
             trigger_session,
@@ -2301,6 +2969,10 @@ def drill_action_decline(run: ActiveRun) -> None:
             sandbox=ACTION_SANDBOX,
             expected=503,
         )
+        if trigger_failure.body != {"detail": "Service unavailable"}:
+            raise DemoError(
+                "PendingAction decline trigger fault returned an unrelated 503 producer"
+            )
         state = mysql_query(
             run,
             "cs_db",
@@ -2309,19 +2981,28 @@ def drill_action_decline(run: ActiveRun) -> None:
         if state != "PENDING:0":
             raise DemoError("ACTION_DECLINED trigger fault left partial truth")
     assert_fault_baseline(run)
-    control = agent_chat(
-        run,
-        token,
-        trigger_session,
-        f"fault-decline-trigger-control-{run.run_id}",
-        "decline",
-        sandbox=ACTION_SANDBOX,
-    ).body
-    if control["outcome"] != "action_declined":
-        raise DemoError("ACTION_DECLINED trigger restoration control failed")
+    trigger_control = require_chat_outcome(
+        agent_chat(
+            run,
+            token,
+            trigger_session,
+            f"fault-decline-trigger-control-{run.run_id}",
+            "decline",
+            sandbox=ACTION_SANDBOX,
+        ).body,
+        "action_declined",
+        citations=False,
+    )
+    return {
+        "grantControlOutcome": control["outcome"],
+        "grantFailureStatus": grant_failure.status,
+        "postState": "PENDING:0 for each injected failure",
+        "triggerControlOutcome": trigger_control["outcome"],
+        "triggerFailureStatus": trigger_failure.status,
+    }
 
 
-def drill_action_expiry(run: ActiveRun) -> None:
+def drill_action_expiry(run: ActiveRun) -> dict[str, object]:
     private = run.private()
     token = private["ACTION_TOKEN"]
     session, pending = action_prepare_for_fault(run, "expiry")
@@ -2331,7 +3012,7 @@ def drill_action_expiry(run: ActiveRun) -> None:
         "CREATE TRIGGER cs_db.cb151_fail_expiry_event BEFORE INSERT ON cs_db.support_event FOR EACH ROW SET NEW.sequence = IF(NEW.event_type = 'ACTION_EXPIRED', 0, NEW.sequence);",
         "DROP TRIGGER cs_db.cb151_fail_expiry_event;",
     ):
-        agent_chat(
+        failure = agent_chat(
             run,
             token,
             session,
@@ -2340,6 +3021,8 @@ def drill_action_expiry(run: ActiveRun) -> None:
             sandbox=ACTION_SANDBOX,
             expected=503,
         )
+        if failure.body != {"detail": "Service unavailable"}:
+            raise DemoError("PendingAction expiry fault returned an unrelated 503 producer")
         state = mysql_query(
             run,
             "cs_db",
@@ -2348,16 +3031,23 @@ def drill_action_expiry(run: ActiveRun) -> None:
         if state != "PENDING:0":
             raise DemoError("ACTION_EXPIRED trigger fault left partial truth")
     assert_fault_baseline(run)
-    control = agent_chat(
-        run,
-        token,
-        session,
-        f"fault-expiry-control-{run.run_id}",
-        "anything",
-        sandbox=ACTION_SANDBOX,
-    ).body
-    if control["outcome"] != "action_expired":
-        raise DemoError("ACTION_EXPIRED trigger restoration control failed")
+    control = require_chat_outcome(
+        agent_chat(
+            run,
+            token,
+            session,
+            f"fault-expiry-control-{run.run_id}",
+            "anything",
+            sandbox=ACTION_SANDBOX,
+        ).body,
+        "action_expired",
+        citations=False,
+    )
+    return {
+        "controlOutcome": control["outcome"],
+        "postState": "PENDING:0",
+        "publicStatus": failure.status,
+    }
 
 
 def faults() -> dict[str, Any]:
@@ -2367,6 +3057,7 @@ def faults() -> dict[str, Any]:
     if not isinstance(demo_result, dict):
         raise DemoError("demo artifact has an invalid schema")
     results: list[dict[str, Any]] = []
+    primary: BaseException | None = None
     try:
         fault_step(
             results, "F1-identity-owner-denial", lambda: drill_owner_denial(run, demo_result)
@@ -2383,8 +3074,19 @@ def faults() -> dict[str, Any]:
         fault_step(results, "F7a-action-prepare", lambda: drill_action_prepare(run))
         fault_step(results, "F7b-action-decline", lambda: drill_action_decline(run))
         fault_step(results, "F7c-action-expiry", lambda: drill_action_expiry(run))
+    except BaseException as error:
+        primary = error
     finally:
-        restore_runtime_faults(run)
+        try:
+            restore_runtime_faults(run)
+        except BaseException:
+            if primary is not None:
+                raise DemoError(
+                    "fault execution failed and final runtime restoration also failed"
+                ) from primary
+            raise
+    if primary is not None:
+        raise primary
     assert_fault_baseline(run)
     result = {"drills": results, "runId": run.run_id}
     write_json(run.artifacts / "faults.json", result)
@@ -2393,14 +3095,53 @@ def faults() -> dict[str, Any]:
 
 
 def demo_all() -> None:
-    run = setup()
-    cleanup_result: dict[str, Any] | None = None
+    had_active_run = ACTIVE_STATE.exists()
+    run: ActiveRun | None = None
+    first_failure: dict[str, str] | None = None
+    stage = "setup"
+    demo_result: dict[str, Any] | None = None
+    fault_result: dict[str, Any] | None = None
+    check_result: dict[str, Any] | None = None
     try:
+        run = setup()
+        stage = "demo"
         demo_result = demo()
+        stage = "faults"
         fault_result = faults()
+        stage = "check"
         check_result = check(emit_result=False)
-    finally:
-        cleanup_result = cleanup_run(run, remove=True)
+    except BaseException as error:
+        first_failure = {
+            "class": type(error).__name__,
+            "detail": str(error),
+            "stage": stage,
+        }
+    if run is None and not had_active_run and ACTIVE_STATE.exists():
+        try:
+            run = ActiveRun.load()
+        except DemoError:
+            run = None
+    cleanup_result: dict[str, Any]
+    if run is None:
+        cleanup_result = {
+            "errors": [],
+            "projectRemoved": False,
+            "runDirectoryRemoved": False,
+            "status": "not-owned",
+        }
+    else:
+        cleanup_result = cleanup_run(run, remove=True, raise_on_error=False)
+    if first_failure is not None or cleanup_result["status"] != "passed":
+        emit(
+            "all",
+            "rejected",
+            cleanup=cleanup_result,
+            firstFailure=first_failure or {"class": "CleanupFailure", "stage": "cleanup"},
+            runId=run.run_id if run is not None else None,
+        )
+        raise SystemExit(2)
+    if demo_result is None or fault_result is None or check_result is None or run is None:
+        raise DemoError("aggregate demo result was incomplete after successful cleanup")
     emit(
         "all",
         "passed",
@@ -2466,18 +3207,68 @@ def process_command(pid: int) -> str:
     return run_command(("ps", "-p", str(pid), "-o", "command="), timeout=5)
 
 
-def stop_process(pid: int, marker: str) -> None:
-    if not process_exists(pid):
-        return
+def process_fingerprint(pid: int, marker: str) -> dict[str, object]:
     command = process_command(pid)
     if marker not in command:
-        raise DemoError(f"refusing to stop stale or unrelated PID {pid}")
+        raise DemoError(f"runtime process {pid} did not contain its exact command marker")
+    executable = run_command(("ps", "-p", str(pid), "-o", "comm="), timeout=5)
+    started_at = run_command(("ps", "-p", str(pid), "-o", "lstart="), timeout=5)
+    try:
+        process_group = os.getpgid(pid)
+        session_id = os.getsid(pid)
+    except ProcessLookupError as error:
+        raise DemoError("runtime process exited while its identity was captured") from error
+    if process_group != pid or session_id != pid:
+        raise DemoError(f"runtime process {pid} does not own an isolated process group/session")
+    return {
+        "commandSha256": hashlib.sha256(command.encode()).hexdigest(),
+        "executableSha256": hashlib.sha256(executable.encode()).hexdigest(),
+        "marker": marker,
+        "pid": pid,
+        "processGroup": process_group,
+        "sessionId": session_id,
+        "startedAt": started_at,
+    }
+
+
+def stop_spawned_process(pid: int, marker: str) -> None:
+    if not process_exists(pid):
+        return
+    stop_process(process_fingerprint(pid, marker))
+
+
+def stop_process(expected: Mapping[str, object]) -> None:
+    required = {
+        "commandSha256",
+        "executableSha256",
+        "marker",
+        "pid",
+        "processGroup",
+        "sessionId",
+        "startedAt",
+    }
+    if set(expected) != required:
+        raise DemoError("runtime process identity has an invalid closed schema")
+    pid = expected["pid"]
+    marker = expected["marker"]
+    process_group = expected["processGroup"]
+    if (
+        not isinstance(pid, int)
+        or not isinstance(process_group, int)
+        or not isinstance(marker, str)
+    ):
+        raise DemoError("runtime process identity has invalid field types")
+    if not process_exists(pid):
+        return
+    actual = process_fingerprint(pid, marker)
+    if actual != dict(expected):
+        raise DemoError(f"refusing to stop reused or unrelated PID {pid}")
     try:
         group = os.getpgid(pid)
     except ProcessLookupError:
         return
-    if group != pid:
-        raise DemoError(f"refusing to stop non-isolated process group for PID {pid}")
+    if group != process_group:
+        raise DemoError(f"refusing to stop changed process group for PID {pid}")
     os.killpg(group, signal.SIGTERM)
     deadline = time.monotonic() + 10
     while process_exists(pid) and time.monotonic() < deadline:
@@ -2486,37 +3277,67 @@ def stop_process(pid: int, marker: str) -> None:
         os.killpg(group, signal.SIGKILL)
 
 
-def cleanup_run(run: ActiveRun, *, remove: bool) -> dict[str, Any]:
+def process_matches(expected: Mapping[str, object]) -> bool:
+    try:
+        pid = expected["pid"]
+        marker = expected["marker"]
+        if not isinstance(pid, int) or not isinstance(marker, str):
+            return False
+        return process_exists(pid) and process_fingerprint(pid, marker) == dict(expected)
+    except (DemoError, KeyError):
+        return False
+
+
+def cleanup_run(run: ActiveRun, *, remove: bool, raise_on_error: bool = True) -> dict[str, Any]:
     run.validate_scope()
-    errors: list[str] = []
-    if (run.artifacts / "fault-baseline.json").exists():
-        restore_runtime_faults(run)
-        assert_fault_baseline(run)
-    if run.manifest_file.exists():
-        manifest = run.manifest()
-        for container in manifest.get("containers", {}).values():
-            try:
-                stop_runtime_container(run, str(container))
-            except DemoError as error:
-                errors.append(str(error))
-        for process in manifest.get("processes", {}).values():
-            try:
-                stop_process(int(process["pid"]), str(process["marker"]))
-            except DemoError as error:
-                errors.append(str(error))
-    if run.env_file.exists():
+    errors: list[dict[str, str]] = []
+
+    def attempt(phase: str, operation: Any) -> None:
         try:
-            compose(run, "down", "--volumes", "--remove-orphans", timeout=180)
-        except DemoError as error:
-            errors.append(str(error))
-    if errors:
-        raise DemoError("cleanup did not finish: " + "; ".join(errors))
-    result = {"projectRemoved": True, "runDirectoryRemoved": remove, "runId": run.run_id}
-    if remove:
+            operation()
+        except BaseException as error:
+            errors.append({"errorClass": type(error).__name__, "phase": phase})
+
+    if (run.artifacts / "fault-baseline.json").exists():
+        attempt("runtime-fault-restore", lambda: restore_runtime_faults(run))
+        attempt("runtime-fault-baseline", lambda: assert_fault_baseline(run))
+    if run.manifest_file.exists():
+        try:
+            manifest = run.manifest()
+        except BaseException as error:
+            errors.append({"errorClass": type(error).__name__, "phase": "manifest-read"})
+        else:
+            for name, container in manifest.get("containers", {}).items():
+                attempt(
+                    f"container-stop:{name}",
+                    lambda container=container: stop_runtime_container(run, str(container)),
+                )
+            for name, process in manifest.get("processes", {}).items():
+                attempt(
+                    f"process-stop:{name}",
+                    lambda process=process: stop_process(cast(Mapping[str, object], process)),
+                )
+    if run.env_file.exists():
+        attempt(
+            "compose-down",
+            lambda: compose(run, "down", "--volumes", "--remove-orphans", timeout=180),
+        )
+    removed = remove and not errors
+    if removed:
         run.validate_scope()
         shutil.rmtree(run.run_directory)
         with contextlib.suppress(FileNotFoundError):
             ACTIVE_STATE.unlink()
+    result = {
+        "errors": errors,
+        "projectRemoved": not errors,
+        "runDirectoryRemoved": removed,
+        "runId": run.run_id,
+        "status": "passed" if not errors else "failed",
+    }
+    if errors and raise_on_error:
+        phases = ",".join(item["phase"] for item in errors)
+        raise DemoError(f"cleanup did not finish its bounded phases: {phases}")
     return result
 
 
@@ -2549,7 +3370,8 @@ def status() -> None:
         return
     manifest = run.manifest()
     processes = {
-        name: process_exists(int(details["pid"])) for name, details in manifest["processes"].items()
+        name: process_matches(cast(Mapping[str, object], details))
+        for name, details in manifest["processes"].items()
     }
     containers = {
         name: runtime_container_running(run, str(container))
@@ -2583,8 +3405,7 @@ def check(*, emit_result: bool = True) -> dict[str, Any]:
     if any(mode != 0o600 for mode in modes.values()):
         raise DemoError("one or more secret-bearing runtime files are not mode 0600")
     for name, details in manifest["processes"].items():
-        pid = int(details["pid"])
-        if not process_exists(pid) or str(details["marker"]) not in process_command(pid):
+        if not process_matches(cast(Mapping[str, object], details)):
             raise DemoError(f"runtime process is not healthy: {name}")
     for name, container in manifest.get("containers", {}).items():
         if not runtime_container_running(run, str(container)):

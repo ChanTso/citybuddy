@@ -4,6 +4,7 @@ import json
 import os
 import stat
 import sys
+import time
 import uuid
 from pathlib import Path
 
@@ -118,6 +119,82 @@ def test_knowledge_fixture_identities_match_verified_retrieval_probes() -> None:
     assert demo.DEMO_AGENT_ATTEMPT_BUDGET == 9
 
 
+def test_reservation_view_waits_for_public_and_durable_convergence(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    run = isolated_state(monkeypatch, tmp_path)
+    pending = {
+        "activityId": "activity",
+        "activityProjectionVersion": 1,
+        "decisionCode": None,
+        "durableOrderCreated": False,
+        "orderId": None,
+        "projectionVersion": 1,
+        "quantity": 1,
+        "replay": False,
+        "reservationId": "reservation",
+        "state": "PENDING",
+    }
+    ordered = {
+        **pending,
+        "decisionCode": "ADMITTED",
+        "durableOrderCreated": True,
+        "orderId": "order",
+        "projectionVersion": 3,
+        "replay": True,
+        "state": "ORDERED",
+    }
+    responses = iter((demo.Response(200, pending), demo.Response(200, ordered)))
+    monkeypatch.setattr(demo, "request", lambda *args, **kwargs: next(responses))
+    monkeypatch.setattr(
+        demo,
+        "mysql_query",
+        lambda *args, **kwargs: json.dumps(
+            {key: value for key, value in ordered.items() if key != "replay"}
+        ),
+    )
+    monkeypatch.setattr(time, "sleep", lambda seconds: None)
+
+    result = demo.wait_for_reservation_view(
+        run,
+        url="http://127.0.0.1/reservations/reservation",
+        token="synthetic-token",
+        reservation_id="reservation",
+        activity_id="activity",
+    )
+
+    assert result == ordered
+
+
+def test_refund_view_accepts_requested_public_and_durable_truth(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    run = isolated_state(monkeypatch, tmp_path)
+    body = {
+        "currency": "CNY",
+        "eligibleAmountMinor": 1500,
+        "failureCode": None,
+        "orderId": "order",
+        "orderKind": "STANDARD",
+        "paymentAttemptId": "attempt",
+        "refundId": "refund",
+        "refundedAmountMinor": 0,
+        "replayed": False,
+        "requestedAmountMinor": 500,
+        "state": "REQUESTED",
+        "stateVersion": 1,
+    }
+    monkeypatch.setattr(
+        demo,
+        "mysql_query",
+        lambda *args, **kwargs: json.dumps(
+            {key: value for key, value in body.items() if key != "replayed"}
+        ),
+    )
+
+    assert demo.require_refund_view(run, body, refund_id="refund", order_id="order") == body
+
+
 @pytest.mark.parametrize(
     ("support", "indexer", "username", "password_name"),
     [
@@ -226,12 +303,60 @@ def test_rebuild_bootstraps_verified_predecessor_before_handoff(
     assert any("demo_knowledge_rebuild.py" in argument for argument in calls[1])
 
 
-def test_stop_process_rejects_a_reused_unrelated_pid(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(demo, "process_exists", lambda pid: True)
-    monkeypatch.setattr(demo, "process_command", lambda pid: "unrelated-process")
+def process_identity(*, started_at: str = "Mon Aug  4 12:00:00 2026") -> dict[str, object]:
+    return {
+        "commandSha256": "a" * 64,
+        "executableSha256": "b" * 64,
+        "marker": "citybuddy-agent",
+        "pid": 12345,
+        "processGroup": 12345,
+        "sessionId": 12345,
+        "startedAt": started_at,
+    }
 
-    with pytest.raises(demo.DemoError, match="unrelated PID"):
-        demo.stop_process(12345, "citybuddy-agent")
+
+def test_stop_process_rejects_a_same_marker_reused_pid(monkeypatch: pytest.MonkeyPatch) -> None:
+    expected = process_identity()
+    monkeypatch.setattr(demo, "process_exists", lambda pid: True)
+    monkeypatch.setattr(
+        demo,
+        "process_fingerprint",
+        lambda pid, marker: process_identity(started_at="Mon Aug  4 12:01:00 2026"),
+    )
+    killed: list[tuple[int, int]] = []
+    monkeypatch.setattr(os, "killpg", lambda group, signal: killed.append((group, signal)))
+
+    with pytest.raises(demo.DemoError, match="reused or unrelated PID"):
+        demo.stop_process(expected)
+    assert killed == []
+
+
+@pytest.mark.parametrize(
+    "output",
+    [
+        "0.0.0.0:12345",
+        "[::1]:12345",
+        "127.0.0.1:12345\n127.0.0.1:12346",
+        "service 127.0.0.1:12345",
+    ],
+)
+def test_compose_port_rejects_non_loopback_multi_address_and_malformed_output(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, output: str
+) -> None:
+    run = isolated_state(monkeypatch, tmp_path)
+    monkeypatch.setattr(demo, "compose", lambda *args, **kwargs: output)
+
+    with pytest.raises(demo.DemoError, match="could not resolve"):
+        demo.compose_port(run, "mysql", 3306)
+
+
+def test_compose_port_accepts_one_exact_loopback_owner(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    run = isolated_state(monkeypatch, tmp_path)
+    monkeypatch.setattr(demo, "compose", lambda *args, **kwargs: "127.0.0.1:49152")
+
+    assert demo.compose_port(run, "mysql", 3306) == 49152
 
 
 def test_runtime_container_guard_rejects_unrelated_name(
@@ -309,22 +434,26 @@ def test_agent_rebind_updates_only_exact_runtime_identity(
             "webEnv": {"CITYBUDDY_AGENT_TARGET": "http://127.0.0.1:8001"},
         },
         "ports": {"agent": 8001, "elasticsearch": 9200},
-        "processes": {"agent": {"marker": "citybuddy-agent", "pid": 123}},
+        "processes": {"agent": process_identity()},
         "project": run.project,
         "runId": run.run_id,
         "schemaVersion": demo.SCHEMA_VERSION,
     }
     demo.write_json(run.manifest_file, manifest)
     demo.write_json(run.private_file, {}, mode=0o600)
-    stopped: list[tuple[int, str]] = []
-    monkeypatch.setattr(demo, "stop_process", lambda pid, marker: stopped.append((pid, marker)))
+    stopped: list[dict[str, object]] = []
+    monkeypatch.setattr(demo, "stop_process", lambda identity: stopped.append(dict(identity)))
     monkeypatch.setattr(demo, "start_agent", lambda run, private, ports: (456, 8101))
+    replacement = {**process_identity(started_at="Mon Aug  4 12:02:00 2026"), "pid": 456}
+    replacement["processGroup"] = 456
+    replacement["sessionId"] = 456
+    monkeypatch.setattr(demo, "process_fingerprint", lambda pid, marker: replacement)
 
     demo.rebind_agent_to_dependency_ports(run, manifest, {"agent": 8001, "elasticsearch": 9300})
 
     updated = run.manifest()
-    assert stopped == [(123, "citybuddy-agent")]
-    assert updated["processes"]["agent"] == {"marker": "citybuddy-agent", "pid": 456}
+    assert stopped == [process_identity()]
+    assert updated["processes"]["agent"] == replacement
     assert updated["ports"]["elasticsearch"] == 9300
     assert updated["baseUrls"]["agent"] == "http://127.0.0.1:8101"
     assert updated["baseUrls"]["webEnv"]["CITYBUDDY_AGENT_TARGET"] == ("http://127.0.0.1:8101")
@@ -370,3 +499,89 @@ def test_cleanup_parser_requires_explicit_confirmation() -> None:
         parser.parse_args(["cleanup"])
     parsed = parser.parse_args(["cleanup", "--confirm-run-id", RUN_ID])
     assert parsed.confirm_run_id == RUN_ID
+
+
+def test_cleanup_attempts_every_bounded_phase_after_restoration_failure(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    run = isolated_state(monkeypatch, tmp_path)
+    demo.write_json(run.artifacts / "fault-baseline.json", {})
+    demo.write_json(
+        run.manifest_file,
+        {
+            "containers": {"auth": f"{run.project}-auth"},
+            "processes": {"agent": process_identity()},
+            "project": run.project,
+            "runId": run.run_id,
+            "schemaVersion": demo.SCHEMA_VERSION,
+        },
+    )
+    run.env_file.write_text("COMPOSE_PROJECT_NAME=synthetic\n", encoding="utf-8")
+    attempted: list[str] = []
+    monkeypatch.setattr(
+        demo,
+        "restore_runtime_faults",
+        lambda run: (_ for _ in ()).throw(demo.DemoError("restore failed")),
+    )
+    monkeypatch.setattr(
+        demo,
+        "assert_fault_baseline",
+        lambda run: (_ for _ in ()).throw(demo.DemoError("compare failed")),
+    )
+    monkeypatch.setattr(
+        demo, "stop_runtime_container", lambda run, name: attempted.append("container")
+    )
+    monkeypatch.setattr(demo, "stop_process", lambda identity: attempted.append("process"))
+
+    def record_compose(*args: object, **kwargs: object) -> str:
+        attempted.append("compose")
+        return ""
+
+    monkeypatch.setattr(demo, "compose", record_compose)
+
+    result = demo.cleanup_run(run, remove=True, raise_on_error=False)
+
+    assert attempted == ["container", "process", "compose"]
+    assert result["status"] == "failed"
+    assert [item["phase"] for item in result["errors"]] == [
+        "runtime-fault-restore",
+        "runtime-fault-baseline",
+    ]
+    assert run.run_directory.exists()
+
+
+def test_demo_all_emits_first_failure_and_cleanup_for_owned_setup_failure(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    run = isolated_state(monkeypatch, tmp_path)
+    demo.ACTIVE_STATE.unlink()
+
+    def fail_after_ownership() -> demo.ActiveRun:
+        demo.write_json(
+            demo.ACTIVE_STATE,
+            {"project": run.project, "runDirectory": str(run.run_directory), "runId": run.run_id},
+            mode=0o600,
+        )
+        raise demo.DemoError("setup")
+
+    monkeypatch.setattr(demo, "setup", fail_after_ownership)
+    cleanup = {
+        "errors": [],
+        "projectRemoved": True,
+        "runDirectoryRemoved": True,
+        "runId": run.run_id,
+        "status": "passed",
+    }
+    monkeypatch.setattr(demo, "cleanup_run", lambda *args, **kwargs: cleanup)
+
+    with pytest.raises(SystemExit) as exit_info:
+        demo.demo_all()
+
+    assert exit_info.value.code == 2
+    summary = json.loads(capsys.readouterr().out)
+    assert summary["firstFailure"] == {
+        "class": "DemoError",
+        "detail": "setup",
+        "stage": "setup",
+    }
+    assert summary["cleanup"] == cleanup
