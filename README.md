@@ -97,7 +97,7 @@ make test-knowledge-rebuild-integration
 make test-evaluation-sandbox-integration
 ```
 
-They exercise real local services and dependencies, use isolated temporary fixtures, and clean them up. They are verification harnesses rather than long-running demo provisioning. A persistent reset/demo fixture is intentionally deferred to CB-151.
+They exercise real local services and dependencies, use isolated temporary fixtures, and clean them up. They remain verification harnesses; the operator runtime below is the long-running demo entry.
 
 ## Web
 
@@ -122,14 +122,30 @@ npm --prefix web run preview
 
 ## Ordered demonstration
 
-Start from a direct-user fixture that has the published-product, seckill-reservation, support-session, and support-chat permissions used by the verified integration topology. The current route does not yet provide a persistent demo-data reset command, so the automated commands below are the reproducible source of fixtures and service evidence; do not claim an interactive manual run unless those services and equivalent fixtures are actually active.
+Create one isolated runtime and fixture set:
 
-1. Run `make test-identity-integration` to verify login, server-owned support session creation, ordinary JSON chat, idempotent replay, and filtered SSE without private events.
-2. Run `make test-catalog-integration` to verify published-product reads, reservation submission, owner-scoped polling, rejection, ordered/cancelled terminal truth, and no early order claim.
-3. Run `make test-retrieval-evidence-integration` to verify the RAG answer/evidence path and public citation projection from sufficient stored evidence.
-4. Run `make test-evaluation-sandbox-integration` for the full isolated CB-122 backend evidence: prepare, clarification, exact `decline`, server-observed expiry, and exact confirmation unavailability. Evaluation APIs used by that test are not called by the web.
-5. Run `npm --prefix web test` for the browser-facing login/logout/expiry reset, product states, stable reservation intent, bounded polling, session reuse, JSON/SSE exclusivity, generic PendingAction notice, clarification, decline, expiry, reserved receipt rejection, and fixed confirmation-unavailable UI.
-6. With equivalent long-running local services active, run `npm --prefix web run dev`, log in, inspect published products, submit the fixture activity id/version, observe only the returned reservation state, send an ordinary support turn, ask a public-knowledge question, prepare a sensitive action, clarify or use **拒绝此动作**, observe expiry only after a server response, and send the exact message `confirm` to observe the fixed unavailable result.
+```shell
+make demo-setup
+make demo-status
+make demo
+make demo-faults
+make demo-check
+```
+
+Every command prints one secret-free JSON summary. `demo-setup` generates a run id and uses only the Compose project `citybuddy-demo-<run-id>`. Its private environment, generated passwords, tokens, and signing key remain in mode-0600 files under `.citybuddy-demo/runs/<run-id>`; they are ignored by Git. The public manifest in that directory contains dynamic local base URLs, fixture ids, PIDs, and the `webEnv` proxy-target map that CB-152 or a local Vite session can reuse.
+
+`make demo` runs the ordered real boundaries: login, product list, standard order, reservation submit/owner poll, mock payment and callback, refund, ordinary chat, sufficient and insufficient RAG, PendingAction prepare, clarification, decline, database-deadline expiry, and exact confirmation unavailability. Running it again proves the stable order/reservation/chat replay paths without creating duplicate truth.
+
+`make demo-faults` runs only the frozen existing failure producers: owner concealment, one exact corrupt derived cache key, seckill/payment/refund replay conflicts, RAG insufficiency and bounded Elasticsearch unavailability, fake-provider denial, and the named PendingAction insert/decline/expiry failures. Runtime grants, trigger inventory, Elasticsearch alias, durable rows, and normal post-restoration controls are checked mechanically.
+
+Cleanup and reset require the exact active run id:
+
+```shell
+make demo-cleanup CONFIRM_DEMO_RUN_ID=<exact-run-id>
+make demo-reset CONFIRM_DEMO_RUN_ID=<exact-run-id>
+```
+
+Cleanup first restores and compares the exact runtime grants/triggers, then stops only recorded processes, removes only the exact Compose project and its volumes, and finally removes the guarded run directory. Reset performs that cleanup and creates a fresh run id. `make demo-all` owns a fresh run, executes setup/demo/faults/check, and cleans it in a `finally` path.
 
 In JSON chat mode the page can show public citations. SSE mode shows only token text and the public terminal outcome because the current SSE contract carries no citations. A refresh signs the user out.
 
@@ -157,7 +173,7 @@ make ci
 
 ## Current limitations
 
-CityBuddy has no cloud deployment or production real-provider claim, no measured performance result, and no operational-readiness claim. The optional Agent metrics and trace mirror do not supply those claims. CB-151 persistent demo reset/fault drills and CB-152 load/latency/quality measurements are not implemented.
+CityBuddy has no cloud deployment or production real-provider claim, no measured performance result, and no operational-readiness claim. The optional Agent metrics and trace mirror and the local CB-151 demo do not supply those claims. CB-152 load/latency/quality measurements are not implemented.
 
 The current Agent route has no successful confirmation, local ActionReceipt projection, `action_completed` turn, or receipt card. The blocked CB-121/CB-123 history does not make those capabilities available. The web never infers action type, amount, order, deadline, identifier, or terminal truth from reply prose.
 

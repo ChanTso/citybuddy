@@ -41,6 +41,8 @@ guard-layout:
 	test -x scripts/test_elasticsearch_integration.sh
 	test -x scripts/test_knowledge_search_integration.sh
 	test -x scripts/test_retrieval_evidence_integration.sh
+	test -f scripts/citybuddy_demo.py
+	test -f scripts/demo_knowledge_rebuild.py
 	test -x scripts/test_rocketmq_integration.sh
 	test -x scripts/test_knowledge_indexer_rocketmq_spike.sh
 	test -x scripts/test_knowledge_sync_integration.sh
@@ -299,9 +301,11 @@ demo-check:
 	uv run python scripts/citybuddy_demo.py check
 
 demo-cleanup:
+	@test -n "$(CONFIRM_DEMO_RUN_ID)" || { echo "Refusing cleanup: CONFIRM_DEMO_RUN_ID is required" >&2; exit 2; }
 	uv run python scripts/citybuddy_demo.py cleanup --confirm-run-id "$(CONFIRM_DEMO_RUN_ID)"
 
 demo-reset:
+	@test -n "$(CONFIRM_DEMO_RUN_ID)" || { echo "Refusing reset: CONFIRM_DEMO_RUN_ID is required" >&2; exit 2; }
 	uv run python scripts/citybuddy_demo.py reset --confirm-run-id "$(CONFIRM_DEMO_RUN_ID)"
 
 demo-all:
