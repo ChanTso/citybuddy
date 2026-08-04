@@ -24,6 +24,7 @@ from citybuddy_agent.application import AgentSettings, MysqlSessionStore, OboCli
 from citybuddy_agent.conversation import CorrelationConflictError, MysqlConversationStore
 from citybuddy_agent.faq_cache import RedisFaqCache
 from citybuddy_agent.knowledge import ElasticsearchKnowledgeSearch
+from citybuddy_agent.metrics import PrometheusCityBuddyMetrics
 from citybuddy_agent.retrieval import RetrievalDecision, load_calibration
 from citybuddy_indexer import (
     ElasticsearchKnowledgeProjection,
@@ -34,6 +35,7 @@ from citybuddy_indexer import (
 )
 from citybuddy_indexer.faq_cache import CachePreparation
 from citybuddy_indexer.worker import VersionedKnowledgeProjection
+from prometheus_client.parser import text_string_to_metric_families
 
 
 class FinalizeUnavailableCache:
@@ -95,19 +97,28 @@ def expect_denied(operation: Callable[[], object], *codes: int) -> None:
         raise AssertionError("Expected MySQL operation to fail closed")
 
 
+def metric_value(payload: str, name: str, labels: dict[str, str]) -> float:
+    for family in text_string_to_metric_families(payload):
+        for sample in family.samples:
+            if sample.name == name and sample.labels == labels:
+                return float(sample.value)
+    return 0.0
+
+
 def make_agent(
     settings: AgentSettings,
     sessions: MysqlSessionStore,
     *,
     model_url: str,
     attempt_limit: int,
+    metrics: PrometheusCityBuddyMetrics | None = None,
 ) -> BoundedAgent:
     circuits = ProviderCircuits(
         minimum_requests=2,
         open_seconds=0.2,
         half_open_probes=1,
     )
-    model = LiteLlmClient(model_url, circuits)
+    model = LiteLlmClient(model_url, circuits, metrics)
     return BoundedAgent(
         RuleRouter(),
         ModelRouter(
@@ -125,7 +136,10 @@ def make_agent(
             ElasticsearchKnowledgeSearch(settings.elasticsearch_url),
             model,
             load_calibration(),
-            RedisFaqCache(settings.support_redis_url) if settings.support_redis_url else None,
+            RedisFaqCache(settings.support_redis_url, metrics=metrics)
+            if settings.support_redis_url
+            else None,
+            metrics,
         ),
     )
 
@@ -532,7 +546,14 @@ def main() -> None:
     )
     refresh_response.raise_for_status()
 
-    cache_agent = make_agent(settings, sessions, model_url=args.model_url, attempt_limit=12)
+    cache_metrics = PrometheusCityBuddyMetrics()
+    cache_agent = make_agent(
+        settings,
+        sessions,
+        model_url=args.model_url,
+        attempt_limit=12,
+        metrics=cache_metrics,
+    )
     first_cache_decision, _, _ = execute(
         store=store,
         agent=cache_agent,
@@ -550,9 +571,29 @@ def main() -> None:
             "Real Elasticsearch miss did not produce one guarded FAQ mapping: "
             f"{first_cache_decision.model_dump(by_alias=True, mode='json')}"
         )
+    after_miss = cache_metrics.render().decode("utf-8")
+    if (
+        metric_value(
+            after_miss,
+            "citybuddy_knowledge_backend_decisions_total",
+            {"decision": "elasticsearch_issued"},
+        )
+        != 1
+        or metric_value(
+            after_miss,
+            "citybuddy_knowledge_backend_decisions_total",
+            {"decision": "cache_served"},
+        )
+        != 0
+    ):
+        raise AssertionError("Real FAQ miss did not record exactly one Elasticsearch decision")
     cache_hit_settings = settings.model_copy(update={"elasticsearch_url": "http://127.0.0.1:9"})
     cache_hit_agent = make_agent(
-        cache_hit_settings, sessions, model_url=args.model_url, attempt_limit=12
+        cache_hit_settings,
+        sessions,
+        model_url=args.model_url,
+        attempt_limit=12,
+        metrics=cache_metrics,
     )
     cache_hit_decision, _, _ = execute(
         store=store,
@@ -563,8 +604,30 @@ def main() -> None:
     )
     if cache_hit_decision.evidence != first_cache_decision.evidence:
         raise AssertionError("Cache hit changed citation or retrieval evidence semantics")
+    after_hit = cache_metrics.render().decode("utf-8")
+    if (
+        metric_value(
+            after_hit,
+            "citybuddy_knowledge_backend_decisions_total",
+            {"decision": "cache_served"},
+        )
+        != 1
+        or metric_value(
+            after_hit,
+            "citybuddy_knowledge_backend_decisions_total",
+            {"decision": "elasticsearch_issued"},
+        )
+        != 1
+    ):
+        raise AssertionError("Real FAQ hit was not isolated from Elasticsearch issuance")
     outage_settings = settings.model_copy(update={"support_redis_url": "redis://127.0.0.1:9/0"})
-    outage_agent = make_agent(outage_settings, sessions, model_url=args.model_url, attempt_limit=12)
+    outage_agent = make_agent(
+        outage_settings,
+        sessions,
+        model_url=args.model_url,
+        attempt_limit=12,
+        metrics=cache_metrics,
+    )
     outage_decision, _, _ = execute(
         store=store,
         agent=outage_agent,
@@ -574,6 +637,37 @@ def main() -> None:
     )
     if outage_decision.evidence != first_cache_decision.evidence:
         raise AssertionError("Support Redis outage changed Elasticsearch fallback evidence")
+    after_outage = cache_metrics.render().decode("utf-8")
+    if (
+        metric_value(
+            after_outage,
+            "citybuddy_knowledge_backend_decisions_total",
+            {"decision": "elasticsearch_issued"},
+        )
+        != 2
+        or metric_value(
+            after_outage,
+            "citybuddy_agent_faq_cache_lookups_total",
+            {"level": "mapping", "result": "unavailable"},
+        )
+        != 1
+    ):
+        raise AssertionError("Real FAQ outage did not record one fallback Elasticsearch decision")
+    if (
+        metric_value(
+            after_outage,
+            "citybuddy_agent_model_request_attempts_total",
+            {"role": "primary", "outcome": "success"},
+        )
+        <= 0
+        or metric_value(
+            after_outage,
+            "citybuddy_agent_model_request_attempts_total",
+            {"role": "reranker", "outcome": "success"},
+        )
+        <= 0
+    ):
+        raise AssertionError("Real retrieval omitted actual provider attempt diagnostics")
 
     interrupted_publication = cache_event(2)
     interrupted_projection = VersionedKnowledgeProjection(
@@ -599,6 +693,14 @@ def main() -> None:
     tombstone = cache_event(3, tombstone=True)
     assert es_projection.apply(tombstone) is ProjectionOutcome.APPLIED
     assert cache_projection.apply(tombstone, "knowledge_docs_v1") is ProjectionOutcome.APPLIED
+    decisions_before_replay = {
+        decision: metric_value(
+            cache_metrics.render().decode("utf-8"),
+            "citybuddy_knowledge_backend_decisions_total",
+            {"decision": decision},
+        )
+        for decision in ("cache_served", "elasticsearch_issued")
+    }
     replay = store.begin_turn(
         session_id=session_id,
         subject="cb091-user",
@@ -608,6 +710,16 @@ def main() -> None:
     )
     if replay.replay is None or replay.replay.retrieval_evidence != cache_hit_decision.evidence:
         raise AssertionError("Historical cache-hit evidence was not replayed from MySQL")
+    decisions_after_replay = {
+        decision: metric_value(
+            cache_metrics.render().decode("utf-8"),
+            "citybuddy_knowledge_backend_decisions_total",
+            {"decision": decision},
+        )
+        for decision in ("cache_served", "elasticsearch_issued")
+    }
+    if decisions_after_replay != decisions_before_replay:
+        raise AssertionError("Durable replay fabricated a backend decision")
 
     print(
         json.dumps(
@@ -617,6 +729,8 @@ def main() -> None:
                 "cacheFinalizeWindow": True,
                 "cacheHitEvidence": True,
                 "cacheOutageFallback": True,
+                "metricsBackendMatrix": True,
+                "metricsReplayExcluded": True,
                 "calibrationVersion": "cb091-calibration-v1",
                 "indexVersion": "knowledge_docs_v1",
                 "outcomes": len(expected) + 4,

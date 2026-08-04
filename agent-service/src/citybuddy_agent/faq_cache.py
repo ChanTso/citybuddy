@@ -18,6 +18,13 @@ from .knowledge import (
     KnowledgeSearchResult,
     PublicKnowledgeMetadata,
 )
+from .metrics import (
+    CityBuddyMetrics,
+    FaqLevel,
+    FaqResult,
+    NoopCityBuddyMetrics,
+    SafeCityBuddyMetrics,
+)
 
 FAQ_CACHE_SCHEMA = "cb112-v1"
 FAQ_CACHE_PREFIX = "cb:faq:v1:"
@@ -64,11 +71,11 @@ local prefix = ARGV[1]
 local expected_hash = ARGV[2]
 
 if redis.call('EXISTS', mapping) == 0 then
-  return {}
+  return {'mapping_miss'}
 end
 if redis.call('HLEN', mapping) ~= 4 then
   redis.call('DEL', mapping)
-  return {}
+  return {'mapping_invalid'}
 end
 local schema = redis.call('HGET', mapping, 'schema')
 local query_hash = redis.call('HGET', mapping, 'query_hash')
@@ -76,14 +83,20 @@ local source_id = redis.call('HGET', mapping, 'source_id')
 local source_version = redis.call('HGET', mapping, 'source_version')
 if schema ~= ARGV[3] or query_hash ~= expected_hash or not source_id or not source_version then
   redis.call('DEL', mapping)
-  return {}
+  return {'mapping_invalid'}
 end
 
 local state = prefix .. 'state:' .. source_id
 local answer = prefix .. 'answer:' .. source_id .. ':' .. source_version
-if redis.call('HLEN', state) ~= 11 or redis.call('HLEN', answer) ~= 12 then
+local state_length = redis.call('HLEN', state)
+local answer_length = redis.call('HLEN', answer)
+if state_length == 0 or answer_length == 0 then
   redis.call('DEL', mapping)
-  return {}
+  return {'answer_miss'}
+end
+if state_length ~= 11 or answer_length ~= 12 then
+  redis.call('DEL', mapping)
+  return {'answer_invalid'}
 end
 if redis.call('HGET', state, 'schema') ~= ARGV[3]
   or redis.call('HGET', state, 'source_id') ~= source_id
@@ -98,7 +111,7 @@ if redis.call('HGET', state, 'schema') ~= ARGV[3]
   or redis.call('HGET', answer, 'cache_commitment')
     ~= redis.call('HGET', state, 'cache_commitment') then
   redis.call('DEL', mapping)
-  return {}
+  return {'answer_invalid'}
 end
 local mapping_ttl = redis.call('PTTL', mapping)
 local state_ttl = redis.call('PTTL', state)
@@ -108,9 +121,9 @@ if mapping_ttl <= 0 or state_ttl <= 0 or answer_ttl <= 0
   or state_ttl > tonumber(ARGV[5]) or answer_ttl > tonumber(ARGV[5])
   or mapping_ttl > state_ttl or mapping_ttl > answer_ttl then
   redis.call('DEL', mapping)
-  return {}
+  return {'answer_invalid'}
 end
-return {redis.call('HGETALL', state), redis.call('HGETALL', answer)}
+return {'hit', redis.call('HGETALL', state), redis.call('HGETALL', answer)}
 """
 
 _POPULATE_SCRIPT = r"""
@@ -175,6 +188,7 @@ class RedisFaqCache:
         *,
         socket_timeout_seconds: float = 0.2,
         client: Redis | None = None,
+        metrics: CityBuddyMetrics | None = None,
     ) -> None:
         if not url.startswith(("redis://", "rediss://")) or socket_timeout_seconds <= 0:
             raise ValueError("FAQ cache configuration is incomplete")
@@ -185,10 +199,12 @@ class RedisFaqCache:
             socket_timeout=socket_timeout_seconds,
             retry_on_timeout=False,
         )
+        self._metrics = SafeCityBuddyMetrics(metrics or NoopCityBuddyMetrics())
 
     def lookup(self, public_query: str) -> KnowledgeSearchOutput | None:
         query_hash = normalized_query_hash(public_query)
         if query_hash is None:
+            self._metrics.record_faq_lookup(FaqLevel.MAPPING, FaqResult.BYPASS)
             return None
         mapping_key = f"{FAQ_CACHE_PREFIX}query:{query_hash}"
         try:
@@ -202,12 +218,31 @@ class RedisFaqCache:
                 str(QUERY_MAPPING_TTL_MS),
                 str(FAQ_ENTRY_TTL_MS),
             )
-            snapshot = _cache_snapshot(raw)
-            if snapshot is None:
+            discriminator, snapshot = _lookup_result(raw)
+            if discriminator == "mapping_miss":
+                self._metrics.record_faq_lookup(FaqLevel.MAPPING, FaqResult.MISS)
                 return None
-            state, answer = snapshot
-            return _knowledge_output(state, answer)
+            if discriminator == "mapping_invalid":
+                self._metrics.record_faq_lookup(FaqLevel.MAPPING, FaqResult.INVALID)
+                return None
+            self._metrics.record_faq_lookup(FaqLevel.MAPPING, FaqResult.HIT)
+            if discriminator == "answer_miss":
+                self._metrics.record_faq_lookup(FaqLevel.ANSWER, FaqResult.MISS)
+                return None
+            if discriminator == "answer_invalid" or snapshot is None:
+                self._metrics.record_faq_lookup(FaqLevel.ANSWER, FaqResult.INVALID)
+                return None
+            try:
+                state, answer = snapshot
+                result = _knowledge_output(state, answer)
+            except (UnicodeError, ValueError, TypeError):
+                self._metrics.record_faq_lookup(FaqLevel.ANSWER, FaqResult.INVALID)
+                self._delete_quietly(mapping_key)
+                return None
+            self._metrics.record_faq_lookup(FaqLevel.ANSWER, FaqResult.HIT)
+            return result
         except (RedisError, OSError, UnicodeError, ValueError, TypeError):
+            self._metrics.record_faq_lookup(FaqLevel.MAPPING, FaqResult.UNAVAILABLE)
             self._delete_quietly(mapping_key)
             return None
 
@@ -273,14 +308,23 @@ def _flat_hash(value: object, expected_fields: set[str]) -> dict[str, str] | Non
     return cast(dict[str, str], result)
 
 
-def _cache_snapshot(value: object) -> tuple[dict[str, str], dict[str, str]] | None:
-    if not isinstance(value, list) or len(value) != 2:
-        return None
-    state = _flat_hash(value[0], _STATE_FIELDS)
-    answer = _flat_hash(value[1], _ANSWER_FIELDS)
+def _lookup_result(
+    value: object,
+) -> tuple[str, tuple[dict[str, str], dict[str, str]] | None]:
+    if not isinstance(value, list) or not value or not isinstance(value[0], str):
+        return "mapping_invalid", None
+    discriminator = value[0]
+    if discriminator in {"mapping_miss", "mapping_invalid", "answer_miss", "answer_invalid"}:
+        if len(value) != 1:
+            return "mapping_invalid", None
+        return discriminator, None
+    if discriminator != "hit" or len(value) != 3:
+        return "mapping_invalid", None
+    state = _flat_hash(value[1], _STATE_FIELDS)
+    answer = _flat_hash(value[2], _ANSWER_FIELDS)
     if state is None or answer is None:
-        return None
-    return state, answer
+        return "answer_invalid", None
+    return "hit", (state, answer)
 
 
 def _knowledge_output(state: dict[str, str], answer: dict[str, str]) -> KnowledgeSearchOutput:

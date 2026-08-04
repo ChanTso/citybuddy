@@ -55,6 +55,10 @@ request. A later semantic diff change requires the checklist to be executed and 
   Only a positively identified database resource or transaction-acquisition failure may use the
   unavailable response. Exercise found, confirmed-absent recovery, indeterminate-then-found,
   persistently indeterminate, conflicting intent, and real dependency unavailability independently.
+- Preserve the final stable classification of one logical operation across response-loss recovery,
+  replay, metrics, traces, and outer integration oracles. A retry that returns committed replay truth
+  does not retroactively create a separate success observation; assert the one terminal outcome and
+  reject an observer or test oracle that relabels it from an earlier attempted response.
 
 ### Total parsing exception boundary
 
@@ -68,6 +72,10 @@ request. A later semantic diff change requires the checklist to be executed and 
 - For JSON from an untrusted dependency, reject duplicate object keys at the decoder boundary.
   A later schema check cannot recover the overwritten first value once a permissive decoder has
   accepted the duplicate. Apply the same duplicate-key hook to success and error responses.
+- Treat opaque command-line option values as data even when their first character is `-`. Pass them
+  with a binding form such as `--option="$value"`, inventory every direct call site mechanically,
+  and exercise legal leading-dash values so argument parsing cannot reinterpret identity data as an
+  option.
 
 ### Bounds apply before materialization
 
@@ -448,6 +456,13 @@ request. A later semantic diff change requires the checklist to be executed and 
   new runtime-owned host port, either refresh every dependent endpoint first or inject the outage in
   place without changing the published endpoint. A readiness timeout must retain application logs
   and fail the test; it must not reinterpret a correct unavailable response as a product defect.
+
+### Finite rolling specification windows
+
+- Compute the rolling specification window as the first up to three non-`DEFERRED` rows from the
+  unique active route row. Require every row that actually exists in that window to link a complete,
+  matching specification, including one- and two-row route tails; do not require placeholder slices
+  beyond the natural end of a finite route or let `DEFERRED` rows fill the window.
 
 ## Closeout maintenance
 

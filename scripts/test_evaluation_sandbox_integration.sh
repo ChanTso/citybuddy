@@ -454,6 +454,7 @@ start_agent() {
   AGENT_EVALUATION_ENABLED="$evaluation_enabled" \
   AGENT_EVALUATION_CLIENT_ID=evaluation-manager \
   AGENT_EVALUATION_CLIENT_SECRET="$management_password" \
+  CITYBUDDY_METRICS_ENABLED=true \
   CITYBUDDY_ENVIRONMENT=integration \
   IDENTITY_ISSUER=https://identity.citybuddy.test \
   IDENTITY_USER_AUDIENCE=citybuddy-web \
@@ -4057,14 +4058,14 @@ assert_status 200 "evaluation evidence validates CB-122 preparation closure" \
   --user "evaluation-manager:$management_password" \
   --header 'X-Eval-Sandbox-Id: sandbox-payment'
 uv run python scripts/check_agent_evaluation_evidence.py "$tmp_dir/http-response.json" \
-  --trace "$cb122_prepare_trace" --session "$cb122_session" --outcome action_pending \
+  --trace "$cb122_prepare_trace" --session="$cb122_session" --outcome action_pending \
   --require-event ACTION_PREPARED
 assert_status 200 "evaluation evidence validates CB-122 decline closure" \
   --request GET "http://127.0.0.1:$agent_port/api/eval/evidence/$cb122_decline_trace" \
   --user "evaluation-manager:$management_password" \
   --header 'X-Eval-Sandbox-Id: sandbox-payment'
 uv run python scripts/check_agent_evaluation_evidence.py "$tmp_dir/http-response.json" \
-  --trace "$cb122_decline_trace" --session "$cb122_session" --outcome action_declined \
+  --trace "$cb122_decline_trace" --session="$cb122_session" --outcome action_declined \
   --require-event ACTION_DECLINED
 mysql_query root "$root_password" cs_db \
   "SET FOREIGN_KEY_CHECKS = 0; UPDATE pending_action_reference SET resolution_trace_id = '00000000-0000-0000-0000-000000000927' WHERE pending_action_id = '$cb122_pending_id'; SET FOREIGN_KEY_CHECKS = 1"
@@ -4237,6 +4238,23 @@ assert_equal 'EXPIRED:1:0' \
   "$(mysql_query root "$root_password" cs_db \
     "SELECT CONCAT(reference.state, ':', (SELECT COUNT(*) FROM support_event event_record JOIN support_turn turn_record ON turn_record.turn_id = event_record.turn_id WHERE turn_record.session_id = '$cb122_expiry_session' AND event_record.event_type = 'ACTION_EXPIRED'), ':', (SELECT COUNT(*) FROM support_event event_record JOIN support_turn turn_record ON turn_record.turn_id = event_record.turn_id WHERE turn_record.session_id = '$cb122_expiry_session' AND event_record.event_type = 'ACTION_RECEIPT')) FROM pending_action_reference reference WHERE reference.pending_action_id = '$cb122_expiry_pending_id'")" \
   "expiry writes one exact local event and no receipt"
+curl --fail --silent --show-error \
+  "http://127.0.0.1:$agent_port/internal/metrics/prometheus" \
+  >"$tmp_dir/cb150-agent-metrics.txt"
+for expected_metric in \
+  'citybuddy_agent_operation_requests_total{operation="pending_action_prepare",outcome="replay"} 1.0' \
+  'citybuddy_agent_operation_requests_total{operation="pending_action_expiry",outcome="unavailable"} 1.0' \
+  'citybuddy_agent_operation_requests_total{operation="pending_action_expiry",outcome="expired"} 1.0' \
+  'citybuddy_agent_operation_requests_total{operation="chat_turn",outcome="pending"} 1.0' \
+  'citybuddy_agent_operation_requests_total{operation="chat_turn",outcome="unavailable"} 1.0' \
+  'citybuddy_agent_operation_requests_total{operation="chat_turn",outcome="expired"} 1.0'; do
+  grep -Fq "$expected_metric" "$tmp_dir/cb150-agent-metrics.txt"
+done
+if grep -Eq 'confirmation|traceId|sessionId|turnId|pendingActionId|python_gc|process_' \
+  "$tmp_dir/cb150-agent-metrics.txt"; then
+  echo "Agent metrics exposed an out-of-scope operation, identifier, or default collector." >&2
+  exit 1
+fi
 stop_process agent_pid "$agent_pid"
 stop_process model_pid "$model_pid"
 stop_process commerce_pid "$commerce_pid"
@@ -4707,7 +4725,7 @@ assert_status 200 "agent evidence projects complete bounded durable truth" \
   --header 'X-Eval-Sandbox-Id: sandbox-main'
 cp "$tmp_dir/http-response.json" "$tmp_dir/agent-evidence.json"
 uv run python scripts/check_agent_evaluation_evidence.py "$tmp_dir/agent-evidence.json" \
-  --trace "$trace_id" --session "$session_id" --outcome completed \
+  --trace "$trace_id" --session="$session_id" --outcome completed \
   --require-event ROUTING_DECISION --require-event TOOL_LIFECYCLE \
   --require-event BUDGET_CHARGED --feedback-count 1 \
   --forbid-marker cb103-private-user-text \
@@ -4772,7 +4790,7 @@ assert_status 200 "agent evidence projects persisted insufficient retrieval deci
   --user "evaluation-manager:$management_password" \
   --header 'X-Eval-Sandbox-Id: sandbox-main'
 uv run python scripts/check_agent_evaluation_evidence.py "$tmp_dir/http-response.json" \
-  --trace "$retrieval_trace" --session "$session_id" --outcome retrieval_denied \
+  --trace "$retrieval_trace" --session="$session_id" --outcome retrieval_denied \
   --require-event RETRIEVAL_DECISION --retrieval-outcome INSUFFICIENT \
   --forbid-marker cb103-private-retrieval-input
 mysql_query root "$root_password" cs_db \
@@ -4794,7 +4812,7 @@ assert_status 200 "agent evidence projects only safe public retrieval references
   --user "evaluation-manager:$management_password" \
   --header 'X-Eval-Sandbox-Id: sandbox-main'
 uv run python scripts/check_agent_evaluation_evidence.py "$tmp_dir/http-response.json" \
-  --trace "$sufficient_trace" --session "$session_id" --outcome completed \
+  --trace "$sufficient_trace" --session="$session_id" --outcome completed \
   --require-event RETRIEVAL_DECISION --retrieval-outcome SUFFICIENT \
   --forbid-marker cb103-private-sufficient-input \
   --forbid-marker cb103-private-source-title \
@@ -4814,7 +4832,7 @@ assert_status 200 "agent evidence projects bounded provider denial without provi
   --user "evaluation-manager:$management_password" \
   --header 'X-Eval-Sandbox-Id: sandbox-main'
 uv run python scripts/check_agent_evaluation_evidence.py "$tmp_dir/http-response.json" \
-  --trace "$provider_trace" --session "$session_id" --outcome provider_denied \
+  --trace "$provider_trace" --session="$session_id" --outcome provider_denied \
   --require-event MODEL_OUTCOME --require-event AGENT_OUTCOME \
   --forbid-marker cb103-private-provider-input \
   --forbid-marker support-standard-primary
@@ -4840,13 +4858,13 @@ assert_status 200 "audit returns only the exact sandbox and support session" \
   --header 'X-Eval-Sandbox-Id: sandbox-main'
 cp "$tmp_dir/http-response.json" "$tmp_dir/audit.json"
 uv run python scripts/check_evaluation_views.py audit "$tmp_dir/audit.json" \
-  --sandbox sandbox-main --session "$session_id" --count 2 --trace "$trace_id"
+  --sandbox sandbox-main --session="$session_id" --count 2 --trace "$trace_id"
 assert_status 200 "audit first page is bounded and has a stable cursor" \
   --request GET "http://127.0.0.1:$commerce_port/api/eval/audit/$session_id?limit=1" \
   --user "evaluation-manager:$management_password" \
   --header 'X-Eval-Sandbox-Id: sandbox-main'
 uv run python scripts/check_evaluation_views.py audit "$tmp_dir/http-response.json" \
-  --sandbox sandbox-main --session "$session_id" --count 1 --next-cursor
+  --sandbox sandbox-main --session="$session_id" --count 1 --next-cursor
 first_sequence="$(mysql_query commerce_app "$commerce_app_password" commerce_db \
   "SELECT MIN(sequence_id) FROM eval_commerce_audit_reference WHERE sandbox_id = 'sandbox-main' AND support_session_id = '$session_id'")"
 assert_status 200 "audit cursor advances deterministically" \
@@ -4854,7 +4872,7 @@ assert_status 200 "audit cursor advances deterministically" \
   --user "evaluation-manager:$management_password" \
   --header 'X-Eval-Sandbox-Id: sandbox-main'
 uv run python scripts/check_evaluation_views.py audit "$tmp_dir/http-response.json" \
-  --sandbox sandbox-main --session "$session_id" --count 1
+  --sandbox sandbox-main --session="$session_id" --count 1
 assert_status 400 "audit rejects unbounded limit" \
   --request GET "http://127.0.0.1:$commerce_port/api/eval/audit/$session_id?limit=51" \
   --user "evaluation-manager:$management_password" \

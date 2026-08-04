@@ -50,6 +50,7 @@ from citybuddy_agent.feedback import (
     FeedbackRecord,
     FeedbackStore,
 )
+from citybuddy_agent.metrics import MetricsRuntime, PrometheusCityBuddyMetrics
 from citybuddy_agent.retrieval import RetrievalDecision
 from cryptography.hazmat.primitives.asymmetric import rsa
 from fastapi import HTTPException
@@ -1334,6 +1335,111 @@ def test_cb122_pending_decline_and_confirmation_unavailable_are_local_and_exact(
     assert "event: action_receipt" not in declined.text
     assert conversations.action_pending is None
     assert agent.calls == 1
+
+
+def test_chat_and_local_pending_action_operations_record_once_without_affecting_results() -> None:
+    private, public_jwk = key_fixture("current-key")
+    resolved = settings().model_copy(update={"metrics_enabled": True})
+    metrics = PrometheusCityBuddyMetrics()
+    runtime = MetricsRuntime(metrics, metrics.render)
+    token = direct_token(private, "current-key")
+
+    sessions = MemorySessionStore()
+    session_id = sessions.create("user-123")
+    conversations = MemoryConversationStore(sessions)
+    app = create_app(
+        resolved,
+        validator=DirectJwtValidator(resolved, CountingJwksSource([public_jwk])),
+        sessions=sessions,
+        conversations=conversations,
+        agent=PreparedActionAgent(),
+        metrics_runtime=runtime,
+    )
+    headers = {"Authorization": f"Bearer {token}", "X-Session-Id": session_id}
+    with TestClient(app) as client:
+        prepared = client.post(
+            "/api/chat",
+            headers={**headers, "Idempotency-Key": "prepare"},
+            json={"message": "prepare refund"},
+        )
+        clarified = client.post(
+            "/api/chat",
+            headers={**headers, "Idempotency-Key": "clarify"},
+            json={"message": "what happens next?"},
+        )
+        declined = client.post(
+            "/api/chat",
+            headers={**headers, "Idempotency-Key": "decline"},
+            json={"message": "decline"},
+        )
+        replayed = client.post(
+            "/api/chat",
+            headers={**headers, "Idempotency-Key": "decline"},
+            json={"message": "decline"},
+        )
+
+    assert [response.status_code for response in (prepared, clarified, declined, replayed)] == [
+        200,
+        200,
+        200,
+        200,
+    ]
+    assert [
+        response.json()["outcome"] for response in (prepared, clarified, declined, replayed)
+    ] == [
+        "action_pending",
+        "action_clarification",
+        "action_declined",
+        "action_declined",
+    ]
+
+    expiry_sessions = MemorySessionStore()
+    expiry_session_id = expiry_sessions.create("user-123")
+    expiry_conversations = MemoryConversationStore(expiry_sessions)
+    expiry_app = create_app(
+        resolved,
+        validator=DirectJwtValidator(resolved, CountingJwksSource([public_jwk])),
+        sessions=expiry_sessions,
+        conversations=expiry_conversations,
+        agent=PreparedActionAgent(expires_at=datetime.now(UTC) - timedelta(seconds=1)),
+        metrics_runtime=runtime,
+    )
+    expiry_headers = {
+        "Authorization": f"Bearer {token}",
+        "X-Session-Id": expiry_session_id,
+    }
+    with TestClient(expiry_app) as client:
+        assert (
+            client.post(
+                "/api/chat",
+                headers={**expiry_headers, "Idempotency-Key": "prepare-expired"},
+                json={"message": "prepare refund"},
+            ).json()["outcome"]
+            == "action_pending"
+        )
+        expired = client.post(
+            "/api/chat",
+            headers={**expiry_headers, "Idempotency-Key": "expire"},
+            json={"message": "anything"},
+        )
+    assert expired.status_code == 200
+    assert expired.json()["outcome"] == "action_expired"
+
+    payload = metrics.render().decode("utf-8")
+    for operation, outcome, count in (
+        ("chat_turn", "pending", 2),
+        ("chat_turn", "clarification", 1),
+        ("chat_turn", "declined", 1),
+        ("chat_turn", "expired", 1),
+        ("chat_turn", "replay", 1),
+        ("pending_action_clarification", "clarification", 1),
+        ("pending_action_decline", "declined", 1),
+        ("pending_action_expiry", "expired", 1),
+    ):
+        assert (
+            "citybuddy_agent_operation_requests_total"
+            f'{{operation="{operation}",outcome="{outcome}"}} {count}.0'
+        ) in payload
 
 
 def test_action_liveness_unavailable_has_request_local_reason_without_public_leak(

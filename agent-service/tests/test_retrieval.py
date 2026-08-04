@@ -21,6 +21,7 @@ from citybuddy_agent.knowledge import (
     KnowledgeSearchResult,
     PublicKnowledgeMetadata,
 )
+from citybuddy_agent.metrics import PrometheusCityBuddyMetrics
 from citybuddy_agent.retrieval import (
     RerankCandidate,
     RerankOutput,
@@ -287,9 +288,11 @@ def test_litellm_reranker_uses_fixed_alias_shared_budget_and_one_retry(
     monkeypatch.setattr(httpx, "post", post)
     events: list[AgentEvent] = []
     budget = AttemptBudget(3, events)
+    metrics = PrometheusCityBuddyMetrics()
     client = LiteLlmClient(
         "https://proxy.test",
         ProviderCircuits(minimum_requests=2, open_seconds=1, half_open_probes=1),
+        metrics,
     )
     request = RerankRequest(
         query="public question",
@@ -308,6 +311,72 @@ def test_litellm_reranker_uses_fixed_alias_shared_budget_and_one_retry(
     ]
     assert all(set(call) == {"model", "messages"} for call in calls)
     assert any(event.payload.get("result") == "rerank-transient" for event in events)
+    metric_payload = metrics.render().decode("utf-8")
+    assert (
+        'citybuddy_agent_model_request_attempts_total{outcome="transient",role="reranker"} 1.0'
+        in metric_payload
+    )
+    assert (
+        'citybuddy_agent_model_request_attempts_total{outcome="success",role="reranker"} 1.0'
+        in metric_payload
+    )
+
+
+@pytest.mark.parametrize(
+    ("status_code", "payload", "expected_outcome"),
+    [
+        (403, {"error": "bounded denial"}, "denied"),
+        (200, {"choices": []}, "invalid"),
+    ],
+)
+def test_reranker_denial_and_invalid_response_record_one_actual_attempt(
+    monkeypatch: pytest.MonkeyPatch,
+    status_code: int,
+    payload: dict[str, object],
+    expected_outcome: str,
+) -> None:
+    class Response:
+        def __init__(self) -> None:
+            self.status_code = status_code
+
+        def json(self) -> dict[str, object]:
+            return payload
+
+    calls = 0
+
+    def post(*args: object, **kwargs: object) -> Response:
+        nonlocal calls
+        del args, kwargs
+        calls += 1
+        return Response()
+
+    monkeypatch.setattr(httpx, "post", post)
+    metrics = PrometheusCityBuddyMetrics()
+    client = LiteLlmClient(
+        "https://proxy.test",
+        ProviderCircuits(minimum_requests=2, open_seconds=1, half_open_probes=1),
+        metrics,
+    )
+
+    with pytest.raises(ProviderFailure):
+        client.rerank(
+            plan(),
+            RerankRequest(
+                query="public question",
+                candidates=tuple(
+                    RerankCandidate.from_search_result(item) for item in search_output().results
+                ),
+            ),
+            AttemptBudget(2, []),
+            [],
+        )
+
+    assert calls == 1
+    metric_payload = metrics.render().decode("utf-8")
+    assert (
+        "citybuddy_agent_model_request_attempts_total"
+        f'{{outcome="{expected_outcome}",role="reranker"}} 1.0'
+    ) in metric_payload
 
 
 def test_reranker_failure_becomes_structured_insufficient_decision() -> None:

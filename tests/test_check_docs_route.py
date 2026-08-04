@@ -37,16 +37,22 @@ def write_fixture(
     duplicate_anchor: bool = False,
     outside_outcome_row: bool = False,
     unlink_next: bool = False,
+    unlink_second: bool = False,
     missing_anchor: bool = False,
+    route_length: int = 3,
 ) -> None:
     slices = root / "docs/slices"
     slices.mkdir(parents=True)
     rows = [
         f"| [CB-010 — First](docs/slices/CB-010.md) | P0 | `{active_state}` | `CB-000` |",
         (
-            "| [CB-011 — Second](docs/slices/CB-011.md) | P0 | `IN_PROGRESS` | `CB-010` |"
-            if duplicate_active
-            else "| [CB-011 — Second](docs/slices/CB-011.md) | P0 | `PLANNED` | `CB-010` |"
+            "| `CB-011 — Second` | P0 | `PLANNED` | `CB-010` |"
+            if unlink_second
+            else (
+                "| [CB-011 — Second](docs/slices/CB-011.md) | P0 | `IN_PROGRESS` | `CB-010` |"
+                if duplicate_active
+                else "| [CB-011 — Second](docs/slices/CB-011.md) | P0 | `PLANNED` | `CB-010` |"
+            )
         ),
         (
             "| `CB-012 — Third` | P0 | `PLANNED` | `CB-011` |"
@@ -57,15 +63,14 @@ def write_fixture(
                 else "| [CB-012 — Third](docs/slices/CB-012.md) | P0 | `PLANNED` | `CB-011` |"
             )
         ),
-    ]
+    ][:route_length]
     (root / "IMPLEMENTATION.md").write_text(
         "## Complete route\n\n| Slice | Priority | State | Depends on |\n"
         "|---|---:|---:|---|\n" + "\n".join(rows) + "\n\n## Change control\n",
         encoding="utf-8",
     )
-    outcome_rows = "\n".join(
-        f"| `{slice_id}` | Outcome |" for slice_id in ("CB-010", "CB-011", "CB-012")
-    )
+    slice_ids = ("CB-010", "CB-011", "CB-012")[:route_length]
+    outcome_rows = "\n".join(f"| `{slice_id}` | Outcome |" for slice_id in slice_ids)
     if duplicate_outcome:
         outcome_rows += "\n| `CB-012` | Duplicate outcome |"
     anchor = "" if missing_anchor else '<a id="contract-test"></a>\n'
@@ -82,8 +87,12 @@ def write_fixture(
         f"{outside_row}",
         encoding="utf-8",
     )
-    for slice_id, title in (("CB-010", "First"), ("CB-011", "Second"), ("CB-012", "Third")):
-        if unlink_next and slice_id == "CB-012":
+    for slice_id, title in (
+        ("CB-010", "First"),
+        ("CB-011", "Second"),
+        ("CB-012", "Third"),
+    )[:route_length]:
+        if (unlink_next and slice_id == "CB-012") or (unlink_second and slice_id == "CB-011"):
             continue
         (slices / f"{slice_id}.md").write_text(
             f"# {slice_id} — {title}\n{HEADINGS}", encoding="utf-8"
@@ -105,6 +114,31 @@ def test_accepts_valid_route_and_window(tmp_path: Path) -> None:
     result = run_check(tmp_path)
 
     assert result.returncode == 0, result.stderr
+
+
+def test_accepts_two_slice_terminal_window(tmp_path: Path) -> None:
+    write_fixture(tmp_path, route_length=2)
+
+    result = run_check(tmp_path)
+
+    assert result.returncode == 0, result.stderr
+
+
+def test_accepts_one_slice_terminal_window(tmp_path: Path) -> None:
+    write_fixture(tmp_path, route_length=1)
+
+    result = run_check(tmp_path)
+
+    assert result.returncode == 0, result.stderr
+
+
+def test_rejects_unlinked_two_slice_terminal_window(tmp_path: Path) -> None:
+    write_fixture(tmp_path, route_length=2, unlink_second=True)
+
+    result = run_check(tmp_path)
+
+    assert result.returncode == 1
+    assert "rolling specification window slice CB-011 is not linked" in result.stderr
 
 
 def test_rejects_multiple_active_slices(tmp_path: Path) -> None:

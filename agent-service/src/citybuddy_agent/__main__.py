@@ -7,6 +7,15 @@ import uvicorn
 from .application import AgentSettings, create_app
 
 
+def _strict_bool(name: str) -> bool:
+    value = os.environ.get(name, "").strip().casefold()
+    if value in {"", "false"}:
+        return False
+    if value == "true":
+        return True
+    raise ValueError(f"{name} must be true or false")
+
+
 def _settings() -> AgentSettings:
     scopes = tuple(item for item in os.environ.get("AGENT_EXCHANGE_SCOPES", "").split() if item)
     return AgentSettings(
@@ -41,6 +50,8 @@ def _settings() -> AgentSettings:
         circuit_minimum_requests=int(os.environ.get("AGENT_CIRCUIT_MINIMUM_REQUESTS", "2")),
         circuit_open_seconds=float(os.environ.get("AGENT_CIRCUIT_OPEN_SECONDS", "1")),
         circuit_half_open_probes=int(os.environ.get("AGENT_CIRCUIT_HALF_OPEN_PROBES", "1")),
+        metrics_enabled=_strict_bool("CITYBUDDY_METRICS_ENABLED"),
+        trace_export_url=os.environ.get("CITYBUDDY_TRACE_EXPORT_URL", ""),
     )
 
 

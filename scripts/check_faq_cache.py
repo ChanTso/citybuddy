@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Any, cast
 
 from citybuddy_agent.faq_cache import RedisFaqCache, normalized_query_hash
+from citybuddy_agent.metrics import PrometheusCityBuddyMetrics
 from citybuddy_indexer.faq_cache import (
     FAQ_CACHE_PREFIX,
     FAQ_PREPARATION_LEASE_MS,
@@ -23,6 +24,7 @@ from citybuddy_indexer.incremental import (
     KnowledgeSyncError,
     ProjectionOutcome,
 )
+from prometheus_client.parser import text_string_to_metric_families
 from redis import Redis
 from redis.exceptions import NoPermissionError, ResponseError
 
@@ -74,6 +76,14 @@ def local_url(user: str, password: str, port: int) -> str:
     return f"redis://{user}:{password}@127.0.0.1:{port}/0"
 
 
+def metric_value(payload: str, name: str, labels: dict[str, str]) -> float:
+    for family in text_string_to_metric_families(payload):
+        for sample in family.samples:
+            if sample.name == name and sample.labels == labels:
+                return float(sample.value)
+    return 0.0
+
+
 def normal(port: int, values: dict[str, str]) -> dict[str, object]:
     admin = Redis(
         host="127.0.0.1",
@@ -90,7 +100,11 @@ def normal(port: int, values: dict[str, str]) -> dict[str, object]:
         decode_responses=True,
     )
     admin.flushdb()
-    cache = RedisFaqCache(local_url("agent_cache", values["REDIS_AGENT_CACHE_PASSWORD"], port))
+    metrics = PrometheusCityBuddyMetrics()
+    cache = RedisFaqCache(
+        local_url("agent_cache", values["REDIS_AGENT_CACHE_PASSWORD"], port),
+        metrics=metrics,
+    )
     projection = RedisFaqCacheProjection(indexer_client)
     raw_query = "  HOW\u3000do Refunds work?  "
 
@@ -258,7 +272,10 @@ def normal(port: int, values: dict[str, str]) -> dict[str, object]:
     assert cache.lookup(raw_query) is None
     assert not admin.exists(mapping_key)
 
-    bad_cache = RedisFaqCache(local_url("agent_cache", "wrong-password", port))
+    bad_cache = RedisFaqCache(
+        local_url("agent_cache", "wrong-password", port),
+        metrics=metrics,
+    )
     assert bad_cache.lookup(raw_query) is None
     assert not bad_cache.populate_mapping(raw_query, "faq-refund", 4)
     bad_projection = RedisFaqCacheProjection.from_url(
@@ -300,6 +317,27 @@ def normal(port: int, values: dict[str, str]) -> dict[str, object]:
         "cache_commitment",
         "lease_deadline_ms",
     }
+    metric_payload = metrics.render().decode("utf-8")
+    observed: dict[str, float] = {}
+    for level, results in {
+        "mapping": ("hit", "miss", "unavailable", "invalid"),
+        "answer": ("hit", "miss", "invalid"),
+    }.items():
+        for result in results:
+            key = f"{level}:{result}"
+            observed[key] = metric_value(
+                metric_payload,
+                "citybuddy_agent_faq_cache_lookups_total",
+                {"level": level, "result": result},
+            )
+            if observed[key] <= 0:
+                raise AssertionError(f"Real Redis path omitted terminal FAQ metric {key}")
+    mapping_hit_rate = observed["mapping:hit"] / (
+        observed["mapping:hit"] + observed["mapping:miss"]
+    )
+    answer_hit_rate = observed["answer:hit"] / (observed["answer:hit"] + observed["answer:miss"])
+    if not 0 < mapping_hit_rate < 1 or not 0 < answer_hit_rate < 1:
+        raise AssertionError("Real Redis FAQ hit-rate denominators are not reconstructable")
     return {
         "aclDenials": 4,
         "concurrentSourceSerialization": True,
@@ -308,6 +346,7 @@ def normal(port: int, values: dict[str, str]) -> dict[str, object]:
         "inFlightStateEvictionSafe": True,
         "preparationPhysicalExpiry": True,
         "normalizationStable": True,
+        "separateFaqHitRates": True,
         "rawQueryStored": False,
         "tombstoneFenced": True,
         "ttlBounds": "mapping<=300000;state,answer<=900000",

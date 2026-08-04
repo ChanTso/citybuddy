@@ -102,8 +102,6 @@ def validate_repository(root: Path) -> list[str]:
         errors.append("route must contain at most one READY or IN_PROGRESS slice")
     elif len(active_indices) == 1:
         window = [row for row in rows[active_indices[0] :] if row.state != "DEFERRED"][:3]
-        if len(window) < 3:
-            errors.append("rolling specification window must contain three non-DEFERRED slices")
         for row in window:
             if row.path is None:
                 errors.append(f"rolling specification window slice {row.slice_id} is not linked")

@@ -33,6 +33,7 @@ from citybuddy_agent.knowledge import (
     PublicKnowledgeMetadata,
     deterministic_query_embedding,
 )
+from citybuddy_agent.metrics import PrometheusCityBuddyMetrics
 from citybuddy_agent.retrieval import RerankOutput, RerankScore, load_calibration
 from pydantic import ValidationError
 
@@ -171,7 +172,13 @@ def test_invalid_tool_arguments_are_rejected_before_any_backend_io(
 
     events: list[AgentEvent] = []
     budget = AttemptBudget(2, events)
-    result = ToolAdapter("https://commerce.test", ForbiddenObo(), ForbiddenKnowledge()).execute(
+    metrics = PrometheusCityBuddyMetrics()
+    result = ToolAdapter(
+        "https://commerce.test",
+        ForbiddenObo(),
+        ForbiddenKnowledge(),
+        metrics=metrics,
+    ).execute(
         name="knowledge.search",
         serialized_arguments=serialized_arguments,
         direct_token="direct",
@@ -186,6 +193,12 @@ def test_invalid_tool_arguments_are_rejected_before_any_backend_io(
         "reason": "invalid_arguments",
     }
     assert budget.used == 0
+    metric_payload = metrics.render().decode("utf-8")
+    assert (
+        "citybuddy_agent_operation_requests_total"
+        '{operation="knowledge_search",outcome="invalid"} 1.0' in metric_payload
+    )
+    assert "citybuddy_knowledge_backend_decisions_total{" not in metric_payload
 
 
 def test_tool_adapter_uses_elasticsearch_without_obo_or_caller_authority() -> None:
@@ -231,12 +244,14 @@ def test_tool_adapter_uses_elasticsearch_without_obo_or_caller_authority() -> No
 
     events: list[AgentEvent] = []
     budget = AttemptBudget(4, events)
+    metrics = PrometheusCityBuddyMetrics()
     adapter = ToolAdapter(
         "https://commerce.test",
         ForbiddenObo(),
         StubKnowledge(),
         StubReranker(),
         load_calibration(),
+        metrics=metrics,
     )
     plan = ModelPlan(
         tier="standard",
@@ -268,6 +283,15 @@ def test_tool_adapter_uses_elasticsearch_without_obo_or_caller_authority() -> No
         "evidence",
     }
     assert budget.used == 3
+    metric_payload = metrics.render().decode("utf-8")
+    assert (
+        'citybuddy_knowledge_backend_decisions_total{decision="elasticsearch_issued"} 1.0'
+        in metric_payload
+    )
+    assert (
+        "citybuddy_agent_operation_requests_total"
+        '{operation="knowledge_search",outcome="sufficient"} 1.0' in metric_payload
+    )
     tool_names: set[str] = set()
     for schema in adapter.schemas():
         function = schema.get("function")
@@ -342,6 +366,7 @@ def test_cache_hit_uses_server_message_and_still_runs_existing_sufficiency_path(
             return RerankOutput(scores=(RerankScore(candidate_id="faq-refund:answer", score=0.9),))
 
     events: list[AgentEvent] = []
+    metrics = PrometheusCityBuddyMetrics()
     result = ToolAdapter(
         "https://commerce.test",
         ForbiddenObo(),
@@ -349,6 +374,7 @@ def test_cache_hit_uses_server_message_and_still_runs_existing_sufficiency_path(
         StubReranker(),
         load_calibration(),
         StubCache(),
+        metrics,
     ).execute(
         name="knowledge.search",
         serialized_arguments='{"query":"model-selected rewrite target"}',
@@ -370,6 +396,11 @@ def test_cache_hit_uses_server_message_and_still_runs_existing_sufficiency_path(
     assert result.retrieval_decision is not None
     assert result.retrieval_decision.evidence[0].source_version == 9
     assert result.retrieval_decision.evidence[0].source_id == "faq-refund"
+    metric_payload = metrics.render().decode("utf-8")
+    assert (
+        'citybuddy_knowledge_backend_decisions_total{decision="cache_served"} 1.0' in metric_payload
+    )
+    assert "elasticsearch_issued" not in metric_payload
 
 
 def test_cache_miss_populates_only_one_sufficient_faq_from_server_message() -> None:
@@ -413,6 +444,7 @@ def test_cache_miss_populates_only_one_sufficient_faq_from_server_message() -> N
             return RerankOutput(scores=(RerankScore(candidate_id="faq-refund:answer", score=0.9),))
 
     cache = StubCache()
+    metrics = PrometheusCityBuddyMetrics()
     result = ToolAdapter(
         "https://commerce.test",
         ForbiddenObo(),
@@ -420,6 +452,7 @@ def test_cache_miss_populates_only_one_sufficient_faq_from_server_message() -> N
         StubReranker(),
         load_calibration(),
         cache,
+        metrics,
     ).execute(
         name="knowledge.search",
         serialized_arguments='{"query":"model query"}',
@@ -439,6 +472,12 @@ def test_cache_miss_populates_only_one_sufficient_faq_from_server_message() -> N
 
     assert result.outcome == "ok"
     assert cache.populated == ("server message", "faq-refund", 4)
+    metric_payload = metrics.render().decode("utf-8")
+    assert (
+        'citybuddy_knowledge_backend_decisions_total{decision="elasticsearch_issued"} 1.0'
+        in metric_payload
+    )
+    assert "cache_served" not in metric_payload
 
 
 @pytest.mark.parametrize(

@@ -12,6 +12,7 @@ from citybuddy_agent.agent_control import (
     TOOL_BOUNDARY_FAILURE_REASONS,
     AgentEvent,
     AttemptBudget,
+    AttemptBudgetExhausted,
     BoundedAgent,
     CatalogProductInput,
     CircuitOpen,
@@ -25,7 +26,9 @@ from citybuddy_agent.agent_control import (
     ToolAdapter,
     ToolBoundaryFailure,
 )
+from citybuddy_agent.metrics import PrometheusCityBuddyMetrics
 from fastapi import HTTPException
+from prometheus_client.parser import text_string_to_metric_families
 
 
 def future_action_expiry(*, hours: int = 1) -> str:
@@ -48,6 +51,24 @@ def plan() -> Any:
 
 def completion(content: str = "bounded response") -> httpx.Response:
     return httpx.Response(200, json={"choices": [{"message": {"content": content}}]})
+
+
+def provider_samples(metrics: PrometheusCityBuddyMetrics) -> dict[tuple[str, str], float]:
+    samples: dict[tuple[str, str], float] = {}
+    for family in text_string_to_metric_families(metrics.render().decode("utf-8")):
+        for sample in family.samples:
+            if sample.name == "citybuddy_agent_model_request_attempts_total":
+                samples[(sample.labels["role"], sample.labels["outcome"])] = sample.value
+    return samples
+
+
+def operation_samples(metrics: PrometheusCityBuddyMetrics) -> dict[tuple[str, str], float]:
+    samples: dict[tuple[str, str], float] = {}
+    for family in text_string_to_metric_families(metrics.render().decode("utf-8")):
+        for sample in family.samples:
+            if sample.name == "citybuddy_agent_operation_requests_total":
+                samples[(sample.labels["operation"], sample.labels["outcome"])] = sample.value
+    return samples
 
 
 def test_rule_and_model_routers_keep_signals_separate_from_tier_policy() -> None:
@@ -77,9 +98,11 @@ def test_litellm_transient_retry_and_same_tier_fallback_share_one_budget(
     monkeypatch.setattr(httpx, "post", post)
     events: list[AgentEvent] = []
     budget = AttemptBudget(8, events)
+    metrics = PrometheusCityBuddyMetrics()
     client = LiteLlmClient(
         "https://proxy.test",
         ProviderCircuits(minimum_requests=2, open_seconds=10, half_open_probes=1),
+        metrics,
     )
 
     reply = client.complete(plan(), [{"role": "user", "content": "hello"}], [], budget, events)
@@ -97,6 +120,10 @@ def test_litellm_transient_retry_and_same_tier_fallback_share_one_budget(
         "provider-a",
         "provider-b",
     }
+    assert provider_samples(metrics) == {
+        ("primary", "transient"): 2,
+        ("fallback", "success"): 1,
+    }
 
 
 def test_litellm_does_not_retry_non_transient_provider_denial(
@@ -113,9 +140,11 @@ def test_litellm_does_not_retry_non_transient_provider_denial(
     monkeypatch.setattr(httpx, "post", post)
     events: list[AgentEvent] = []
     budget = AttemptBudget(8, events)
+    metrics = PrometheusCityBuddyMetrics()
     client = LiteLlmClient(
         "https://proxy.test",
         ProviderCircuits(minimum_requests=2, open_seconds=10, half_open_probes=1),
+        metrics,
     )
 
     with pytest.raises(ProviderFailure) as denied:
@@ -124,6 +153,7 @@ def test_litellm_does_not_retry_non_transient_provider_denial(
     assert denied.value.transient is False
     assert calls == 1
     assert budget.used == 1
+    assert provider_samples(metrics) == {("primary", "denied"): 1}
 
 
 def test_litellm_does_not_retry_invalid_provider_payload(
@@ -139,11 +169,13 @@ def test_litellm_does_not_retry_invalid_provider_payload(
 
     monkeypatch.setattr(httpx, "post", post)
     events: list[AgentEvent] = []
+    metrics = PrometheusCityBuddyMetrics()
 
     with pytest.raises(ProviderFailure) as denied:
         LiteLlmClient(
             "https://proxy.test",
             ProviderCircuits(minimum_requests=2, open_seconds=10, half_open_probes=1),
+            metrics,
         ).complete(
             plan(),
             [{"role": "user", "content": "hello"}],
@@ -154,6 +186,92 @@ def test_litellm_does_not_retry_invalid_provider_payload(
 
     assert denied.value.transient is False
     assert calls == 1
+    assert provider_samples(metrics) == {("primary", "invalid"): 1}
+
+
+def test_three_route_plan_aggregates_every_nonfirst_actual_attempt_as_fallback(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    requests: list[str] = []
+    responses = [httpx.Response(503), httpx.Response(503), completion("fallback-three")]
+
+    def post(*args: Any, **kwargs: Any) -> httpx.Response:
+        del args
+        requests.append(kwargs["json"]["model"])
+        return responses.pop(0)
+
+    monkeypatch.setattr(httpx, "post", post)
+    routes = tuple(
+        ProviderRoute(f"support-route-{index}", f"provider-{index}") for index in range(3)
+    )
+    selected = ModelRouter(routes, 8).plan(RuleRouter().signals("hello"))
+    metrics = PrometheusCityBuddyMetrics()
+    events: list[AgentEvent] = []
+    client = LiteLlmClient(
+        "https://proxy.test",
+        ProviderCircuits(minimum_requests=1, open_seconds=10, half_open_probes=1),
+        metrics,
+    )
+
+    reply = client.complete(
+        selected,
+        [{"role": "user", "content": "hello"}],
+        [],
+        AttemptBudget(8, events),
+        events,
+    )
+
+    assert reply.content == "fallback-three"
+    assert requests == ["support-route-0", "support-route-1", "support-route-2"]
+    assert provider_samples(metrics) == {
+        ("primary", "transient"): 1,
+        ("fallback", "transient"): 1,
+        ("fallback", "success"): 1,
+    }
+    assert "provider-0" not in metrics.render().decode("utf-8")
+    assert "support-route-1" not in metrics.render().decode("utf-8")
+
+
+def test_budget_and_circuit_rejection_before_http_record_zero_attempts(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls = 0
+
+    def post(*args: Any, **kwargs: Any) -> httpx.Response:
+        nonlocal calls
+        del args, kwargs
+        calls += 1
+        return completion()
+
+    monkeypatch.setattr(httpx, "post", post)
+    metrics = PrometheusCityBuddyMetrics()
+    events: list[AgentEvent] = []
+    circuits = ProviderCircuits(minimum_requests=1, open_seconds=10, half_open_probes=1)
+    circuits.transient_failure("provider-a", events)
+    client = LiteLlmClient("https://proxy.test", circuits, metrics)
+    one_route = ModelRouter((ProviderRoute("primary", "provider-a"),), 1).plan(
+        RuleRouter().signals("hello")
+    )
+
+    with pytest.raises(ProviderFailure):
+        client.complete(
+            one_route,
+            [{"role": "user", "content": "hello"}],
+            [],
+            AttemptBudget(1, events),
+            events,
+        )
+    with pytest.raises(AttemptBudgetExhausted):
+        client.complete(
+            one_route,
+            [{"role": "user", "content": "hello"}],
+            [],
+            AttemptBudget(0, events),
+            events,
+        )
+
+    assert calls == 0
+    assert provider_samples(metrics) == {}
 
 
 def test_provider_circuits_are_isolated_bounded_and_half_open() -> None:
@@ -507,7 +625,8 @@ def test_refund_prepare_uses_exact_obo_correlation_and_validates_untrusted_resul
         )
 
     monkeypatch.setattr(httpx, "stream", stream)
-    result = ToolAdapter("https://commerce.test", obo).execute(
+    metrics = PrometheusCityBuddyMetrics()
+    result = ToolAdapter("https://commerce.test", obo, metrics=metrics).execute(
         name=REFUND_PREPARE_SPEC.name,
         serialized_arguments=json.dumps(
             {
@@ -548,6 +667,7 @@ def test_refund_prepare_uses_exact_obo_correlation_and_validates_untrusted_resul
             "currency": "CNY",
         },
     }
+    assert operation_samples(metrics) == {("pending_action_prepare", "success"): 1.0}
 
 
 @pytest.mark.parametrize(
@@ -903,7 +1023,8 @@ def test_refund_prepare_replays_once_after_indeterminate_response_loss(
 
     monkeypatch.setattr(httpx, "stream", stream)
     events: list[AgentEvent] = []
-    result = ToolAdapter("https://commerce.test", RecordingObo()).execute(
+    metrics = PrometheusCityBuddyMetrics()
+    result = ToolAdapter("https://commerce.test", RecordingObo(), metrics=metrics).execute(
         name=REFUND_PREPARE_SPEC.name,
         serialized_arguments=json.dumps(
             {
@@ -932,63 +1053,96 @@ def test_refund_prepare_replays_once_after_indeterminate_response_loss(
         "tool_http",
         "tool_http",
     ]
+    assert operation_samples(metrics) == {("pending_action_prepare", "replay"): 1.0}
 
 
 @pytest.mark.parametrize(
-    ("status", "body", "reason", "raises"),
+    ("status", "body", "reason", "raises", "expected_outcome"),
     [
         (
             400,
             {"category": "VALIDATION", "message": "invalid"},
             "ACTION_PREPARATION_COMMERCE_VALIDATION_REJECTED",
             False,
+            "rejected",
         ),
-        (401, {"error": "Unauthorized"}, "ACTION_PREPARATION_COMMERCE_UNAUTHENTICATED", False),
-        (403, {"error": "Forbidden"}, "ACTION_PREPARATION_COMMERCE_FORBIDDEN", False),
+        (
+            401,
+            {"error": "Unauthorized"},
+            "ACTION_PREPARATION_COMMERCE_UNAUTHENTICATED",
+            False,
+            "denied",
+        ),
+        (
+            403,
+            {"error": "Forbidden"},
+            "ACTION_PREPARATION_COMMERCE_FORBIDDEN",
+            False,
+            "denied",
+        ),
         (
             404,
             {"category": "NOT_FOUND", "message": "missing"},
             "ACTION_PREPARATION_TARGET_NOT_FOUND",
             False,
+            "not_found",
         ),
         (
             409,
             {"category": "CONFLICT", "message": "conflict"},
             "ACTION_PREPARATION_INTENT_CONFLICT",
             False,
+            "conflict",
         ),
         (
             409,
             {"category": "INCONSISTENT_DURABLE_STATE", "message": "damaged"},
             "ACTION_PREPARATION_DURABLE_TRUTH_INCONSISTENT",
             False,
+            "conflict",
         ),
         (
             422,
             {"category": "VALIDATION", "message": "invalid"},
             "ACTION_PREPARATION_COMMERCE_VALIDATION_REJECTED",
             False,
+            "rejected",
         ),
         (
             408,
             {"category": "DEPENDENCY_UNAVAILABLE", "message": "timeout"},
             "ACTION_PREPARATION_COMMERCE_TIMEOUT",
             True,
+            "unavailable",
         ),
         (
             429,
             {"category": "INDETERMINATE", "message": "retry"},
             "ACTION_PREPARATION_COMMERCE_INDETERMINATE",
             True,
+            "indeterminate",
         ),
         (
             502,
             {"category": "DEPENDENCY_UNAVAILABLE", "message": "unavailable"},
             "ACTION_PREPARATION_COMMERCE_UNAVAILABLE",
             True,
+            "unavailable",
         ),
-        (503, {"error": "Service unavailable"}, "ACTION_PREPARATION_COMMERCE_UNAVAILABLE", True),
-        (504, {"error": "Service unavailable"}, "ACTION_PREPARATION_COMMERCE_TIMEOUT", True),
+        (
+            503,
+            {"error": "Service unavailable"},
+            "ACTION_PREPARATION_COMMERCE_UNAVAILABLE",
+            True,
+            "unavailable",
+        ),
+        (
+            504,
+            {"error": "Service unavailable"},
+            "ACTION_PREPARATION_COMMERCE_TIMEOUT",
+            True,
+            "unavailable",
+        ),
     ],
 )
 def test_refund_prepare_rejection_producer_matrix_is_exact(
@@ -996,6 +1150,7 @@ def test_refund_prepare_rejection_producer_matrix_is_exact(
     body: dict[str, object],
     reason: str,
     raises: bool,
+    expected_outcome: str,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     @contextmanager
@@ -1008,7 +1163,8 @@ def test_refund_prepare_rejection_producer_matrix_is_exact(
         )
 
     monkeypatch.setattr(httpx, "stream", stream)
-    adapter = ToolAdapter("https://commerce.test", RecordingObo())
+    metrics = PrometheusCityBuddyMetrics()
+    adapter = ToolAdapter("https://commerce.test", RecordingObo(), metrics=metrics)
 
     def invoke() -> Any:
         return adapter.execute(
@@ -1040,6 +1196,7 @@ def test_refund_prepare_rejection_producer_matrix_is_exact(
             "outcome": "deny_with_feedback",
             "reason": "policy_denied",
         }
+    assert operation_samples(metrics) == {("pending_action_prepare", expected_outcome): 1.0}
 
 
 @pytest.mark.parametrize(
