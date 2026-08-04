@@ -123,7 +123,7 @@ DRILL_SPECS: dict[str, dict[str, object]] = {
         "trigger": "stop only the active demo project's Elasticsearch service",
         "expectedPublic": "200 retrieval_denied with zero citations",
         "authoritativePreState": "exact knowledge alias inventory",
-        "authoritativePostState": "durable retrieval reason knowledge_unavailable and alias equality",
+        "authoritativePostState": "zero retrieval decision, one exact TOOL_DENIED event, and alias equality",
         "sideEffectAssertion": "zero fabricated evidence",
         "restoration": "start the same service/publication and rebind only the recorded Agent if needed",
         "postRestorationControl": "sufficient RAG completes with citations",
