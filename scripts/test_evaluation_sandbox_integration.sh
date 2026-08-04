@@ -4242,7 +4242,7 @@ curl --fail --silent --show-error \
   "http://127.0.0.1:$agent_port/internal/metrics/prometheus" \
   >"$tmp_dir/cb150-agent-metrics.txt"
 for expected_metric in \
-  'citybuddy_agent_operation_requests_total{operation="pending_action_prepare",outcome="success"} 1.0' \
+  'citybuddy_agent_operation_requests_total{operation="pending_action_prepare",outcome="replay"} 1.0' \
   'citybuddy_agent_operation_requests_total{operation="pending_action_expiry",outcome="unavailable"} 1.0' \
   'citybuddy_agent_operation_requests_total{operation="pending_action_expiry",outcome="expired"} 1.0' \
   'citybuddy_agent_operation_requests_total{operation="chat_turn",outcome="pending"} 1.0' \
