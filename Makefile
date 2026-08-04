@@ -10,7 +10,7 @@ COMPOSE_BUILD ?= --build
 COMPOSE := docker compose --project-name "$(COMPOSE_PROJECT_NAME)" --env-file "$(ENV_FILE)" --file compose.yaml
 
 .DEFAULT_GOAL := ci
-.PHONY: setup setup-java setup-python setup-web setup-repo format lint typecheck test build docs-check secret-scan java-ci python-ci web-ci repo-ci ci guard-layout init-local up down reset-local grant-access revoke-v013-migration-access migrate-auth migrate-commerce migrate-agent rocketmq-store-init rocketmq-init test-integration test-runtime-integration test-mysql-integration test-identity-integration test-evaluation-identity-integration test-evaluation-sandbox-integration test-catalog-integration test-redis-integration test-elasticsearch-integration test-knowledge-search-integration test-retrieval-evidence-integration test-rocketmq-integration test-knowledge-indexer-rocketmq-spike test-knowledge-sync-integration test-knowledge-rebuild-integration
+.PHONY: setup setup-java setup-python setup-web setup-repo format lint typecheck test build docs-check secret-scan java-ci python-ci web-ci repo-ci ci guard-layout init-local up down reset-local grant-access revoke-v013-migration-access migrate-auth migrate-commerce migrate-agent rocketmq-store-init rocketmq-init test-integration test-runtime-integration test-mysql-integration test-identity-integration test-evaluation-identity-integration test-evaluation-sandbox-integration test-catalog-integration test-redis-integration test-elasticsearch-integration test-knowledge-search-integration test-retrieval-evidence-integration test-rocketmq-integration test-knowledge-indexer-rocketmq-spike test-knowledge-sync-integration test-knowledge-rebuild-integration demo-setup demo demo-faults demo-status demo-check demo-cleanup demo-reset demo-all
 
 guard-layout:
 	test -x ./mvnw
@@ -282,3 +282,27 @@ repo-ci: guard-layout
 	$(MAKE) secret-scan
 
 ci: java-ci python-ci web-ci repo-ci test-integration
+
+demo-setup:
+	uv run python scripts/citybuddy_demo.py setup
+
+demo:
+	uv run python scripts/citybuddy_demo.py demo
+
+demo-faults:
+	uv run python scripts/citybuddy_demo.py faults
+
+demo-status:
+	uv run python scripts/citybuddy_demo.py status
+
+demo-check:
+	uv run python scripts/citybuddy_demo.py check
+
+demo-cleanup:
+	uv run python scripts/citybuddy_demo.py cleanup --confirm-run-id "$(CONFIRM_DEMO_RUN_ID)"
+
+demo-reset:
+	uv run python scripts/citybuddy_demo.py reset --confirm-run-id "$(CONFIRM_DEMO_RUN_ID)"
+
+demo-all:
+	uv run python scripts/citybuddy_demo.py all

@@ -24,3 +24,4 @@ web/*.tsbuildinfo
 # Local tooling
 .pre-commit-cache/
 .tools/
+.citybuddy-demo/
