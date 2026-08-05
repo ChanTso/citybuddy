@@ -3,6 +3,7 @@ package io.citybuddy.commerce.tool;
 import com.fasterxml.jackson.databind.JsonNode;
 import io.citybuddy.commerce.evaluation.EvaluationCommerceAuditService;
 import io.citybuddy.commerce.evaluation.EvaluationRejectionReason;
+import io.citybuddy.commerce.evaluation.EvaluationRequestParser;
 import io.citybuddy.commerce.evaluation.EvaluationSandboxAccess;
 import io.citybuddy.commerce.evaluation.EvaluationSandboxException;
 import io.citybuddy.commerce.identity.IdentityVerificationUnavailableException;
@@ -67,12 +68,13 @@ public final class AgentToolController {
     if (!CATALOG_TOOL.equals(toolName)) {
       throw new AgentToolException(404, "Unknown tool");
     }
+    String validSupportSession = EvaluationRequestParser.supportSession(supportSession);
     String token = bearer(authorization);
     OboAuthorizer.OboPrincipal principal =
         authorizer.authorize(
             token,
             new OboAuthorizer.AuthorizationRequest(
-                CATALOG_SCOPE, null, supportSession, null, null, evalSandbox));
+                CATALOG_SCOPE, null, validSupportSession, null, null, evalSandbox));
     if (!request.isObject()
         || request.size() != 1
         || !CATALOG_FIELDS.equals(
@@ -92,7 +94,11 @@ public final class AgentToolController {
     }
     var products =
         product(
-            principal.sandboxId(), supportSession, traceId, operationId, productNode.textValue());
+            principal.sandboxId(),
+            validSupportSession,
+            traceId,
+            operationId,
+            productNode.textValue());
     if (products.size() != 1) {
       throw new AgentToolException(404, "Product not found");
     }

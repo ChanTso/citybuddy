@@ -1,6 +1,7 @@
 package io.citybuddy.commerce.evaluation;
 
 import com.fasterxml.jackson.databind.JsonNode;
+import io.citybuddy.commerce.identity.SupportSessionId;
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
@@ -167,6 +168,14 @@ public final class EvaluationRequestParser {
         || value.length() > maximum
         || !BOUNDED_ID.matcher(value).matches()) {
       throw invalid(message);
+    }
+    return value;
+  }
+
+  public static String supportSession(String value) {
+    if (!SupportSessionId.isValid(value)) {
+      throw new EvaluationSandboxException(
+          400, EvaluationRejectionReason.TOOL_SUPPORT_SESSION_INVALID, "Bad request");
     }
     return value;
   }

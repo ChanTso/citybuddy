@@ -561,6 +561,7 @@ uv run python scripts/check_evaluation_token.py \
   --audience commerce-service \
   --token-type agent_obo \
   --sandbox sandbox-1 \
+  --session eval-session-1 \
   --maximum-expiry "$direct_expiry" \
   --output "$tmp_dir/evaluation-obo.json"
 test "$(uv run python scripts/read_json_field.py "$tmp_dir/evaluation-obo.json" subject)" = "$evaluation_subject"

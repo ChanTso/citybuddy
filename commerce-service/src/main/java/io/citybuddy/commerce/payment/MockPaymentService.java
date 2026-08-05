@@ -2,6 +2,7 @@ package io.citybuddy.commerce.payment;
 
 import io.citybuddy.commerce.evaluation.EvaluationAuditReferenceIdentity;
 import io.citybuddy.commerce.evaluation.EvaluationSandboxRepository;
+import io.citybuddy.commerce.identity.SupportSessionId;
 import java.sql.SQLException;
 import java.time.Clock;
 import java.time.Instant;
@@ -478,7 +479,7 @@ public final class MockPaymentService {
             || request.operationId() != null;
     boolean completeEvaluationContext =
         matches(BOUNDED_CONTEXT, request.sandboxId())
-            && matches(BOUNDED_CONTEXT, request.supportSessionId())
+            && SupportSessionId.isValid(request.supportSessionId())
             && matches(BOUNDED_CONTEXT, request.traceId())
             && matches(OPERATION, request.operationId());
     if (anyEvaluationContext != completeEvaluationContext) {

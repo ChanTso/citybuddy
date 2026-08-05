@@ -782,6 +782,110 @@ class MockPaymentIntegrationTest {
   }
 
   @Test
+  void evaluationCallbacksPreserveCanonicalSupportSessionsAndRejectWhitespace() {
+    int index = 0;
+    for (String session : List.of("-" + "A".repeat(42), "_" + "A".repeat(42))) {
+      EvaluationPaymentFixture fixture = seedEvaluationPayment("support-session-edge-" + index);
+      MockPaymentService evaluation = evaluationPayments(new MockPaymentRepository(jdbc));
+      MockPaymentResult attempt =
+          evaluation.start(
+              fixture.userSubject(),
+              fixture.sandboxId(),
+              fixture.orderId(),
+              "payment-session-edge-" + index,
+              new MockPaymentRequest(1800L, "CNY", null));
+      MockPaymentCallbackRequest base =
+          evaluationCallback(attempt, fixture.sandboxId(), "support-session-edge-" + index);
+      MockPaymentCallbackRequest callback =
+          evaluationCallbackWith(
+              base,
+              base.callbackEventId(),
+              base.callbackCorrelationId(),
+              base.orderId(),
+              base.amountMinor(),
+              base.currency(),
+              base.outcome(),
+              base.sandboxId(),
+              session,
+              base.traceId(),
+              base.operationId());
+      String callbackKey = "callback-session-edge-" + index;
+
+      assertThat(session).hasSize(43);
+      assertThat(evaluation.callback(callbackKey, callback).replayed()).isFalse();
+      assertThat(evaluation.callback(callbackKey, callback).replayed()).isTrue();
+      assertThat(
+              jdbc.queryForObject(
+                  "SELECT support_session_id FROM mock_payment_callback WHERE attempt_id = ?",
+                  String.class,
+                  attempt.attemptId()))
+          .isEqualTo(session);
+      assertThat(
+              jdbc.queryForObject(
+                  "SELECT support_session_id FROM eval_commerce_audit_reference "
+                      + "WHERE sandbox_id = ? AND entity_type = 'PAYMENT_CALLBACK'",
+                  String.class,
+                  fixture.sandboxId()))
+          .isEqualTo(session);
+      assertThat(callbackCount(attempt.attemptId())).isOne();
+      assertThat(paymentMovementCount(attempt.attemptId())).isOne();
+      index++;
+    }
+
+    EvaluationPaymentFixture invalidFixture = seedEvaluationPayment("support-session-whitespace");
+    MockPaymentService evaluation = evaluationPayments(new MockPaymentRepository(jdbc));
+    MockPaymentResult pending =
+        evaluation.start(
+            invalidFixture.userSubject(),
+            invalidFixture.sandboxId(),
+            invalidFixture.orderId(),
+            "payment-session-whitespace",
+            new MockPaymentRequest(1800L, "CNY", null));
+    MockPaymentCallbackRequest base =
+        evaluationCallback(pending, invalidFixture.sandboxId(), "support-session-whitespace");
+
+    for (String invalidSession : List.of(" session-main", "session-main ", "-" + "A".repeat(41))) {
+      MockPaymentCallbackRequest invalid =
+          evaluationCallbackWith(
+              base,
+              base.callbackEventId(),
+              base.callbackCorrelationId(),
+              base.orderId(),
+              base.amountMinor(),
+              base.currency(),
+              base.outcome(),
+              base.sandboxId(),
+              invalidSession,
+              base.traceId(),
+              base.operationId());
+      assertThat(paymentFailure(() -> evaluation.callback("callback-invalid-session", invalid)))
+          .isEqualTo("400:VALIDATION:Payment callback is invalid");
+    }
+
+    MockPaymentCallbackRequest invalidSandbox =
+        evaluationCallbackWith(
+            base,
+            base.callbackEventId(),
+            base.callbackCorrelationId(),
+            base.orderId(),
+            base.amountMinor(),
+            base.currency(),
+            base.outcome(),
+            "-" + "A".repeat(42),
+            "session-main",
+            base.traceId(),
+            base.operationId());
+    assertThat(
+            paymentFailure(
+                () -> evaluation.callback("callback-invalid-generic-context", invalidSandbox)))
+        .isEqualTo("400:VALIDATION:Payment callback is invalid");
+    assertThat(attemptState(pending.attemptId())).containsExactly("PENDING", "1");
+    assertThat(callbackCount(pending.attemptId())).isZero();
+    assertThat(paymentMovementCount(pending.attemptId())).isZero();
+    assertThat(paymentAuditCount(invalidFixture.sandboxId())).isZero();
+  }
+
+  @Test
   void evaluationPaymentOrderingUsesItsDocumentedTotalOrderAndExercisesTheTieKey() {
     EvaluationPaymentFixture fixture = seedEvaluationPayment("payment-ordering");
     MockPaymentService evaluation = evaluationPayments(new MockPaymentRepository(jdbc));

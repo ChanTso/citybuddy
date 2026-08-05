@@ -16,6 +16,7 @@ def main() -> None:
     parser.add_argument("--audience", required=True)
     parser.add_argument("--token-type", required=True)
     parser.add_argument("--sandbox", required=True)
+    parser.add_argument("--session")
     parser.add_argument("--maximum-expiry", required=True, type=int)
     parser.add_argument("--output", required=True, type=Path)
     args = parser.parse_args()
@@ -70,9 +71,11 @@ def main() -> None:
         if "act" in claims or "session" in claims or "scope" in claims:
             raise ValueError("Evaluation direct token carries delegated authority")
     elif args.token_type == "agent_obo":
+        if args.session is None:
+            raise ValueError("Expected OBO session is required")
         if claims.get("user_id") != claims["sub"]:
             raise ValueError("OBO user binding changed")
-        if claims.get("scope") != "catalog:read" or claims.get("session") != "eval-session-1":
+        if claims.get("scope") != "catalog:read" or claims.get("session") != args.session:
             raise ValueError("OBO scope or session binding changed")
         if claims.get("act") != {"azp": "agent-service"}:
             raise ValueError("OBO actor binding changed")

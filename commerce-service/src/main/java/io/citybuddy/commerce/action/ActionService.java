@@ -8,6 +8,7 @@ import io.citybuddy.commerce.action.ActionRepository.RefundOutboxRecord;
 import io.citybuddy.commerce.evaluation.EvaluationRejectionReason;
 import io.citybuddy.commerce.evaluation.EvaluationSandboxAccess;
 import io.citybuddy.commerce.evaluation.EvaluationSandboxException;
+import io.citybuddy.commerce.identity.SupportSessionId;
 import io.citybuddy.commerce.refund.RefundException;
 import io.citybuddy.commerce.refund.RefundRejectionReason;
 import io.citybuddy.commerce.refund.RefundRepository.RefundIntegrityException;
@@ -542,7 +543,7 @@ public final class ActionService {
     if (!uuid(pending.pendingActionId())
         || !REFUND_REQUEST.equals(pending.actionType())
         || !bounded(pending.userSubject(), 128)
-        || !bounded(pending.supportSessionId(), 64)
+        || !SupportSessionId.isValid(pending.supportSessionId())
         || !BOUNDED_ID.matcher(nullToEmpty(pending.traceId())).matches()
         || !uuid(pending.turnId())
         || !properties.requiredScope().equals(pending.requiredScope())
@@ -692,7 +693,7 @@ public final class ActionService {
   private ValidatedContext validateContext(ActionRequestContext context) {
     if (context == null
         || !bounded(context.userSubject(), 128)
-        || !bounded(context.supportSessionId(), 64)
+        || !SupportSessionId.isValid(context.supportSessionId())
         || !BOUNDED_ID.matcher(nullToEmpty(context.traceId())).matches()
         || !uuid(context.turnId())
         || !properties.requiredScope().equals(context.requiredScope())
@@ -701,7 +702,7 @@ public final class ActionService {
     }
     return new ValidatedContext(
         context.userSubject().strip(),
-        context.supportSessionId().strip(),
+        context.supportSessionId(),
         context.traceId(),
         context.turnId(),
         context.sandboxId(),

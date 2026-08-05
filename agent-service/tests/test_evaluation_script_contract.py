@@ -123,9 +123,68 @@ def test_evaluation_script_binds_every_opaque_session_option() -> None:
         for command in logical_commands
         if "python scripts/check_evaluation_views.py audit" in command
     ]
+    token_calls = [
+        command
+        for command in logical_commands
+        if "python scripts/check_evaluation_token.py" in command and "edge_session" in command
+    ]
 
     assert len(evidence_calls) == 6
     assert len(audit_calls) == 3
     calls = evidence_calls + audit_calls
     assert all(re.search(r'--session="\$(?:cb122_session|session_id)"', call) for call in calls)
     assert all(not re.search(r'--session\s+"\$', call) for call in calls)
+    assert len(token_calls) == 1
+    assert '--session="$edge_session"' in token_calls[0]
+
+    edge_start = script.index("edge_sessions=(")
+    auth_restart = script.rfind("start_auth evaluation", 0, edge_start)
+    current_expiry = script.rfind('direct_expiry="', 0, edge_start)
+    assert auth_restart < current_expiry < edge_start
+    assert 'grep -Fq -- "$invalid_support_session"' in script
+
+
+def test_support_session_producer_consumer_inventory_is_closed_without_normalization() -> None:
+    agent = (REPOSITORY / "agent-service/src/citybuddy_agent/application.py").read_text(
+        encoding="utf-8"
+    )
+    auth_controller = (
+        REPOSITORY / "auth-service/src/main/java/io/citybuddy/auth/identity/AuthController.java"
+    ).read_text(encoding="utf-8")
+    auth_keys = (
+        REPOSITORY / "auth-service/src/main/java/io/citybuddy/auth/identity/AuthKeySet.java"
+    ).read_text(encoding="utf-8")
+    support_session = (
+        REPOSITORY
+        / "commerce-service/src/main/java/io/citybuddy/commerce/identity/SupportSessionId.java"
+    ).read_text(encoding="utf-8")
+    evaluation_parser = (
+        REPOSITORY / "commerce-service/src/main/java/io/citybuddy/commerce/evaluation/"
+        "EvaluationRequestParser.java"
+    ).read_text(encoding="utf-8")
+    view_parser = (
+        REPOSITORY / "commerce-service/src/main/java/io/citybuddy/commerce/evaluation/"
+        "EvaluationViewRequestParser.java"
+    ).read_text(encoding="utf-8")
+    action = (
+        REPOSITORY
+        / "commerce-service/src/main/java/io/citybuddy/commerce/action/ActionService.java"
+    ).read_text(encoding="utf-8")
+    payment = (
+        REPOSITORY
+        / "commerce-service/src/main/java/io/citybuddy/commerce/payment/MockPaymentService.java"
+    ).read_text(encoding="utf-8")
+
+    assert "session_id = secrets.token_urlsafe(32)" in agent
+    assert 'Pattern.compile("^[A-Za-z0-9][A-Za-z0-9._:-]{0,63}$")' in support_session
+    assert 'Pattern.compile("^[A-Za-z0-9_-]{43}$")' in support_session
+    assert "return value;" in evaluation_parser
+    assert "TOOL_SUPPORT_SESSION_INVALID" in evaluation_parser
+    assert "return EvaluationRequestParser.supportSession(value);" in view_parser
+    assert action.count("SupportSessionId.isValid(") == 2
+    assert "context.supportSessionId().strip()" not in action
+    assert "SupportSessionId.isValid(request.supportSessionId())" in payment
+    assert "matches(BOUNDED_CONTEXT, request.sandboxId())" in payment
+    assert "matches(BOUNDED_CONTEXT, request.traceId())" in payment
+    assert "request.sessionId()," in auth_controller
+    assert '.claim("session", sessionId)' in auth_keys

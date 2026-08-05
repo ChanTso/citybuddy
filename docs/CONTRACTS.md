@@ -793,4 +793,33 @@ RAG HitRate@5/MRR; FAQ mapping/answer hit rates; and Elasticsearch knowledge-sea
 correction changes no ownership, API, transaction, retrieval policy, cache behavior, route order,
 Agent-only metrics scope, trace scope, or measurement count.
 
-Current Level 3 conflicts: **none unresolved as of 2026-08-03**.
+**Resolved contract correction — 2026-08-06 (opaque support-session consumer closure):** The owner
+explicitly authorized this correction in a defect-correction non-slice lane; it is not a silent
+contract change or an AGENTS.md Rule 2 maintenance lane. A support session is an opaque identifier.
+The unchanged Agent producer `secrets.token_urlsafe(32)` generates exactly 43 unpadded Base64URL
+characters in `[A-Za-z0-9_-]`, with every alphabet character permitted in the first position. The
+consumer contract is the union of that canonical language and the existing bounded human-readable
+language `[A-Za-z0-9][A-Za-z0-9._:-]{0,63}`. Consumers preserve the value byte-for-byte; they do not
+trim, case-fold, encode, decode, replace, prefix, retry, or otherwise normalize it. Existing stored
+sessions remain valid, and generic human-readable identifier grammars for sandbox, product, trace,
+operation, reset, case correlation, and test-user labels are unchanged.
+
+The first documented consumer failure was the shell argv transport fixed by `c723f398`, where a
+leading-dash session was parsed as an option. The second was the Commerce evaluation session parser,
+whose generic leading-alphanumeric grammar rejected the same valid producer partition. The closure
+also applies the dedicated union validator at real Action and evaluation-payment support-session
+boundaries; Auth remains an exact pass-through from token-exchange request to OBO `session` claim.
+Invalid support-session grammar on the evaluation tool boundary remains public HTTP 400 with the
+fixed `Bad request` body and no field or value disclosure, while the server records only the precise
+request-local reason `TOOL_SUPPORT_SESSION_INVALID`. The Agent response, OBO claim, headers,
+authorization context, durable filters, observations, audit references, Action records, and payment
+records retain exact byte equality. Producer entropy, alphabet, persistence, response shape, schema,
+stored data, grants, and public API shape do not change.
+
+The parked documentation PR #76 did not introduce this defect and remains read-only evidence. A
+mechanical repository-wide audit of opaque generators and their positional languages found no
+additional producer/consumer mismatch: `opaque_identifier_audit = no additional mismatch found`.
+Any later mismatch in a different identifier domain requires a separate owner decision and is not
+authorized by this correction.
+
+Current Level 3 conflicts: **none unresolved as of 2026-08-06**.
