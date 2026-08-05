@@ -15,7 +15,7 @@ final class EvaluationViewRequestParser {
   }
 
   static String session(String value) {
-    return boundedId(value, 64, "Invalid support session");
+    return EvaluationRequestParser.supportSession(value);
   }
 
   static String trace(String value) {

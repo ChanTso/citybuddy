@@ -345,3 +345,10 @@ This file records only factual pitfalls supported by merged pull-request, commit
 - 根因：外围 integration oracle 从“上游第一次已执行”推断 success，没有沿生产 producer 使用的最终 ToolResult classification 追踪同一个逻辑 operation；response-loss 后的稳定 replay 真值与传输尝试被混为两个 outcome。命令编排则把 opaque 协议值当成了普通 shell 单词，没有覆盖其完整合法字母表与参数解析边界。
 - 解决：保持 production metrics、counter、outcome mapping 与六条精确 scrape 语义不变，只把 prepare 的 integration oracle 对齐为唯一的 `replay = 1.0`；其余五条指标、business-first 断言与 privacy fail-closed guard 保持严格。全部 9 个直接 session 调用点改用 `--session="$value"` 绑定形式，并以 leading-dash session 的真实 evidence/audit helper 回归固定行为。focused tests、fresh evaluation integration、完整 `make ci`、完整 GitHub required workflow 与两轮 complete-diff review 构成 closeout 证据。
 - 结论：可观测性必须继承业务执行链最终稳定分类，不能由外围观察者根据某次已发生的尝试重新命名一个逻辑 operation；response loss、retry 与 replay 也不能制造双计数。opaque CLI 值必须按其完整合法字母表作为数据绑定，并机械枚举所有调用点，不能依赖“通常不会以短横线开头”的样本。
+
+## Defect correction — Opaque support-session producer-language closure
+
+- 现象：Agent 的合法 43 字符 Base64URL session 在首字符为 `-` 或 `_` 时，会被部分 Commerce consumer 的通用 human-ID 首字符规则拒绝；Action 又在没有 session 字符语法校验的情况下执行 `.strip()`，使同一领域在不同边界具有不同接受语言和字节语义。
+- 根因：先前只修复了 leading-dash 的 shell argv 传输，没有从 producer 的精确长度、完整字母表和位置分区机械枚举同一 identifier domain 的所有 consumer；常见的字母数字 fixture 掩盖了首字符分区差异。
+- 解决：保持 `secrets.token_urlsafe(32)`、既有持久值和 public API 不变，为 support-session 增加 union validator，并在 evaluation、Action 和 evaluation payment 的真实拒绝边界复用；Auth 保持原样透传。64 个确定性首字符向量、显式 `-`/`_` 跨服务路径、legacy compatibility、rejection matrix、无 normalization 与精确 server-only attribution 共同构成回归证据。
+- 结论：opaque identifier 的合同是 producer 生成的完整语言，不只是字符集合。修复一个传输调用点后仍必须审计同领域的 parser、claim、header、持久过滤和 replay 边界；兼容性 inventory 应区分正常接受 fixture 与故意非法的 rejection/corruption fixture，不能通过修改负向样本制造闭合结论。

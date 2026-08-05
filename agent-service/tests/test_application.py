@@ -1,9 +1,13 @@
 import base64
+import inspect
 import json
 import logging
+import secrets
+import sys
 import time
 from collections.abc import Mapping
 from datetime import UTC, datetime, timedelta
+from types import FrameType
 from typing import Any, Literal
 
 import httpx
@@ -23,6 +27,7 @@ from citybuddy_agent.application import (
     DirectJwtValidator,
     DirectPrincipal,
     HttpSandboxLiveness,
+    MysqlSessionStore,
     OboClient,
     SessionStore,
     create_app,
@@ -83,6 +88,17 @@ class MemorySessionStore(SessionStore):
     def verify_owner(self, session_id: str, subject: str, sandbox_id: str | None = None) -> None:
         if self.owners.get(session_id) != subject or self.sandboxes.get(session_id) != sandbox_id:
             raise HTTPException(status_code=403, detail="Forbidden")
+
+
+class FixedSessionStore(MemorySessionStore):
+    def __init__(self, session_id: str) -> None:
+        super().__init__()
+        self.session_id = session_id
+
+    def create(self, subject: str, sandbox_id: str | None = None) -> str:
+        self.owners[self.session_id] = subject
+        self.sandboxes[self.session_id] = sandbox_id
+        return self.session_id
 
 
 class MemoryConversationStore(ConversationStore):
@@ -968,6 +984,97 @@ def test_session_endpoint_uses_token_subject_and_rejects_client_identity_and_eva
     )
 
 
+def test_mysql_session_store_generates_and_persists_the_exact_opaque_session(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    executions: list[tuple[str, tuple[object, ...]]] = []
+
+    class RecordingCursor:
+        def __enter__(self) -> "RecordingCursor":
+            return self
+
+        def __exit__(self, *args: object) -> None:
+            return None
+
+        def execute(self, statement: str, parameters: tuple[object, ...]) -> None:
+            executions.append((statement, parameters))
+
+        def fetchone(self) -> tuple[str, str]:
+            return ("user-123", "sandbox-1")
+
+    class RecordingConnection:
+        def __init__(self) -> None:
+            self.commits = 0
+            self.cursor_instance = RecordingCursor()
+
+        def __enter__(self) -> "RecordingConnection":
+            return self
+
+        def __exit__(self, *args: object) -> None:
+            return None
+
+        def cursor(self) -> RecordingCursor:
+            return self.cursor_instance
+
+        def commit(self) -> None:
+            self.commits += 1
+
+    connection = RecordingConnection()
+    store = MysqlSessionStore(settings())
+    monkeypatch.setattr(store, "_connect", lambda: connection)
+    token_urlsafe_calls: list[int | None] = []
+
+    def profile(frame: FrameType, event: str, arg: object) -> None:
+        del arg
+        if event == "call" and getattr(frame, "f_code", None) is secrets.token_urlsafe.__code__:
+            token_urlsafe_calls.append(frame.f_locals["nbytes"])
+
+    previous_profile = sys.getprofile()
+    sys.setprofile(profile)
+    try:
+        session_id = store.create("user-123", "sandbox-1")
+    finally:
+        sys.setprofile(previous_profile)
+
+    assert token_urlsafe_calls == [32]
+    assert len(session_id) == 43
+    assert set(session_id) <= set(
+        "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_"
+    )
+    assert executions[0][1] == (session_id, "user-123", "sandbox-1")
+    assert executions[1][1][1:] == (session_id, "user-123")
+    assert connection.commits == 1
+    assert "session_id = secrets.token_urlsafe(32)" in inspect.getsource(MysqlSessionStore.create)
+
+    store.verify_owner(session_id, "user-123", "sandbox-1")
+    assert executions[2][1] == (session_id,)
+
+
+@pytest.mark.parametrize(
+    "session_id",
+    [
+        "-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+        "_AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+    ],
+)
+def test_session_endpoint_returns_exact_canonical_edge_session(session_id: str) -> None:
+    assert len(session_id) == 43
+    private, public_jwk = key_fixture("current-key")
+    validator = DirectJwtValidator(settings(), CountingJwksSource([public_jwk]))
+    sessions = FixedSessionStore(session_id)
+    client = TestClient(create_app(settings(), validator=validator, sessions=sessions))
+
+    response = client.post(
+        "/api/sessions",
+        headers={"Authorization": f"Bearer {direct_token(private, 'current-key')}"},
+        json={},
+    )
+
+    assert response.status_code == 201
+    assert response.json() == {"sessionId": session_id}
+    sessions.verify_owner(session_id, "user-123")
+
+
 def test_evaluation_session_and_chat_require_liveness_and_exact_sandbox() -> None:
     private, public_jwk = key_fixture("current-key")
     resolved = evaluation_settings()
@@ -1076,6 +1183,41 @@ def test_obo_client_rechecks_owner_and_server_allowlist(
     with pytest.raises(HTTPException) as forged:
         client.exchange("direct-token", principal.subject, "forged-session", "catalog:read")
     assert forged.value.status_code == 403
+
+
+@pytest.mark.parametrize(
+    "session_id",
+    [
+        "-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+        "_AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+    ],
+)
+def test_obo_client_preserves_exact_canonical_edge_session(
+    session_id: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    assert len(session_id) == 43
+    sessions = FixedSessionStore(session_id)
+    sessions.create("user-123", "sandbox-1")
+    client = OboClient(evaluation_settings(), sessions)
+    requests: list[dict[str, Any]] = []
+
+    def exchange_response(*args: Any, **kwargs: Any) -> httpx.Response:
+        requests.append(kwargs)
+        return httpx.Response(200, json={"accessToken": "signed-eval-obo"})
+
+    monkeypatch.setattr(httpx, "post", exchange_response)
+
+    assert (
+        client.exchange(
+            "eval-direct-token",
+            "user-123",
+            session_id,
+            "catalog:read",
+            "sandbox-1",
+        )
+        == "signed-eval-obo"
+    )
+    assert requests[0]["json"]["sessionId"] == session_id
 
 
 @pytest.mark.parametrize("status", [401, 403])

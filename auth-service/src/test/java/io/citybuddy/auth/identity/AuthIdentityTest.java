@@ -300,6 +300,17 @@ class AuthIdentityTest {
     assertThat(obo.getJWTClaimsSet().getJSONObjectClaim("act"))
         .containsEntry("azp", "agent-service");
 
+    for (String session : List.of("-" + "A".repeat(42), "_" + "A".repeat(42))) {
+      AuthController.TokenResponse edgeResponse =
+          controller.exchange(
+              basic,
+              "Bearer " + direct,
+              null,
+              new AuthController.ExchangeRequest(session, "user-123", "catalog:read"));
+      assertThat(SignedJWT.parse(edgeResponse.accessToken()).getJWTClaimsSet().getClaim("session"))
+          .isEqualTo(session);
+    }
+
     assertThatThrownBy(
             () ->
                 controller.exchange(

@@ -12,7 +12,9 @@ import static org.springframework.test.web.servlet.request.MockMvcRequestBuilder
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
 
+import io.citybuddy.commerce.evaluation.EvaluationCommerceAuditService;
 import io.citybuddy.commerce.evaluation.EvaluationRejectionReason;
+import io.citybuddy.commerce.evaluation.EvaluationSandboxAccess;
 import io.citybuddy.commerce.evaluation.EvaluationSandboxException;
 import io.citybuddy.commerce.identity.IdentityVerificationUnavailableException;
 import io.citybuddy.commerce.identity.OboAuthorizationException;
@@ -22,6 +24,7 @@ import java.util.Map;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
+import org.springframework.beans.factory.ObjectProvider;
 import org.springframework.boot.test.system.CapturedOutput;
 import org.springframework.boot.test.system.OutputCaptureExtension;
 import org.springframework.dao.CannotAcquireLockException;
@@ -88,6 +91,74 @@ class AgentToolControllerTest {
             eq(
                 new OboAuthorizer.AuthorizationRequest(
                     "catalog:read", null, "session-1", null, null, null)));
+  }
+
+  @Test
+  void preservesCanonicalEdgeSessionsThroughAuthorizationAndAudit() throws Exception {
+    @SuppressWarnings("unchecked")
+    ObjectProvider<EvaluationSandboxAccess> sandboxProvider = mock(ObjectProvider.class);
+    @SuppressWarnings("unchecked")
+    ObjectProvider<EvaluationCommerceAuditService> auditProvider = mock(ObjectProvider.class);
+    EvaluationSandboxAccess sandbox = mock(EvaluationSandboxAccess.class);
+    EvaluationCommerceAuditService audit = mock(EvaluationCommerceAuditService.class);
+    when(sandboxProvider.getIfAvailable()).thenReturn(sandbox);
+    when(auditProvider.getIfAvailable()).thenReturn(audit);
+    when(audit.observeProduct(
+            eq("sandbox-1"), anyString(), eq("trace-1"), anyString(), eq("product-1")))
+        .thenReturn(
+            new EvaluationCommerceAuditService.ProductObservation(
+                "product-1", "Tea", 500L, "CNY", true, 2L));
+    MockMvc evaluationMvc =
+        MockMvcBuilders.standaloneSetup(
+                new AgentToolController(authorizer, jdbc, sandboxProvider, auditProvider))
+            .build();
+
+    for (String session : List.of("-" + "A".repeat(42), "_" + "A".repeat(42))) {
+      when(authorizer.authorize(anyString(), any(OboAuthorizer.AuthorizationRequest.class)))
+          .thenReturn(
+              new OboAuthorizer.OboPrincipal("user-1", session, "catalog:read", "sandbox-1"));
+
+      evaluationMvc
+          .perform(
+              post("/internal/tools/catalog.product.get")
+                  .header("Authorization", "Bearer signed-obo")
+                  .header("X-Support-Session-Id", session)
+                  .header("X-Eval-Sandbox-Id", "sandbox-1")
+                  .header("X-Agent-Trace-Id", "trace-1")
+                  .header("X-Agent-Operation-Id", "a".repeat(64))
+                  .contentType(MediaType.APPLICATION_JSON)
+                  .content("{\"productId\":\"product-1\"}"))
+          .andExpect(status().isOk())
+          .andExpect(jsonPath("$.productId").value("product-1"));
+
+      verify(authorizer)
+          .authorize(
+              "signed-obo",
+              new OboAuthorizer.AuthorizationRequest(
+                  "catalog:read", null, session, null, null, "sandbox-1"));
+      verify(audit).observeProduct("sandbox-1", session, "trace-1", "a".repeat(64), "product-1");
+    }
+    verifyNoInteractions(jdbc);
+  }
+
+  @Test
+  void rejectsInvalidSupportSessionWithOnePrivateReasonAndNoRawValue(CapturedOutput output)
+      throws Exception {
+    String invalid = "-not-canonical";
+
+    mvc.perform(
+            post("/internal/tools/catalog.product.get")
+                .header("Authorization", "Bearer signed-obo")
+                .header("X-Support-Session-Id", invalid)
+                .contentType(MediaType.APPLICATION_JSON)
+                .content("{\"productId\":\"product-1\"}"))
+        .andExpect(status().isBadRequest())
+        .andExpect(jsonPath("$.error").value("Bad request"));
+
+    verifyNoInteractions(authorizer, jdbc);
+    org.assertj.core.api.Assertions.assertThat(output)
+        .contains("reason_code=TOOL_SUPPORT_SESSION_INVALID")
+        .doesNotContain(invalid);
   }
 
   @Test

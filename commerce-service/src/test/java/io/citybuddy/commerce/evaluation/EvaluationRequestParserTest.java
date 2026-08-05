@@ -4,6 +4,7 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
+import java.util.Base64;
 import java.util.List;
 import org.junit.jupiter.api.Test;
 import org.springframework.util.LinkedMultiValueMap;
@@ -155,5 +156,86 @@ class EvaluationRequestParserTest {
     duplicate.add("limit", "2");
     assertThatThrownBy(() -> EvaluationViewRequestParser.auditPage(duplicate))
         .isInstanceOf(EvaluationSandboxException.class);
+  }
+
+  @Test
+  void supportSessionParsersAcceptTheCompleteOpaqueLanguageWithoutChangingGenericIds()
+      throws Exception {
+    for (int firstSixBits = 0; firstSixBits < 64; firstSixBits++) {
+      byte[] raw = new byte[32];
+      raw[0] = (byte) (firstSixBits << 2);
+      String session = Base64.getUrlEncoder().withoutPadding().encodeToString(raw);
+
+      assertThat(session).hasSize(43);
+      assertThat(EvaluationRequestParser.supportSession(session)).isSameAs(session);
+      assertThat(EvaluationViewRequestParser.session(session)).isSameAs(session);
+    }
+
+    String leadingDash = "-" + "A".repeat(42);
+    assertThatThrownBy(
+            () -> EvaluationRequestParser.boundedHeader(leadingDash, 64, "Invalid sandbox"))
+        .isInstanceOf(EvaluationSandboxException.class);
+    assertThatThrownBy(() -> EvaluationViewRequestParser.sandbox(leadingDash))
+        .isInstanceOf(EvaluationSandboxException.class);
+    assertThatThrownBy(() -> EvaluationViewRequestParser.trace(leadingDash))
+        .isInstanceOf(EvaluationSandboxException.class);
+    assertThatThrownBy(() -> EvaluationViewRequestParser.operation(leadingDash))
+        .isInstanceOf(EvaluationSandboxException.class);
+    assertThatThrownBy(
+            () ->
+                EvaluationRequestParser.parseReset(
+                    mapper.readTree(
+                        """
+                        {"sandboxId":"sandbox-1","caseCorrelation":"case-1","ttlSeconds":300,
+                         "testUserLabel":"test-user-1","products":[{"productId":"%s",
+                         "name":"Tea","description":"Evaluation tea","priceMinor":500,
+                         "currency":"CNY","stockQuantity":10,"available":true}]}
+                        """
+                            .formatted(leadingDash))))
+        .isInstanceOf(EvaluationSandboxException.class);
+  }
+
+  @Test
+  void invalidSupportSessionsHaveOnePrecisePrivateReasonAndFixedMessage() {
+    List<String> invalid =
+        java.util.Arrays.asList(
+            null,
+            "",
+            " ",
+            " session-main",
+            "session-main ",
+            "session main",
+            ".session-main",
+            ":session-main",
+            "-" + "A".repeat(41),
+            "-" + "A".repeat(43),
+            "_" + "A".repeat(41),
+            "_" + "A".repeat(43),
+            "session+main",
+            "session/main",
+            "session=main",
+            "session\nmain",
+            "session\u0000main",
+            "sessіon-main",
+            "A".repeat(65),
+            "session-main\r\nX-Injected: true");
+
+    for (String value : invalid) {
+      assertThatThrownBy(() -> EvaluationRequestParser.supportSession(value))
+          .isInstanceOfSatisfying(
+              EvaluationSandboxException.class,
+              exception -> {
+                assertThat(exception.status()).isEqualTo(400);
+                assertThat(exception.reason())
+                    .isEqualTo(EvaluationRejectionReason.TOOL_SUPPORT_SESSION_INVALID);
+                assertThat(exception).hasMessage("Bad request");
+              });
+      assertThatThrownBy(() -> EvaluationViewRequestParser.session(value))
+          .isInstanceOfSatisfying(
+              EvaluationSandboxException.class,
+              exception ->
+                  assertThat(exception.reason())
+                      .isEqualTo(EvaluationRejectionReason.TOOL_SUPPORT_SESSION_INVALID));
+    }
   }
 }

@@ -482,3 +482,18 @@ runner report rather than trusting process exit zero. Record the executed and sk
 make the owning integration script fail unless every named required class has a report with
 `tests > 0`, `skipped = 0`, `failures = 0`, and `errors = 0`. A command whose selected tests were
 all skipped is not evidence, even when the build succeeds.
+
+### Producer-language closure across consumers
+
+For an opaque identifier, enumerate the complete language produced at the source, including exact
+length and positional character partitions. Every consumer, serializer, CLI boundary, token claim,
+header parser, and durable filter must accept that complete language without normalization. Typical
+alphanumeric samples are insufficient; cover every possible first character deterministically. Do
+not widen a generic human-readable identifier grammar to repair one opaque identifier.
+
+A call-site transport fix does not establish the identifier contract for other consumers. After one
+opaque-value failure, inventory every consumer of that identifier domain. Audit other opaque
+generators for the same class, but do not merge unrelated identifier-domain corrections into the
+same lane without owner approval. Classify fixtures by expected disposition: intentionally invalid
+rejection fixtures and corrupted-state fixtures must remain fail-closed evidence, while only normal
+success, replay, and control fixtures establish accepted-language compatibility.

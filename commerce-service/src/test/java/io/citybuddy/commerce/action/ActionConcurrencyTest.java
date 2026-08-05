@@ -116,6 +116,41 @@ class ActionConcurrencyTest {
   }
 
   @Test
+  void invalidSupportSessionsAreRejectedBeforeActionWorkWithoutTrimming() {
+    for (String session :
+        java.util.List.of(
+            " support-session",
+            "support-session ",
+            "support session",
+            "-" + "A".repeat(41),
+            "_" + "A".repeat(43))) {
+      ActionRequestContext invalid =
+          new ActionRequestContext(
+              "action-owner",
+              session,
+              "trace-118",
+              "00000000-0000-0000-0000-000000000119",
+              null,
+              "refund:create");
+
+      assertThatThrownBy(
+              () ->
+                  service.prepare(
+                      invalid,
+                      new PrepareActionCommand(
+                          "REFUND_REQUEST", "00000000-0000-0000-0000-000000000123", 500L, "AUD")))
+          .isInstanceOfSatisfying(
+              ActionException.class,
+              exception -> {
+                assertThat(exception.status()).isEqualTo(400);
+                assertThat(exception.category()).isEqualTo("VALIDATION");
+              });
+    }
+
+    verifyNoInteractions(repository, refunds, transactions);
+  }
+
+  @Test
   void refundProgrammerFailureRemainsVisible() {
     IllegalStateException programmerFailure =
         new IllegalStateException("controlled missing Action transaction");

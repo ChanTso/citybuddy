@@ -1344,6 +1344,7 @@ uv run python scripts/check_evaluation_token.py \
   --maximum-expiry "$(date -u -v+901S +%s 2>/dev/null || date -u -d '+901 seconds' +%s)" \
   --output "$tmp_dir/direct.json"
 direct_subject="$(uv run python scripts/read_json_field.py "$tmp_dir/direct.json" subject)"
+direct_expiry="$(uv run python scripts/read_json_field.py "$tmp_dir/direct.json" expiresAt)"
 
 payment_order_id='00000000-0000-0000-0000-000000000105'
 reset_payment_sandbox sandbox-payment case-payment reset-payment "$payment_order_id" 3600
@@ -1787,7 +1788,8 @@ mysql_query root "$root_password" commerce_db \
   "UPDATE standard_order SET evaluation_owner_handle = '$payment_handle' WHERE order_id = '$payment_order_id'"
 
 payment_event_id='00000000-0000-0000-0000-000000000106'
-payment_session='payment-session'
+payment_session='-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA'
+assert_equal 43 "${#payment_session}" "payment support-session edge fixture is exactly canonical length"
 payment_trace='payment-trace'
 payment_operation="$(openssl rand -hex 32)"
 payment_callback_key='callback-evaluation'
@@ -3596,7 +3598,8 @@ assert_status 200 "payment state recovers after every authoritative row is resto
   --user "evaluation-manager:$management_password" \
   --header 'X-Eval-Sandbox-Id: sandbox-payment'
 
-action_session='action-payment-session'
+action_session='_AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA'
+assert_equal 43 "${#action_session}" "Action support-session edge fixture is exactly canonical length"
 action_trace='action-payment-trace'
 action_turn='00000000-0000-0000-0000-000000000401'
 assert_status 200 "exchange sandbox-bound Action OBO token" \
@@ -4421,6 +4424,14 @@ stop_process agent_pid "$agent_pid"
 stop_process commerce_pid "$commerce_pid"
 start_commerce evaluation "http://127.0.0.1:$auth_port"
 start_agent true
+printf '%s' "$direct_token" >"$tmp_dir/direct.jwt"
+uv run python scripts/check_evaluation_token.py \
+  --token-file "$tmp_dir/direct.jwt" --jwks-file "$tmp_dir/jwks.json" \
+  --issuer https://identity.citybuddy.test --audience citybuddy-web \
+  --token-type eval_direct_user --sandbox sandbox-main \
+  --maximum-expiry "$(date -u -v+901S +%s 2>/dev/null || date -u -d '+901 seconds' +%s)" \
+  --output "$tmp_dir/direct.json"
+direct_expiry="$(uv run python scripts/read_json_field.py "$tmp_dir/direct.json" expiresAt)"
 assert_equal $'LIVENESS_DIRECT_USER_JWKS_UNAVAILABLE\nTOOL_OBO_JWKS_UNAVAILABLE' \
   "$jwks_rejection_reasons" \
   "JWKS outage reaches exactly the two attributed unavailable producers"
@@ -4432,6 +4443,124 @@ assert_equal 'Service unavailable' \
 assert_equal 'Service unavailable' \
   "$(uv run python scripts/read_json_field.py "$tmp_dir/jwks-tool-unavailable.json" error)" \
   "tool JWKS outage exposes only the fixed unavailable response"
+edge_sessions=(
+  '-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA'
+  '_AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA'
+)
+edge_conversations=(
+  '00000000-0000-0000-0000-000000000501'
+  '00000000-0000-0000-0000-000000000502'
+)
+edge_operations=(
+  'cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc'
+  'dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd'
+)
+edge_traces=('edge-dash-trace' 'edge-underscore-trace')
+edge_labels=('leading dash' 'leading underscore')
+mysql_query agent_app "$agent_app_password" cs_db \
+  "INSERT INTO support_session (session_id, user_subject, sandbox_id) VALUES ('${edge_sessions[0]}', '$direct_subject', 'sandbox-main'), ('${edge_sessions[1]}', '$direct_subject', 'sandbox-main')"
+mysql_query agent_app "$agent_app_password" cs_db \
+  "INSERT INTO support_conversation (conversation_id, session_id, user_subject, state, next_turn_sequence) VALUES ('${edge_conversations[0]}', '${edge_sessions[0]}', '$direct_subject', 'ACTIVE', 0), ('${edge_conversations[1]}', '${edge_sessions[1]}', '$direct_subject', 'ACTIVE', 0)"
+for edge_index in "${!edge_sessions[@]}"; do
+  edge_session="${edge_sessions[$edge_index]}"
+  edge_operation="${edge_operations[$edge_index]}"
+  edge_trace="${edge_traces[$edge_index]}"
+  edge_label="${edge_labels[$edge_index]}"
+  assert_equal 43 "${#edge_session}" "$edge_label support-session fixture is exactly canonical length"
+  assert_equal "$direct_subject:sandbox-main:1" \
+    "$(mysql_query agent_app "$agent_app_password" cs_db \
+      "SELECT CONCAT(user_subject, ':', sandbox_id, ':', COUNT(*)) FROM support_session WHERE session_id = '$edge_session' GROUP BY user_subject, sandbox_id")" \
+    "$edge_label support session is stored once without normalization"
+  assert_equal 1 \
+    "$(mysql_query agent_app "$agent_app_password" cs_db \
+      "SELECT COUNT(*) FROM support_conversation WHERE conversation_id = '${edge_conversations[$edge_index]}' AND session_id = '$edge_session' AND user_subject = '$direct_subject'")" \
+    "$edge_label support conversation preserves the exact session"
+  assert_status 200 "$edge_label session survives real Auth exchange" \
+    --request POST "http://127.0.0.1:$auth_port/auth/token/exchange" \
+    --user "agent-service:$agent_service_password" \
+    --header "X-User-Authorization: Bearer $direct_token" \
+    --header 'X-Eval-Sandbox-Id: sandbox-main' \
+    --header 'Content-Type: application/json' \
+    --data "{\"sessionId\":\"$edge_session\",\"userSubject\":\"$direct_subject\",\"scope\":\"catalog:read\"}"
+  edge_obo_token="$(uv run python scripts/read_json_field.py "$tmp_dir/http-response.json" accessToken)"
+  printf '%s' "$edge_obo_token" >"$tmp_dir/edge-obo-$edge_index.jwt"
+  uv run python scripts/check_evaluation_token.py \
+    --token-file "$tmp_dir/edge-obo-$edge_index.jwt" --jwks-file "$tmp_dir/jwks.json" \
+    --issuer https://identity.citybuddy.test --audience commerce-service \
+    --token-type agent_obo --sandbox sandbox-main --session="$edge_session" \
+    --maximum-expiry "$direct_expiry" --output "$tmp_dir/edge-obo-$edge_index.json"
+  assert_status 200 "$edge_label session reaches the real Commerce product tool" \
+    --request POST "http://127.0.0.1:$commerce_port/internal/tools/catalog.product.get" \
+    --header "Authorization: Bearer $edge_obo_token" \
+    --header "X-Support-Session-Id: $edge_session" \
+    --header 'X-Eval-Sandbox-Id: sandbox-main' \
+    --header "X-Agent-Trace-Id: $edge_trace" \
+    --header "X-Agent-Operation-Id: $edge_operation" \
+    --header 'Content-Type: application/json' \
+    --data '{"productId":"product-1"}'
+  assert_equal sandbox-product \
+    "$(uv run python scripts/read_json_field.py "$tmp_dir/http-response.json" name)" \
+    "$edge_label tool returns the exact sandbox product"
+  assert_status 200 "$edge_label tool operation replays idempotently" \
+    --request POST "http://127.0.0.1:$commerce_port/internal/tools/catalog.product.get" \
+    --header "Authorization: Bearer $edge_obo_token" \
+    --header "X-Support-Session-Id: $edge_session" \
+    --header 'X-Eval-Sandbox-Id: sandbox-main' \
+    --header "X-Agent-Trace-Id: $edge_trace" \
+    --header "X-Agent-Operation-Id: $edge_operation" \
+    --header 'Content-Type: application/json' \
+    --data '{"productId":"product-1"}'
+  assert_equal '1:1' \
+    "$(mysql_query commerce_app "$commerce_app_password" commerce_db \
+      "SELECT CONCAT((SELECT COUNT(*) FROM eval_commerce_product_observation WHERE operation_id = '$edge_operation' AND support_session_id = '$edge_session'), ':', (SELECT COUNT(*) FROM eval_commerce_audit_reference WHERE operation_id = '$edge_operation' AND support_session_id = '$edge_session'))")" \
+    "$edge_label operation has one exact observation and audit reference"
+  assert_equal 0 \
+    "$(mysql_query commerce_app "$commerce_app_password" commerce_db \
+      "SELECT COUNT(*) FROM eval_commerce_audit_reference WHERE operation_id = '$edge_operation' AND support_session_id <> '$edge_session'")" \
+    "$edge_label operation has no cross-session substitution"
+  assert_status 200 "$edge_label audit route filters by the exact session" \
+    --request GET "http://127.0.0.1:$commerce_port/api/eval/audit/$edge_session" \
+    --user "evaluation-manager:$management_password" \
+    --header 'X-Eval-Sandbox-Id: sandbox-main'
+  uv run python -c '
+import json
+import sys
+
+payload = json.load(open(sys.argv[1], encoding="utf-8"))
+assert len(payload["entries"]) == 1
+entry = payload["entries"][0]
+assert entry["sandboxId"] == "sandbox-main"
+assert entry["supportSessionId"] == sys.argv[2]
+assert entry["traceId"] == sys.argv[3]
+' "$tmp_dir/http-response.json" "$edge_session" "$edge_trace"
+done
+invalid_support_session='-invalid-session'
+invalid_support_operation='eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee'
+invalid_support_log_start="$(wc -l <"$tmp_dir/commerce.log")"
+assert_status_reason 400 TOOL_SUPPORT_SESSION_INVALID 'Bad request' \
+  "invalid support session is rejected by the audit route" \
+  --request GET "http://127.0.0.1:$commerce_port/api/eval/audit/$invalid_support_session" \
+  --user "evaluation-manager:$management_password" \
+  --header 'X-Eval-Sandbox-Id: sandbox-main'
+assert_status_reason 400 TOOL_SUPPORT_SESSION_INVALID 'Bad request' \
+  "invalid support session is request-locally attributed" \
+  --request POST "http://127.0.0.1:$commerce_port/internal/tools/catalog.product.get" \
+  --header "Authorization: Bearer $obo_token" \
+  --header "X-Support-Session-Id: $invalid_support_session" \
+  --header 'X-Eval-Sandbox-Id: sandbox-main' \
+  --header 'X-Agent-Trace-Id: invalid-support-session-trace' \
+  --header "X-Agent-Operation-Id: $invalid_support_operation" \
+  --header 'Content-Type: application/json' \
+  --data '{"productId":"product-1"}'
+assert_equal '0:0' \
+  "$(mysql_query commerce_app "$commerce_app_password" commerce_db \
+    "SELECT CONCAT((SELECT COUNT(*) FROM eval_commerce_product_observation WHERE operation_id = '$invalid_support_operation'), ':', (SELECT COUNT(*) FROM eval_commerce_audit_reference WHERE operation_id = '$invalid_support_operation'))")" \
+  "invalid support session has zero durable effect"
+if tail -n "+$((invalid_support_log_start + 1))" "$tmp_dir/commerce.log" \
+  | grep -Fq -- "$invalid_support_session"; then
+  echo 'Invalid support-session value leaked into the server log.' >&2
+  exit 1
+fi
 direct_trace="direct-trace-$(openssl rand -hex 8)"
 direct_operation="$(openssl rand -hex 32)"
 failed_operation="$(openssl rand -hex 32)"

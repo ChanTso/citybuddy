@@ -205,6 +205,93 @@ class ActionIntegrationTest {
         .isEqualTo("CONSUMED:2:1");
   }
 
+  @Test
+  void canonicalEdgeSessionsPersistAndReplayWithoutNormalization() {
+    int index = 0;
+    for (String session : List.of("-" + "A".repeat(42), "_" + "A".repeat(42))) {
+      PaidFixture paid = seedPaidStandard(910 + index, "action-session-edge-" + index);
+      String trace = "trace-session-edge-" + index;
+      String turn = UUID.randomUUID().toString();
+      ActionRequestContext context =
+          new ActionRequestContext(USER, session, trace, turn, null, SCOPE);
+      PrepareActionCommand command =
+          new PrepareActionCommand("REFUND_REQUEST", paid.orderId(), 300L, "AUD");
+
+      PendingActionView created = actions.prepare(context, command);
+      PendingActionView replayed = actions.prepare(context, command);
+      String argumentHash = ActionCanonical.hash("REFUND_REQUEST", paid.orderId(), "300", "AUD");
+      String expectedActionKey =
+          ActionCanonical.hash(USER, session, turn, "REFUND_REQUEST", argumentHash);
+      Map<String, Object> durable =
+          jdbc.queryForMap(
+              "SELECT action_idempotency_key, support_session_id FROM pending_action "
+                  + "WHERE pending_action_id = ?",
+              created.pendingActionId());
+
+      assertThat(session).hasSize(43);
+      assertThat(created.supportSessionId()).isSameAs(session);
+      assertThat(created.replayed()).isFalse();
+      assertThat(replayed.pendingActionId()).isEqualTo(created.pendingActionId());
+      assertThat(replayed.supportSessionId()).isEqualTo(session);
+      assertThat(replayed.replayed()).isTrue();
+      assertThat(durable.get("support_session_id")).isEqualTo(session);
+      assertThat(durable.get("action_idempotency_key")).isEqualTo(expectedActionKey);
+      assertThat(
+              jdbc.queryForObject(
+                  "SELECT COUNT(*) FROM pending_action WHERE support_session_id = ? "
+                      + "AND turn_id = ?",
+                  Long.class,
+                  session,
+                  turn))
+          .isOne();
+      index++;
+    }
+  }
+
+  @Test
+  void whitespaceSessionVariantsRejectInsteadOfReplayingTrimmedIntent() {
+    PaidFixture paid = seedPaidStandard(912, "action-session-whitespace");
+    String turn = UUID.randomUUID().toString();
+    PrepareActionCommand command =
+        new PrepareActionCommand("REFUND_REQUEST", paid.orderId(), 300L, "AUD");
+    PendingActionView created =
+        actions.prepare(
+            new ActionRequestContext(USER, "session-main", "trace-whitespace", turn, null, SCOPE),
+            command);
+    long pendingBefore = tableCount("pending_action");
+    long receiptBefore = tableCount("action_receipt");
+    long refundBefore = tableCount("mock_refund");
+    long outboxBefore = tableCount("commerce_outbox");
+
+    for (String invalid : List.of(" session-main", "session-main ", "session main")) {
+      assertThatThrownBy(
+              () ->
+                  actions.prepare(
+                      new ActionRequestContext(
+                          USER, invalid, "trace-whitespace", turn, null, SCOPE),
+                      command))
+          .isInstanceOfSatisfying(
+              ActionException.class,
+              exception -> {
+                assertThat(exception.status()).isEqualTo(400);
+                assertThat(exception.category()).isEqualTo("VALIDATION");
+              });
+    }
+
+    assertThat(created.supportSessionId()).isEqualTo("session-main");
+    assertThat(tableCount("pending_action")).isEqualTo(pendingBefore);
+    assertThat(tableCount("action_receipt")).isEqualTo(receiptBefore);
+    assertThat(tableCount("mock_refund")).isEqualTo(refundBefore);
+    assertThat(tableCount("commerce_outbox")).isEqualTo(outboxBefore);
+    assertThat(
+            jdbc.queryForObject(
+                "SELECT COUNT(*) FROM pending_action WHERE pending_action_id = ? "
+                    + "AND support_session_id = 'session-main'",
+                Long.class,
+                created.pendingActionId()))
+        .isOne();
+  }
+
   private void assertPreparedBindings(
       JsonNode body, String orderId, String traceId, String turnId, boolean replayed) {
     Map<String, Object> durable =
@@ -755,6 +842,14 @@ class ActionIntegrationTest {
     }
     return jdbc.queryForObject(
         "SELECT COUNT(*) FROM " + table + " WHERE " + key + " = ?", Long.class, value);
+  }
+
+  private long tableCount(String table) {
+    if (!List.of("pending_action", "action_receipt", "mock_refund", "commerce_outbox")
+        .contains(table)) {
+      throw new IllegalArgumentException("Unregistered test count target");
+    }
+    return jdbc.queryForObject("SELECT COUNT(*) FROM " + table, Long.class);
   }
 
   private String receiptOutbox(String receiptId) {
