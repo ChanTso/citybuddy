@@ -1,10 +1,9 @@
 # CityBuddy implementation index
 
-**Document version:** v0.43\
-**Verification date:** 2026-08-05\
-**Repository phase:** CB-151 is blocked after its implementation pull request closed without merge.
-No slice is READY or IN_PROGRESS pending an owner-approved Level 3
-portfolio-route disposition.
+**Document version:** v0.44\
+**Verification date:** 2026-08-06\
+**Repository phase:** CB-151 remains BLOCKED. CB-152 is the sole READY slice in the
+owner-approved three-part measurement route. No measurement implementation has begun.
 
 ## How to use this index
 
@@ -58,6 +57,8 @@ The repository contains the verified local-runtime foundations, identity vertica
 - format, lint, type/compile, unit-test, build, pre-commit, Gitleaks, and GitHub Actions paths through `make ci`.
 
 It does not yet contain real model-provider access, deployment, or measured performance claims.
+The CB-151 generalized demo/reset/fault harness did not merge; the current route proceeds through
+the measurement-only CB-152, CB-153, and CB-154 slices without inheriting that harness.
 
 Cross-slice target architecture, preflight conclusions, service/data ownership, interface and security boundaries, sequence diagrams, route outcomes, risks, and change control live in [docs/CONTRACTS.md](docs/CONTRACTS.md).
 
@@ -85,18 +86,20 @@ Cross-slice target architecture, preflight conclusions, service/data ownership, 
 
 ## Complete route
 
-The owner-approved portfolio P0/P1 route terminates at `CB-152`. `CB-151` is blocked, `CB-152`
-remains planned, and no replacement or downstream bypass is authorized. `CB-900`, `CB-910`, and
-`CB-920` remain deferred outlines outside this Goal and must not be promoted, expanded, or used to
-create post-`CB-152` work. The approved `CB-150` scope is limited to Agent metrics and an optional,
-default-no-op Agent trace sink; it does not add Auth or Commerce metrics. Its cache measurements are
-FAQ mapping/answer hit rates and Elasticsearch knowledge-search avoidance; provider-attempt counters
-remain diagnostic and do not produce a model-call-saving result. `CB-152` must
-close with real load, latency, and quality evidence measured and environment-labelled in the local
-Docker Compose topology. `CB-114` and `CB-115` are deferred vNext evolution and do not reactivate
-automatically after `CB-152`. `CB-130`, `CB-131`, and `CB-132` are also retained only as vNext
-evolution; the current route does not implement Agent successful confirmation, Agent ActionReceipt
-projection or turn commit, memory/PII, handoff tickets, or failure-candidate export.
+The owner-approved portfolio P0/P1 route terminates at `CB-154`; no `CB-155` is authorized.
+`CB-151` remains immutable `BLOCKED` history and has no replacement in the current route.
+CB-152, CB-153, and CB-154 are measurement-only slices whose thin runners may compose existing
+runtime commands but may not recreate the unmerged generalized demo/reset/fault harness. The route
+retains exactly five portfolio outputs: seckill QPS/concurrency correctness, Agent-path P99, RAG
+HitRate@5/MRR, FAQ mapping/answer hit rates, and Elasticsearch knowledge-search avoidance. Each
+measurement slice publishes its own persistent result bundle; CB-152 and CB-153 results become
+independently valid at their own verification and are not gated or rewritten by CB-154 aggregation.
+The approved `CB-150` scope remains limited to Agent metrics and an optional default-no-op trace
+sink; provider-attempt counters remain diagnostic and do not produce a model-call-saving result.
+`CB-900`, `CB-910`, and `CB-920` remain deferred outlines outside this Goal. `CB-114`, `CB-115`,
+`CB-130`, `CB-131`, and `CB-132` remain deferred vNext evolution and do not reactivate automatically
+after CB-154. The current route does not implement Agent successful confirmation, Agent
+ActionReceipt projection or turn commit, memory/PII, handoff tickets, or failure-candidate export.
 
 The linked slice name is the canonical detailed specification. Target outcomes are retained separately in the [route outcome catalog](docs/CONTRACTS.md#contracts-route-outcomes).
 
@@ -148,7 +151,9 @@ The linked slice name is the canonical detailed specification. Target outcomes a
 | [CB-140 — Portfolio web demonstration and README truth](docs/slices/CB-140.md) | P1 | `VERIFIED` | `CB-020`, `CB-030`, `CB-060`, `CB-082`, `CB-091`, `CB-118`, `CB-122` |
 | [CB-150 — Agent metrics and optional no-op trace sink](docs/slices/CB-150.md) | P1 | `VERIFIED` | `CB-140` |
 | [CB-151 — Verified-path demo reset and fault drills](docs/slices/CB-151.md) | P1 | `BLOCKED` | `CB-150` |
-| [CB-152 — Verified-path load, latency, and quality evidence](docs/slices/CB-152.md) | P1 | `PLANNED` | `CB-151` |
+| [CB-152 — Seckill load and concurrency-correctness evidence](docs/slices/CB-152.md) | P1 | `READY` | `CB-150` |
+| [CB-153 — Agent-path latency evidence](docs/slices/CB-153.md) | P1 | `PLANNED` | `CB-150` |
+| [CB-154 — Retrieval/cache quality and final portfolio evidence](docs/slices/CB-154.md) | P1 | `PLANNED` | `CB-152`, `CB-153` |
 | `CB-900 — Multimodal intake and object storage outline` | P2 | `DEFERRED` | Explicit promotion only |
 | `CB-910 — Action recovery scanning and advanced resilience outline` | P2 | `DEFERRED` | Explicit promotion only |
 | `CB-920 — Advanced retrieval, provider-cache experiments, and expanded operations views` | P2 | `DEFERRED` | Explicit promotion only |

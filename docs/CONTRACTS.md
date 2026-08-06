@@ -558,7 +558,9 @@ Slice status, priority, dependencies, and ordering live only in [IMPLEMENTATION.
 | `CB-140` | Minimal portfolio web plus factual README for login, products, seckill reservation/status, support chat, and PendingAction prepare/clarification/decline/expiry. No successful confirmation, receipt card, cart, full store, or workstation. |
 | `CB-150` | Agent-only operational metrics for verified paths and an optional default-no-op Agent trace sink that never becomes business or evidence truth. |
 | `CB-151` | Scripted reset/demo and phase-bound fault drills only for verified identity, catalog, ordering/seckill, payment/refund, RAG, chat, and PendingAction prepare/decline/expiry paths. |
-| `CB-152` | Five environment/dataset/duration-labelled outputs: JMeter seckill QPS and concurrency correctness; Locust/Mock-LLM ordinary-chat, RAG, and PendingAction-prepare P99; RAG HitRate@5/MRR; FAQ mapping/answer cache hit rates; and Elasticsearch knowledge-search avoidance. Separately identify the first evidenced bottleneck in the local Docker Compose topology, or `indeterminate`. No unimplemented or real-provider claims. |
+| `CB-152` | JMeter seckill load evidence with authoritative Commerce concurrency correctness and independently committed result artifacts. |
+| `CB-153` | Locust/Mock-LLM path-separated Agent latency evidence with independently committed result artifacts. |
+| `CB-154` | RAG quality, FAQ/cache and Elasticsearch-avoidance evidence plus a five-output aggregate that references rather than rewrites CB-152/153 results. |
 | `CB-900` | Future multimodal boundary only. |
 | `CB-910` | Future recovery scanner and observed-failure-driven resilience only. |
 | `CB-920` | Optional experiments and expanded views; no result assumed. |
@@ -792,6 +794,89 @@ producer. Its five outputs remain JMeter seckill QPS/concurrency correctness; Lo
 RAG HitRate@5/MRR; FAQ mapping/answer hit rates; and Elasticsearch knowledge-search avoidance. This
 correction changes no ownership, API, transaction, retrieval policy, cache behavior, route order,
 Agent-only metrics scope, trace scope, or measurement count.
+
+<a id="contract-measurement-route-disposition"></a>
+
+**Resolved Level 3 portfolio-route disposition — 2026-08-06 (CB-151 blocked measurement-route
+split):** PR #75 closed without merge after CB-151 exhausted its review recovery budget. CB-151's
+Goal, blocker evidence, Completion record, and `BLOCKED` history remain immutable; the current route
+creates no CB-151 replacement and inherits no code, test, review, CI, verification, or Resume-ready
+credit from that pull request. The generalized persistent demo/reset/fault harness is dropped from
+the current portfolio route. No PR #75 code or state/artifact schema may be copied, cherry-picked,
+or treated as an implemented prerequisite.
+
+The original CB-152 had not started when the owner applied the complexity gate. It combined three
+independently deliverable boundaries with separable acceptance, rejection, recovery, truth, and
+tool evidence: (1) JMeter against Commerce public seckill APIs and authoritative
+reservation/order/inventory-ledger truth, (2) Locust with a deterministic Mock LLM against Agent
+public paths and minimum durable path-validity truth, and (3) offline labelled RAG evaluation plus
+Agent FAQ/cache counters, real Elasticsearch-call reconciliation, and final portfolio aggregation.
+JMeter and Locust are distinct tools; Commerce and Agent are distinct truth owners; concurrency
+correctness and latency have different rejection evidence; offline retrieval/cache quality does not
+depend on a load runner; no atomic transaction or security boundary spans the three outcomes; and
+the original combined unit could not reasonably be reviewed, tested, recovered, and merged as one
+coherent pull request. The split occurs before any CB-152 implementation and neither adds nor
+removes a portfolio output or changes business behavior.
+
+The current technical dependencies are `CB-152 ← CB-150`, `CB-153 ← CB-150`, and `CB-154 ←
+CB-152, CB-153`. CB-152 and CB-153 are technically independent sibling measurements; canonical
+route order executes CB-152 first and does not invent a dependency solely to encode that order.
+CB-154 depends on both because it consumes their committed bundles. This disposition supersedes
+only the current dependency and terminus mappings in the 2026-08-02 portfolio-route decision and
+the historical CB-152 terminus supplements; their original facts remain historical record. The
+route now terminates at CB-154, no CB-155 is authorized, and completion leaves no `READY` or
+`IN_PROGRESS` row. CB-151 remains `BLOCKED`; CB-152 is the sole `READY` row; CB-153 and CB-154 are
+`PLANNED`. Blocked and deferred Agent confirmation/receipt, memory, handoff, export, rollback,
+cleanup, and other vNext work does not reactivate automatically.
+
+The five portfolio outputs are unchanged: seckill QPS/concurrency correctness; path-separated Agent
+P99; RAG HitRate@5/MRR; FAQ mapping/answer hit rates; and Elasticsearch knowledge-search avoidance.
+First bottleneck is explanatory metadata, not a sixth output. Each slice owns a persistent,
+sanitized, checker-reconstructable bundle at `evidence/measurements/<slice-id>/` containing at least
+`manifest.json`, `result.json`, `checksums.sha256`, and lossless bounded `raw/` artifacts including
+failures. Each specification freezes its artifact budget; exceeding it stops and adjusts the
+predeclared run instead of discarding samples. CB-152 and CB-153 results become independently valid
+on their own verification, raw reconstruction, independent `NO BLOCKER`, and exact-main checks.
+CB-154 may validate and reference their committed schema and digest but may not recalculate,
+overwrite, or gate their validity.
+
+All three slices are restricted to single-command ephemeral thin orchestration over the existing
+runtime chain: `make init-local`, `make up` with a unique `ENV_FILE` and
+`COMPOSE_PROJECT_NAME`, required application child processes, readiness, measurement,
+authoritative reconciliation, artifact write, owned-child shutdown, explicit `make reset-local
+CONFIRM_RESET_LOCAL=1`, and exact residue checks. `make up` retains its existing RocketMQ store and
+runtime initialization, health, grant, and three-migration responsibilities. `make down` preserves
+volumes and the env file and cannot close cleanup. Runners keep no cross-command active state; use
+no active-run/phase/PID/container registry, generalized reset/demo/fault or resume semantics,
+host-wide prune, default project, user `.env`, wildcard cleanup, or `make demo-*`; and prove exact
+project containers, networks, volumes, owned processes, generated env, and temporary secret residue
+are zero/absent without allowing cleanup failure to hide the first failure.
+
+After the first complete evidence execution, each measurement slice has at most two total
+scope-owned semantic recovery cycles, each requiring unique evidence, the minimum correction,
+targeted verification, and the required full evidence/review. Read-only preflight, source
+attribution without correction, superseded CI, platform-confirmed external-infrastructure rerun,
+and commands denied before repository execution do not count. Exhaustion cannot open a third
+framework lane, rename the same root cause, weaken raw/artifact truth, or rebuild a general runner;
+the slice stops under its predeclared blocked or claim-reduction rule and waits for the owner.
+
+CB-152 Q01-Q09, unexplained-error zero, duplicate/over-allocation zero, and residue zero are never
+reducible. CB-153 per-path raw samples and error accounting, prohibition on mixed aggregation,
+path-validity controls, and residue zero are never reducible. CB-154 freezes a blocking core before
+execution: a versioned labelled RAG set and raw ranking reconstruction; cold miss and warm hit;
+bypass/unavailable/invalid exclusion from mapping/answer hit denominators; formulas `hit / (hit +
+miss)` and `cache_served / (cache_served + elasticsearch_issued)`; and request-level proof that every
+cache-served choice issues zero logical Elasticsearch searches while every issued choice invokes
+exactly one, including invoked-then-failed. Provider attempts remain diagnostic. Core failure blocks
+CB-154. Expiry and replay are a predeclared extended layer: only after two exhausted semantic cycles
+may they be marked residual with workload scope limited to cold/warm eligible synthetic requests,
+without changing a core formula or claiming all-scenario coverage.
+
+This disposition changes the public route, linked specifications, route outcomes, frozen decision
+record, and directly conflicting README facts only. It implements no measurement, runner, artifact,
+test, business behavior, production code, workflow, dependency, migration, schema, grant, API,
+stored data, service/language responsibility, truth owner, security boundary, or transaction
+boundary. It makes no private-core or ServiceEval change.
 
 **Resolved contract correction — 2026-08-06 (opaque support-session consumer closure):** The owner
 explicitly authorized this correction in a defect-correction non-slice lane; it is not a silent
