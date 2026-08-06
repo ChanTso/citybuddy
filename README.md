@@ -97,7 +97,9 @@ make test-knowledge-rebuild-integration
 make test-evaluation-sandbox-integration
 ```
 
-They exercise real local services and dependencies, use isolated temporary fixtures, and clean them up. They are verification harnesses rather than long-running demo provisioning. A persistent reset/demo fixture is intentionally deferred to CB-151.
+They exercise real local services and dependencies, use isolated temporary fixtures, and clean them
+up. They are verified engineering evidence rather than long-running demo provisioning. The CB-151
+generalized persistent demo/reset/fault harness was not merged and is not part of the current route.
 
 ## Web
 
@@ -122,7 +124,12 @@ npm --prefix web run preview
 
 ## Ordered demonstration
 
-Start from a direct-user fixture that has the published-product, seckill-reservation, support-session, and support-chat permissions used by the verified integration topology. The current route does not yet provide a persistent demo-data reset command, so the automated commands below are the reproducible source of fixtures and service evidence; do not claim an interactive manual run unless those services and equivalent fixtures are actually active.
+CB-140 supplies the interactive web surface. Start from a direct-user fixture that has the
+published-product, seckill-reservation, support-session, and support-chat permissions used by the
+verified integration topology. The current route does not provide a persistent demo-data reset
+command, so the automated commands below are the reproducible source of fixtures and service
+evidence; do not claim an interactive manual run unless those services and equivalent fixtures are
+actually active.
 
 1. Run `make test-identity-integration` to verify login, server-owned support session creation, ordinary JSON chat, idempotent replay, and filtered SSE without private events.
 2. Run `make test-catalog-integration` to verify published-product reads, reservation submission, owner-scoped polling, rejection, ordered/cancelled terminal truth, and no early order claim.
@@ -157,8 +164,17 @@ make ci
 
 ## Current limitations
 
-CityBuddy has no cloud deployment or production real-provider claim, no measured performance result, and no operational-readiness claim. The optional Agent metrics and trace mirror do not supply those claims. CB-151 persistent demo reset/fault drills and CB-152 load/latency/quality measurements are not implemented.
+CityBuddy has no cloud deployment or production real-provider claim, no measured performance or
+quality result, and no operational-readiness claim. The optional Agent metrics and trace mirror do
+not supply those claims. The current measurement-only route is CB-152 seckill evidence, CB-153
+Agent-path latency evidence, and CB-154 retrieval/cache quality plus final aggregation; it ends at
+CB-154. Future measurement commands must be ephemeral thin wrappers over `make init-local`,
+`make up`, the required application processes, and explicit `make reset-local
+CONFIRM_RESET_LOCAL=1`, not a `make demo-*` lifecycle framework. No runner or result artifact exists
+yet.
 
 The current Agent route has no successful confirmation, local ActionReceipt projection, `action_completed` turn, or receipt card. The blocked CB-121/CB-123 history does not make those capabilities available. The web never infers action type, amount, order, deadline, identifier, or terminal truth from reply prose.
 
-MemoryPacker/watermarks, the PII/output-safety lane, handoff or `HUMAN_PENDING`, failure-candidate export, cart, checkout, full storefront, agent workstation, multimodal intake, and deployment are outside the current route.
+MemoryPacker/watermarks, the PII/output-safety lane, handoff or `HUMAN_PENDING`, failure-candidate
+export, cart, checkout, full storefront, agent workstation, multimodal intake, and deployment are
+outside the current route.
