@@ -288,7 +288,10 @@ def test_seckill_result_never_claims_an_order_without_explicit_durable_state() -
         "ADMITTED",
         "REJECTED",
         "ORDERED",
+        "CANCELLED",
     }
+    assert result["properties"]["projectionVersion"]["minimum"] == 1
+    assert result["properties"]["projectionVersion"]["maximum"] == 4
     assert {"durableOrderCreated", "orderId", "replay", "projectionVersion"} <= set(
         result["required"]
     )
