@@ -133,6 +133,14 @@ request. A later semantic diff change requires the checklist to be executed and 
 - Reject evidence based on distinct timestamps, a test-only query, or a checker that validates
   fields without validating their order.
 
+### Closed public state/version contract equality
+
+- Compare the final migration or state constraint, runtime enum and transition, public OpenAPI
+  enum and version bounds, and executable contract assertion. All four must name the same closed
+  state set and version range, including the highest terminal state's public projection.
+- Treat an executable test that preserves a stale expected state or version as a contract defect,
+  not as coverage. A runtime-enum-to-OpenAPI equality guard must fail when either side evolves alone.
+
 ### Bidirectional audit/state completeness reconciliation
 
 - Make the reconciliation predicate total over every audited row in the sandbox scope. Do not let
