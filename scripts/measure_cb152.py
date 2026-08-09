@@ -464,32 +464,62 @@ def hash_locator(state: RunState, kind: str, value: str | None) -> str | None:
     return hashlib.sha256(state.hash_salt + f"cb152:{kind}:".encode() + value.encode()).hexdigest()
 
 
-def classify_public(state: RunState, response: HttpResult, *, operation: str) -> PublicRecord:
+def canonical_uuid(value: Any) -> str | None:
+    if not isinstance(value, str) or len(value) != 36:
+        return None
+    try:
+        return value if str(uuid.UUID(value)) == value else None
+    except ValueError:
+        return None
+
+
+def classify_public(
+    state: RunState,
+    response: HttpResult,
+    *,
+    operation: str,
+    expected_activity_id: str,
+) -> PublicRecord:
+    empty = {
+        "classification": "UNKNOWN",
+        "responseCode": response.status,
+        "activityId": None,
+        "quantity": None,
+        "activityProjectionVersion": None,
+        "state": None,
+        "decisionCode": None,
+        "projectionVersion": None,
+        "durableOrderCreated": None,
+        "replay": None,
+        "reservationLocatorHash": None,
+        "orderLocatorHash": None,
+    }
     try:
         body = strict_json_text(
             response.body.decode("utf-8"), source=f"public {operation} response"
         )
     except (UnicodeDecodeError, BundleError):
-        return PublicRecord(
-            {
-                "classification": "PARSE_ERROR",
-                "state": None,
-                "decisionCode": None,
-                "projectionVersion": None,
-                "durableOrderCreated": None,
-                "replay": None,
-                "reservationLocatorHash": None,
-                "orderLocatorHash": None,
-            },
-            None,
-            None,
+        empty["classification"] = (
+            "TRANSPORT_ERROR"
+            if response.status <= 0
+            else "PARSE_ERROR"
+            if response.status in {200, 201, 202, 409}
+            else "UNEXPECTED_ERROR"
         )
+        return PublicRecord(empty, None, None)
+    classification = (
+        "TRANSPORT_ERROR"
+        if response.status <= 0
+        else "PARSE_ERROR"
+        if response.status in {200, 201, 202, 409}
+        else "UNEXPECTED_ERROR"
+    )
+    reservation_id = order_id = None
     if not isinstance(body, dict):
-        classification = "UNKNOWN"
-        reservation_id = order_id = None
+        pass
     elif set(body) == {"category", "message"}:
-        classification = "UNEXPECTED_ERROR"
-        reservation_id = order_id = None
+        if all(isinstance(body[key], str) and body[key] for key in ("category", "message")):
+            classification = "UNEXPECTED_ERROR"
     else:
         expected = {
             "reservationId",
@@ -503,100 +533,99 @@ def classify_public(state: RunState, response: HttpResult, *, operation: str) ->
             "durableOrderCreated",
             "orderId",
         }
-        classification = "BUSINESS" if set(body) == expected else "UNKNOWN"
-        reservation_id = (
-            body.get("reservationId") if isinstance(body.get("reservationId"), str) else None
-        )
-        order_id = body.get("orderId") if isinstance(body.get("orderId"), str) else None
-        state_name = body.get("state")
-        decision = body.get("decisionCode")
-        projection = body.get("projectionVersion")
-        durable = body.get("durableOrderCreated")
-        replay = body.get("replay")
-        quantity = body.get("quantity")
-        activity_version = body.get("activityProjectionVersion")
-        try:
-            if reservation_id is None:
-                raise ValueError
-            uuid.UUID(reservation_id)
-            if order_id is not None:
-                uuid.UUID(order_id)
-            if state_name not in {"PENDING", "ADMITTED", "REJECTED", "ORDERED", "CANCELLED"}:
-                raise ValueError
-            if decision not in {
-                None,
-                "ADMITTED",
-                "ACTIVITY_INACTIVE",
-                "NOT_OPEN",
-                "EXPIRED",
-                "STALE_VERSION",
-                "EXHAUSTED",
-                "DUPLICATE_USER",
-                "TRANSACTION_TIMEOUT",
-            }:
-                raise ValueError
-            if (
-                not isinstance(projection, int)
-                or isinstance(projection, bool)
-                or not 1 <= projection <= 4
-            ):
-                raise ValueError
-            if not isinstance(quantity, int) or isinstance(quantity, bool) or quantity < 1:
-                raise ValueError
-            if (
-                not isinstance(activity_version, int)
-                or isinstance(activity_version, bool)
-                or activity_version < 1
-            ):
-                raise ValueError
-            if not isinstance(durable, bool) or not isinstance(replay, bool):
-                raise ValueError
-            expected_projection = {
-                "PENDING": 1,
-                "ADMITTED": 2,
-                "REJECTED": 2,
-                "ORDERED": 3,
-                "CANCELLED": 4,
-            }[state_name]
-            if projection != expected_projection:
-                raise ValueError
-            if state_name == "PENDING" and decision is not None:
-                raise ValueError
-            if state_name == "REJECTED" and (decision is None or decision == "ADMITTED"):
-                raise ValueError
-            if state_name in {"ADMITTED", "ORDERED", "CANCELLED"} and decision != "ADMITTED":
-                raise ValueError
-            if durable != (state_name in {"ORDERED", "CANCELLED"}) or durable != (
-                order_id is not None
-            ):
-                raise ValueError
-            allowed_status = {
-                "submit": {
-                    "PENDING": {202},
-                    "ADMITTED": {200 if replay else 201},
-                    "REJECTED": {409},
-                    "ORDERED": {200},
-                    "CANCELLED": {200},
-                },
-                "poll": {
-                    state: {200}
-                    for state in ("PENDING", "ADMITTED", "REJECTED", "ORDERED", "CANCELLED")
-                },
-            }
-            if response.status not in allowed_status[operation][state_name]:
-                raise ValueError
-        except (KeyError, ValueError):
-            classification = "UNKNOWN"
-    sanitized = {
-        "classification": classification,
-        "state": body.get("state") if isinstance(body, dict) else None,
-        "decisionCode": body.get("decisionCode") if isinstance(body, dict) else None,
-        "projectionVersion": body.get("projectionVersion") if isinstance(body, dict) else None,
-        "durableOrderCreated": body.get("durableOrderCreated") if isinstance(body, dict) else None,
-        "replay": body.get("replay") if isinstance(body, dict) else None,
-        "reservationLocatorHash": hash_locator(state, "reservation", reservation_id),
-        "orderLocatorHash": hash_locator(state, "order", order_id),
-    }
+        if set(body) == expected:
+            reservation_id = canonical_uuid(body["reservationId"])
+            order_id = None if body["orderId"] is None else canonical_uuid(body["orderId"])
+            state_name = body["state"]
+            decision = body["decisionCode"]
+            projection = body["projectionVersion"]
+            durable = body["durableOrderCreated"]
+            replay = body["replay"]
+            quantity = body["quantity"]
+            activity_version = body["activityProjectionVersion"]
+            try:
+                if reservation_id is None or (body["orderId"] is not None and order_id is None):
+                    raise ValueError
+                if body["activityId"] != expected_activity_id:
+                    raise ValueError
+                if quantity != 1 or isinstance(quantity, bool):
+                    raise ValueError
+                if activity_version != PROJECTION_VERSION or isinstance(activity_version, bool):
+                    raise ValueError
+                if operation not in {"submit", "poll"}:
+                    raise ValueError
+                if not isinstance(durable, bool) or not isinstance(replay, bool):
+                    raise ValueError
+                if state_name not in {"PENDING", "ADMITTED", "REJECTED", "ORDERED", "CANCELLED"}:
+                    raise ValueError
+                if decision not in {
+                    None,
+                    "ADMITTED",
+                    "ACTIVITY_INACTIVE",
+                    "NOT_OPEN",
+                    "EXPIRED",
+                    "STALE_VERSION",
+                    "EXHAUSTED",
+                    "DUPLICATE_USER",
+                    "TRANSACTION_TIMEOUT",
+                }:
+                    raise ValueError
+                if not isinstance(projection, int) or isinstance(projection, bool):
+                    raise ValueError
+                expected_projection = {
+                    "PENDING": 1,
+                    "ADMITTED": 2,
+                    "REJECTED": 2,
+                    "ORDERED": 3,
+                    "CANCELLED": 4,
+                }[state_name]
+                if projection != expected_projection:
+                    raise ValueError
+                if state_name == "PENDING" and decision is not None:
+                    raise ValueError
+                if state_name == "REJECTED" and (decision is None or decision == "ADMITTED"):
+                    raise ValueError
+                if state_name in {"ADMITTED", "ORDERED", "CANCELLED"} and decision != "ADMITTED":
+                    raise ValueError
+                if durable != (state_name in {"ORDERED", "CANCELLED"}) or durable != (
+                    order_id is not None
+                ):
+                    raise ValueError
+                allowed_status = {
+                    "submit": {
+                        "PENDING": {202} if replay is False else set(),
+                        "ADMITTED": {200} if replay else {201},
+                        "REJECTED": {409},
+                        "ORDERED": {200} if replay else set(),
+                        "CANCELLED": {200} if replay else set(),
+                    },
+                    "poll": {
+                        state: {200}
+                        for state in ("PENDING", "ADMITTED", "REJECTED", "ORDERED", "CANCELLED")
+                    },
+                }
+                if response.status not in allowed_status[operation][state_name]:
+                    raise ValueError
+            except (KeyError, ValueError):
+                reservation_id = order_id = None
+            else:
+                classification = "BUSINESS"
+    sanitized = dict(empty)
+    sanitized["classification"] = classification
+    if classification == "BUSINESS":
+        for key in (
+            "activityId",
+            "quantity",
+            "activityProjectionVersion",
+            "state",
+            "decisionCode",
+            "projectionVersion",
+            "durableOrderCreated",
+            "replay",
+        ):
+            sanitized[key] = body[key]
+        sanitized["reservationLocatorHash"] = hash_locator(state, "reservation", reservation_id)
+        sanitized["orderLocatorHash"] = hash_locator(state, "order", order_id)
     return PublicRecord(sanitized, reservation_id, order_id)
 
 
@@ -613,25 +642,34 @@ def submit(
         headers={"Idempotency-Key": idempotency_key},
         body={"quantity": 1, "expectedActivityVersion": PROJECTION_VERSION},
     )
-    return classify_public(state, response, operation="submit")
+    return classify_public(state, response, operation="submit", expected_activity_id=activity_id)
 
 
-def poll(state: RunState, token: str, reservation_id: str) -> tuple[HttpResult, PublicRecord]:
+def poll(
+    state: RunState, token: str, reservation_id: str, activity_id: str
+) -> tuple[HttpResult, PublicRecord]:
     response = http(
         "GET",
         f"http://127.0.0.1:{state.commerce_port}/api/reservations/{reservation_id}",
         token=token,
     )
-    return response, classify_public(state, response, operation="poll")
+    return response, classify_public(
+        state, response, operation="poll", expected_activity_id=activity_id
+    )
 
 
 def wait_terminal(
-    state: RunState, token: str, reservation_id: str, *, require_cancelled: bool = False
+    state: RunState,
+    token: str,
+    reservation_id: str,
+    activity_id: str,
+    *,
+    require_cancelled: bool = False,
 ) -> PublicRecord:
     deadline = time.monotonic() + state.profile.settlement_timeout_seconds
     last: PublicRecord | None = None
     while time.monotonic() < deadline:
-        _, last = poll(state, token, reservation_id)
+        _, last = poll(state, token, reservation_id, activity_id)
         if last.sanitized["classification"] != "BUSINESS":
             raise RuntimeError("public poll failed closed classification")
         state_name = last.sanitized["state"]
@@ -974,7 +1012,9 @@ def run_jmeter(
     return jtl
 
 
-def parse_jtl(state: RunState, path: Path, expected_count: int) -> list[PublicRecord]:
+def parse_jtl(
+    state: RunState, path: Path, expected_count: int, expected_activity_id: str
+) -> list[PublicRecord]:
     records: list[PublicRecord] = []
     indexes: set[int] = set()
     for _, element in ET.iterparse(path, events=("end",)):
@@ -992,7 +1032,12 @@ def parse_jtl(state: RunState, path: Path, expected_count: int) -> list[PublicRe
             else ""
         )
         response = HttpResult(int(element.attrib.get("rc", "0")), body_text.encode())
-        public = classify_public(state, response, operation="submit")
+        public = classify_public(
+            state,
+            response,
+            operation="submit",
+            expected_activity_id=expected_activity_id,
+        )
         public.sanitized.update(
             {
                 "sampleIndex": sample_index,
@@ -1215,6 +1260,7 @@ def collect_reconciliation(
     measured: list[PublicRecord],
     measured_tokens: dict[str, str],
     q07_initial: PublicRecord,
+    q07_initial_at: dt.datetime,
     q07_token: str,
     q07_intent: str,
     q08_initial: PublicRecord,
@@ -1256,17 +1302,22 @@ def collect_reconciliation(
     settle_cutoff = utc_now()
 
     q07_replay1 = submit(state, q07_token, fixture["activityId"], q07_intent)
+    q07_replay1_at = utc_now()
     q07_replay2 = submit(state, q07_token, fixture["activityId"], q07_intent)
+    q07_replay2_at = utc_now()
     q07_rows = []
-    for phase, record in (
-        ("initial", q07_initial),
-        ("replay1", q07_replay1),
-        ("replay2", q07_replay2),
+    for phase, record, observed_at in (
+        ("initial", q07_initial, q07_initial_at),
+        ("replay1", q07_replay1, q07_replay1_at),
+        ("replay2", q07_replay2, q07_replay2_at),
     ):
         q07_rows.append(
             {
                 "caseId": "same-intent-control-1",
                 "phase": phase,
+                "observedAt": iso(observed_at),
+                "responseCode": record.sanitized["responseCode"],
+                "classification": record.sanitized["classification"],
                 "reservationLocatorHash": record.sanitized["reservationLocatorHash"],
                 "activityId": fixture["activityId"],
                 "quantity": 1,
@@ -1285,10 +1336,12 @@ def collect_reconciliation(
     )
     if len(q08_before_rows) != 1 or len(q08_before_rows[0]) != len(q08_before_header):
         raise RuntimeError("Q08 before rowset is not exactly one row")
-    owner_response, owner_poll = poll(state, q08_token, q08_initial.reservation_id)
+    owner_response, owner_poll = poll(
+        state, q08_token, q08_initial.reservation_id, fixture["activityId"]
+    )
     unknown_id = str(uuid.uuid4())
-    unknown_response, _ = poll(state, q08_token, unknown_id)
-    other_response, _ = poll(state, other_token, q08_initial.reservation_id)
+    unknown_response, _ = poll(state, q08_token, unknown_id, fixture["activityId"])
+    other_response, _ = poll(state, other_token, q08_initial.reservation_id, fixture["activityId"])
     q08_controls: list[dict[str, Any]] = []
     for kind, response, locator in (
         ("owner", owner_response, q08_initial.reservation_id),
@@ -1325,6 +1378,7 @@ def collect_reconciliation(
             state,
             locator_tokens[record.reservation_id],
             record.reservation_id,
+            fixture["activityId"],
             require_cancelled=True,
         )
         public_by_hash[terminal.sanitized["reservationLocatorHash"]] = terminal
@@ -1519,12 +1573,14 @@ def machine_metadata() -> dict[str, Any]:
     docker = run(
         ["docker", "version", "--format", "{{.Server.Version}}"], check=False
     ).stdout.strip()
+    if not memory.isdigit() or not docker or not isinstance(os.cpu_count(), int):
+        raise RuntimeError("machine metadata is incomplete")
     return {
         "os": platform.system(),
         "architecture": platform.machine(),
         "logicalCpuCount": os.cpu_count(),
-        "memoryBytes": int(memory) if memory.isdigit() else None,
-        "dockerServerVersion": docker or "unknown",
+        "memoryBytes": int(memory),
+        "dockerServerVersion": docker,
     }
 
 
@@ -1562,6 +1618,10 @@ def build_bundle_payload(
         "toolVersion": JMETER_VERSION,
         "toolArchiveUrl": JMETER_URL,
         "toolArchiveSha512": JMETER_SHA512,
+        "unpaidTimeoutSeconds": state.profile.unpaid_timeout_seconds,
+        "settlementTimeoutSeconds": state.profile.settlement_timeout_seconds,
+        "jmeterConnectTimeoutMs": state.profile.connect_timeout_ms,
+        "jmeterResponseTimeoutMs": state.profile.response_timeout_ms,
         "warmup": {
             "samples": state.profile.warmup_samples,
             "threads": state.profile.warmup_threads,
@@ -1582,7 +1642,11 @@ def build_bundle_payload(
         "commands": [
             "make init-local ENV_FILE=<run-env>",
             "make up ENV_FILE=<run-env> COMPOSE_PROJECT_NAME=<unique-project>",
-            "Apache JMeter non-GUI fixed-sample warm-up and measured runs",
+            "Apache JMeter non-GUI fixed-sample warm-up and measured runs "
+            f"-JconnectTimeoutMs={state.profile.connect_timeout_ms} "
+            f"-JresponseTimeoutMs={state.profile.response_timeout_ms}",
+            f"Commerce unpaid timeout {state.profile.unpaid_timeout_seconds}s",
+            f"bounded settlement timeout {state.profile.settlement_timeout_seconds}s",
             "make reset-local CONFIRM_RESET_LOCAL=1 ENV_FILE=<run-env> "
             "COMPOSE_PROJECT_NAME=<unique-project>",
             "python reconstruct.py <bundle>",
@@ -1875,11 +1939,13 @@ def execute_measurement(
         ramp_seconds=state.profile.warmup_ramp_seconds,
         label="warmup",
     )
-    warm_records = parse_jtl(state, warm_jtl, state.profile.warmup_samples)
+    warm_records = parse_jtl(
+        state, warm_jtl, state.profile.warmup_samples, fixture["warmActivityId"]
+    )
     for record, row in zip(warm_records, warm_rows, strict=True):
         if record.sanitized["classification"] != "BUSINESS" or record.reservation_id is None:
             raise RuntimeError("warm-up produced an unclassified or missing reservation")
-        wait_terminal(state, row[1], record.reservation_id)
+        wait_terminal(state, row[1], record.reservation_id, fixture["warmActivityId"])
     warm_open = mysql_scalar(
         state,
         "SELECT COUNT(*) FROM seckill_reservation WHERE activity_id = ? "
@@ -1895,11 +1961,12 @@ def execute_measurement(
     q07_intent = "cb152-q07-same-intent"
     q08_intent = "cb152-q08-ownership"
     q07_initial = submit(state, q07_token, fixture["activityId"], q07_intent)
+    q07_initial_at = utc_now()
     q08_initial = submit(state, q08_token, fixture["activityId"], q08_intent)
     if q07_initial.reservation_id is None or q08_initial.reservation_id is None:
         raise RuntimeError("control initial submission lacks a reservation locator")
-    wait_terminal(state, q07_token, q07_initial.reservation_id)
-    wait_terminal(state, q08_token, q08_initial.reservation_id)
+    wait_terminal(state, q07_token, q07_initial.reservation_id, fixture["activityId"])
+    wait_terminal(state, q08_token, q08_initial.reservation_id, fixture["activityId"])
 
     measured_rows = [
         (index, tokens[name], f"cb152-load-{index:04d}")
@@ -1915,7 +1982,7 @@ def execute_measurement(
         ramp_seconds=state.profile.ramp_seconds,
         label="measured",
     )
-    measured = parse_jtl(state, measured_jtl, state.profile.sample_count)
+    measured = parse_jtl(state, measured_jtl, state.profile.sample_count, fixture["activityId"])
     token_by_index = {index: token for index, token, _ in measured_rows}
     measured_tokens: dict[str, str] = {}
     for record in measured:
@@ -1944,6 +2011,7 @@ def execute_measurement(
         measured,
         measured_tokens,
         q07_initial,
+        q07_initial_at,
         q07_token,
         q07_intent,
         q08_initial,
