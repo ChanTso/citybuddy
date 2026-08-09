@@ -356,4 +356,4 @@ This file records only factual pitfalls supported by merged pull-request, commit
 ## CB-152 — Acquisition diagnostics before local initialization
 
 - 现象：一次正式 invocation 在 fixture 与本地拓扑初始化前报告 JMeter archive checksum mismatch；失败 archive 及其实际 digest 未保留，随后 cleanup 又对从未创建的 run env 无条件调用 `reset-local`。
-- 结论：已确认的缺陷是 downloader 没有比较声明的 Content-Length 与实际读取字节数，也没有保留 transfer diagnostics；提前 EOF 是 plausible、可复现的失败路径，但原 mismatching transfer 的准确原因仍未证明。Owner 在 semantic budget 2/2 已耗尽后单独授权一次不改变 measurement semantics 的 acquisition-boundary 与 pre-init cleanup correction。
+- 结论：已确认的缺陷是 downloader 没有比较声明的 Content-Length 与实际读取字节数，也没有保留 transfer diagnostics；提前 EOF 是 plausible、可复现的失败路径，但原 mismatching transfer 的准确原因仍未证明。Owner 在 semantic budget 2/2 已耗尽后单独授权一次不改变 measurement semantics 的 acquisition-boundary 与 pre-init cleanup correction；该 correction 的 fresh review 仍发现 partial-file open 与 output-handle close failure 缺少直接 counterexample tests，且不允许第二次 review correction，因此 CB-152 最终 BLOCKED，未执行新的 formal invocation，也未发布 bundle 或性能数字。
