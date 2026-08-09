@@ -1552,7 +1552,10 @@ def build_bundle_payload(
         "machine": machine_metadata(),
         "containerResources": {
             "limits": "compose services have no explicit CPU/memory limits",
-            "applicationProcesses": "host JVM children with kernel-assigned ports",
+            "applicationProcesses": (
+                "foreground Auth and Commerce application containers launched as "
+                "direct child processes with kernel-assigned host ports"
+            ),
         },
         "fixtureOrDatasetVersion": FIXTURE_VERSION,
         "tool": "Apache JMeter",
