@@ -1,0 +1,83 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<jmeterTestPlan version="1.2" properties="5.0" jmeter="5.6.3">
+  <hashTree>
+    <TestPlan guiclass="TestPlanGui" testclass="TestPlan" testname="CB-152 seckill fixed-sample load">
+      <boolProp name="TestPlan.functional_mode">false</boolProp>
+      <boolProp name="TestPlan.serialize_threadgroups">false</boolProp>
+    </TestPlan>
+    <hashTree>
+      <CSVDataSet guiclass="TestBeanGUI" testclass="CSVDataSet" testname="Ephemeral token data">
+        <stringProp name="filename">${__P(dataFile)}</stringProp>
+        <stringProp name="fileEncoding">UTF-8</stringProp>
+        <stringProp name="variableNames">sampleIndex,token,idempotencyKey</stringProp>
+        <stringProp name="delimiter">,</stringProp>
+        <boolProp name="quotedData">true</boolProp>
+        <boolProp name="recycle">false</boolProp>
+        <boolProp name="stopThread">true</boolProp>
+        <stringProp name="shareMode">shareMode.all</stringProp>
+        <boolProp name="ignoreFirstLine">true</boolProp>
+      </CSVDataSet>
+      <hashTree/>
+      <ThreadGroup guiclass="ThreadGroupGui" testclass="ThreadGroup" testname="Measured initial submissions">
+        <stringProp name="ThreadGroup.num_threads">${__P(threads)}</stringProp>
+        <stringProp name="ThreadGroup.ramp_time">${__P(rampSeconds)}</stringProp>
+        <boolProp name="ThreadGroup.same_user_on_next_iteration">true</boolProp>
+        <elementProp name="ThreadGroup.main_controller" elementType="LoopController" guiclass="LoopControlPanel" testclass="LoopController">
+          <stringProp name="LoopController.loops">${__P(loops)}</stringProp>
+          <boolProp name="LoopController.continue_forever">false</boolProp>
+        </elementProp>
+      </ThreadGroup>
+      <hashTree>
+        <HeaderManager guiclass="HeaderPanel" testclass="HeaderManager" testname="Public request headers">
+          <collectionProp name="HeaderManager.headers">
+            <elementProp name="" elementType="Header"><stringProp name="Header.name">Content-Type</stringProp><stringProp name="Header.value">application/json</stringProp></elementProp>
+            <elementProp name="" elementType="Header"><stringProp name="Header.name">Authorization</stringProp><stringProp name="Header.value">Bearer ${token}</stringProp></elementProp>
+            <elementProp name="" elementType="Header"><stringProp name="Header.name">Idempotency-Key</stringProp><stringProp name="Header.value">${idempotencyKey}</stringProp></elementProp>
+          </collectionProp>
+        </HeaderManager>
+        <hashTree/>
+        <HTTPSamplerProxy guiclass="HttpTestSampleGui" testclass="HTTPSamplerProxy" testname="cb152-${sampleIndex}">
+          <stringProp name="HTTPSampler.domain">${__P(host)}</stringProp>
+          <stringProp name="HTTPSampler.port">${__P(port)}</stringProp>
+          <stringProp name="HTTPSampler.protocol">http</stringProp>
+          <stringProp name="HTTPSampler.path">/api/seckill/activities/${__P(activityId)}/reservations</stringProp>
+          <stringProp name="HTTPSampler.method">POST</stringProp>
+          <boolProp name="HTTPSampler.follow_redirects">false</boolProp>
+          <boolProp name="HTTPSampler.use_keepalive">true</boolProp>
+          <boolProp name="HTTPSampler.postBodyRaw">true</boolProp>
+          <stringProp name="HTTPSampler.connect_timeout">${__P(connectTimeoutMs)}</stringProp>
+          <stringProp name="HTTPSampler.response_timeout">${__P(responseTimeoutMs)}</stringProp>
+          <elementProp name="HTTPsampler.Arguments" elementType="Arguments">
+            <collectionProp name="Arguments.arguments">
+              <elementProp name="" elementType="HTTPArgument">
+                <boolProp name="HTTPArgument.always_encode">false</boolProp>
+                <stringProp name="Argument.value">{&quot;quantity&quot;:1,&quot;expectedActivityVersion&quot;:${__P(expectedVersion)}}</stringProp>
+                <stringProp name="Argument.metadata">=</stringProp>
+              </elementProp>
+            </collectionProp>
+          </elementProp>
+        </HTTPSamplerProxy>
+        <hashTree/>
+      </hashTree>
+      <ResultCollector guiclass="ViewResultsFullVisualizer" testclass="ResultCollector" testname="Temporary raw JTL">
+        <boolProp name="ResultCollector.error_logging">false</boolProp>
+        <objProp>
+          <name>saveConfig</name>
+          <value class="SampleSaveConfiguration">
+            <time>true</time><latency>true</latency><timestamp>true</timestamp><success>true</success>
+            <label>true</label><code>true</code><message>true</message><threadName>true</threadName>
+            <dataType>true</dataType><encoding>true</encoding><assertions>true</assertions>
+            <subresults>true</subresults><responseData>true</responseData><samplerData>false</samplerData>
+            <xml>true</xml><fieldNames>true</fieldNames><responseHeaders>false</responseHeaders>
+            <requestHeaders>false</requestHeaders><responseDataOnError>false</responseDataOnError>
+            <saveAssertionResultsFailureMessage>true</saveAssertionResultsFailureMessage><assertionsResultsToSave>0</assertionsResultsToSave>
+            <bytes>true</bytes><sentBytes>true</sentBytes><url>false</url><threadCounts>true</threadCounts>
+            <idleTime>true</idleTime><connectTime>true</connectTime>
+          </value>
+        </objProp>
+        <stringProp name="filename"></stringProp>
+      </ResultCollector>
+      <hashTree/>
+    </hashTree>
+  </hashTree>
+</jmeterTestPlan>
