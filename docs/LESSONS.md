@@ -352,3 +352,8 @@ This file records only factual pitfalls supported by merged pull-request, commit
 - 根因：先前只修复了 leading-dash 的 shell argv 传输，没有从 producer 的精确长度、完整字母表和位置分区机械枚举同一 identifier domain 的所有 consumer；常见的字母数字 fixture 掩盖了首字符分区差异。
 - 解决：保持 `secrets.token_urlsafe(32)`、既有持久值和 public API 不变，为 support-session 增加 union validator，并在 evaluation、Action 和 evaluation payment 的真实拒绝边界复用；Auth 保持原样透传。64 个确定性首字符向量、显式 `-`/`_` 跨服务路径、legacy compatibility、rejection matrix、无 normalization 与精确 server-only attribution 共同构成回归证据。
 - 结论：opaque identifier 的合同是 producer 生成的完整语言，不只是字符集合。修复一个传输调用点后仍必须审计同领域的 parser、claim、header、持久过滤和 replay 边界；兼容性 inventory 应区分正常接受 fixture 与故意非法的 rejection/corruption fixture，不能通过修改负向样本制造闭合结论。
+
+## CB-152 — Formal acquisition failure before local initialization
+
+- 现象：最后一次正式 evidence run 在 fixture 与本地拓扑初始化前拒绝了下载的 JMeter archive，因为实际计算的 SHA-512 与固定的 Apache 官方值不匹配；随后 cleanup 调用 `reset-local` 时，尚未创建的 run env 使 cleanup 也返回非零。
+- 结论：供应链 checksum 失败必须保留为首要失败且不得发布测量结果；若 acquisition 位于 local initialization 之前，cleanup 仍需区分“资源从未创建”和“已创建但未清理”。本片已耗尽明确授权的 semantic recovery budget，因此不在当前 PR 中继续修正或重跑。
