@@ -19,11 +19,13 @@ import tarfile
 import tempfile
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 import uuid
 import xml.etree.ElementTree as ET
 from collections.abc import Iterable, Sequence
 from dataclasses import dataclass, field
+from http.client import IncompleteRead
 from pathlib import Path
 from typing import Any
 
@@ -120,6 +122,21 @@ class RunState:
     commerce_port: int = 0
     env: dict[str, str] = field(default_factory=dict)
     hash_salt: bytes = b""
+    env_created: bool = False
+    init_local_started: bool = False
+    init_local_completed: bool = False
+    compose_up_started: bool = False
+
+
+@dataclass(frozen=True)
+class JMeterTransferDiagnostics:
+    http_status: int
+    final_url: str
+    content_length: int | None
+    actual_bytes: int
+    actual_sha512: str
+    official_sha512: str
+    pinned_sha512: str
 
 
 def run(
@@ -210,23 +227,201 @@ def exact_port(state: RunState, service: str, container_port: int) -> int:
     return int(match.group(1))
 
 
-def download_jmeter(state: RunState) -> Path:
+def jmeter_paths(state: RunState) -> tuple[Path, Path, Path, Path]:
     archive = state.temp_dir / JMETER_ARCHIVE
+    partial_archive = state.temp_dir / f"{JMETER_ARCHIVE}.part"
     checksum_file = state.temp_dir / f"{JMETER_ARCHIVE}.sha512"
     install = state.temp_dir / "jmeter-install"
     state.absent_paths.extend(
         [("jmeterArchive", archive), ("jmeterChecksum", checksum_file), ("jmeterInstall", install)]
     )
+    return archive, partial_archive, checksum_file, install
+
+
+def sanitized_public_url(value: str) -> str:
+    parsed = urllib.parse.urlsplit(value)
+    hostname = parsed.hostname or ""
+    if ":" in hostname and not hostname.startswith("["):
+        hostname = f"[{hostname}]"
+    netloc = hostname
+    if parsed.port is not None:
+        netloc = f"{netloc}:{parsed.port}"
+    return urllib.parse.urlunsplit((parsed.scheme, netloc, parsed.path, "", ""))
+
+
+def transfer_diagnostic_text(
+    *,
+    http_status: int | str,
+    final_url: str,
+    content_length: int | str | None,
+    actual_bytes: int,
+    actual_sha512: str,
+    official_sha512: str,
+    pinned_sha512: str,
+) -> str:
+    content = "absent" if content_length is None else str(content_length)
+    expected = content if isinstance(content_length, int) else "absent"
+    return (
+        f"httpStatus={http_status} finalUrl={final_url} contentLength={content} "
+        f"expectedBytes={expected} actualBytes={actual_bytes} "
+        f"actualSha512={actual_sha512} officialSha512={official_sha512} "
+        f"pinnedSha512={pinned_sha512}"
+    )
+
+
+def acquire_jmeter_archive(
+    url: str,
+    final_archive: Path,
+    partial_archive: Path,
+    *,
+    official_sha512: str,
+    pinned_sha512: str,
+    timeout_seconds: int = 60,
+) -> JMeterTransferDiagnostics:
+    partial_archive.unlink(missing_ok=True)
+    final_archive.unlink(missing_ok=True)
+    digest = hashlib.sha512()
+    actual_bytes = 0
+    http_status: int | str = "unavailable"
+    final_url = sanitized_public_url(url)
+    content_length: int | str | None = None
+    try:
+        try:
+            response = urllib.request.urlopen(url, timeout=timeout_seconds)
+        except Exception as exc:
+            if isinstance(exc, urllib.error.HTTPError):
+                http_status = exc.code
+                final_url = sanitized_public_url(exc.geturl())
+            detail = transfer_diagnostic_text(
+                http_status=http_status,
+                final_url=final_url,
+                content_length=content_length,
+                actual_bytes=actual_bytes,
+                actual_sha512=digest.hexdigest(),
+                official_sha512=official_sha512,
+                pinned_sha512=pinned_sha512,
+            )
+            raise RuntimeError(
+                f"JMeter archive request failed: {detail} errorType={type(exc).__name__}"
+            ) from exc
+        with response, partial_archive.open("wb") as output:
+            response_status = getattr(response, "status", None)
+            if response_status is None:
+                response_status = response.getcode()
+            http_status = int(response_status)
+            final_url = sanitized_public_url(response.geturl())
+            raw_content_length = response.headers.get("Content-Length")
+            if raw_content_length is not None:
+                if not re.fullmatch(r"[0-9]+", raw_content_length):
+                    content_length = "invalid"
+                    detail = transfer_diagnostic_text(
+                        http_status=http_status,
+                        final_url=final_url,
+                        content_length=content_length,
+                        actual_bytes=actual_bytes,
+                        actual_sha512=digest.hexdigest(),
+                        official_sha512=official_sha512,
+                        pinned_sha512=pinned_sha512,
+                    )
+                    raise RuntimeError(f"JMeter archive invalid Content-Length: {detail}")
+                content_length = int(raw_content_length)
+            if http_status != 200:
+                detail = transfer_diagnostic_text(
+                    http_status=http_status,
+                    final_url=final_url,
+                    content_length=content_length,
+                    actual_bytes=actual_bytes,
+                    actual_sha512=digest.hexdigest(),
+                    official_sha512=official_sha512,
+                    pinned_sha512=pinned_sha512,
+                )
+                raise RuntimeError(f"JMeter archive HTTP status rejected: {detail}")
+            while True:
+                try:
+                    chunk = response.read(1024 * 1024)
+                except Exception as exc:
+                    partial = getattr(exc, "partial", b"")
+                    if isinstance(partial, bytes) and partial:
+                        digest.update(partial)
+                        output.write(partial)
+                        actual_bytes += len(partial)
+                    detail = transfer_diagnostic_text(
+                        http_status=http_status,
+                        final_url=final_url,
+                        content_length=content_length,
+                        actual_bytes=actual_bytes,
+                        actual_sha512=digest.hexdigest(),
+                        official_sha512=official_sha512,
+                        pinned_sha512=pinned_sha512,
+                    )
+                    if isinstance(exc, IncompleteRead) and isinstance(content_length, int):
+                        raise RuntimeError(
+                            f"JMeter archive transfer incomplete: {detail} "
+                            f"errorType={type(exc).__name__}"
+                        ) from exc
+                    raise RuntimeError(
+                        f"JMeter archive transfer failed: {detail} errorType={type(exc).__name__}"
+                    ) from exc
+                if not chunk:
+                    break
+                digest.update(chunk)
+                output.write(chunk)
+                actual_bytes += len(chunk)
+        actual_sha512 = digest.hexdigest()
+        detail = transfer_diagnostic_text(
+            http_status=http_status,
+            final_url=final_url,
+            content_length=content_length,
+            actual_bytes=actual_bytes,
+            actual_sha512=actual_sha512,
+            official_sha512=official_sha512,
+            pinned_sha512=pinned_sha512,
+        )
+        if isinstance(content_length, int) and actual_bytes != content_length:
+            raise RuntimeError(f"JMeter archive transfer incomplete: {detail}")
+        if actual_sha512 != pinned_sha512 or official_sha512 != pinned_sha512:
+            raise RuntimeError(f"JMeter archive checksum mismatch: {detail}")
+        os.replace(partial_archive, final_archive)
+        return JMeterTransferDiagnostics(
+            http_status=int(http_status),
+            final_url=final_url,
+            content_length=content_length if isinstance(content_length, int) else None,
+            actual_bytes=actual_bytes,
+            actual_sha512=actual_sha512,
+            official_sha512=official_sha512,
+            pinned_sha512=pinned_sha512,
+        )
+    except BaseException:
+        partial_archive.unlink(missing_ok=True)
+        final_archive.unlink(missing_ok=True)
+        raise
+
+
+def download_jmeter(state: RunState) -> Path:
+    archive, partial_archive, checksum_file, install = jmeter_paths(state)
     with urllib.request.urlopen(JMETER_CHECKSUM_URL, timeout=30) as response:
         checksum_bytes = response.read(1024)
     checksum_file.write_bytes(checksum_bytes)
-    validate_jmeter_checksum(checksum_bytes)
-    digest = hashlib.sha512()
-    with urllib.request.urlopen(JMETER_URL, timeout=60) as response, archive.open("wb") as output:
-        while chunk := response.read(1024 * 1024):
-            digest.update(chunk)
-            output.write(chunk)
-    validate_jmeter_archive_digest(digest.hexdigest())
+    official_sha512 = validate_jmeter_checksum(checksum_bytes)
+    diagnostics = acquire_jmeter_archive(
+        JMETER_URL,
+        archive,
+        partial_archive,
+        official_sha512=official_sha512,
+        pinned_sha512=JMETER_SHA512,
+    )
+    print(
+        "CB-152 JMeter acquisition: PASS "
+        + transfer_diagnostic_text(
+            http_status=diagnostics.http_status,
+            final_url=diagnostics.final_url,
+            content_length=diagnostics.content_length,
+            actual_bytes=diagnostics.actual_bytes,
+            actual_sha512=diagnostics.actual_sha512,
+            official_sha512=diagnostics.official_sha512,
+            pinned_sha512=diagnostics.pinned_sha512,
+        )
+    )
     install.mkdir(mode=0o700)
     with tarfile.open(archive, mode="r:gz") as source:
         members = source.getmembers()
@@ -246,7 +441,7 @@ def download_jmeter(state: RunState) -> Path:
     return binary
 
 
-def validate_jmeter_checksum(checksum_bytes: bytes) -> None:
+def validate_jmeter_checksum(checksum_bytes: bytes) -> str:
     fields = checksum_bytes.decode("ascii").strip().split()
     if (
         len(fields) != 2
@@ -254,11 +449,7 @@ def validate_jmeter_checksum(checksum_bytes: bytes) -> None:
         or fields[1].lstrip("*") != JMETER_ARCHIVE
     ):
         raise RuntimeError("official JMeter checksum file does not match the pinned release")
-
-
-def validate_jmeter_archive_digest(digest: str) -> None:
-    if digest.lower() != JMETER_SHA512:
-        raise RuntimeError("downloaded JMeter archive checksum mismatch")
+    return fields[0].lower()
 
 
 def preserve_first_failure(
@@ -1821,19 +2012,39 @@ def cleanup(state: RunState) -> dict[str, Any]:
         stop_children(state)
     except BaseException as exc:
         cleanup_error = exc
-    try:
-        run(
-            [
-                "make",
-                "reset-local",
-                "CONFIRM_RESET_LOCAL=1",
-                f"ENV_FILE={state.env_file}",
-                f"COMPOSE_PROJECT_NAME={state.project}",
-            ]
+    if state.env_file.is_file():
+        state.env_created = True
+        print(
+            "CB-152 cleanup phase: runEnv=created resetLocal=required "
+            f"initLocalStarted={str(state.init_local_started).lower()} "
+            f"initLocalCompleted={str(state.init_local_completed).lower()} "
+            f"composeUpStarted={str(state.compose_up_started).lower()}"
         )
-    except BaseException as exc:
+        try:
+            run(
+                [
+                    "make",
+                    "reset-local",
+                    "CONFIRM_RESET_LOCAL=1",
+                    f"ENV_FILE={state.env_file}",
+                    f"COMPOSE_PROJECT_NAME={state.project}",
+                ]
+            )
+        except BaseException as exc:
+            if cleanup_error is None:
+                cleanup_error = exc
+    elif state.compose_up_started or state.children:
+        print(
+            "CB-152 cleanup phase: runEnv=missing resetLocal=unavailable "
+            f"composeUpStarted={str(state.compose_up_started).lower()}"
+        )
         if cleanup_error is None:
-            cleanup_error = exc
+            cleanup_error = RuntimeError("run env missing after runtime startup")
+    else:
+        print(
+            "CB-152 cleanup phase: runEnv=never-created resetLocal=skipped "
+            "runtimeResources=never-created exactResidueQueries=required"
+        )
     for child in state.children:
         ps = run(["ps", "-p", str(child.process.pid)], check=False)
         if ps.returncode == 0 and cleanup_error is None:
@@ -2095,9 +2306,13 @@ def main() -> int:
                 "package",
             ]
         )
+        state.init_local_started = True
         run(["make", "init-local", f"ENV_FILE={state.env_file}"])
+        state.env_created = state.env_file.is_file()
+        state.init_local_completed = True
         state.env = read_env(state.env_file)
         state.secrets.extend(value.encode() for value in state.env.values())
+        state.compose_up_started = True
         run(["make", "up", f"ENV_FILE={state.env_file}", f"COMPOSE_PROJECT_NAME={state.project}"])
         state.mysql_port = exact_port(state, "mysql", 3306)
         state.redis_port = exact_port(state, "redis-commerce", 6379)

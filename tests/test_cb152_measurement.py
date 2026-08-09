@@ -1,9 +1,15 @@
 from __future__ import annotations
 
+import contextlib
+import hashlib
+import http.server
 import json
 import re
 import sys
+import threading
+from collections.abc import Iterator
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -12,6 +18,39 @@ sys.path.insert(0, str(ROOT / "scripts"))
 
 import check_cb152_bundle as checker  # noqa: E402
 import measure_cb152 as measure  # noqa: E402
+
+FROZEN_CHECKER_BLOB = "630fd75fba7d8fd5a65818663d33378f5a97f8f3"
+
+
+@contextlib.contextmanager
+def serve_payload(payload: bytes, *, content_length: int | None) -> Iterator[str]:
+    class Handler(http.server.BaseHTTPRequestHandler):
+        def do_GET(self) -> None:  # noqa: N802
+            self.send_response(200)
+            if content_length is not None:
+                self.send_header("Content-Length", str(content_length))
+            self.end_headers()
+            self.wfile.write(payload)
+            self.wfile.flush()
+            self.close_connection = True
+
+        def log_message(self, _format: str, *_args: object) -> None:
+            return
+
+    server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        address = server.server_address
+        assert isinstance(address, tuple)
+        host, port = address[0], address[1]
+        assert isinstance(host, str)
+        assert isinstance(port, int)
+        yield f"http://{host}:{port}/apache-jmeter-test.tgz"
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=5)
 
 
 def write_valid_bundle(tmp_path: Path, *, q05_failure: bool = False, residue: int = 0) -> Path:
@@ -342,11 +381,231 @@ def jsonl_rows(path: Path) -> list[dict[str, object]]:
     return [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines()]
 
 
-def test_jmeter_checksum_mismatch_is_rejected() -> None:
-    with pytest.raises(RuntimeError, match="checksum"):
-        measure.validate_jmeter_archive_digest("0" * 128)
-    with pytest.raises(RuntimeError, match="checksum"):
+def test_jmeter_official_checksum_mismatch_is_rejected() -> None:
+    with pytest.raises(
+        RuntimeError,
+        match=re.escape("official JMeter checksum file does not match the pinned release"),
+    ):
         measure.validate_jmeter_checksum(b"0" * 128 + b" *apache-jmeter-5.6.3.tgz\n")
+
+
+def test_jmeter_incomplete_transfer_reports_bytes_digest_and_removes_partial(
+    tmp_path: Path,
+) -> None:
+    payload = b"truncated-archive"
+    expected_bytes = len(payload) + 19
+    actual_digest = hashlib.sha512(payload).hexdigest()
+    final_archive = tmp_path / "apache-jmeter-test.tgz"
+    partial_archive = tmp_path / "apache-jmeter-test.tgz.part"
+    with serve_payload(payload, content_length=expected_bytes) as url:
+        with pytest.raises(
+            RuntimeError, match=re.escape("JMeter archive transfer incomplete:")
+        ) as raised:
+            measure.acquire_jmeter_archive(
+                url,
+                final_archive,
+                partial_archive,
+                official_sha512="f" * 128,
+                pinned_sha512="f" * 128,
+                timeout_seconds=5,
+            )
+    message = str(raised.value)
+    assert f"expectedBytes={expected_bytes}" in message
+    assert f"actualBytes={len(payload)}" in message
+    assert f"actualSha512={actual_digest}" in message
+    assert "checksum mismatch" not in message
+    assert not partial_archive.exists()
+    assert not final_archive.exists()
+
+
+def test_jmeter_complete_transfer_atomically_publishes_final_archive(tmp_path: Path) -> None:
+    payload = b"complete-archive"
+    digest = hashlib.sha512(payload).hexdigest()
+    final_archive = tmp_path / "apache-jmeter-test.tgz"
+    partial_archive = tmp_path / "apache-jmeter-test.tgz.part"
+    with serve_payload(payload, content_length=len(payload)) as url:
+        diagnostics = measure.acquire_jmeter_archive(
+            url,
+            final_archive,
+            partial_archive,
+            official_sha512=digest,
+            pinned_sha512=digest,
+            timeout_seconds=5,
+        )
+    assert diagnostics.content_length == len(payload)
+    assert diagnostics.actual_bytes == len(payload)
+    assert diagnostics.actual_sha512 == digest
+    assert final_archive.read_bytes() == payload
+    assert not partial_archive.exists()
+
+
+def test_jmeter_complete_wrong_digest_is_not_reported_as_truncation(tmp_path: Path) -> None:
+    payload = b"complete-but-wrong"
+    actual_digest = hashlib.sha512(payload).hexdigest()
+    final_archive = tmp_path / "apache-jmeter-test.tgz"
+    partial_archive = tmp_path / "apache-jmeter-test.tgz.part"
+    with serve_payload(payload, content_length=len(payload)) as url:
+        with pytest.raises(
+            RuntimeError, match=re.escape("JMeter archive checksum mismatch:")
+        ) as raised:
+            measure.acquire_jmeter_archive(
+                url,
+                final_archive,
+                partial_archive,
+                official_sha512="f" * 128,
+                pinned_sha512="f" * 128,
+                timeout_seconds=5,
+            )
+    message = str(raised.value)
+    assert f"actualBytes={len(payload)}" in message
+    assert f"actualSha512={actual_digest}" in message
+    assert f"officialSha512={'f' * 128}" in message
+    assert f"pinnedSha512={'f' * 128}" in message
+    assert "transfer incomplete" not in message
+    assert not partial_archive.exists()
+    assert not final_archive.exists()
+
+
+def test_jmeter_absent_content_length_uses_checksum_closure(tmp_path: Path) -> None:
+    payload = b"close-delimited-archive"
+    digest = hashlib.sha512(payload).hexdigest()
+    final_archive = tmp_path / "apache-jmeter-test.tgz"
+    partial_archive = tmp_path / "apache-jmeter-test.tgz.part"
+    with serve_payload(payload, content_length=None) as url:
+        diagnostics = measure.acquire_jmeter_archive(
+            url,
+            final_archive,
+            partial_archive,
+            official_sha512=digest,
+            pinned_sha512=digest,
+            timeout_seconds=5,
+        )
+    assert diagnostics.content_length is None
+    assert diagnostics.actual_bytes == len(payload)
+    assert final_archive.read_bytes() == payload
+    final_archive.unlink()
+    with serve_payload(payload, content_length=None) as url:
+        with pytest.raises(
+            RuntimeError, match=re.escape("JMeter archive checksum mismatch:")
+        ) as raised:
+            measure.acquire_jmeter_archive(
+                url,
+                final_archive,
+                partial_archive,
+                official_sha512="f" * 128,
+                pinned_sha512="f" * 128,
+                timeout_seconds=5,
+            )
+    message = str(raised.value)
+    assert "contentLength=absent expectedBytes=absent" in message
+    assert f"actualBytes={len(payload)}" in message
+    assert f"actualSha512={digest}" in message
+    assert not partial_archive.exists()
+    assert not final_archive.exists()
+
+
+def test_pre_init_cleanup_skips_reset_but_still_queries_exact_residue(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    captured: list[list[str]] = []
+
+    def fake_run(args: list[str], **_kwargs: object) -> SimpleNamespace:
+        captured.append(list(args))
+        return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr(measure, "run", fake_run)
+    pre_init = tmp_path / "pre-init"
+    pre_init.mkdir()
+    partial = pre_init / "apache-jmeter-test.tgz.part"
+    partial.write_bytes(b"partial")
+    state = measure.RunState(
+        measure.PROFILES["smoke"],
+        pre_init,
+        pre_init / "run.env",
+        "cb152-pre-init",
+        "f" * 40,
+    )
+    residue = measure.cleanup(state)
+    assert not any(command[:2] == ["make", "reset-local"] for command in captured)
+    assert [command[:3] for command in captured] == [
+        ["docker", "ps", "-aq"],
+        ["docker", "network", "ls"],
+        ["docker", "volume", "ls"],
+    ]
+    assert residue["containers"] == residue["networks"] == residue["volumes"] == 0
+    assert not partial.exists()
+    assert not pre_init.exists()
+
+    captured.clear()
+    initialized = tmp_path / "initialized"
+    initialized.mkdir()
+    env_file = initialized / "run.env"
+    env_file.write_text("CB152_SYNTHETIC=1\n", encoding="utf-8")
+    state = measure.RunState(
+        measure.PROFILES["smoke"],
+        initialized,
+        env_file,
+        "cb152-initialized",
+        "f" * 40,
+        env_created=True,
+        init_local_started=True,
+        init_local_completed=True,
+    )
+    measure.cleanup(state)
+    reset = next(command for command in captured if command[:2] == ["make", "reset-local"])
+    assert reset == [
+        "make",
+        "reset-local",
+        "CONFIRM_RESET_LOCAL=1",
+        f"ENV_FILE={env_file}",
+        "COMPOSE_PROJECT_NAME=cb152-initialized",
+    ]
+
+
+def test_frozen_checker_blob_schema_and_nonpublic_transfer_diagnostics(tmp_path: Path) -> None:
+    data = (ROOT / "scripts/check_cb152_bundle.py").read_bytes()
+    header = f"blob {len(data)}\0".encode("ascii")
+    blob = hashlib.sha1(header + data, usedforsecurity=False).hexdigest()
+    assert blob == FROZEN_CHECKER_BLOB
+    assert len(checker.ABSENT_PATH_KINDS) == 12
+    assert len(checker.MANIFEST_KEYS) == 34
+
+    state = measure.RunState(
+        measure.PROFILES["smoke"],
+        tmp_path,
+        tmp_path / "run.env",
+        "project",
+        "f" * 40,
+    )
+    archive, partial, checksum, install = measure.jmeter_paths(state)
+    assert state.absent_paths == [
+        ("jmeterArchive", archive),
+        ("jmeterChecksum", checksum),
+        ("jmeterInstall", install),
+    ]
+    assert partial == tmp_path / f"{measure.JMETER_ARCHIVE}.part"
+    assert all(kind != "jmeterArchivePart" for kind, _path in state.absent_paths)
+
+    bundle = write_valid_bundle(tmp_path / "payload")
+    diagnostic_fields = {
+        "httpStatus",
+        "finalUrl",
+        "contentLength",
+        "expectedBytes",
+        "actualBytes",
+        "actualSha512",
+        "officialSha512",
+        "pinnedSha512",
+    }
+    committed_payloads = [
+        bundle / "manifest.json",
+        bundle / "result.json",
+        *bundle.glob("raw/**/*"),
+    ]
+    for path in committed_payloads:
+        if path.is_file():
+            payload = path.read_bytes()
+            assert all(f'"{field}"'.encode() not in payload for field in diagnostic_fields)
 
 
 def test_jtl_stream_preserves_every_sample_and_marks_parse_failure(tmp_path: Path) -> None:
