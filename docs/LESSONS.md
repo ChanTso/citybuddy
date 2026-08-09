@@ -352,3 +352,11 @@ This file records only factual pitfalls supported by merged pull-request, commit
 - 根因：先前只修复了 leading-dash 的 shell argv 传输，没有从 producer 的精确长度、完整字母表和位置分区机械枚举同一 identifier domain 的所有 consumer；常见的字母数字 fixture 掩盖了首字符分区差异。
 - 解决：保持 `secrets.token_urlsafe(32)`、既有持久值和 public API 不变，为 support-session 增加 union validator，并在 evaluation、Action 和 evaluation payment 的真实拒绝边界复用；Auth 保持原样透传。64 个确定性首字符向量、显式 `-`/`_` 跨服务路径、legacy compatibility、rejection matrix、无 normalization 与精确 server-only attribution 共同构成回归证据。
 - 结论：opaque identifier 的合同是 producer 生成的完整语言，不只是字符集合。修复一个传输调用点后仍必须审计同领域的 parser、claim、header、持久过滤和 replay 边界；兼容性 inventory 应区分正常接受 fixture 与故意非法的 rejection/corruption fixture，不能通过修改负向样本制造闭合结论。
+
+## CB-152 — Seckill load and concurrency-correctness evidence
+
+- 现象：宿主 JVM 不能使用 RocketMQ Proxy 向 Compose 网络发布的容器路由，因此测量 runner 将 Auth/Commerce 作为 foreground application containers 置于 exact Compose network；首份正式 bundle 的 manifest 却仍把它们描述为 host JVM children。修正后，post-evidence CI 又证明只对未提交 diff 运行 pre-commit secret hook不足以覆盖 commit-history scanner：两个非秘密 control intent 变量名触发了 Gitleaks `generic-api-key` 规则。
+- 证据链接：[slice PR #80](https://github.com/ChanTso/citybuddy/pull/80)、evidence code revision `f696d73038ce1910df0f70d04d71275acc202bca`
+- 根因：环境元数据没有从实际 process/container owner 反向核对；secret-scan 的证据时点也没有覆盖正式 evidence 所绑定的 committed candidate history。
+- 解决：应用容器保持为当前进程直接拥有的 foreground child，使用 exact Compose network、内核分配的宿主端口和 exact label/PID cleanup；manifest 明确记录真实容器拓扑与无显式资源限制。删除不准确 bundle并完整重跑。随后只重命名非语义 control intent 变量、autosquash 未发布 branch history，并在最终正式 run 前要求 repository Gitleaks 对全部可达 commits `no leaks found`；没有增加 allowlist、exclude 或关闭规则。最终 200 个 JMeter measured samples、Q01-Q09、零 residue、canonical zero-rewrite、checksum/reconstruction 与完整 CI 全部通过。
+- 结论：可重建数字不等于完整证据，manifest 对执行拓扑的错误描述同样会使 bundle 无效；正式 evidence 必须绑定同时通过内容测试和 committed-history policy scan 的 candidate。检查工作树或 staged diff 不能替代扫描将被推送的可达历史。

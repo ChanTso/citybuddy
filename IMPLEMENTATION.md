@@ -1,9 +1,9 @@
 # CityBuddy implementation index
 
-**Document version:** v0.44\
-**Verification date:** 2026-08-06\
-**Repository phase:** CB-151 remains BLOCKED. CB-152 is the sole READY slice in the
-owner-approved three-part measurement route. No measurement implementation has begun.
+**Document version:** v0.45\
+**Verification date:** 2026-08-09\
+**Repository phase:** CB-151 remains BLOCKED. CB-152 is VERIFIED, and CB-153 is the sole READY
+slice in the owner-approved three-part measurement route. CB-154 remains PLANNED.
 
 ## How to use this index
 
@@ -151,8 +151,8 @@ The linked slice name is the canonical detailed specification. Target outcomes a
 | [CB-140 — Portfolio web demonstration and README truth](docs/slices/CB-140.md) | P1 | `VERIFIED` | `CB-020`, `CB-030`, `CB-060`, `CB-082`, `CB-091`, `CB-118`, `CB-122` |
 | [CB-150 — Agent metrics and optional no-op trace sink](docs/slices/CB-150.md) | P1 | `VERIFIED` | `CB-140` |
 | [CB-151 — Verified-path demo reset and fault drills](docs/slices/CB-151.md) | P1 | `BLOCKED` | `CB-150` |
-| [CB-152 — Seckill load and concurrency-correctness evidence](docs/slices/CB-152.md) | P1 | `IN_PROGRESS` | `CB-150` |
-| [CB-153 — Agent-path latency evidence](docs/slices/CB-153.md) | P1 | `PLANNED` | `CB-150` |
+| [CB-152 — Seckill load and concurrency-correctness evidence](docs/slices/CB-152.md) | P1 | `VERIFIED` | `CB-150` |
+| [CB-153 — Agent-path latency evidence](docs/slices/CB-153.md) | P1 | `READY` | `CB-150` |
 | [CB-154 — Retrieval/cache quality and final portfolio evidence](docs/slices/CB-154.md) | P1 | `PLANNED` | `CB-152`, `CB-153` |
 | `CB-900 — Multimodal intake and object storage outline` | P2 | `DEFERRED` | Explicit promotion only |
 | `CB-910 — Action recovery scanning and advanced resilience outline` | P2 | `DEFERRED` | Explicit promotion only |
