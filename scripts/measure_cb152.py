@@ -278,54 +278,71 @@ def acquire_jmeter_archive(
     pinned_sha512: str,
     timeout_seconds: int = 60,
 ) -> JMeterTransferDiagnostics:
-    partial_archive.unlink(missing_ok=True)
-    final_archive.unlink(missing_ok=True)
     digest = hashlib.sha512()
     actual_bytes = 0
     http_status: int | str = "unavailable"
     final_url = sanitized_public_url(url)
     content_length: int | str | None = None
+    response: Any = None
+    output: Any = None
+    failure: BaseException | None = None
+
+    def diagnostic_error(label: str, exc: BaseException) -> RuntimeError:
+        detail = transfer_diagnostic_text(
+            http_status=http_status,
+            final_url=final_url,
+            content_length=content_length,
+            actual_bytes=actual_bytes,
+            actual_sha512=digest.hexdigest(),
+            official_sha512=official_sha512,
+            pinned_sha512=pinned_sha512,
+        )
+        return RuntimeError(f"{label}: {detail} errorType={type(exc).__name__}")
+
+    def retain_cleanup_failure(
+        primary: BaseException | None, *, kind: str, error: BaseException
+    ) -> BaseException:
+        cleanup = RuntimeError(
+            f"JMeter archive cleanup failed: kind={kind} errorType={type(error).__name__}"
+        )
+        if primary is None:
+            return cleanup
+        primary.add_note(str(cleanup))
+        return primary
+
+    for kind, path in (("partialArchive", partial_archive), ("finalArchive", final_archive)):
+        try:
+            path.unlink(missing_ok=True)
+        except BaseException as exc:
+            failure = retain_cleanup_failure(failure, kind=kind, error=exc)
+    if failure is not None:
+        raise failure
+
     try:
         try:
             response = urllib.request.urlopen(url, timeout=timeout_seconds)
-        except Exception as exc:
+        except BaseException as exc:
             if isinstance(exc, urllib.error.HTTPError):
+                response = exc
                 http_status = exc.code
                 final_url = sanitized_public_url(exc.geturl())
-            detail = transfer_diagnostic_text(
-                http_status=http_status,
-                final_url=final_url,
-                content_length=content_length,
-                actual_bytes=actual_bytes,
-                actual_sha512=digest.hexdigest(),
-                official_sha512=official_sha512,
-                pinned_sha512=pinned_sha512,
-            )
-            raise RuntimeError(
-                f"JMeter archive request failed: {detail} errorType={type(exc).__name__}"
-            ) from exc
-        with response, partial_archive.open("wb") as output:
-            response_status = getattr(response, "status", None)
-            if response_status is None:
-                response_status = response.getcode()
-            http_status = int(response_status)
-            final_url = sanitized_public_url(response.geturl())
-            raw_content_length = response.headers.get("Content-Length")
-            if raw_content_length is not None:
-                if not re.fullmatch(r"[0-9]+", raw_content_length):
-                    content_length = "invalid"
-                    detail = transfer_diagnostic_text(
-                        http_status=http_status,
-                        final_url=final_url,
-                        content_length=content_length,
-                        actual_bytes=actual_bytes,
-                        actual_sha512=digest.hexdigest(),
-                        official_sha512=official_sha512,
-                        pinned_sha512=pinned_sha512,
+                raw_content_length = exc.headers.get("Content-Length")
+                if raw_content_length is not None:
+                    content_length = (
+                        int(raw_content_length)
+                        if re.fullmatch(r"[0-9]+", raw_content_length)
+                        else "invalid"
                     )
-                    raise RuntimeError(f"JMeter archive invalid Content-Length: {detail}")
-                content_length = int(raw_content_length)
-            if http_status != 200:
+            raise diagnostic_error("JMeter archive request failed", exc) from exc
+        response_status = getattr(response, "status", None)
+        if response_status is None:
+            response_status = response.getcode()
+        http_status = int(response_status)
+        final_url = sanitized_public_url(response.geturl())
+        raw_content_length = response.headers.get("Content-Length")
+        if raw_content_length is not None:
+            if not re.fullmatch(r"[0-9]+", raw_content_length):
+                content_length = "invalid"
                 detail = transfer_diagnostic_text(
                     http_status=http_status,
                     final_url=final_url,
@@ -335,38 +352,52 @@ def acquire_jmeter_archive(
                     official_sha512=official_sha512,
                     pinned_sha512=pinned_sha512,
                 )
-                raise RuntimeError(f"JMeter archive HTTP status rejected: {detail}")
-            while True:
-                try:
-                    chunk = response.read(1024 * 1024)
-                except Exception as exc:
-                    partial = getattr(exc, "partial", b"")
-                    if isinstance(partial, bytes) and partial:
-                        digest.update(partial)
-                        output.write(partial)
-                        actual_bytes += len(partial)
-                    detail = transfer_diagnostic_text(
-                        http_status=http_status,
-                        final_url=final_url,
-                        content_length=content_length,
-                        actual_bytes=actual_bytes,
-                        actual_sha512=digest.hexdigest(),
-                        official_sha512=official_sha512,
-                        pinned_sha512=pinned_sha512,
-                    )
-                    if isinstance(exc, IncompleteRead) and isinstance(content_length, int):
-                        raise RuntimeError(
-                            f"JMeter archive transfer incomplete: {detail} "
-                            f"errorType={type(exc).__name__}"
-                        ) from exc
-                    raise RuntimeError(
-                        f"JMeter archive transfer failed: {detail} errorType={type(exc).__name__}"
-                    ) from exc
-                if not chunk:
-                    break
-                digest.update(chunk)
+                raise RuntimeError(f"JMeter archive invalid Content-Length: {detail}")
+            content_length = int(raw_content_length)
+        if http_status != 200:
+            detail = transfer_diagnostic_text(
+                http_status=http_status,
+                final_url=final_url,
+                content_length=content_length,
+                actual_bytes=actual_bytes,
+                actual_sha512=digest.hexdigest(),
+                official_sha512=official_sha512,
+                pinned_sha512=pinned_sha512,
+            )
+            raise RuntimeError(f"JMeter archive HTTP status rejected: {detail}")
+        try:
+            output = partial_archive.open("wb")
+        except BaseException as exc:
+            raise diagnostic_error("JMeter archive transfer failed", exc) from exc
+        while True:
+            try:
+                chunk = response.read(1024 * 1024)
+            except BaseException as exc:
+                partial = getattr(exc, "partial", b"")
+                if isinstance(partial, bytes) and partial:
+                    digest.update(partial)
+                    actual_bytes += len(partial)
+                if isinstance(exc, IncompleteRead) and isinstance(content_length, int):
+                    raise diagnostic_error("JMeter archive transfer incomplete", exc) from exc
+                raise diagnostic_error("JMeter archive transfer failed", exc) from exc
+            if not chunk:
+                break
+            digest.update(chunk)
+            actual_bytes += len(chunk)
+            try:
                 output.write(chunk)
-                actual_bytes += len(chunk)
+            except BaseException as exc:
+                raise diagnostic_error("JMeter archive transfer failed", exc) from exc
+        try:
+            output.close()
+        except BaseException as exc:
+            raise diagnostic_error("JMeter archive transfer failed", exc) from exc
+        output = None
+        try:
+            response.close()
+        except BaseException as exc:
+            raise diagnostic_error("JMeter archive transfer failed", exc) from exc
+        response = None
         actual_sha512 = digest.hexdigest()
         detail = transfer_diagnostic_text(
             http_status=http_status,
@@ -381,7 +412,10 @@ def acquire_jmeter_archive(
             raise RuntimeError(f"JMeter archive transfer incomplete: {detail}")
         if actual_sha512 != pinned_sha512 or official_sha512 != pinned_sha512:
             raise RuntimeError(f"JMeter archive checksum mismatch: {detail}")
-        os.replace(partial_archive, final_archive)
+        try:
+            os.replace(partial_archive, final_archive)
+        except BaseException as exc:
+            raise diagnostic_error("JMeter archive publication failed", exc) from exc
         return JMeterTransferDiagnostics(
             http_status=int(http_status),
             final_url=final_url,
@@ -391,10 +425,31 @@ def acquire_jmeter_archive(
             official_sha512=official_sha512,
             pinned_sha512=pinned_sha512,
         )
-    except BaseException:
-        partial_archive.unlink(missing_ok=True)
-        final_archive.unlink(missing_ok=True)
-        raise
+    except BaseException as exc:
+        failure = exc
+    finally:
+        if output is not None:
+            try:
+                output.close()
+            except BaseException as exc:
+                failure = retain_cleanup_failure(failure, kind="partialArchiveHandle", error=exc)
+        if response is not None:
+            try:
+                response.close()
+            except BaseException as exc:
+                failure = retain_cleanup_failure(failure, kind="responseHandle", error=exc)
+        if failure is not None:
+            for kind, path in (
+                ("partialArchive", partial_archive),
+                ("finalArchive", final_archive),
+            ):
+                try:
+                    path.unlink(missing_ok=True)
+                except BaseException as exc:
+                    failure = retain_cleanup_failure(failure, kind=kind, error=exc)
+    if failure is not None:
+        raise failure
+    raise AssertionError("JMeter acquisition ended without a result or failure")
 
 
 def download_jmeter(state: RunState) -> Path:

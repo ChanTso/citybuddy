@@ -1,12 +1,16 @@
 from __future__ import annotations
 
 import contextlib
+import email.message
 import hashlib
 import http.server
 import json
+import os
 import re
 import sys
 import threading
+import urllib.error
+import urllib.request
 from collections.abc import Iterator
 from pathlib import Path
 from types import SimpleNamespace
@@ -501,6 +505,209 @@ def test_jmeter_absent_content_length_uses_checksum_closure(tmp_path: Path) -> N
     assert f"actualBytes={len(payload)}" in message
     assert f"actualSha512={digest}" in message
     assert not partial_archive.exists()
+    assert not final_archive.exists()
+
+
+def test_jmeter_write_failure_reports_bytes_digest_and_error_type(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    payload = b"bytes-read-before-write-failure"
+    digest = hashlib.sha512(payload).hexdigest()
+    final_archive = tmp_path / "apache-jmeter-test.tgz"
+    partial_archive = tmp_path / "apache-jmeter-test.tgz.part"
+
+    class Response:
+        status = 200
+        headers = {"Content-Length": str(len(payload))}
+
+        def __init__(self) -> None:
+            self.pending = payload
+
+        def geturl(self) -> str:
+            return "https://archive.apache.org/jmeter.tgz?private=removed"
+
+        def read(self, _size: int) -> bytes:
+            value, self.pending = self.pending, b""
+            return value
+
+        def close(self) -> None:
+            return
+
+    class Output:
+        def write(self, _chunk: bytes) -> None:
+            raise OSError("controlled write failure")
+
+        def close(self) -> None:
+            return
+
+    original_open = Path.open
+    monkeypatch.setattr(urllib.request, "urlopen", lambda *_args, **_kwargs: Response())
+    monkeypatch.setattr(
+        Path,
+        "open",
+        lambda self, *args, **kwargs: (
+            Output() if self == partial_archive else original_open(self, *args, **kwargs)
+        ),
+    )
+    with pytest.raises(RuntimeError, match=re.escape("JMeter archive transfer failed:")) as raised:
+        measure.acquire_jmeter_archive(
+            "https://archive.apache.org/jmeter.tgz",
+            final_archive,
+            partial_archive,
+            official_sha512=digest,
+            pinned_sha512=digest,
+        )
+    message = str(raised.value)
+    assert f"actualBytes={len(payload)}" in message
+    assert f"actualSha512={digest}" in message
+    assert "errorType=OSError" in message
+    assert "?private=removed" not in message
+    assert not partial_archive.exists()
+    assert not final_archive.exists()
+
+
+def test_jmeter_http_error_retains_declared_content_length(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    headers = email.message.Message()
+    headers["Content-Length"] = "17"
+    error = urllib.error.HTTPError(
+        "https://archive.apache.org/jmeter.tgz?private=removed",
+        503,
+        "unavailable",
+        headers,
+        None,
+    )
+    monkeypatch.setattr(
+        urllib.request,
+        "urlopen",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(error),
+    )
+    with pytest.raises(RuntimeError, match=re.escape("JMeter archive request failed:")) as raised:
+        measure.acquire_jmeter_archive(
+            "https://archive.apache.org/jmeter.tgz",
+            tmp_path / "archive.tgz",
+            tmp_path / "archive.tgz.part",
+            official_sha512="f" * 128,
+            pinned_sha512="f" * 128,
+        )
+    message = str(raised.value)
+    assert "httpStatus=503" in message
+    assert "contentLength=17 expectedBytes=17 actualBytes=0" in message
+    assert "errorType=HTTPError" in message
+    assert "?private=removed" not in message
+
+
+def test_jmeter_atomic_publication_failure_is_diagnostic_and_cleans_partial(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    payload = b"complete-before-rename"
+    digest = hashlib.sha512(payload).hexdigest()
+    final_archive = tmp_path / "archive.tgz"
+    partial_archive = tmp_path / "archive.tgz.part"
+    monkeypatch.setattr(
+        os,
+        "replace",
+        lambda *_args: (_ for _ in ()).throw(OSError("controlled replace failure")),
+    )
+    with serve_payload(payload, content_length=len(payload)) as url:
+        with pytest.raises(
+            RuntimeError, match=re.escape("JMeter archive publication failed:")
+        ) as raised:
+            measure.acquire_jmeter_archive(
+                url,
+                final_archive,
+                partial_archive,
+                official_sha512=digest,
+                pinned_sha512=digest,
+            )
+    message = str(raised.value)
+    assert f"actualBytes={len(payload)}" in message
+    assert f"actualSha512={digest}" in message
+    assert "errorType=OSError" in message
+    assert not partial_archive.exists()
+    assert not final_archive.exists()
+
+
+def test_jmeter_response_close_failure_is_diagnostic_and_preserves_primary(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    payload = b"complete-before-response-close"
+    digest = hashlib.sha512(payload).hexdigest()
+    final_archive = tmp_path / "archive.tgz"
+    partial_archive = tmp_path / "archive.tgz.part"
+
+    class Response:
+        status = 200
+        headers = {"Content-Length": str(len(payload))}
+
+        def __init__(self) -> None:
+            self.pending = payload
+
+        def geturl(self) -> str:
+            return "https://archive.apache.org/jmeter.tgz"
+
+        def read(self, _size: int) -> bytes:
+            value, self.pending = self.pending, b""
+            return value
+
+        def close(self) -> None:
+            raise OSError("controlled response close failure")
+
+    monkeypatch.setattr(urllib.request, "urlopen", lambda *_args, **_kwargs: Response())
+    with pytest.raises(RuntimeError, match=re.escape("JMeter archive transfer failed:")) as raised:
+        measure.acquire_jmeter_archive(
+            "https://archive.apache.org/jmeter.tgz",
+            final_archive,
+            partial_archive,
+            official_sha512=digest,
+            pinned_sha512=digest,
+        )
+    message = str(raised.value)
+    assert f"actualBytes={len(payload)}" in message
+    assert f"actualSha512={digest}" in message
+    assert "errorType=OSError" in message
+    assert any(
+        "JMeter archive cleanup failed: kind=responseHandle errorType=OSError" in note
+        for note in getattr(raised.value, "__notes__", [])
+    )
+    assert not partial_archive.exists()
+    assert not final_archive.exists()
+
+
+def test_jmeter_cleanup_failure_preserves_primary_acquisition_failure(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    payload = b"complete-but-wrong-with-cleanup-failure"
+    actual_digest = hashlib.sha512(payload).hexdigest()
+    final_archive = tmp_path / "archive.tgz"
+    partial_archive = tmp_path / "archive.tgz.part"
+    original_unlink = Path.unlink
+
+    def controlled_unlink(path: Path, *, missing_ok: bool = False) -> None:
+        if path == partial_archive and path.exists():
+            raise OSError("controlled cleanup failure")
+        original_unlink(path, missing_ok=missing_ok)
+
+    monkeypatch.setattr(Path, "unlink", controlled_unlink)
+    with serve_payload(payload, content_length=len(payload)) as url:
+        with pytest.raises(
+            RuntimeError, match=re.escape("JMeter archive checksum mismatch:")
+        ) as raised:
+            measure.acquire_jmeter_archive(
+                url,
+                final_archive,
+                partial_archive,
+                official_sha512="f" * 128,
+                pinned_sha512="f" * 128,
+            )
+    assert f"actualSha512={actual_digest}" in str(raised.value)
+    assert any(
+        "JMeter archive cleanup failed: kind=partialArchive errorType=OSError" in note
+        for note in getattr(raised.value, "__notes__", [])
+    )
+    assert partial_archive.exists()
+    original_unlink(partial_archive)
     assert not final_archive.exists()
 
 
