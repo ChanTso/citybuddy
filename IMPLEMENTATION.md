@@ -1,9 +1,12 @@
 # CityBuddy implementation index
 
-**Document version:** v0.44\
-**Verification date:** 2026-08-06\
-**Repository phase:** CB-151 remains BLOCKED. CB-152 is the sole READY slice in the
-owner-approved three-part measurement route. No measurement implementation has begun.
+**Document version:** v0.45\
+**Verification date:** 2026-08-10\
+**Repository phase:** CB-151 and CB-152 are `BLOCKED`; CB-153 and CB-154 remain `PLANNED`.
+The route has zero `READY` and zero `IN_PROGRESS` rows. CB-152 legally started, but implementation
+PR #80 closed without merge after an evidence-validity blocker; it published no valid measurement
+result or performance claim. The measurement route is paused for owner Level 3 disposition, and
+CB-153 does not start automatically.
 
 ## How to use this index
 
@@ -57,8 +60,10 @@ The repository contains the verified local-runtime foundations, identity vertica
 - format, lint, type/compile, unit-test, build, pre-commit, Gitleaks, and GitHub Actions paths through `make ci`.
 
 It does not yet contain real model-provider access, deployment, or measured performance claims.
-The CB-151 generalized demo/reset/fault harness did not merge; the current route proceeds through
-the measurement-only CB-152, CB-153, and CB-154 slices without inheriting that harness.
+The CB-151 generalized demo/reset/fault harness did not merge. CB-152 legally started, but its
+implementation PR #80 closed without merge after an evidence-validity blocker; no CB-152
+runner, checker, result bundle, or performance claim entered `main`. The measurement route is
+paused for owner Level 3 disposition, and CB-153 does not start automatically.
 
 Cross-slice target architecture, preflight conclusions, service/data ownership, interface and security boundaries, sequence diagrams, route outcomes, risks, and change control live in [docs/CONTRACTS.md](docs/CONTRACTS.md).
 
@@ -87,7 +92,9 @@ Cross-slice target architecture, preflight conclusions, service/data ownership, 
 ## Complete route
 
 The owner-approved portfolio P0/P1 route terminates at `CB-154`; no `CB-155` is authorized.
-`CB-151` remains immutable `BLOCKED` history and has no replacement in the current route.
+`CB-151` and `CB-152` are `BLOCKED`, and neither has an authorized replacement in the current
+route. There is no `READY` or `IN_PROGRESS` row. Blocked and deferred work does not reactivate
+automatically; further route disposition belongs to the owner.
 CB-152, CB-153, and CB-154 are measurement-only slices whose thin runners may compose existing
 runtime commands but may not recreate the unmerged generalized demo/reset/fault harness. The route
 retains exactly five portfolio outputs: seckill QPS/concurrency correctness, Agent-path P99, RAG
@@ -151,7 +158,7 @@ The linked slice name is the canonical detailed specification. Target outcomes a
 | [CB-140 — Portfolio web demonstration and README truth](docs/slices/CB-140.md) | P1 | `VERIFIED` | `CB-020`, `CB-030`, `CB-060`, `CB-082`, `CB-091`, `CB-118`, `CB-122` |
 | [CB-150 — Agent metrics and optional no-op trace sink](docs/slices/CB-150.md) | P1 | `VERIFIED` | `CB-140` |
 | [CB-151 — Verified-path demo reset and fault drills](docs/slices/CB-151.md) | P1 | `BLOCKED` | `CB-150` |
-| [CB-152 — Seckill load and concurrency-correctness evidence](docs/slices/CB-152.md) | P1 | `READY` | `CB-150` |
+| [CB-152 — Seckill load and concurrency-correctness evidence](docs/slices/CB-152.md) | P1 | `BLOCKED` | `CB-150` |
 | [CB-153 — Agent-path latency evidence](docs/slices/CB-153.md) | P1 | `PLANNED` | `CB-150` |
 | [CB-154 — Retrieval/cache quality and final portfolio evidence](docs/slices/CB-154.md) | P1 | `PLANNED` | `CB-152`, `CB-153` |
 | `CB-900 — Multimodal intake and object storage outline` | P2 | `DEFERRED` | Explicit promotion only |
