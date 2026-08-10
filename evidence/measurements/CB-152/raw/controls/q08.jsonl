@@ -1,0 +1,3 @@
+{"category":null,"kind":"owner","message":null,"reservationLocatorHash":"b27648537d57db05b33dbf5234443b7399a3b50aa52efc1fb1a42cc0529b13a0","status":200}
+{"category":"VALIDATION","kind":"unknown","message":"Reservation is missing or not owned","reservationLocatorHash":"c85e0dba38649a25ca595ace5606f4915ce0bf44e90cb546487617ba5606001a","status":404}
+{"category":"VALIDATION","kind":"other-owner","message":"Reservation is missing or not owned","reservationLocatorHash":"b27648537d57db05b33dbf5234443b7399a3b50aa52efc1fb1a42cc0529b13a0","status":404}

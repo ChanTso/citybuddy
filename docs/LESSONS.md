@@ -356,4 +356,6 @@ This file records only factual pitfalls supported by merged pull-request, commit
 ## CB-152 — Acquisition diagnostics before local initialization
 
 - 现象：一次正式 invocation 在 fixture 与本地拓扑初始化前报告 JMeter archive checksum mismatch；失败 archive 及其实际 digest 未保留，随后 cleanup 又对从未创建的 run env 无条件调用 `reset-local`。
-- 结论：已确认的缺陷是 downloader 没有比较声明的 Content-Length 与实际读取字节数，也没有保留 transfer diagnostics；提前 EOF 是 plausible、可复现的失败路径，但原 mismatching transfer 的准确原因仍未证明。Owner 在 semantic budget 2/2 已耗尽后单独授权一次不改变 measurement semantics 的 acquisition-boundary 与 pre-init cleanup correction。
+- 根因：已确认的缺陷是 downloader 没有比较声明的 Content-Length 与实际读取字节数，也没有保留 transfer diagnostics。提前 EOF 是 plausible、可复现的失败路径；原 mismatching transfer 的准确原因仍未证明，因为失败字节和 digest 已被删除。
+- 解决：Owner 在 semantic budget 2/2 已耗尽后单独授权一次不改变 measurement semantics 的 acquisition-boundary 与 pre-init cleanup correction。下载改为在临时目录内流式累计实际字节数和 SHA-512，闭合可选 Content-Length、official/pinned/local digest，失败删除 partial 且不发布 final archive；pre-init 失败不再对从未创建的 env 调用 `reset-local`，仍保留 exact project residue 查询和 primary-failure precedence。Owner 逐行裁决缺少 `partial_archive.open()`/`output.close()` 两个额外直接测试只是已由相邻失败路径覆盖的排列扩张，不是可执行反例；runner、checker 与既有 41 个 focused tests 未因此弱化。
+- 结论：边界完整性失败必须报告足以区分提前 EOF、完整但 digest 错误和 I/O 失败的实际诊断，同时只把真实创建过的资源报告为已清理。修复后唯一获准的正式 invocation 取得三方 SHA-512 一致、Q01-Q09 与 residue 全部通过的首份有效 bundle；没有重跑、挑数或优化。本片没有发现 `docs/REVIEW_CHECKLIST.md` 尚未覆盖的新增 recurring defect class。
