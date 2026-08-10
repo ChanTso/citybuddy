@@ -1,9 +1,9 @@
 # CityBuddy implementation index
 
-**Document version:** v0.49\
+**Document version:** v0.50\
 **Verification date:** 2026-08-10\
-**Repository phase:** CB-151 remains BLOCKED, CB-152 is VERIFIED, CB-153 is the sole READY slice,
-and CB-154 remains PLANNED. There is no IN_PROGRESS slice.
+**Repository phase:** CB-151 and CB-152 are BLOCKED, while CB-153 and CB-154 remain PLANNED.
+There is no READY or IN_PROGRESS slice.
 
 ## How to use this index
 
@@ -56,8 +56,8 @@ The repository contains the verified local-runtime foundations, identity vertica
 - owner-scoped idempotent partial and full refunds with cumulative paid-amount bounds, legal terminal transitions, atomic MySQL refund/order/ledger/Outbox truth, and locking current-read reconciliation across payment, refund, and unpaid-timeout state;
 - format, lint, type/compile, unit-test, build, pre-commit, Gitleaks, and GitHub Actions paths through `make ci`.
 
-It does not yet contain real model-provider access or deployment. CB-152 contributes only its
-declared-local-environment seckill load result; later portfolio measurements remain unstarted.
+It does not yet contain real model-provider access, deployment, or a valid measured performance
+claim. CB-152's final review invalidated its result bundle, which is not retained.
 The CB-151 generalized demo/reset/fault harness did not merge; the current route proceeds through
 the measurement-only CB-152, CB-153, and CB-154 slices without inheriting that harness.
 
@@ -152,8 +152,8 @@ The linked slice name is the canonical detailed specification. Target outcomes a
 | [CB-140 — Portfolio web demonstration and README truth](docs/slices/CB-140.md) | P1 | `VERIFIED` | `CB-020`, `CB-030`, `CB-060`, `CB-082`, `CB-091`, `CB-118`, `CB-122` |
 | [CB-150 — Agent metrics and optional no-op trace sink](docs/slices/CB-150.md) | P1 | `VERIFIED` | `CB-140` |
 | [CB-151 — Verified-path demo reset and fault drills](docs/slices/CB-151.md) | P1 | `BLOCKED` | `CB-150` |
-| [CB-152 — Seckill load and concurrency-correctness evidence](docs/slices/CB-152.md) | P1 | `VERIFIED` | `CB-150` |
-| [CB-153 — Agent-path latency evidence](docs/slices/CB-153.md) | P1 | `READY` | `CB-150` |
+| [CB-152 — Seckill load and concurrency-correctness evidence](docs/slices/CB-152.md) | P1 | `BLOCKED` | `CB-150` |
+| [CB-153 — Agent-path latency evidence](docs/slices/CB-153.md) | P1 | `PLANNED` | `CB-150` |
 | [CB-154 — Retrieval/cache quality and final portfolio evidence](docs/slices/CB-154.md) | P1 | `PLANNED` | `CB-152`, `CB-153` |
 | `CB-900 — Multimodal intake and object storage outline` | P2 | `DEFERRED` | Explicit promotion only |
 | `CB-910 — Action recovery scanning and advanced resilience outline` | P2 | `DEFERRED` | Explicit promotion only |
