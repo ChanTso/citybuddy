@@ -878,6 +878,28 @@ test, business behavior, production code, workflow, dependency, migration, schem
 stored data, service/language responsibility, truth owner, security boundary, or transaction
 boundary. It makes no private-core or ServiceEval change.
 
+**Resolved factual execution disposition — 2026-08-10 (CB-152 final evidence blocker):** This is
+the current factual status that supersedes only the status snapshot in the 2026-08-06 disposition;
+the earlier decision text remains its unchanged historical record. CB-152 legally started, but
+implementation PR #80 closed without merge and formed no acceptable result. Fresh final review of
+evidence head `19a878e31d85e35d327ec6b1f86f0a2132fd0214` proved executable Q08 false-greens: malformed
+unknown and other-owner 404 JSON bodies with the wrong bounded key set could collapse to equal null
+category/message tuples, and a 64-character non-hex reservation-locator hash could pass without
+validation. The invalid bundle was deleted at final implementation head
+`3932a0f00be43620b3e5ddf158ac2de305192d1b`. No result bundle, QPS, percentile, Resume-ready,
+implementation, `VERIFIED`, or replacement credit is retained. PR #80 remains the detailed test,
+failure, and reviewer-evidence record; none of its unmerged code is a reusable implementation asset.
+
+CB-152 is now `BLOCKED`; CB-153 and CB-154 remain `PLANNED`; the route has no `READY` and no
+`IN_PROGRESS` row. The technical dependencies remain exactly `CB-152 ← CB-150`, `CB-153 ← CB-150`,
+and `CB-154 ← CB-152, CB-153`. The same five portfolio outputs remain unchanged, CB-154 still
+depends on both CB-152 and CB-153, the route still terminates at CB-154, and the decision that no
+CB-155 is authorized remains in force. No replacement map exists, and neither CB-153 nor any
+blocked or deferred work is activated. Any supersession requires a separate owner-authorized Level
+3 replacement map satisfying the conditions in `AGENTS.md`; blocked history cannot be deleted or
+rewritten. This addendum changes no API, schema, formula, Q01-Q09 requirement, business contract,
+truth owner, security boundary, transaction boundary, dependency, output, or route terminus.
+
 **Resolved contract correction — 2026-08-06 (opaque support-session consumer closure):** The owner
 explicitly authorized this correction in a defect-correction non-slice lane; it is not a silent
 contract change or an AGENTS.md Rule 2 maintenance lane. A support session is an opaque identifier.
