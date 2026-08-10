@@ -1,12 +1,12 @@
 # CityBuddy implementation index
 
-**Document version:** v0.45\
+**Document version:** v0.46\
 **Verification date:** 2026-08-10\
-**Repository phase:** CB-151 and CB-152 are `BLOCKED`; CB-153 and CB-154 remain `PLANNED`.
-The route has zero `READY` and zero `IN_PROGRESS` rows. CB-152 legally started, but implementation
-PR #80 closed without merge after an evidence-validity blocker; it published no valid measurement
-result or performance claim. The measurement route is paused for owner Level 3 disposition, and
-CB-153 does not start automatically.
+**Repository phase:** CB-151 and CB-152 are `BLOCKED`; CB-155 is the sole `READY` replacement;
+CB-153 and CB-154 remain `PLANNED`. The route has one `READY` and zero `IN_PROGRESS` rows. CB-152
+legally started, but implementation PR #80 closed without merge after an evidence-validity blocker;
+it published no valid measurement result or performance claim. No implementation has begun for
+CB-155.
 
 ## How to use this index
 
@@ -62,8 +62,10 @@ The repository contains the verified local-runtime foundations, identity vertica
 It does not yet contain real model-provider access, deployment, or measured performance claims.
 The CB-151 generalized demo/reset/fault harness did not merge. CB-152 legally started, but its
 implementation PR #80 closed without merge after an evidence-validity blocker; no CB-152
-runner, checker, result bundle, or performance claim entered `main`. The measurement route is
-paused for owner Level 3 disposition, and CB-153 does not start automatically.
+runner, checker, result bundle, or performance claim entered `main`, and its unmerged code is not
+reusable. CB-155 is the new, unimplemented sole replacement for the unfulfilled seckill-measurement
+outcome and inherits no implementation, review, CI, verification, Resume-ready, bundle, metric, or
+performance credit from PR #80. No measured performance claim exists.
 
 Cross-slice target architecture, preflight conclusions, service/data ownership, interface and security boundaries, sequence diagrams, route outcomes, risks, and change control live in [docs/CONTRACTS.md](docs/CONTRACTS.md).
 
@@ -91,16 +93,22 @@ Cross-slice target architecture, preflight conclusions, service/data ownership, 
 
 ## Complete route
 
-The owner-approved portfolio P0/P1 route terminates at `CB-154`; no `CB-155` is authorized.
-`CB-151` and `CB-152` are `BLOCKED`, and neither has an authorized replacement in the current
-route. There is no `READY` or `IN_PROGRESS` row. Blocked and deferred work does not reactivate
-automatically; further route disposition belongs to the owner.
-CB-152, CB-153, and CB-154 are measurement-only slices whose thin runners may compose existing
-runtime commands but may not recreate the unmerged generalized demo/reset/fault harness. The route
-retains exactly five portfolio outputs: seckill QPS/concurrency correctness, Agent-path P99, RAG
-HitRate@5/MRR, FAQ mapping/answer hit rates, and Elasticsearch knowledge-search avoidance. Each
-measurement slice publishes its own persistent result bundle; CB-152 and CB-153 results become
-independently valid at their own verification and are not gated or rewritten by CB-154 aggregation.
+The owner-approved portfolio P0/P1 route terminates at `CB-154`. `CB-151` remains `BLOCKED` without
+a replacement. `CB-152` remains immutable `BLOCKED` history and is superseded only for its
+unfulfilled seckill-measurement outcome by `CB-155`, the sole `READY` row. `CB-153` and `CB-154`
+remain `PLANNED`; there is no `IN_PROGRESS` row. The canonical execution order is `CB-155 → CB-153
+→ CB-154`. CB-155 is an explicit Level 3 replacement, not CB-152 recovery; blocked and deferred
+work does not reactivate automatically. No `CB-156` or further seckill-measurement replacement is
+authorized.
+
+CB-155, CB-153, and CB-154 are the current measurement-only route; CB-152 remains immutable
+`BLOCKED` history. Their thin runners may compose existing runtime commands but may not recreate the
+unmerged generalized demo/reset/fault harness. The route retains exactly five portfolio outputs:
+seckill QPS/concurrency correctness, Agent-path P99, RAG HitRate@5/MRR, FAQ mapping/answer hit rates,
+and Elasticsearch knowledge-search avoidance. First bottleneck is explanatory metadata, not a
+sixth output. Each current measurement slice publishes its own persistent result bundle; CB-155 and
+CB-153 results become independently valid at their own verification and are not gated or rewritten
+by CB-154 aggregation.
 The approved `CB-150` scope remains limited to Agent metrics and an optional default-no-op trace
 sink; provider-attempt counters remain diagnostic and do not produce a model-call-saving result.
 `CB-900`, `CB-910`, and `CB-920` remain deferred outlines outside this Goal. `CB-114`, `CB-115`,
@@ -159,8 +167,9 @@ The linked slice name is the canonical detailed specification. Target outcomes a
 | [CB-150 — Agent metrics and optional no-op trace sink](docs/slices/CB-150.md) | P1 | `VERIFIED` | `CB-140` |
 | [CB-151 — Verified-path demo reset and fault drills](docs/slices/CB-151.md) | P1 | `BLOCKED` | `CB-150` |
 | [CB-152 — Seckill load and concurrency-correctness evidence](docs/slices/CB-152.md) | P1 | `BLOCKED` | `CB-150` |
+| [CB-155 — Seckill load and concurrency-correctness evidence replacement](docs/slices/CB-155.md) | P1 | `READY` | `CB-150` |
 | [CB-153 — Agent-path latency evidence](docs/slices/CB-153.md) | P1 | `PLANNED` | `CB-150` |
-| [CB-154 — Retrieval/cache quality and final portfolio evidence](docs/slices/CB-154.md) | P1 | `PLANNED` | `CB-152`, `CB-153` |
+| [CB-154 — Retrieval/cache quality and final portfolio evidence](docs/slices/CB-154.md) | P1 | `PLANNED` | `CB-155`, `CB-153` |
 | `CB-900 — Multimodal intake and object storage outline` | P2 | `DEFERRED` | Explicit promotion only |
 | `CB-910 — Action recovery scanning and advanced resilience outline` | P2 | `DEFERRED` | Explicit promotion only |
 | `CB-920 — Advanced retrieval, provider-cache experiments, and expanded operations views` | P2 | `DEFERRED` | Explicit promotion only |

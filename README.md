@@ -166,12 +166,12 @@ make ci
 
 CityBuddy has no cloud deployment or production real-provider claim, no measured performance or
 quality result, and no operational-readiness claim. The optional Agent metrics and trace mirror do
-not supply those claims. The current measurement-only route is CB-152 seckill evidence, CB-153
-Agent-path latency evidence, and CB-154 retrieval/cache quality plus final aggregation; it ends at
-CB-154. Future measurement commands must be ephemeral thin wrappers over `make init-local`,
-`make up`, the required application processes, and explicit `make reset-local
-CONFIRM_RESET_LOCAL=1`, not a `make demo-*` lifecycle framework. No runner or result artifact exists
-yet.
+not supply those claims. CB-152 is `BLOCKED`; CB-155 is the sole `READY` replacement, while CB-153
+and CB-154 remain `PLANNED`. The canonical measurement-only order is CB-155 → CB-153 → CB-154, and
+the route still ends at CB-154. Future measurement commands must be ephemeral thin wrappers over
+`make init-local`, `make up`, the required application processes, and explicit `make reset-local
+CONFIRM_RESET_LOCAL=1`, not a `make demo-*` lifecycle framework. No CB-155 runner or result artifact
+exists yet, and no measured performance or quality result exists.
 
 The current Agent route has no successful confirmation, local ActionReceipt projection, `action_completed` turn, or receipt card. The blocked CB-121/CB-123 history does not make those capabilities available. The web never infers action type, amount, order, deadline, identifier, or terminal truth from reply prose.
 

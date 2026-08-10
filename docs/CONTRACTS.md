@@ -558,9 +558,10 @@ Slice status, priority, dependencies, and ordering live only in [IMPLEMENTATION.
 | `CB-140` | Minimal portfolio web plus factual README for login, products, seckill reservation/status, support chat, and PendingAction prepare/clarification/decline/expiry. No successful confirmation, receipt card, cart, full store, or workstation. |
 | `CB-150` | Agent-only operational metrics for verified paths and an optional default-no-op Agent trace sink that never becomes business or evidence truth. |
 | `CB-151` | Scripted reset/demo and phase-bound fault drills only for verified identity, catalog, ordering/seckill, payment/refund, RAG, chat, and PendingAction prepare/decline/expiry paths. |
-| `CB-152` | JMeter seckill load evidence with authoritative Commerce concurrency correctness and independently committed result artifacts. |
+| `CB-152` | Blocked historical attempt at the seckill-measurement outcome. It produced no valid result or credit and is superseded only for the unfulfilled outcome by CB-155. |
+| `CB-155` | Fresh JMeter seckill load evidence with authoritative Commerce Q01-Q09 concurrency correctness and independently committed result artifacts, as the sole replacement for CB-152's unfulfilled output. |
 | `CB-153` | Locust/Mock-LLM path-separated Agent latency evidence with independently committed result artifacts. |
-| `CB-154` | RAG quality, FAQ/cache and Elasticsearch-avoidance evidence plus a five-output aggregate that references rather than rewrites CB-152/153 results. |
+| `CB-154` | RAG quality, FAQ/cache and Elasticsearch-avoidance evidence plus a five-output aggregate that references rather than rewrites CB-155/153 results. |
 | `CB-900` | Future multimodal boundary only. |
 | `CB-910` | Future recovery scanner and observed-failure-driven resilience only. |
 | `CB-920` | Optional experiments and expanded views; no result assumed. |
@@ -899,6 +900,45 @@ blocked or deferred work is activated. Any supersession requires a separate owne
 3 replacement map satisfying the conditions in `AGENTS.md`; blocked history cannot be deleted or
 rewritten. This addendum changes no API, schema, formula, Q01-Q09 requirement, business contract,
 truth owner, security boundary, transaction boundary, dependency, output, or route terminus.
+
+**Resolved Level 3 replacement disposition — 2026-08-10 (CB-152 superseded by CB-155):**
+
+**Trigger and evidence.** PR #80 is closed without merge, CB-152's factual `BLOCKED` status and
+Completion record are on `main`, and fresh final review proved executable Q08 false-greens. No valid
+bundle, metric, implementation, review, CI, verification, Resume-ready, or performance credit
+survived. The implementation branch is deleted, no unresolved branch or open pull request remains,
+the latest `main` checks succeeded, and the owner supplied this explicit Level 3 replacement map;
+all supersession preconditions are satisfied.
+
+**Exact decision.** CB-152 remains permanently `BLOCKED`. CB-155 becomes the sole `READY` row and
+depends on CB-150. CB-153 remains `PLANNED` and depends on CB-150. CB-154 remains `PLANNED` and now
+depends on CB-155 plus CB-153. Canonical execution is `CB-155 → CB-153 → CB-154`, and the route
+terminates at CB-154. CB-152 and CB-155 do not represent two Portfolio numbers: both map to the
+same first output, seckill QPS / concurrency correctness. CB-152 is immutable blocked history and
+CB-155 is the sole current result owner. This paragraph supersedes the current effect of the
+2026-08-06 decision that no CB-155 was authorized and the 2026-08-10 factual addendum that no
+replacement map existed and no CB-155 remained in force; those dated historical texts remain
+unchanged. No CB-156 or further seckill-measurement replacement is authorized.
+
+**Impact radius.** The change is limited to the public route, route outcome catalog, CB-152
+append-only supersession reference, new CB-155 specification, CB-154 input dependency, and directly
+conflicting README route text. It changes no production behavior, API, schema, grant, migration,
+truth owner, security boundary, transaction boundary, Q01-Q09 requirement, five-output set,
+first-bottleneck explanatory status, ServiceEval work, or private-core state.
+
+**Operational cost.** CB-155 requires a fresh implementation from current `main`; no PR #80 commit,
+runner, checker, JMeter plan, test, bundle, or other code is reusable. There is no stored-data or
+runtime migration. This decision adds one documentation/specification unit; later implementation
+remains one ephemeral measurement runner within the linked slice boundary.
+
+**Replacement acceptance and terminal stop.** CB-155 must satisfy the unchanged CB-152 measurement
+outcome and Q01-Q09, publish `evidence/measurements/CB-155/` independently, close its pre-formal
+adversarial requirements, and obtain a fresh independent `NO BLOCKER` without reusing PR #80
+implementation. The Portfolio still has exactly five outputs—seckill QPS / concurrency correctness,
+Agent-path P99, RAG HitRate@5 / MRR, FAQ mapping / answer hit rates, and Elasticsearch
+knowledge-search avoidance—and first bottleneck remains explanatory metadata, not a sixth output.
+If CB-155 becomes `BLOCKED`, no CB-156 or second replacement is authorized and the route stops for
+owner disposition.
 
 **Resolved contract correction — 2026-08-06 (opaque support-session consumer closure):** The owner
 explicitly authorized this correction in a defect-correction non-slice lane; it is not a silent
