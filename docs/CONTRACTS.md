@@ -940,6 +940,43 @@ knowledge-search avoidance—and first bottleneck remains explanatory metadata, 
 If CB-155 becomes `BLOCKED`, no CB-156 or second replacement is authorized and the route stops for
 owner disposition.
 
+**Resolved Level 3 implementation-surface clarification — 2026-08-11 (CB-155 frozen-SQL LOC
+accounting):**
+
+**Trigger.** The bounded CB-155 preflight correctly identified the five-file functional gate, but
+allocated only 75–105 runner lines to the ten literal SQL blocks together with prepared execution and
+rowset serialization. Mechanical review of the still-unstarted `READY` specification proves that it
+already contains ten SQL blocks and 174 nonblank SQL lines. Continuing with a total-only projection
+would defer the surface stop until substantial implementation had been completed. This is an
+implementation-before projection correction, not evidence of a CB-155 implementation or formal-run
+failure.
+
+**Exact decision.** `total_nonblank` is every nonblank source line in the CB-155 runner and checker.
+`frozen_sql_nonblank` is exactly 174 lines from the ten ordered specification SQL blocks, and only
+when each implemented block is mechanically equal line by line and in order.
+`authored_nonblank = total_nonblank - frozen_sql_nonblank` only after that equality passes. The hard
+limits are `authored_nonblank <= 1,800`, `total_nonblank <= 1,974`, and at most five functional
+implementation/test files. CB-155 has no separate pre-formal smoke profile or alternate workload
+branch. Its first live lifecycle invocation is its first complete formal evidence execution, and the
+existing one post-formal scope-owned semantic recovery cycle remains unchanged.
+
+**Rationale.** The 174 literal SQL lines were already accepted as normative Q01-Q09 content through
+route/specification review, while implementation must still prove exact block count, order, character
+content, and single occurrence. Prepared binding, execution, fetch, serialization, error handling,
+cleanup, and all other implementation logic remain authored surface. Total LOC must still be
+disclosed and is independently capped at 1,974. This is neither an open-ended exclusion nor a way to
+hide review surface: only the 174 mechanically equal SQL payload lines receive the frozen exclusion.
+
+**Impact radius.** This clarification affects only CB-155 implementation-surface accounting, the
+number of CB-155 pre-formal execution paths, and future private factual synchronization. It does not
+change Q01-Q09 or their SQL content, workload, artifact contract, business truth, production API,
+schema, grant, migration, dependency, output ownership, route terminus, recovery-cycle count, or the
+no-CB-156 boundary.
+
+**Stop rule.** Frozen SQL equality failure, `authored_nonblank > 1,800`,
+`total_nonblank > 1,974`, or more than five functional files stops CB-155 before formal execution.
+These gates must not be relaxed again, and no CB-156 may be created.
+
 **Resolved contract correction — 2026-08-06 (opaque support-session consumer closure):** The owner
 explicitly authorized this correction in a defect-correction non-slice lane; it is not a silent
 contract change or an AGENTS.md Rule 2 maintenance lane. A support session is an opaque identifier.
