@@ -2,11 +2,11 @@
 
 **Document version:** v0.46\
 **Verification date:** 2026-08-10\
-**Repository phase:** CB-151 and CB-152 are `BLOCKED`; CB-155 is the sole `READY` replacement;
-CB-153 and CB-154 remain `PLANNED`. The route has one `READY` and zero `IN_PROGRESS` rows. CB-152
+**Repository phase:** CB-151 and CB-152 are `BLOCKED`; CB-155 is the sole `IN_PROGRESS` replacement;
+CB-153 and CB-154 remain `PLANNED`. The route has zero `READY` and one `IN_PROGRESS` row. CB-152
 legally started, but implementation PR #80 closed without merge after an evidence-validity blocker;
 it published no valid measurement result or performance claim. No implementation has begun for
-CB-155.
+CB-155. CB-155 implementation is now active on its single authorized feature branch.
 
 ## How to use this index
 
@@ -95,8 +95,8 @@ Cross-slice target architecture, preflight conclusions, service/data ownership, 
 
 The owner-approved portfolio P0/P1 route terminates at `CB-154`. `CB-151` remains `BLOCKED` without
 a replacement. `CB-152` remains immutable `BLOCKED` history and is superseded only for its
-unfulfilled seckill-measurement outcome by `CB-155`, the sole `READY` row. `CB-153` and `CB-154`
-remain `PLANNED`; there is no `IN_PROGRESS` row. The canonical execution order is `CB-155 → CB-153
+unfulfilled seckill-measurement outcome by `CB-155`, the sole `IN_PROGRESS` row. `CB-153` and `CB-154`
+remain `PLANNED`; there is no `READY` row. The canonical execution order is `CB-155 → CB-153
 → CB-154`. CB-155 is an explicit Level 3 replacement, not CB-152 recovery; blocked and deferred
 work does not reactivate automatically. No `CB-156` or further seckill-measurement replacement is
 authorized.
@@ -167,7 +167,7 @@ The linked slice name is the canonical detailed specification. Target outcomes a
 | [CB-150 — Agent metrics and optional no-op trace sink](docs/slices/CB-150.md) | P1 | `VERIFIED` | `CB-140` |
 | [CB-151 — Verified-path demo reset and fault drills](docs/slices/CB-151.md) | P1 | `BLOCKED` | `CB-150` |
 | [CB-152 — Seckill load and concurrency-correctness evidence](docs/slices/CB-152.md) | P1 | `BLOCKED` | `CB-150` |
-| [CB-155 — Seckill load and concurrency-correctness evidence replacement](docs/slices/CB-155.md) | P1 | `READY` | `CB-150` |
+| [CB-155 — Seckill load and concurrency-correctness evidence replacement](docs/slices/CB-155.md) | P1 | `IN_PROGRESS` | `CB-150` |
 | [CB-153 — Agent-path latency evidence](docs/slices/CB-153.md) | P1 | `PLANNED` | `CB-150` |
 | [CB-154 — Retrieval/cache quality and final portfolio evidence](docs/slices/CB-154.md) | P1 | `PLANNED` | `CB-155`, `CB-153` |
 | `CB-900 — Multimodal intake and object storage outline` | P2 | `DEFERRED` | Explicit promotion only |
