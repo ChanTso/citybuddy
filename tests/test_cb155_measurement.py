@@ -342,7 +342,19 @@ def build_bundle(root: Path) -> Path:
             "volumes": 0,
             "children": [{"kind": "auth", "absent": True}, {"kind": "commerce", "absent": True}],
             "paths": [
+                {"kind": "auth_log", "absent": True},
+                {"kind": "commerce_log", "absent": True},
+                {"kind": "docker_client_config", "absent": True},
+                {"kind": "jmeter_archive", "absent": True},
+                {"kind": "jmeter_checksum", "absent": True},
+                {"kind": "jmeter_install", "absent": True},
+                {"kind": "measured_temporary_jtl", "absent": True},
+                {"kind": "measured_token_input", "absent": True},
+                {"kind": "rsa_private_key", "absent": True},
+                {"kind": "rsa_public_key", "absent": True},
                 {"kind": "run_env", "absent": True},
+                {"kind": "warmup_temporary_jtl", "absent": True},
+                {"kind": "warmup_token_input", "absent": True},
                 {"kind": "temporary_directory", "absent": True},
             ],
         },
@@ -417,7 +429,10 @@ def build_bundle(root: Path) -> Path:
         "settlementTimeoutSeconds": 300,
         "jmeterConnectTimeoutMs": 2000,
         "jmeterResponseTimeoutMs": 10000,
-        "runOrder": ["formal"],
+        "runOrder": (
+            "build acquire-jmeter init-local up fixtures auth commerce q01 warmup controls "
+            "measured settlement q02-q09 cleanup reconstruct publish"
+        ).split(),
     }
     result = {
         "schemaVersion": "cb155-result-v1",
@@ -507,6 +522,15 @@ def test_frozen_sql_matches_specification_exactly() -> None:
     [
         (lambda value: value.pop("jmeterResponseTimeoutMs"), "MANIFEST_SCHEMA"),
         (lambda value: value["environment"].update({"unknown": True}), "MANIFEST_ENVIRONMENT"),
+        (lambda value: value.update({"commands": []}), "MANIFEST_RUNTIME_PARAMETER"),
+        (lambda value: value.update({"runOrder": []}), "MANIFEST_RUNTIME_PARAMETER"),
+        (lambda value: value.update({"settleCutoff": "zzzz"}), "MANIFEST_TIMESTAMP"),
+        (lambda value: value["environment"].update({"scope": True}), "MANIFEST_FACT"),
+        (lambda value: value["machine"].update({"cpuCount": True}), "MANIFEST_FACT"),
+        (
+            lambda value: value["containerResources"].update({"composeVersion": True}),
+            "MANIFEST_FACT",
+        ),
     ],
 )
 def test_manifest_false_green_rejections(
@@ -525,6 +549,16 @@ def test_contradictory_public_sample_is_rejected(tmp_path: Path) -> None:
         lambda rows: rows[0].update({"projectionVersion": "3"}),
     )
     assert_rejected(bundle, "PUBLIC_SAMPLE_CONTRACT")
+
+
+def test_malformed_response_bytes_is_rejected(tmp_path: Path) -> None:
+    bundle = build_bundle(tmp_path)
+    mutate_csv(
+        bundle,
+        "raw/performance/measured.csv",
+        lambda rows: rows[0].update({"responseBytes": "not-an-integer"}),
+    )
+    assert_rejected(bundle, "SAMPLE_BODY")
 
 
 def test_noncanonical_uuid_is_rejected_by_producer() -> None:
@@ -590,6 +624,18 @@ def test_q04_public_durable_binding_mismatch(tmp_path: Path) -> None:
     assert_rejected(bundle, "Q04_PUBLIC_DURABLE")
 
 
+def test_q04_locator_set_must_cover_measured_and_controls(tmp_path: Path) -> None:
+    bundle = build_bundle(tmp_path)
+
+    def replace_locator(rows: list[dict[str, Any]]) -> None:
+        replacement = digest("unrelated-reservation")
+        rows[0]["public"]["reservationLocatorHash"] = replacement
+        rows[0]["durable"]["reservationLocatorHash"] = replacement
+
+    mutate_json(bundle, "raw/controls/q04.jsonl", replace_locator)
+    assert_rejected(bundle, "Q04_CONTROL_COVERAGE")
+
+
 @pytest.mark.parametrize(
     ("field", "value", "code"),
     [
@@ -620,6 +666,37 @@ def test_q07_replay_before_settlement(tmp_path: Path) -> None:
 
 
 @pytest.mark.parametrize(
+    "observed_at", ["zzzz", "2026-01-01T00:02:00.1Z", "2099-01-01T00:00:00.000000Z"]
+)
+def test_q07_malformed_or_future_replay_timestamp_is_rejected(
+    tmp_path: Path, observed_at: str
+) -> None:
+    bundle = build_bundle(tmp_path)
+    mutate_json(
+        bundle,
+        "raw/controls/q07.jsonl",
+        lambda rows: rows[1].update({"observedAt": observed_at}),
+    )
+    assert_rejected(bundle, "Q07_REPLAY_TIMING")
+
+
+def test_q07_string_status_is_rejected(tmp_path: Path) -> None:
+    bundle = build_bundle(tmp_path)
+    mutate_json(bundle, "raw/controls/q07.jsonl", lambda rows: rows[1].update({"status": "200"}))
+    assert_rejected(bundle, "Q07_STATUS")
+
+
+def test_runner_rejects_q07_canonical_order_mismatch() -> None:
+    detail = {
+        "reservation_id": "reservation",
+        "order_id": "order",
+        "canonical_order_id": "different-order",
+    }
+    with pytest.raises(RuntimeError, match=r"^Q07_CANONICAL_ORDER:"):
+        runner.sanitize_q07_detail(detail)
+
+
+@pytest.mark.parametrize(
     ("mutation", "code"),
     [
         (lambda rows: rows[1]["body"].pop("message"), "Q08_ERROR_KEYSET"),
@@ -637,11 +714,123 @@ def test_q08_disclosure_mutations(
     assert_rejected(bundle, code)
 
 
+@pytest.mark.parametrize("case", ["unknown", "unknown-existing", "other-owner"])
+def test_q08_locator_ownership_binding(tmp_path: Path, case: str) -> None:
+    bundle = build_bundle(tmp_path)
+
+    def break_binding(rows: list[dict[str, Any]]) -> None:
+        owner = rows[0]["reservationLocatorHash"]
+        target = 1 if case.startswith("unknown") else 2
+        replacements = {"unknown": owner, "unknown-existing": digest("measured-1")}
+        rows[target]["reservationLocatorHash"] = replacements.get(case, digest("wrong"))
+
+    mutate_json(bundle, "raw/controls/q08.jsonl", break_binding)
+    assert_rejected(bundle, "Q08_LOCATOR_BINDING")
+
+
+def test_q08_owner_status_body_classification(tmp_path: Path) -> None:
+    bundle = build_bundle(tmp_path)
+    mutate_json(
+        bundle,
+        "raw/controls/q08.jsonl",
+        lambda rows: rows[0].update({"body": public_body("q08", "cb155-activity")}),
+    )
+    assert_rejected(bundle, "PUBLIC_SAMPLE_CONTRACT")
+
+
+def test_q08_owner_must_equal_q04_terminal_body(tmp_path: Path) -> None:
+    bundle = build_bundle(tmp_path)
+    mutate_json(
+        bundle,
+        "raw/controls/q08.jsonl",
+        lambda rows: rows[0]["body"].update({"orderLocatorHash": digest("different-order")}),
+    )
+    assert_rejected(bundle, "Q08_OWNER_BINDING")
+
+
+@pytest.mark.parametrize(
+    "relative",
+    [
+        "raw/reconciliation/q05.csv",
+        "raw/reconciliation/q06.csv",
+        "raw/reconciliation/q07-duplicates.csv",
+        "raw/reconciliation/q09.csv",
+    ],
+)
+def test_reconciliation_requires_exact_headers(tmp_path: Path, relative: str) -> None:
+    bundle = build_bundle(tmp_path)
+    mutate_csv(bundle, relative, lambda rows: rows[0].update({"unexpected": "0"}))
+    assert_rejected(bundle, "CSV_HEADER")
+
+
+def test_q06_missing_stock_columns_is_rejected(tmp_path: Path) -> None:
+    bundle = build_bundle(tmp_path)
+
+    def remove_stock(rows: list[dict[str, str]]) -> None:
+        rows[0].pop("final_stock")
+        rows[0].pop("expected_final_stock")
+
+    mutate_csv(bundle, "raw/reconciliation/q06.csv", remove_stock)
+    assert_rejected(bundle, "CSV_HEADER")
+
+
 @pytest.mark.parametrize("field", ["children", "paths"])
 def test_q09_empty_inventory(tmp_path: Path, field: str) -> None:
     bundle = build_bundle(tmp_path)
     mutate_json(bundle, "raw/residue.json", lambda value: value.update({field: []}))
     assert_rejected(bundle, "Q09_EMPTY_INVENTORY")
+
+
+@pytest.mark.parametrize("field", ["children", "paths"])
+def test_q09_inventory_requires_exact_owned_kinds(tmp_path: Path, field: str) -> None:
+    bundle = build_bundle(tmp_path)
+    mutate_json(bundle, "raw/residue.json", lambda value: value[field].pop())
+    assert_rejected(bundle, "Q09_INVENTORY_SET")
+
+
+def test_q09_inventory_rejects_arbitrary_path_kind(tmp_path: Path) -> None:
+    bundle = build_bundle(tmp_path)
+    replacement = [{"kind": "fake", "absent": True}]
+    mutate_json(bundle, "raw/residue.json", lambda value: value.update({"paths": replacement}))
+    assert_rejected(bundle, "Q09_INVENTORY_SET")
+
+
+@pytest.mark.parametrize(
+    ("message", "code"),
+    [
+        (
+            ".".join(("eyJhbGciOiJIUzI1NiJ9", "eyJzdWIiOiJjYjE1NSJ9", "signature123")),
+            "SECRET_SCAN",
+        ),
+        ('{"password":"secret"}', "SECRET_SCAN"),
+        ('{"Authorization":"secret"}', "SECRET_SCAN"),
+        ("private endpoint http://127.0.0.1:8080/internal", "SECRET_SCAN"),
+        ("raw identity cb155-subject-001", "RAW_LOCATOR_OR_PATH"),
+        ("temporary file /tmp/cb155-secret", "RAW_LOCATOR_OR_PATH"),
+        ("temporary file /var/folders/aa/cb155-secret", "RAW_LOCATOR_OR_PATH"),
+        ("temporary file /var/tmp/cb155-secret", "RAW_LOCATOR_OR_PATH"),
+    ],
+)
+def test_q08_error_payload_sanitization(tmp_path: Path, message: str, code: str) -> None:
+    bundle = build_bundle(tmp_path)
+
+    def inject(rows: list[dict[str, Any]]) -> None:
+        rows[1]["body"]["message"] = message
+        rows[2]["body"]["message"] = message
+
+    mutate_json(bundle, "raw/controls/q08.jsonl", inject)
+    assert_rejected(bundle, code)
+
+
+@pytest.mark.parametrize(
+    "escaped", [rb"p\u0061ssword=secret", rb"http:\/\/127.0.0.1:8080/internal"]
+)
+def test_q08_noncanonical_escape_cannot_hide_secret(tmp_path: Path, escaped: bytes) -> None:
+    bundle = build_bundle(tmp_path)
+    path = bundle / "raw/controls/q08.jsonl"
+    path.write_bytes(path.read_bytes().replace(b"Reservation not found", escaped))
+    refresh(bundle)
+    assert_rejected(bundle, "SECRET_SCAN")
 
 
 def test_declared_actual_record_mismatch_reaches_record_guard(tmp_path: Path) -> None:

@@ -324,8 +324,7 @@ def named_fields(names: str, values: tuple[Any, ...]) -> dict[str, Any]:
 
 
 def source_gate() -> str:
-    if output(["git", "status", "--porcelain"]):
-        fail("CANDIDATE_DIRTY", "formal run requires a clean candidate")
+    ensure(not output(["git", "status", "--porcelain"]), "CANDIDATE_DIRTY")
     revision = output(["git", "rev-parse", "HEAD"])
     expected = ["Q01", "Q02", "Q03", "Q04", "Q05", "Q06", "Q07a", "Q07b", "Q08", "Q09"]
     ensure(list(SQL_BLOCKS) == expected, "SQL_ORDER", repr(list(SQL_BLOCKS)))
@@ -361,19 +360,17 @@ def download(url: str, destination: Path, maximum: int | None = None) -> str:
             final_url = response.geturl()
             raw_length = response.headers.get("Content-Length")
             if raw_length is not None:
-                if re.fullmatch(r"0|[1-9][0-9]*", raw_length) is None:
-                    fail("DOWNLOAD_CONTENT_LENGTH", raw_length)
+                ensure(re.fullmatch(r"0|[1-9][0-9]*", raw_length) is not None, "DOWNLOAD_LENGTH")
                 length_text = raw_length
             ensure(status == 200, "DOWNLOAD_STATUS", str(status))
             with part.open("wb") as target:
                 while chunk := response.read(1024 * 1024):
                     count += len(chunk)
-                    if maximum is not None and count > maximum:
-                        fail("DOWNLOAD_SIZE", str(count))
+                    ensure(maximum is None or count <= maximum, "DOWNLOAD_SIZE", str(count))
                     digest.update(chunk)
                     target.write(chunk)
-            if raw_length is not None and count != int(raw_length):
-                fail("DOWNLOAD_EOF", f"declared={raw_length} actual={count}")
+            complete = raw_length is None or count == int(raw_length)
+            ensure(complete, "DOWNLOAD_EOF", f"declared={raw_length} actual={count}")
         os.replace(part, destination)
         return digest.hexdigest()
     except Exception as error:
@@ -402,15 +399,15 @@ def acquire_jmeter(state: State) -> Path:
     if match is None:
         fail("JMETER_OFFICIAL_CHECKSUM", "one exact sha512sum record required")
     actual = download(f"{JMETER_BASE}/{JMETER_ARCHIVE}", archive)
-    if match.group(1) != JMETER_SHA512 or actual != JMETER_SHA512:
-        fail("JMETER_DIGEST", f"official={match.group(1)} pinned={JMETER_SHA512} actual={actual}")
+    digest_match = match.group(1) == JMETER_SHA512 and actual == JMETER_SHA512
+    ensure(digest_match, "JMETER_DIGEST", f"official={match.group(1)} actual={actual}")
     install.mkdir(mode=0o700)
     with tarfile.open(archive, "r:gz") as tar:
         members = tar.getmembers()
         for member in members:
             target = (install / member.name).resolve()
-            if install.resolve() not in target.parents or not (member.isfile() or member.isdir()):
-                fail("JMETER_ARCHIVE_MEMBER", member.name)
+            safe = install.resolve() in target.parents and (member.isfile() or member.isdir())
+            ensure(safe, "JMETER_ARCHIVE_MEMBER", member.name)
         tar.extractall(install, members=members)  # noqa: S202
     executable = install / f"apache-jmeter-{JMETER_VERSION}/bin/jmeter"
     ensure(executable.is_file(), "JMETER_INSTALL", "executable missing")
@@ -422,8 +419,7 @@ def env_values(path: Path) -> dict[str, str]:
     for line in path.read_text().splitlines():
         if line and not line.startswith("#"):
             key, separator, value = line.partition("=")
-            if not separator or key in values:
-                fail("RUN_ENV", "malformed")
+            ensure(bool(separator) and key not in values, "RUN_ENV", "malformed")
             values[key] = value
     return values
 
@@ -431,8 +427,7 @@ def env_values(path: Path) -> dict[str, str]:
 def compose(
     state: State, *arguments: str, capture: bool = False
 ) -> subprocess.CompletedProcess[str]:
-    if state.env is None:
-        fail("RUN_ENV", "missing")
+    ensure(state.env is not None, "RUN_ENV", "missing")
     return command(
         [
             "docker",
@@ -453,8 +448,8 @@ def compose(
 def dependency_port(state: State, service: str, container_port: int) -> int:
     binding = compose(state, "port", service, str(container_port), capture=True).stdout.strip()
     match = re.fullmatch(r"127\.0\.0\.1:([0-9]{1,5})", binding)
-    if match is None or not 0 < int(match.group(1)) <= 65535:
-        fail("DEPENDENCY_PORT", f"{service}:{container_port}")
+    ensure(match is not None and 0 < int(match.group(1)) <= 65535, "DEPENDENCY_PORT")
+    assert match is not None
     return int(match.group(1))
 
 
@@ -632,8 +627,7 @@ def request(
 def _unique_pairs(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
     value: dict[str, Any] = {}
     for key, item in pairs:
-        if key in value:
-            fail("HTTP_DUPLICATE_KEY", key)
+        ensure(key not in value, "HTTP_DUPLICATE_KEY", key)
         value[key] = item
     return value
 
@@ -668,14 +662,11 @@ def public_body(payload: dict[str, Any], activity: str, quantity: int, code: str
     if order is not None:
         canonical_uuid(order, code)
     integer_fields = "quantity activityProjectionVersion projectionVersion".split()
-    if any(type(payload[key]) is not int for key in integer_fields) or (
-        payload["activityId"] != activity
-        or payload["quantity"] != quantity
-        or payload["activityProjectionVersion"] != 1
-    ):
-        fail(code, "intent mismatch")
-    if type(payload["replay"]) is not bool or type(payload["durableOrderCreated"]) is not bool:
-        fail(code, "boolean type")
+    intent = (payload["activityId"], payload["quantity"], payload["activityProjectionVersion"])
+    ensure(all(type(payload[key]) is int for key in integer_fields), code, "integer type")
+    ensure(intent == (activity, quantity, 1), code, "intent mismatch")
+    booleans = (payload["replay"], payload["durableOrderCreated"])
+    ensure(all(type(value) is bool for value in booleans), code, "boolean type")
     state_value = payload["state"]
     actual = (
         payload["decisionCode"],
@@ -722,8 +713,8 @@ def login(auth_port: int, index: int, password: str) -> str:
         f"http://127.0.0.1:{auth_port}/auth/login",
         {"loginIdentifier": f"cb155-login-{index:03d}", "password": password},
     )
-    if response.status != 200 or set(response.payload) != {"accessToken", "tokenType", "expiresIn"}:
-        fail("AUTH_LOGIN", str(index))
+    fields = {"accessToken", "tokenType", "expiresIn"}
+    ensure(response.status == 200 and set(response.payload) == fields, "AUTH_LOGIN", str(index))
     token = response.payload["accessToken"]
     ensure(isinstance(token, str) and bool(token), "AUTH_LOGIN", str(index))
     return str(token)
@@ -736,12 +727,8 @@ def jwt_expiry(token: str) -> int:
         value = json.loads(decoded, object_pairs_hook=_unique_pairs)
     except (IndexError, ValueError, json.JSONDecodeError) as error:
         fail("JWT_EXPIRY", str(error))
-    if (
-        not isinstance(value, dict)
-        or isinstance(value.get("exp"), bool)
-        or not isinstance(value.get("exp"), int)
-    ):
-        fail("JWT_EXPIRY", "integer exp required")
+    valid = isinstance(value, dict) and not isinstance(value.get("exp"), bool)
+    ensure(valid and isinstance(value.get("exp"), int), "JWT_EXPIRY", "integer exp required")
     return int(value["exp"])
 
 
@@ -762,8 +749,7 @@ def query(connection: Database, name: str, values: dict[str, Any]) -> list[dict[
 
     def placeholder(match: re.Match[str]) -> str:
         key = match.group(1)
-        if key not in values:
-            fail("SQL_BINDING", f"{name}:{key}")
+        ensure(key in values, "SQL_BINDING", f"{name}:{key}")
         bindings.append(values[key])
         return "%s"
 
@@ -891,8 +877,8 @@ def wait_ordered(port: int, token: str, locator: str, activity: str) -> dict[str
 
 
 def public_error(response: Response, code: str) -> dict[str, str]:
-    if response.status != 404 or set(response.payload) != {"category", "message"}:
-        fail(code, f"status={response.status} keys={sorted(response.payload)}")
+    valid = response.status == 404 and set(response.payload) == {"category", "message"}
+    ensure(valid, code, f"status={response.status} keys={sorted(response.payload)}")
     category = response.payload["category"]
     message = response.payload["message"]
     if not isinstance(category, str) or not category or not isinstance(message, str) or not message:
@@ -911,6 +897,16 @@ def row_digest(row: dict[str, Any]) -> str:
             data = str(value).encode()
             encoded.extend(str(len(data)).encode() + b":" + data + b";")
     return hashlib.sha256(encoded).hexdigest()
+
+
+def sanitize_q07_detail(row: dict[str, Any]) -> dict[str, Any]:
+    detail = dict(row)
+    detail["reservation_locator_hash"] = locator_hash(str(detail.pop("reservation_id")))
+    order_id = detail.pop("order_id")
+    canonical_order_id = detail.pop("canonical_order_id")
+    ensure(canonical_order_id == order_id, "Q07_CANONICAL_ORDER", "order identity mismatch")
+    detail["order_locator_hash"] = None if order_id is None else locator_hash(str(order_id))
+    return detail
 
 
 def csv_payload(rows: list[dict[str, Any]]) -> str:
@@ -1120,8 +1116,8 @@ def execute_formal(
         measured_hashes = {str(row["reservationLocatorHash"]) for row in measured}
         ensure(len(measured_hashes) == 500, "MEASURED_OWNER_CARDINALITY")
         ensure(time.monotonic() - preload_done <= 70, "MEASURED_HARD_END")
-        if min(row["startTimestampMs"] for row in measured) - preload_epoch_ms > 10_000:
-            fail("MEASURED_START_BOUND", "JMeter started more than 10 seconds after precheck")
+        start_delay = min(row["startTimestampMs"] for row in measured) - preload_epoch_ms
+        ensure(start_delay <= 10_000, "MEASURED_START_BOUND", str(start_delay))
         projection_raw = cache.get(f"commerce:seckill:activity:{activity}")
         projection = json.loads(str(projection_raw or "{}"))
         ensure(projection.get("remainingQuota") == 0, "POSTLOAD_QUOTA", repr(projection))
@@ -1155,8 +1151,7 @@ def execute_formal(
                 and all(int(value or 0) == 0 for value in q09[0].values())
             ):
                 break
-            if time.monotonic() >= settle_deadline:
-                fail("SETTLEMENT_TIMEOUT", "Q03/Q09 did not close in 300 seconds")
+            ensure(time.monotonic() < settle_deadline, "SETTLEMENT_TIMEOUT")
             time.sleep(1)
         settle_cutoff = observed
         q04_controls: list[dict[str, Any]] = []
@@ -1223,11 +1218,7 @@ def execute_formal(
             name: query(db, name, final_values)
             for name in ("Q02", "Q03", "Q04", "Q05", "Q06", "Q07a", "Q07b", "Q09")
         }
-        detail = q_rows["Q07a"][0]
-        detail["reservation_locator_hash"] = locator_hash(str(detail.pop("reservation_id")))
-        order_id = detail.pop("order_id")
-        detail.pop("canonical_order_id")
-        detail["order_locator_hash"] = None if order_id is None else locator_hash(str(order_id))
+        detail = sanitize_q07_detail(q_rows["Q07a"][0])
         files: dict[str, Any] = {"raw/performance/warmup.csv": sample_csv(warmup)}
         files["raw/performance/measured.csv"] = sample_csv(measured)
         for name in ("Q01", "Q02", "Q03", "Q04", "Q05", "Q06", "Q09"):
@@ -1392,16 +1383,14 @@ def canonical_guard(paths: list[Path], message: str) -> None:
     for hook in ("trailing-whitespace", "end-of-file-fixer", "mixed-line-ending"):
         command(["uv", "run", "pre-commit", "run", hook, "--files", *map(str, paths)], env=hook_env)
     after = {path: hashlib.sha256(path.read_bytes()).hexdigest() for path in paths}
-    if before != after:
-        fail("CANONICALIZATION_REWRITE", message)
+    ensure(before == after, "CANONICALIZATION_REWRITE", message)
 
 
 def publish(data: RunData, residue: dict[str, Any], state: State) -> None:
     parent = FINAL_BUNDLE.parent
     parent.mkdir(parents=True, exist_ok=True)
     staging = parent / f".CB-155-staging-{os.getpid()}"
-    if staging.exists() or FINAL_BUNDLE.exists():
-        fail("ATOMIC_PUBLICATION", "target or owned staging already exists")
+    ensure(not staging.exists() and not FINAL_BUNDLE.exists(), "ATOMIC_PUBLICATION")
     staging.mkdir(mode=0o700)
     try:
         data.files["raw/residue.json"] = residue
@@ -1488,8 +1477,7 @@ def main() -> None:
         if cleanup_error is not None:
             print(f"cleanup_after_primary_failure={cleanup_error}", file=sys.stderr)
         raise primary
-    if cleanup_error is not None:
-        raise cleanup_error
+    ensure(cleanup_error is None, "CLEANUP_FAILED", str(cleanup_error))
     if data is None:
         fail("RUN_RESULT", "missing")
     publish(data, residue, state)
