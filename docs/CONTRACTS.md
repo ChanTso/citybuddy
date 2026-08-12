@@ -977,6 +977,49 @@ no-CB-156 boundary.
 `total_nonblank > 1,974`, or more than five functional files stops CB-155 before formal execution.
 These gates must not be relaxed again, and no CB-156 may be created.
 
+**Resolved factual execution disposition — 2026-08-12 (CB-155 final pre-formal evidence
+blocker):** This addendum supersedes only the current CB-155 route-status effect of the earlier
+measurement-route decisions; every dated decision above remains unchanged historical record.
+
+**Trigger and evidence.** CB-155 legally began on the now-deleted
+`codex/cb155-seckill-measurement` branch. At final/reviewed head
+`471b622f6771783a3a3a19b6091ddb48702b1135`, the five-file functional surface passed with
+`total_nonblank = 1971`, `frozen_sql_nonblank = 174`, `authored_nonblank = 1797`, exact ten-block
+SQL equality, 68 focused tests, pre-formal `make ci`, and 19 successful PR checks. Fresh independent
+pre-formal review nevertheless proved two executable false-green classes. First, Python bool/int
+equality and incomplete required-fixture primitive closure allowed values including
+`activityProjectionVersion = true`, workload `quantity = true`, cleanup integer count `false`,
+`pathsAbsent = 1`, `warmup.productId = null`, `warmup.activityId = true`, and
+`fixtureOrDatasetVersion = true`. Second, the checker did not require the Q07 replay/Q07a terminal
+body to equal the Q04 terminal public/durable body for the same `reservationLocatorHash`; replacing
+both Q04 order hashes with another valid hash while retaining Q07's original order binding could
+still pass. Two pre-formal recovery cycles for those review-finding classes were consumed, and no
+independent `NO BLOCKER` was issued. The formal lifecycle never started. PR #84 closed without
+merge.
+
+**Current factual state.** CB-155 is `BLOCKED`; CB-153 and CB-154 remain `PLANNED`. The route has
+zero `READY` and zero `IN_PROGRESS` rows. No valid bundle, Q01-Q09 result, measured number,
+implementation credit, `VERIFIED` credit, or Resume-ready credit exists. The runner, checker, JMX
+plan, tests, and candidate implementation from PR #84 did not enter `main`.
+
+**Preserved route facts.** Dependencies remain exactly `CB-155 ← CB-150`, `CB-153 ← CB-150`, and
+`CB-154 ← CB-155 + CB-153`. The five outputs remain seckill QPS/concurrency correctness, Agent-path
+P99, RAG HitRate@5/MRR, FAQ mapping/answer hit rates, and Elasticsearch knowledge-search avoidance;
+first bottleneck remains explanatory metadata rather than a sixth output. Truth ownership, security
+boundaries, transaction boundaries, result ownership, and the architectural terminus at CB-154 are
+unchanged.
+
+**Terminal stop.** CB-155 was the sole and final replacement. No CB-156, second seckill replacement,
+claim reduction, or automatic CB-153 activation is authorized. The current measurement route has
+no eligible implementation lane. Further work requires a new owner terminal disposition, not
+another implementation recovery.
+
+**Impact radius.** This factual addendum synchronizes only route status, the CB-155 Completion
+record, the README current limitation, and the terminal owner-decision requirement. It changes no
+production behavior, API, schema, grant, migration, Q01-Q09, literal SQL, workload, artifact
+contract, output ownership, dependency, ServiceEval work, or private-core state. Closed PR #84
+continues to carry the detailed implementation, test, and review evidence.
+
 **Resolved contract correction — 2026-08-06 (opaque support-session consumer closure):** The owner
 explicitly authorized this correction in a defect-correction non-slice lane; it is not a silent
 contract change or an AGENTS.md Rule 2 maintenance lane. A support session is an opaque identifier.

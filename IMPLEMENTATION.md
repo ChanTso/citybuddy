@@ -1,12 +1,11 @@
 # CityBuddy implementation index
 
-**Document version:** v0.46\
-**Verification date:** 2026-08-10\
-**Repository phase:** CB-151 and CB-152 are `BLOCKED`; CB-155 is the sole `READY` replacement;
-CB-153 and CB-154 remain `PLANNED`. The route has one `READY` and zero `IN_PROGRESS` rows. CB-152
-legally started, but implementation PR #80 closed without merge after an evidence-validity blocker;
-it published no valid measurement result or performance claim. No implementation has begun for
-CB-155.
+**Document version:** v0.47\
+**Verification date:** 2026-08-12\
+**Repository phase:** CB-151, CB-152, and CB-155 are `BLOCKED`; CB-153 and CB-154 remain `PLANNED`.
+The route has zero `READY` and zero `IN_PROGRESS` rows. PR #84 closed without merge; no formal
+evidence run occurred, and no valid result or performance claim exists. No implementation lane is
+currently eligible; owner terminal route disposition is required.
 
 ## How to use this index
 
@@ -61,11 +60,18 @@ The repository contains the verified local-runtime foundations, identity vertica
 
 It does not yet contain real model-provider access, deployment, or measured performance claims.
 The CB-151 generalized demo/reset/fault harness did not merge. CB-152 legally started, but its
-implementation PR #80 closed without merge after an evidence-validity blocker; no CB-152
-runner, checker, result bundle, or performance claim entered `main`, and its unmerged code is not
-reusable. CB-155 is the new, unimplemented sole replacement for the unfulfilled seckill-measurement
-outcome and inherits no implementation, review, CI, verification, Resume-ready, bundle, metric, or
-performance credit from PR #80. No measured performance claim exists.
+implementation PR #80 closed without merge after an evidence-validity blocker; no CB-152 runner,
+checker, result bundle, or performance claim entered `main`, and its unmerged code is not reusable.
+CB-155 then legally began as the sole and final replacement on
+`codex/cb155-seckill-measurement`. Its five-file candidate passed the frozen surface gate, ten-block
+SQL equality, 68 focused tests, pre-formal `make ci`, and 19 successful PR checks, but fresh independent
+pre-formal review retained executable strict-primitive/factual-schema and Q07/Q04 same-locator
+cross-face false-greens. Both permitted pre-formal recovery cycles were consumed without an
+independent `NO BLOCKER`; PR #84 closed without merge at reviewed head
+`471b622f6771783a3a3a19b6091ddb48702b1135`. Its runner, checker, JMX plan, tests, and candidate code
+did not enter `main`. The formal lifecycle was never invoked, no result bundle or Q01-Q09 result
+exists, and no implementation, verification, Resume-ready, metric, or performance credit survives.
+No measured performance claim exists.
 
 Cross-slice target architecture, preflight conclusions, service/data ownership, interface and security boundaries, sequence diagrams, route outcomes, risks, and change control live in [docs/CONTRACTS.md](docs/CONTRACTS.md).
 
@@ -93,22 +99,20 @@ Cross-slice target architecture, preflight conclusions, service/data ownership, 
 
 ## Complete route
 
-The owner-approved portfolio P0/P1 route terminates at `CB-154`. `CB-151` remains `BLOCKED` without
-a replacement. `CB-152` remains immutable `BLOCKED` history and is superseded only for its
-unfulfilled seckill-measurement outcome by `CB-155`, the sole `READY` row. `CB-153` and `CB-154`
-remain `PLANNED`; there is no `IN_PROGRESS` row. The canonical execution order is `CB-155 → CB-153
-→ CB-154`. CB-155 is an explicit Level 3 replacement, not CB-152 recovery; blocked and deferred
-work does not reactivate automatically. No `CB-156` or further seckill-measurement replacement is
-authorized.
+The owner-approved portfolio P0/P1 route has an architectural terminus at `CB-154`. `CB-151` remains
+`BLOCKED` without a replacement. `CB-152` remains immutable `BLOCKED` history, and its sole and final
+replacement `CB-155` is now also `BLOCKED`. `CB-153` and `CB-154` remain `PLANNED`; the route has
+zero `READY` and zero `IN_PROGRESS` rows. CB-155 was an explicit Level 3 replacement, not CB-152
+recovery. No `CB-156` or second seckill-measurement replacement is authorized; blocked and deferred
+work does not reactivate automatically, and CB-153 does not become `READY` automatically.
 
-CB-155, CB-153, and CB-154 are the current measurement-only route; CB-152 remains immutable
-`BLOCKED` history. Their thin runners may compose existing runtime commands but may not recreate the
-unmerged generalized demo/reset/fault harness. The route retains exactly five portfolio outputs:
-seckill QPS/concurrency correctness, Agent-path P99, RAG HitRate@5/MRR, FAQ mapping/answer hit rates,
-and Elasticsearch knowledge-search avoidance. First bottleneck is explanatory metadata, not a
-sixth output. Each current measurement slice publishes its own persistent result bundle; CB-155 and
-CB-153 results become independently valid at their own verification and are not gated or rewritten
-by CB-154 aggregation.
+The preserved technical dependencies are exactly `CB-155 ← CB-150`, `CB-153 ← CB-150`, and
+`CB-154 ← CB-155 + CB-153`. The route retains exactly five portfolio outputs: seckill
+QPS/concurrency correctness, Agent-path P99, RAG HitRate@5/MRR, FAQ mapping/answer hit rates, and
+Elasticsearch knowledge-search avoidance. First bottleneck remains explanatory metadata, not a
+sixth output. Truth ownership, security boundaries, transaction boundaries, and result ownership
+remain unchanged. The current route cannot progress to CB-154 and has no eligible business
+implementation lane; further work requires owner terminal disposition.
 The approved `CB-150` scope remains limited to Agent metrics and an optional default-no-op trace
 sink; provider-attempt counters remain diagnostic and do not produce a model-call-saving result.
 `CB-900`, `CB-910`, and `CB-920` remain deferred outlines outside this Goal. `CB-114`, `CB-115`,
@@ -167,7 +171,7 @@ The linked slice name is the canonical detailed specification. Target outcomes a
 | [CB-150 — Agent metrics and optional no-op trace sink](docs/slices/CB-150.md) | P1 | `VERIFIED` | `CB-140` |
 | [CB-151 — Verified-path demo reset and fault drills](docs/slices/CB-151.md) | P1 | `BLOCKED` | `CB-150` |
 | [CB-152 — Seckill load and concurrency-correctness evidence](docs/slices/CB-152.md) | P1 | `BLOCKED` | `CB-150` |
-| [CB-155 — Seckill load and concurrency-correctness evidence replacement](docs/slices/CB-155.md) | P1 | `READY` | `CB-150` |
+| [CB-155 — Seckill load and concurrency-correctness evidence replacement](docs/slices/CB-155.md) | P1 | `BLOCKED` | `CB-150` |
 | [CB-153 — Agent-path latency evidence](docs/slices/CB-153.md) | P1 | `PLANNED` | `CB-150` |
 | [CB-154 — Retrieval/cache quality and final portfolio evidence](docs/slices/CB-154.md) | P1 | `PLANNED` | `CB-155`, `CB-153` |
 | `CB-900 — Multimodal intake and object storage outline` | P2 | `DEFERRED` | Explicit promotion only |
