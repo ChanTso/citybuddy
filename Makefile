@@ -10,7 +10,7 @@ COMPOSE_BUILD ?= --build
 COMPOSE := docker compose --project-name "$(COMPOSE_PROJECT_NAME)" --env-file "$(ENV_FILE)" --file compose.yaml
 
 .DEFAULT_GOAL := ci
-.PHONY: setup setup-java setup-python setup-web setup-repo format lint typecheck test build docs-check secret-scan java-ci python-ci web-ci repo-ci ci guard-layout init-local up down reset-local grant-access revoke-v013-migration-access migrate-auth migrate-commerce migrate-agent rocketmq-store-init rocketmq-init test-integration test-runtime-integration test-mysql-integration test-identity-integration test-evaluation-identity-integration test-evaluation-sandbox-integration test-catalog-integration test-redis-integration test-elasticsearch-integration test-knowledge-search-integration test-retrieval-evidence-integration test-rocketmq-integration test-knowledge-indexer-rocketmq-spike test-knowledge-sync-integration test-knowledge-rebuild-integration
+.PHONY: setup setup-java setup-python setup-web setup-repo format lint typecheck test build secret-scan java-ci python-ci web-ci repo-ci ci guard-layout init-local up down reset-local grant-access revoke-v013-migration-access migrate-auth migrate-commerce migrate-agent rocketmq-store-init rocketmq-init test-integration test-runtime-integration test-mysql-integration test-identity-integration test-evaluation-identity-integration test-evaluation-sandbox-integration test-catalog-integration test-redis-integration test-elasticsearch-integration test-knowledge-search-integration test-retrieval-evidence-integration test-rocketmq-integration test-knowledge-indexer-rocketmq-spike test-knowledge-sync-integration test-knowledge-rebuild-integration
 
 guard-layout:
 	test -x ./mvnw
@@ -25,7 +25,6 @@ guard-layout:
 	test -f .pre-commit-config.yaml
 	test -f compose.yaml
 	test -f .env.example
-	test -f scripts/check_docs_route.py
 	test -x scripts/install-gitleaks.sh
 	test -x scripts/init_local.sh
 	test -x scripts/require_local_env.sh
@@ -253,9 +252,6 @@ build: guard-layout
 	uv build --package citybuddy-agent-service
 	uv build --package citybuddy-knowledge-indexer
 	npm --prefix web run build
-
-docs-check: guard-layout
-	uv run python scripts/check_docs_route.py
 
 secret-scan: guard-layout
 	.tools/gitleaks git --no-banner --redact --verbose .

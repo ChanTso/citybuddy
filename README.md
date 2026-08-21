@@ -1,181 +1,146 @@
 # CityBuddy
 
-CityBuddy is a local-commerce transaction and text-only AI customer-support project built around explicit identity, transaction, retrieval, and evaluation boundaries. The repository contains runnable Java and Python services, a health-gated local data topology, and a small React portfolio surface for the verified direct-user paths.
+CityBuddy is a local-commerce transaction backend with a text-only AI customer-support agent
+built on top of it. The point of the project is the boundary between the two: an LLM agent can
+read business data and *prepare* sensitive actions such as refunds, but it cannot become the
+authority on whether a transaction happened.
 
-The canonical route and slice status live in [IMPLEMENTATION.md](IMPLEMENTATION.md). Cross-slice ownership and security boundaries live in [docs/CONTRACTS.md](docs/CONTRACTS.md).
+Everything below runs locally against real MySQL, Redis, Elasticsearch, and RocketMQ instances —
+no in-memory substitutes and no mocked infrastructure in the integration suite.
 
-## Verified capabilities
+## What is worth reading here
 
-- Identity: RS256 direct-user login, current/overlap JWKS publication, independently authenticated JIT token exchange, exact-scope OBO tokens, and server-owned support sessions.
-- Commerce: authenticated published products, standard ordering, seckill allocation/reservation/transaction ordering, unpaid cancellation, owner-scoped mock payment, partial/full refund, reconciliation, and transactional Outbox paths.
-- Support: durable owner-scoped conversations, bounded agent/tool mediation, filtered JSON and POST-SSE responses, append-only feedback/evidence, and deterministic provider fakes for tests.
-- Observability: optional Agent-only low-cardinality Prometheus metrics and a bounded identifier-free trace mirror; both are disabled by default and neither is business truth.
-- Knowledge: versioned hybrid retrieval, reranking and sufficiency calibration, citations from committed public evidence, FAQ publication/synchronization, versioned cache, rebuild validation, and atomic forward alias switching.
-- Sensitive action boundary: Commerce owns verified CB-118 PendingAction and immutable ActionReceipt truth. Agent CB-122 validates a prepared result, stores a local reference, and supports clarification, decline, and expiry. Exact Agent confirmation remains unavailable.
-- Web: an intentionally small responsive React/TypeScript page for login, product browsing, idempotent seckill reservation/status, JSON or filtered SSE support turns, and a generic PendingAction notice. It adds no storefront or business authority.
+- **Delegated identity.** RS256 login and JWKS publication, plus just-in-time token exchange
+  that mints an exact-scope on-behalf-of token per tool call. The OBO token binds `act.azp`,
+  the user subject, the server-owned support session, and resource ownership; commerce rejects
+  body-level identity substitution. See [§6 of the contracts](docs/CONTRACTS.md#6-interface-and-security-boundaries).
+- **Seckill admission under contention.** Redis Lua performs atomic quota and one-order-per-user
+  admission; MySQL holds authoritative reservation, order, inventory, and ledger truth. A
+  RocketMQ transaction message binds the admission decision to durable order creation, and the
+  transaction checker resolves from a persisted decision marker only.
+- **Sensitive action truth.** Commerce owns `PendingAction` and an immutable `ActionReceipt`.
+  Model prose is explicitly non-authoritative: SSE tokens cannot produce a success state, and a
+  deterministic action-claim lexicon exists only as defense in depth.
+- **Failure convergence.** Idempotency keys, unique constraints, an inventory ledger, and
+  status/version CAS make duplicate delivery, unpaid-timeout cancellation, and partial refunds
+  converge to one result. The real deadlock, snapshot, and precision problems found while
+  proving that are written up in [docs/LESSONS.md](docs/LESSONS.md).
+
+## Services
+
+| Service | Runtime | Responsibility |
+|---|---|---|
+| `auth-service` | Java 21 / Spring Boot | Login, RS256 tokens, JWKS and key rotation, service-authenticated exact-scope OBO exchange |
+| `commerce-service` | Java 21 / Spring Boot | Products, inventory, orders, seckill, payment, refund, reconciliation, internal tool APIs |
+| `agent-service` | Python 3.11 / FastAPI | Support sessions, bounded ReAct agent, tool mediation, retrieval, SSE egress, durable evidence |
+| `knowledge-indexer` | Python 3.11 | FAQ/product indexing, source-version ordering, tombstones, rebuild and alias switching |
+| `web` | React / TypeScript | Small demonstration surface for the verified direct-user paths |
+
+Data topology: MySQL (`commerce_db`, `cs_db`, auth), two Redis instances with different eviction
+policies, Elasticsearch 8 with the IK analyzer, and RocketMQ 5 Broker/Proxy.
 
 ## Truth ownership
 
-- MySQL `commerce_db` is authoritative for products, inventory, orders, reservations, payments, refunds, Commerce PendingAction, and ActionReceipt.
-- MySQL `cs_db` is authoritative for support sessions, conversations, event/evidence records, feedback, and the Agent-local PendingAction reference. That reference cannot override Commerce action truth.
-- Elasticsearch is a derived public-knowledge index. Redis instances are non-authoritative admission projections or caches.
-- Evaluation identity, sandbox, state, audit, and evidence routes exist only in the evaluation profile. The web never calls them.
-- The browser never supplies user/owner truth. Its direct-user token is held only in React memory, is cleared on logout or `401`, and is not restored after refresh.
+- MySQL `commerce_db` is authoritative for products, inventory, orders, reservations, payments,
+  refunds, `PendingAction`, and `ActionReceipt`. MySQL `cs_db` is authoritative for support
+  sessions, conversations, evidence, and feedback.
+- Elasticsearch is a derived index. Both Redis instances are non-authoritative projections or
+  caches. The browser never supplies user or owner truth.
+- Evaluation-only identity, sandbox, state, and audit routes exist solely under the `evaluation`
+  profile and are never called by the web surface.
 
-## Prerequisites and locked setup
+Full ownership, invariant, and interface tables are in [docs/CONTRACTS.md](docs/CONTRACTS.md).
 
-Use Java 21, Python 3.11, `uv` 0.11.24, Node.js 24 with npm, GNU Make, Docker with Compose v2, OpenSSL, GNU `sha256sum`, `curl`, and `tar`.
+## Running it locally
 
-```shell
+Requires Java 21, Python 3.11, `uv` 0.11.24, Node.js 24, GNU Make, Docker with Compose v2,
+OpenSSL, `sha256sum`, `curl`, and `tar`.
+
+```bash
 make setup
 ```
 
-This uses the committed Maven wrapper, `uv.lock`, and `web/package-lock.json`. Do not replace locked installs with ad-hoc dependency upgrades.
+Generate synthetic local credentials, start the data topology, and apply all three migration
+streams with their exact grants:
 
-## Local data topology and migrations
-
-Generate private synthetic credentials, start MySQL, two Redis instances, Elasticsearch/IK, and RocketMQ Broker/Proxy, then apply all three migration streams and exact grants:
-
-```shell
-make init-local
-make up
+```bash
+make init-local && make up
 ```
 
-`make up` runs `grant-access`, `migrate-auth`, `migrate-commerce`, and `migrate-agent` in the repository-defined order. To run those jobs explicitly against an existing topology:
+`make down` preserves named volumes. The destructive reset is deliberately explicit:
+`make reset-local CONFIRM_RESET_LOCAL=1`.
 
-```shell
-make grant-access
-make migrate-auth
-make migrate-commerce
-make migrate-agent
-```
+Application entry points:
 
-Normal shutdown preserves named volumes:
-
-```shell
-make down
-```
-
-The destructive reset is deliberately explicit: `make reset-local CONFIRM_RESET_LOCAL=1` removes local volumes and the generated `.env`.
-
-## Application processes
-
-The services require their documented runtime environment, database identities, URLs, signing material, and feature flags. The complete executable launch examples are maintained in the owning integration scripts; they generate temporary keys/credentials and do not print tokens. The underlying application entry points are:
-
-```shell
+```bash
 ./mvnw -pl auth-service spring-boot:run
+```
+
+```bash
 ./mvnw -pl commerce-service spring-boot:run
+```
+
+```bash
 uv run citybuddy-agent
+```
+
+```bash
 uv run citybuddy-indexer
 ```
 
-### Optional Agent observability
+The web surface proxies the three APIs in development:
 
-Set `CITYBUDDY_METRICS_ENABLED=true` to expose the custom-registry-only internal endpoint at
-`/internal/metrics/prometheus`. Any missing, empty, or case-insensitive `false` value keeps the
-endpoint absent; other non-empty values are rejected at startup. The inventory is committed in
-`observability/metrics-v1.json`. FAQ hit rates are calculated separately for mapping and answer as
-`hit / (hit + miss)`, while Elasticsearch avoidance is
-`cache_served / (cache_served + elasticsearch_issued)`. Provider-attempt counters are diagnostics
-only and do not establish model-call savings.
+```bash
+npm --prefix web ci && cp web/.env.example web/.env.local && npm --prefix web run dev
+```
 
-Set `CITYBUDDY_TRACE_EXPORT_URL` to one fixed `http` or `https` endpoint to enable the Agent's
-custom JSON trace mirror. Leaving it empty selects `Noop`: no worker, queue, network request, or
-trace metric is created. The enabled mirror has a 64-item queue, 50 ms HTTP timeout, zero retry,
-and a 300 ms shutdown bound. Its six-field payload contains only schema, service, bounded span and
-outcome, duration, and occurrence time; it contains no identifiers, content, credentials, or raw
-errors. This mirror is not OpenTelemetry and export success is never evidence or business truth.
+## Verification
 
-Use these scripts as the reproducible, fully configured local service examples:
+These targets run against the real local topology with isolated temporary fixtures and clean up
+after themselves. They are the reproducible evidence for the capabilities listed above:
 
-```shell
+```bash
 make test-identity-integration
+```
+
+```bash
 make test-catalog-integration
+```
+
+```bash
 make test-retrieval-evidence-integration
+```
+
+```bash
 make test-knowledge-sync-integration
+```
+
+```bash
 make test-knowledge-rebuild-integration
+```
+
+```bash
 make test-evaluation-sandbox-integration
 ```
 
-They exercise real local services and dependencies, use isolated temporary fixtures, and clean them
-up. They are verified engineering evidence rather than long-running demo provisioning. The CB-151
-generalized persistent demo/reset/fault harness was not merged and is not part of the current route.
+The full gate — Java, Python, web, repository hygiene, secret scanning, and the ordered
+integration suite — is:
 
-## Web
-
-Install the locked web packages and copy the public proxy-target example if the three APIs use ports other than the defaults shown there:
-
-```shell
-npm --prefix web ci
-cp web/.env.example web/.env.local
-npm --prefix web run dev
-```
-
-The Vite development server proxies `/auth` to auth-service, the product/seckill/reservation paths to commerce-service, and session/chat paths to agent-service. `web/.env.local` contains only public local targets; credentials do not belong there.
-
-Build and inspect the static artifact:
-
-```shell
-npm --prefix web run build
-npm --prefix web run preview
-```
-
-`preview` serves the generated static artifact. It is not a production reverse proxy or deployment.
-
-## Ordered demonstration
-
-CB-140 supplies the interactive web surface. Start from a direct-user fixture that has the
-published-product, seckill-reservation, support-session, and support-chat permissions used by the
-verified integration topology. The current route does not provide a persistent demo-data reset
-command, so the automated commands below are the reproducible source of fixtures and service
-evidence; do not claim an interactive manual run unless those services and equivalent fixtures are
-actually active.
-
-1. Run `make test-identity-integration` to verify login, server-owned support session creation, ordinary JSON chat, idempotent replay, and filtered SSE without private events.
-2. Run `make test-catalog-integration` to verify published-product reads, reservation submission, owner-scoped polling, rejection, ordered/cancelled terminal truth, and no early order claim.
-3. Run `make test-retrieval-evidence-integration` to verify the RAG answer/evidence path and public citation projection from sufficient stored evidence.
-4. Run `make test-evaluation-sandbox-integration` for the full isolated CB-122 backend evidence: prepare, clarification, exact `decline`, server-observed expiry, and exact confirmation unavailability. Evaluation APIs used by that test are not called by the web.
-5. Run `npm --prefix web test` for the browser-facing login/logout/expiry reset, product states, stable reservation intent, bounded polling, session reuse, JSON/SSE exclusivity, generic PendingAction notice, clarification, decline, expiry, reserved receipt rejection, and fixed confirmation-unavailable UI.
-6. With equivalent long-running local services active, run `npm --prefix web run dev`, log in, inspect published products, submit the fixture activity id/version, observe only the returned reservation state, send an ordinary support turn, ask a public-knowledge question, prepare a sensitive action, clarify or use **拒绝此动作**, observe expiry only after a server response, and send the exact message `confirm` to observe the fixed unavailable result.
-
-In JSON chat mode the page can show public citations. SSE mode shows only token text and the public terminal outcome because the current SSE contract carries no citations. A refresh signs the user out.
-
-## Checks
-
-Focused web checks:
-
-```shell
-npm --prefix web run format:check
-npm --prefix web run lint
-npm --prefix web run typecheck
-npm --prefix web test
-npm --prefix web run build
-make web-ci
-```
-
-Repository checks:
-
-```shell
-make repo-ci
+```bash
 make ci
 ```
 
-`make ci` runs Java, Python, web, repository hygiene/secret checks, and the ordered real local integration suite. It requires the prerequisites above and sufficient local Docker resources.
+## Current scope
 
-## Current limitations
+CityBuddy has no cloud deployment, no real model-provider access, and no measured performance
+result; the optional Agent metrics endpoint and JSON trace mirror are diagnostics and do not
+supply one. Load and latency measurement is the next piece of work, and no throughput or
+capacity claim should be read into this repository until raw results land here.
 
-CityBuddy has no cloud deployment or production real-provider claim, no measured performance or
-quality result, and no operational-readiness claim. The optional Agent metrics and trace mirror do
-not supply those claims. CB-152 is `BLOCKED`; CB-155 is also `BLOCKED` after PR #84 closed without
-merge; CB-153 and CB-154 remain `PLANNED`. The route has zero `READY` and zero `IN_PROGRESS` rows.
-No CB-156 or second replacement is authorized, and the measurement route is stopped pending owner
-disposition. Its architectural terminus remains CB-154, but the current route has no eligible path
-to reach it without a new owner disposition. No CB-155 implementation entered `main`; no CB-155
-runner, checker, JMX plan, or result bundle exists on `main`; and no measured performance or quality
-result exists.
+The agent can prepare, clarify, decline, and expire a sensitive action, but successful agent-side
+confirmation and receipt projection are not implemented; the clients therefore render no
+successful action state. Cart, checkout, a full storefront, agent workstation, multimodal intake,
+PII/output-safety handling, and human handoff are out of scope.
 
-The current Agent route has no successful confirmation, local ActionReceipt projection, `action_completed` turn, or receipt card. The blocked CB-121/CB-123 history does not make those capabilities available. The web never infers action type, amount, order, deadline, identifier, or terminal truth from reply prose.
-
-MemoryPacker/watermarks, the PII/output-safety lane, handoff or `HUMAN_PENDING`, failure-candidate
-export, cart, checkout, full storefront, agent workstation, multimodal intake, and deployment are
-outside the current route.
+Development rules are in [AGENTS.md](AGENTS.md). Retired process records are in
+[docs/archive/](docs/archive/README.md).

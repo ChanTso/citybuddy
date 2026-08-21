@@ -422,7 +422,7 @@ def test_real_entries_are_production_only_and_guard_draft_is_absent() -> None:
 
 def test_frozen_contract_transfers_guard_to_the_first_introducing_slice() -> None:
     contracts = source("docs/CONTRACTS.md")
-    specification = source("docs/slices/CB-104.md")
+    specification = source("docs/archive/slices/CB-104.md")
     assert "evaluationReachablePathCount = 0" in specification
     assert "must implement the sandbox liveness guard in that same slice" in contracts
     assert "real producer and Broker" in contracts
