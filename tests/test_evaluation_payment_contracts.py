@@ -272,24 +272,6 @@ def test_payment_schema_and_code_keep_production_and_evaluation_truth_separate()
         in integration
     )
 
-    contracts = (ROOT / "docs/CONTRACTS.md").read_text(encoding="utf-8")
-    residual_decision = contracts[
-        contracts.index(
-            "The shared definition distinguishes exact/invariant-backed participating columns"
-        ) : contracts.index(
-            "**Resolved Level 3 route decision — 2026-07-23 (terminal portfolio route"
-        )
-    ]
-    assert "The start-command `request_idempotency_key` is canonical business intent" in (
-        residual_decision
-    )
-    assert "owner rejected treating it as an internal residual" in residual_decision
-    assert "Three internal-only residual dispositions" not in residual_decision
-    assert "Two internal-only residual dispositions" in residual_decision
-    assert "CB-116 committed payment event time" in residual_decision
-    assert "single `PAYMENT_EVENT_TIME` correlated content group" in residual_decision
-    assert "no independent absolute-microsecond commitment" in residual_decision
-
 
 def test_terminal_payment_callers_use_the_shared_complete_closure() -> None:
     service = (

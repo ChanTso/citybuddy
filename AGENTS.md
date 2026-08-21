@@ -1,102 +1,40 @@
 # Repository development rules
 
-## Slice workflow
+These rules replace the slice/route/recovery process used through 2026-08. That process is
+archived under `docs/archive/`; it is history, not a ruleset. Do not reintroduce it.
 
-1. Read `IMPLEMENTATION.md` before changing the repository. It is the canonical source for slice names, priority, dependencies, ordering, and status.
-2. Find the single route row marked `READY` or `IN_PROGRESS`, then begin with its linked slice specification and the directly listed sections of `docs/CONTRACTS.md`.
-3. Prefer this active-slice context over a broad scan. Search or read other slice specifications when needed to resolve an explicit dependency, shared contract, sequencing question, or frozen-contract conflict; treat them as read-only context and do not implement them early. A slice without a linked, complete specification cannot start.
-4. Work on only the single active slice: start from `READY`, then change that same route row to `IN_PROGRESS` when its feature branch exists and real implementation begins.
-5. Slice work uses one feature branch and one pull request. Slice-work commit messages include the slice identifier. Do not implement later slices, add out-of-scope dependencies, or perform unrelated refactoring.
-6. If implementation evidence conflicts with a frozen contract, mark the slice `BLOCKED` and record the concise impact in its Completion record; keep detailed evidence in the pull request and do not silently change the contract.
-7. `IMPLEMENTATION.md` is the slice-status source, the linked slice file is the specification and Completion-record source, and the pull request is the detailed test and review evidence source. GitHub Issues are optional.
-8. A governance-document change that does not implement a slice uses a dedicated documentation branch and pull request and does not change the active slice status.
+## Working agreement
 
-## Non-slice governance lanes
+1. One branch and one pull request at a time. Do not open a second lane before the first merges.
+2. Implement the smallest design that satisfies the request. No speculative abstractions,
+   unrequired fallbacks, or future feature flags.
+3. Run `make ci` before requesting review. The pull request records the commands actually run
+   and their real results.
+4. Never delete, weaken, or skip existing tests to make work pass. Never fabricate tests,
+   results, commits, reviews, or evidence.
+5. Never commit secrets, credentials, personal data, or private planning material.
+6. Comments explain non-obvious reasons, invariants, and external constraints. They do not
+   narrate the code or promise future work.
 
-1. A maintenance or route-refinement lane requires explicit user authorization. It is not implied by an active slice or continuous-slice Goal unless that Goal names the lane and its scope.
-2. A maintenance lane may change only CI workflow, test orchestration, dependency/readiness gating, and failure diagnostics required to keep the existing checks reliable or timely. It uses a dedicated branch and pull request, leaves the business slice and route states unchanged, and must not change production behavior, product dependencies, migrations, frozen contracts, or acceptance criteria. It must not delete, weaken, skip, or reduce existing required test coverage; it may add only the regression and rejection assertions required to prove the lane behavior. If the smallest correction crosses one of those boundaries, stop and request authority for a different lane.
-3. A route-refinement lane may change only the canonical route, route outcome catalog, dependencies, and linked specifications for unstarted work under an explicitly approved replacement map. It uses a dedicated documentation branch and pull request, implements no product behavior, and preserves the approved total outcome, truth ownership, security and transaction boundaries, and dependency order unless the user explicitly authorizes a frozen-contract change.
-4. Never split a `VERIFIED` or `IN_PROGRESS` slice. A `READY` slice may be replaced only before real implementation begins, when no unresolved implementation branch or pull request exists for it and the user explicitly approves the replacement map. New rows must have unique identifiers, unambiguous dependencies, and complete linked specifications where the rolling window requires them.
-5. Before a `PLANNED` slice enters the rolling specification window or becomes `READY`, apply a complexity gate. Route refinement is required when the proposed slice contains multiple independently deliverable outcomes with separable acceptance/rejection evidence, crosses multiple separable truth or transaction boundaries, or cannot reasonably be reviewed, tested, recovered, and merged as one coherent pull request. Do not split one atomic transaction, security boundary, or end-to-end invariant merely to reduce file count. The gate identifies a decision; it does not authorize a route change.
-6. Only one lane may be active at a time. Finish its review, required checks, merge, updated-main verification, and branch cleanup before starting another maintenance lane, route-refinement lane, or business slice.
-7. A `BLOCKED` slice may be superseded only when:
-   - its factual `BLOCKED` status and Completion record are merged to `main`;
-   - its implementation pull request is closed without merge and no unresolved implementation branch or open pull request remains;
-   - all configured required checks on the latest `main` commit have succeeded;
-   - the owner explicitly approves a Level 3 replacement map.
+## Evidence
 
-   The original slice ID, Goal, `BLOCKED` status, blocker evidence, and failed implementation history remain immutable. Its Completion record may receive only an append-only supersession reference.
+1. Measurement uses standard tools — k6 for HTTP paths, memtier_benchmark for Redis paths.
+   Raw tool output plus the workload and environment description is the evidence.
+2. Do not build verification machinery around the evidence: no reconstruction checkers, no
+   manifest closures, no proof-of-proof mutation frameworks, no checker-of-checker. A small
+   deterministic calculator for sample count, throughput, and percentiles is the maximum.
+3. Business correctness is proven by SQL against the authoritative database plus its raw
+   output. Do not reimplement the business model inside a checker.
+4. Report achieved numbers with their exact boundary — workload, hardware, and what is
+   excluded. Do not present a local topology result as a capacity or production claim.
 
-   Replacement slices use new unique IDs and inherit no implementation, review, CI, verification, or resume-ready credit from the blocked pull request. Route refinement may add their specifications and remap only unstarted downstream dependencies.
+## Review
 
-   The replacement map must preserve the original total outcome, truth ownership, security boundaries, atomic transaction boundaries, and dependency order. It must not split one atomic transaction or security boundary merely to reduce diff size.
-
-   The route-refinement lane must finish with exactly one eligible replacement slice `READY`, all other replacements `PLANNED`, no `IN_PROGRESS` row, and the original slice still `BLOCKED`.
-
-## Quality and evidence
-
-1. Do not delete, weaken, skip, or rewrite failing tests to make work pass. Do not create placeholder tests, no-op checks, or commands that hide failures.
-2. Do not fabricate tests, performance results, branches, commits, pull requests, reviews, subagent work, or completion evidence.
-3. Put enforceable format, lint, type, test, dependency, and CI rules in executable configuration. Run the real `make ci` before slice closeout.
-4. Every non-trivial pull request records the commands actually run, their results, exercised rejection paths, and known incomplete or out-of-scope work.
-5. Never commit secrets, personal data, private URLs, internal accounts, or private planning material.
-6. A failed `gh auth status` inside the sandbox is inconclusive because the sandbox may not expose the host keyring, credential helper, network, or GitHub session. Retry the same non-mutating authentication check outside the sandbox with approval before claiming that credentials are invalid or asking the user to run `gh auth login`; only report an authentication blocker when the outside-sandbox check also fails.
-7. Before every independent review request, the primary implementer executes every item in `docs/REVIEW_CHECKLIST.md` against the complete current diff and records each conclusion, its concrete evidence, or a precise not-applicable rationale in the pull request. Any later semantic diff change invalidates both that self-review and the independent review and requires both to be repeated on the revised complete diff.
-8. At every slice or authorized non-slice closeout, append to `docs/REVIEW_CHECKLIST.md` every newly evidenced recurring defect class that is not already covered. When the evidence contains no new class, record that explicit conclusion in the pull request; do not add a placeholder check, weaken an existing check, or turn the checklist into a status or review log.
-
-## Implementation and comment style
-
-1. Implement the smallest design that satisfies the active slice and its referenced frozen contracts.
-2. Add validation at real trust boundaries, required invariants, and explicit rejection paths. Do not duplicate guards already enforced by types, schemas, constructors, or validation within the same trusted process boundary. Cross-service, network, messaging, persistence, user, model, and tool boundaries are not trusted merely because they are internal.
-3. Do not add speculative abstractions, unrequired fallback or retry paths, future feature flags, or broad catch-and-continue handling unless the active slice or one of its referenced frozen contracts explicitly requires them.
-4. Let unexpected programmer and configuration errors fail visibly unless the active slice or one of its referenced frozen contracts defines a boundary translation or recovery rule.
-5. Comments explain non-obvious reasons, invariants, and external constraints. They do not narrate the code, restate types, or promise future work.
-
-## Agent roles
-
-1. The primary coding session is the orchestrator, primary developer, and sole integrator. It owns production code, build and CI configuration, migrations, implementation decisions, commits, slice status, Completion records, and merge decisions.
-2. For a non-trivial slice, maintenance lane, or route-refinement lane, use one independent test/review subagent before closeout. It is read-only by default and checks the applicable specification or approved scope, rejection paths, evidence, tests, and false-green risks.
-3. If explicitly authorized, the subagent may sequentially edit only tests, fixtures, and dedicated test helpers. It must not edit production code, build or lockfiles, CI, migrations, frozen contracts, acceptance criteria, slice status, or Completion records; it must not commit or merge.
-4. At most one agent may write at a time. Additional specialist reviewers, when useful for high-risk work, remain read-only.
-5. Before committing, pushing, or opening a pull request for a behavior-changing `AGENTS.md` edit, obtain an explicit `NO BLOCKER` from an independent read-only subagent that reviewed the complete current diff. Record or compare a deterministic diff hash when practical. Any later semantic change invalidates that review and requires a fresh complete-diff review before publication.
-6. Every independent review is bound to the complete diff it examined. For any non-trivial lane, a later semantic change to production code, tests, build or CI configuration, migrations, contracts, acceptance criteria, slice state, or governance invalidates the earlier result; obtain a fresh complete-diff read-only `NO BLOCKER` before closeout or merge.
-
-## Slice closeout and merge
-
-1. Close the slice in the same feature branch and pull request. Do not create a second pull request only for status or Completion-record updates.
-2. When all acceptance criteria, rejection paths, required evidence, review blockers, and required checks are satisfied:
-   - add the slice's factual pitfall record to `docs/LESSONS.md`, or record an explicit `none` when the available pull-request, commit, and test evidence contains no substantive pitfall;
-   - fill the real Completion record;
-   - mark the completed slice `VERIFIED`;
-   - mark the next eligible slice as the only `READY` slice;
-   - roll the detailed specifications forward as required.
-3. Commit and push the closeout changes, then rerun the required checks. These state changes become authoritative only after they land on `main`.
-4. Unless the user asks to stop before merge, merge the pull request after required checks pass and no blocker remains. Use a merge commit for a clean slice branch; squash only when the history is genuinely noisy or the user requests it.
-5. After merge, update local `main`, confirm the working tree is clean and the expected slice states are present, and delete the merged branch when safe. Then stop unless the user has explicitly activated a continuous-slice Goal under the rules below and no stop-after-current request is latched; an eligible active Goal is standing authorization to select its next authorized lane without a new prompt.
-6. If review, repository policy, mergeability, or a check failure outside the recoverable same-slice CI and review paths below blocks completion, stop and report the blocker; do not bypass it.
-
-## Continuous-slice Goals
-
-1. Only an explicit user-started Goal may activate continuous-slice execution. A normal request to implement one slice does not activate it. The Goal is the sole execution driver: do not create, enable, or use a scheduled heartbeat or other recurring trigger for this loop unless the user explicitly changes this strategy.
-2. Continuous mode remains sequential. At every transition use this order: inspect updated `main`, local and remote branches, and open pull requests; honor any latched stop request; resume incomplete post-merge verification; resume the one unambiguous active lane if present; otherwise start the next explicitly authorized maintenance or route-refinement lane named by the Goal; otherwise start or resume the one eligible business slice. Exactly one state below must match.
-3. Resume post-merge verification only when exactly one Goal-owned merged pull request has a merge commit equal to the latest `origin/main` commit, no later lane branch or pull request exists, and at least one required closeout item remains incomplete: local `main` is not at that commit, a configured required `main` check has not succeeded, or a safely deletable merged branch still exists. Perform only the verification and cleanup in rule 9 before selecting another state.
-4. Resume an authorized non-slice lane only when exactly one unresolved dedicated branch belongs to that lane, with at most one matching open pull request, and its diff remains within the approved maintenance or route-refinement scope. Continue only that lane's implementation, independent review, checks, evidence, and merge; do not change slice status or start business implementation.
-5. Resume setup or implementation only when updated `main` has one `READY` slice and exactly one unresolved feature branch belongs to that same slice, with at most one open pull request that unambiguously matches it. Inspect the branch head and continue on that existing branch only if it either still matches `main` before real implementation began, or changes that slice to the sole `IN_PROGRESS` row, has no `READY` row, and retains a complete linked specification. In the first case, change the same row to `IN_PROGRESS` with the first real implementation change; in the second, resume the remaining normal implementation, independent review, CI, closeout, and merge workflow. Do not create another branch or start another slice.
-6. Resume pre-merge closeout only when exactly one unresolved feature branch and pull request belong to the slice that is still `READY` on updated `main`, while the pull-request head validly changes that slice to `VERIFIED`, marks exactly one eligible next slice `READY`, and has no `IN_PROGRESS` row. Continue only the remaining review, checks, closeout fixes, and merge for that pull request; do not start the next lane before the closeout lands on `main`.
-7. Start an explicitly authorized non-slice lane only when updated `main` is clean, the post-merge verification state does not match, no unresolved earlier lane or slice branch or pull request exists, and the Goal contains its concrete scope or replacement map. Freeze the current business route state and use the applicable non-slice governance rules above.
-8. Start a fresh slice only when updated `main` has no `IN_PROGRESS` row, exactly one `READY` row with a complete linked specification, the post-merge verification state does not match, no explicitly authorized non-slice lane remains queued ahead of it, the complexity gate does not require an unresolved decision, and no unresolved local or remote lane or slice branch or pull request exists for that slice or any preceding unfinished work. Start it through the normal branch, status, implementation, independent review, CI, closeout, and merge workflow.
-9. After every merge, update local `main`; verify the exact merge commit and tree are present on `origin/main`, the working tree is clean, expected route states are present, and configured required `main` checks pass; delete the merged branch when safe. Then re-read `AGENTS.md` and `IMPLEMENTATION.md` from updated `main` before selecting another state. A successful pull-request check does not by itself prove the merged `main` state.
-10. Standing authorization covers only the Goal's named sequence and repetition or resumption of the existing single-lane workflow. It does not authorize parallel writers, unlisted maintenance or route changes, frozen-contract changes, bypassing review or CI, destructive operations, new secrets, broader permissions, or other materially different actions.
-11. Required CI is final-head-only. The merge-eligible result is the complete required check set for the latest non-superseded pull-request head; all required lanes and any final aggregator must pass. A run canceled because a newer head superseded it is neither a failure nor a recovery cycle. Do not use empty, cosmetic, or test-weakening pushes to supersede a failure. Do not manually duplicate an unchanged full suite after a final-head pass unless repository policy requires it; still wait for configured post-merge `main` checks.
-12. During an active continuous-slice Goal, an ordinary required CI failure is recoverable when its evidence unambiguously attributes the failure to the current branch and the smallest correction remains within the active slice specification or explicitly approved non-slice lane, the same branch and pull request, frozen contracts, and already authorized tools and permissions. Stay on the same lane, report the failure evidence, implement the smallest correction, push it, and rerun applicable targeted tests and all required final-head checks. If the correction makes any semantic diff change after the last independent review, that review is invalid and a fresh complete-diff read-only `NO BLOCKER` is required before closeout or merge. Do not merge or start another lane while a required final-head check is failing.
-13. During an active continuous-slice Goal, an ordinary review blocker is recoverable when the finding is concrete, actionable, unambiguously attributable to the current branch or pull request, and the smallest correction remains within the active slice specification or explicitly approved non-slice lane, frozen contracts, the same branch and pull request, and already authorized tools and permissions. The primary session must validate the finding rather than accept it blindly, report the evidence, and apply the smallest correction; pull-request description and evidence corrections are included. Rerun applicable targeted tests and obtain a fresh independent read-only review of the complete revised diff. An explicit `NO BLOCKER` result is required before closeout, merge, or starting another lane.
-14. One recovery cycle is one evidence-based correction followed by the required reruns or re-review. Perform at most two consecutive recovery cycles for the same CI failure class or review-finding class; a full pass of all required final-head checks resets the CI limit, and an independent `NO BLOCKER` review resets the review limit. Do not evade either limit through cosmetic changes, retries without a correction, test weakening, skipped checks or review, relabeling the same root cause, or a new branch or pull request. The one-time external-infrastructure rerun permitted by rule 17 is not a recovery cycle or an exception to any required check.
-15. A user request to stop after the current lane latches immediately. Finish only the already active branch and pull request through review, required checks, merge, updated-main verification, and safe branch cleanup, then stop before selecting or starting another lane. If no lane is active, stop immediately. Ordinary follow-up messages do not clear the latch; only an explicit resume or new Goal does.
-16. Stop continuous execution and report the reason when repository state matches zero or multiple states above; a slice becomes `BLOCKED`; the complexity gate requires an unapproved route decision; evidence conflicts with a frozen contract; `main`, branch, or pull-request state is ambiguous or contradictory; a CI failure is unrelated to the current lane, has ambiguous evidence, or persists after two recovery cycles; a review finding is unrelated, ambiguous, cannot be validated, conflicts with another required source, or persists after two recovery cycles; a correction exceeds the active specification or approved lane or requires changed contracts, route, scope, product dependencies, secrets, permissions, or user authority; a finding raises unresolved security-boundary, data-loss, or destructive-operation risk; merge, credentials, repository policy, CI infrastructure after the one permitted rerun in rule 17, or mergeability blocks progress; or continuation would bypass a required check or independent review.
-17. When a required check fails with evidence that unambiguously attributes the failure to external infrastructure before repository code executes or otherwise clearly independently of repository code, automatically rerun that unchanged required check or workflow once without waiting for owner authorization and without consuming a recovery cycle. This permission is limited to image-registry pull failures or timeouts, runner network failures, runner resource exhaustion, and CI-platform errors. Record the original evidence and rerun conclusion in the pull request or commit record. If the same external failure class recurs on that rerun, stop and report it; do not rerun again. Product code, tests, repository-owned orchestration, and any failure with non-unique attribution are ineligible and remain subject to the existing correction and stop rules.
-
-## Repository boundaries
-
-1. Root governance Markdown is limited to `README.md`, `AGENTS.md`, `CLAUDE.md`, and `IMPLEMENTATION.md`. Cross-slice contracts live only in `docs/CONTRACTS.md`; detailed slice specifications live only in `docs/slices/CB-*.md`.
-2. Do not create a parallel status source, roadmap, test plan, review log, ticket document, duplicate contract file, or unlinked slice specification. `docs/LESSONS.md` is limited to the approved factual pitfall record required at slice closeout and is not a status, contract, test, or review source.
-3. Pure spelling, documentation-only formatting, or comment-only corrections may be committed directly only when they do not change behavior, a frozen contract, or slice state.
+1. Use one independent read-only reviewer before merging non-trivial work.
+2. A reviewer finding blocks the merge only when it names an executable counterexample against
+   product behavior, a secret or cleanup risk, or a business-truth conflict. Style preferences,
+   additional permutations, and future-framework suggestions do not block.
+3. A finding about verification machinery is a reason to delete that machinery, not a reason to
+   extend it.
+4. When review and implementation disagree twice on the same point, the owner decides. Do not
+   spend a third cycle.
