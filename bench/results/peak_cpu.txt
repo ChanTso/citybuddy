@@ -1,0 +1,6 @@
+contended  k6: 59.77
+contended  commerce: 145.42
+contended  mysql: 60.59
+spread  k6: 42.47
+spread  commerce: 109.91
+spread  mysql: 82.86
