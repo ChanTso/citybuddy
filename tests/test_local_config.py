@@ -54,7 +54,10 @@ INVALID_INTEGRATION_TIMEOUT_CASES = (
     "job-timeout-in-env",
     "job-timeout-in-steps",
     "job-timeout-fixed",
-    "evaluation-budget-too-small",
+    "duplicate-shard-index",
+    "missing-shard-entry",
+    "inconsistent-shard-count",
+    "shard-index-out-of-range",
     "ordinary-budget-too-large",
     "extra-target",
     "missing-target",
@@ -139,22 +142,44 @@ def validate_integration_timeout_contract(text: str) -> dict[str, int]:
     assert type(include) is list
 
     timeout_by_target: dict[str, int] = {}
+    entries_by_target: dict[str, int] = {}
+    # A target may appear more than once only to divide one suite across shards, and those entries
+    # must together cover every shard index exactly once. A repeated or missing index would leave
+    # part of a sharded matrix unprobed while CI still reported green, so the workflow declaration
+    # is checked here instead of trusted.
+    shards_by_target: dict[str, set[int]] = {}
+    shard_count_by_target: dict[str, int] = {}
     for entry in include:
         assert type(entry) is dict
         target = entry["target"]
         timeout_minutes = entry["timeout_minutes"]
         assert type(target) is str
         assert type(timeout_minutes) is int
-        assert target not in timeout_by_target
+        if target in timeout_by_target:
+            assert timeout_by_target[target] == timeout_minutes
         timeout_by_target[target] = timeout_minutes
+        entries_by_target[target] = entries_by_target.get(target, 0) + 1
+        if "payment_matrix_shard" in entry or "payment_matrix_shards" in entry:
+            shard = entry["payment_matrix_shard"]
+            shard_count = entry["payment_matrix_shards"]
+            assert type(shard) is int
+            assert type(shard_count) is int
+            assert shard_count >= 1
+            assert 0 <= shard < shard_count
+            assert shard_count_by_target.setdefault(target, shard_count) == shard_count
+            assert shard not in shards_by_target.setdefault(target, set())
+            shards_by_target[target].add(shard)
+
+    for target, entry_count in entries_by_target.items():
+        shards = shards_by_target.get(target)
+        if shards is None:
+            assert entry_count == 1
+        else:
+            assert entry_count == len(shards)
+            assert shards == set(range(shard_count_by_target[target]))
 
     assert set(timeout_by_target) == set(REQUIRED_INTEGRATION_TARGETS)
-    assert timeout_by_target["test-evaluation-sandbox-integration"] == 60
-    assert all(
-        timeout_by_target[target] == 30
-        for target in REQUIRED_INTEGRATION_TARGETS
-        if target != "test-evaluation-sandbox-integration"
-    )
+    assert all(timeout == 30 for timeout in timeout_by_target.values())
     return timeout_by_target
 
 
@@ -175,11 +200,17 @@ def invalid_integration_timeout_workflows(workflow: str) -> dict[str, str]:
             python: false
             timeout_minutes: 30
 """
-    evaluation_entry = """          - target: test-evaluation-sandbox-integration
+
+    def sandbox_shard_entry(shard: int, shard_count: int = 8) -> str:
+        return f"""          - target: test-evaluation-sandbox-integration
+            lane: test-evaluation-sandbox-integration shard {shard} of {shard_count}
+            payment_matrix_shards: {shard_count}
+            payment_matrix_shard: {shard}
             java: true
             python: true
-            timeout_minutes: 60
+            timeout_minutes: 30
 """
+
     rebuild_tail = """          - target: test-knowledge-rebuild-integration
             java: true
             python: true
@@ -193,15 +224,20 @@ def invalid_integration_timeout_workflows(workflow: str) -> dict[str, str]:
         job_timeout + "    strategy:\n",
         ("    strategy:\n      timeout-minutes: ${{ matrix.timeout_minutes }}\n"),
     )
+    integration_step = """      - name: Run integration suite
+        env:
+          SANDBOX_PAYMENT_MATRIX_SHARDS: ${{ matrix.payment_matrix_shards }}
+          SANDBOX_PAYMENT_MATRIX_SHARD: ${{ matrix.payment_matrix_shard }}
+        run: make ${{ matrix.target }}
+"""
     job_timeout_in_steps = replace_once(
         without_job_timeout,
-        """      - name: Run integration suite
-        run: make ${{ matrix.target }}
-""",
-        """      - name: Run integration suite
-        timeout-minutes: ${{ matrix.timeout_minutes }}
-        run: make ${{ matrix.target }}
-""",
+        integration_step,
+        integration_step.replace(
+            "      - name: Run integration suite\n",
+            "      - name: Run integration suite\n"
+            "        timeout-minutes: ${{ matrix.timeout_minutes }}\n",
+        ),
     )
     anchored_runtime_entry = runtime_entry.replace(
         "          - target:",
@@ -269,10 +305,30 @@ def invalid_integration_timeout_workflows(workflow: str) -> dict[str, str]:
             job_timeout,
             "    timeout-minutes: 30\n",
         ),
-        "evaluation-budget-too-small": replace_once(
+        "duplicate-shard-index": replace_once(
             workflow,
-            evaluation_entry,
-            evaluation_entry.replace("timeout_minutes: 60", "timeout_minutes: 30"),
+            sandbox_shard_entry(1),
+            sandbox_shard_entry(1).replace(
+                "payment_matrix_shard: 1",
+                "payment_matrix_shard: 0",
+            ),
+        ),
+        "missing-shard-entry": replace_once(workflow, sandbox_shard_entry(7), ""),
+        "inconsistent-shard-count": replace_once(
+            workflow,
+            sandbox_shard_entry(0),
+            sandbox_shard_entry(0).replace(
+                "payment_matrix_shards: 8",
+                "payment_matrix_shards: 4",
+            ),
+        ),
+        "shard-index-out-of-range": replace_once(
+            workflow,
+            sandbox_shard_entry(0),
+            sandbox_shard_entry(0).replace(
+                "payment_matrix_shard: 0",
+                "payment_matrix_shard: 8",
+            ),
         ),
         "ordinary-budget-too-large": replace_once(
             workflow,
@@ -578,8 +634,7 @@ def test_local_ci_order_and_parallel_workflow_cover_every_required_target() -> N
     assert "setup: setup-java setup-python setup-web setup-repo" in makefile
 
     assert validate_integration_timeout_contract(workflow) == {
-        target: 60 if target == "test-evaluation-sandbox-integration" else 30
-        for target in REQUIRED_INTEGRATION_TARGETS
+        target: 30 for target in REQUIRED_INTEGRATION_TARGETS
     }
     for target in ("java-ci", "python-ci", "web-ci", "repo-ci"):
         assert f"run: make {target}" in workflow
