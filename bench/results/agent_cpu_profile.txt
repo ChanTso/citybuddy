@@ -1,0 +1,32 @@
+== Where the agent's on-CPU time goes ==
+
+Tallied from the raw py-spy collapsed stacks in agent_pyspy_<path>_c<concurrency>.txt, each
+produced by bench/agent/profile_agent_cpu.sh. py-spy excludes idle threads by default, so the
+denominator is samples of threads that were actually running.
+
+path         concurrency ssl_samples     share
+chat                  1        794     64.3%
+chat                  8       8679     71.2%
+retrieval             1       1391     83.8%
+retrieval             8      17131     94.9%
+prepare               1        204     57.0%
+prepare               8       2723     55.4%
+
+Repeat runs move these by roughly ten points either way — one earlier chat run at concurrency
+8 tallied 91.1 % — but the share stays dominant in every run and at both operating points.
+
+== Cost of one construction, measured in the same container ==
+  ssl.create_default_context: 13.08 ms
+  httpx.Client():            10.84 ms
+
+== Call sites: module-level httpx helpers, each building a fresh client ==
+citybuddy_agent/agent_control.py:390:                    response = httpx.post(
+citybuddy_agent/agent_control.py:488:                response = httpx.post(
+citybuddy_agent/agent_control.py:1005:                response = httpx.post(
+citybuddy_agent/application.py:170:        response = httpx.get(self._url, timeout=3.0)
+citybuddy_agent/application.py:392:            response = httpx.post(
+citybuddy_agent/application.py:433:        response = httpx.post(
+citybuddy_agent/knowledge.py:464:            response = httpx.request(
+
+Reused httpx.Client instances in the agent:
+  none

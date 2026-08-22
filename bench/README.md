@@ -1,5 +1,7 @@
 # Seckill measurement
 
+The agent's three support paths are measured separately in [agent/README.md](agent/README.md).
+
 Local measurement of the CityBuddy seckill path: correctness under contention first, then
 component and full-path throughput. Every number here was produced by the scripts in this
 directory against the real local topology, and the raw tool output is in `results/`.
