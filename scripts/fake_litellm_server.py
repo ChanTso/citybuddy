@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
+import re
 from collections import Counter
 from typing import Any
 
@@ -14,6 +15,7 @@ from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse, Response
 
 app = FastAPI(docs_url=None, redoc_url=None)
+ACTION_ORDER_PATTERN = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}")
 counts: Counter[str] = Counter()
 commerce_base_url = ""
 
@@ -137,12 +139,19 @@ async def complete(request: Request) -> JSONResponse:
     if selected == "budget-exhaustion":
         return JSONResponse(content=tool_message("unknown.tool", "{}"))
     if selected == "action-prepare" and not has_tool_feedback:
+        # A caller that owns a different order names it in the message; the fixture order stays
+        # the default so existing scenarios are unaffected.
+        order_match = ACTION_ORDER_PATTERN.search(user_messages[0])
         return JSONResponse(
             content=tool_message(
                 "actions.refund.prepare",
                 json.dumps(
                     {
-                        "orderId": "00000000-0000-0000-0000-000000000105",
+                        "orderId": (
+                            order_match.group(0)
+                            if order_match
+                            else "00000000-0000-0000-0000-000000000105"
+                        ),
                         "amountMinor": 400,
                         "currency": "CNY",
                     },
