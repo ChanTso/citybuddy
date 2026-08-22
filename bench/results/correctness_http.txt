@@ -1,0 +1,3 @@
+attempts=600 wall_seconds=7.17
+HTTP 409 decision=EXHAUSTED: 500
+HTTP 201 decision=ADMITTED: 100

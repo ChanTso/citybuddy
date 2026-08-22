@@ -1,0 +1,4 @@
+12404
+deadlock log events by minute:
+ 250 2026-08-21T17:06
+5972 2026-08-21T17:07
