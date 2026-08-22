@@ -26,7 +26,9 @@ proxy_port="$(docker port citybuddy-rocketmq-broker-proxy-1 8081/tcp | cut -d: -
 
 sql() { MYSQL_PWD="$2" mysql --protocol=TCP -h 127.0.0.1 -P "$mysql_port" -u "$1" -D "$3" --batch --skip-column-names -e "$4"; }
 
-topic_suffix="bench"
+# A fresh suffix gives a clean queue; reusing one leaves a prior run's backlog in front
+# of the next run's messages.
+topic_suffix="${TOPIC_SUFFIX:-bench}"
 tx_topic="cb060-seckill-transaction-$topic_suffix"
 tx_group="cb060-seckill-order-consumer-$topic_suffix"
 to_topic="cb061-seckill-timeout-$topic_suffix"

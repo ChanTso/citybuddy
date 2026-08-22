@@ -8,6 +8,7 @@ run_dir="$repo_root/bench/.run"; out="$repo_root/bench/results"; mkdir -p "$out"
 QUOTA="${QUOTA:-100}"
 ATTEMPTS="${ATTEMPTS:-600}"
 ACTIVITY="bench-correctness"
+PRODUCT="bench-correctness-product"
 
 read_value() { grep -E "^$1=" .env | head -1 | cut -d= -f2-; }
 commerce_pw="$(read_value MYSQL_COMMERCE_APP_PASSWORD)"; root_pw="$(read_value MYSQL_BOOTSTRAP_PASSWORD)"
@@ -21,16 +22,22 @@ DELETE FROM inventory_ledger WHERE activity_id='$ACTIVITY';
 DELETE FROM seckill_order WHERE activity_id='$ACTIVITY';
 DELETE FROM seckill_reservation WHERE activity_id='$ACTIVITY';
 DELETE FROM seckill_activity WHERE activity_id='$ACTIVITY';
-UPDATE product SET stock_quantity=1000000 WHERE product_id='bench-product';" >/dev/null
+DELETE FROM product WHERE product_id='$PRODUCT';" >/dev/null
+q commerce_app "$commerce_pw" -e "
+INSERT INTO product (product_id, name, description, price_minor, currency, stock_quantity, available, publication_state, publication_version)
+VALUES ('$PRODUCT','Correctness Product','seckill correctness fixture',1990,'CNY',1000000,TRUE,'PUBLISHED',1);" >/dev/null
 q commerce_app "$commerce_pw" -e "
 INSERT INTO seckill_activity (activity_id, product_id, starts_at, ends_at, state, allocated_quota, projection_version)
-VALUES ('$ACTIVITY','bench-product','2020-01-01 00:00:00','2035-01-01 00:00:00','ACTIVE',$QUOTA,1);" >/dev/null
-docker exec citybuddy-redis-commerce-1 redis-cli -a "$redis_pw" --no-auth-warning DEL \
-  "commerce:seckill:activity:$ACTIVITY" >/dev/null 2>&1
+VALUES ('$ACTIVITY','$PRODUCT','2020-01-01 00:00:00','2035-01-01 00:00:00','ACTIVE',$QUOTA,1);" >/dev/null
+# Drop the activity projection and every per-user admission marker for it; a leftover marker
+# would reject a fresh attempt as DUPLICATE_USER and change the decision mix.
+docker exec citybuddy-redis-commerce-1 redis-cli -a "$redis_pw" --no-auth-warning EVAL \
+  "for _,k in ipairs(redis.call('KEYS','commerce:seckill:*'..ARGV[1]..'*')) do redis.call('DEL',k) end return 1" \
+  0 "$ACTIVITY" >/dev/null 2>&1
 docker exec citybuddy-redis-commerce-1 redis-cli -a "$redis_pw" --no-auth-warning SET \
   "commerce:seckill:activity:$ACTIVITY" \
   "{\"activityId\":\"$ACTIVITY\",\"projectionVersion\":1,\"startsAt\":\"2020-01-01T00:00:00Z\",\"endsAt\":\"2035-01-01T00:00:00Z\",\"state\":\"ACTIVE\",\"remainingQuota\":$QUOTA}" >/dev/null 2>&1
-stock_before="$(q commerce_app "$commerce_pw" --skip-column-names -e "SELECT stock_quantity FROM product WHERE product_id='bench-product'")"
+stock_before="$(q commerce_app "$commerce_pw" --skip-column-names -e "SELECT stock_quantity FROM product WHERE product_id='$PRODUCT'")"
 echo "stock before: $stock_before"
 
 echo "== firing $ATTEMPTS concurrent reservations at one activity with quota $QUOTA =="
@@ -65,16 +72,15 @@ print(text); open(out, "w").write(text + "\n")
 PY
 
 echo "== waiting for asynchronous order creation to settle =="
-prev=-1; stable=0
-for _ in $(seq 1 90); do
-  cur="$(q commerce_app "$commerce_pw" --skip-column-names -e "SELECT COUNT(*) FROM seckill_order WHERE activity_id='$ACTIVITY'")"
+admitted_target=""
+for _ in $(seq 1 180); do
+  admitted_target="$(q commerce_app "$commerce_pw" --skip-column-names -e "SELECT COUNT(*) FROM seckill_reservation WHERE activity_id='$ACTIVITY' AND decision_code='ADMITTED'")"
+  prev="$(q commerce_app "$commerce_pw" --skip-column-names -e "SELECT COUNT(*) FROM seckill_order WHERE activity_id='$ACTIVITY'")"
   pend="$(q commerce_app "$commerce_pw" --skip-column-names -e "SELECT COUNT(*) FROM seckill_reservation WHERE activity_id='$ACTIVITY' AND state='PENDING'")"
-  if [ "$cur" = "$prev" ] && [ "$pend" = "0" ]; then stable=$((stable+1)); else stable=0; fi
-  prev="$cur"
-  [ "$stable" -ge 3 ] && break
+  if [ "$pend" = "0" ] && [ "$prev" = "$admitted_target" ] && [ "$prev" != "0" ]; then break; fi
   sleep 2
 done
-echo "orders settled at: $prev (pending reservations: $pend)"
+echo "orders settled at: $prev of $admitted_target admitted (pending: $pend)"
 
 echo "== authoritative correctness queries =="
 {
@@ -82,7 +88,7 @@ echo "== authoritative correctness queries =="
   echo "activity=$ACTIVITY allocated_quota=$QUOTA attempts=$ATTEMPTS stock_before=$stock_before"
   echo
 } > "$out/correctness_sql.txt"
-QUOTA="$QUOTA" ACTIVITY="$ACTIVITY" STOCK_BEFORE="$stock_before" \
+QUOTA="$QUOTA" ACTIVITY="$ACTIVITY" PRODUCT="$PRODUCT" STOCK_BEFORE="$stock_before" \
   envsubst < bench/sql/correctness.sql > "$run_dir/correctness_resolved.sql"
 q commerce_app "$commerce_pw" --table < "$run_dir/correctness_resolved.sql" >> "$out/correctness_sql.txt"
 cat "$out/correctness_sql.txt"

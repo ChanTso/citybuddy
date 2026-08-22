@@ -8,6 +8,7 @@ import java.util.List;
 import java.util.Locale;
 import java.util.Set;
 import java.util.UUID;
+import org.springframework.dao.DuplicateKeyException;
 import org.springframework.transaction.support.TransactionTemplate;
 
 public final class SeckillReservationService {
@@ -142,15 +143,6 @@ public final class SeckillReservationService {
     activityRepository
         .findForUpdate(activityId)
         .orElseThrow(() -> new IllegalArgumentException("Seckill activity is missing"));
-    var existing = repository.findByIdempotencyForUpdate(userSubject, activityId, idempotencyKey);
-    if (existing.isPresent()) {
-      if (!existing.get().intentHash().equals(intent.intentHash())) {
-        throw new IllegalStateException(
-            "Idempotency key is bound to a conflicting reservation intent");
-      }
-      return new PreparedReservation(existing.get(), true);
-    }
-
     SeckillReservation pending =
         new SeckillReservation(
             UUID.randomUUID().toString(),
@@ -163,7 +155,24 @@ public final class SeckillReservationService {
             ReservationState.PENDING,
             null,
             1);
-    repository.reservePending(pending, properties.minimumBrokerCoverage());
+    // Insert first and let the unique key decide whether this is a replay. Reading the
+    // idempotency row before it exists takes a gap lock, and the insert that follows needs an
+    // insert-intention lock in that same gap; concurrent activities then deadlock on the shared
+    // index gap even though they touch unrelated activity rows.
+    try {
+      repository.reservePending(pending, properties.minimumBrokerCoverage());
+    } catch (DuplicateKeyException duplicate) {
+      SeckillReservation existing =
+          repository
+              .findByIdempotencyForShare(userSubject, activityId, idempotencyKey)
+              .orElseThrow(
+                  () -> new IllegalStateException("Duplicate reservation truth is missing"));
+      if (!existing.intentHash().equals(intent.intentHash())) {
+        throw new IllegalStateException(
+            "Idempotency key is bound to a conflicting reservation intent");
+      }
+      return new PreparedReservation(existing, true);
+    }
     SeckillReservation persisted =
         repository
             .findForUpdate(pending.reservationId())

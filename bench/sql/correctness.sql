@@ -58,7 +58,7 @@ SELECT ${STOCK_BEFORE} AS stock_before, p.stock_quantity AS stock_after,
        CASE WHEN ${STOCK_BEFORE} - p.stock_quantity
                  = (SELECT COALESCE(SUM(quantity),0) FROM seckill_order WHERE activity_id = '${ACTIVITY}')
             THEN 'PASS' ELSE 'FAIL' END AS verdict
-FROM product p WHERE p.product_id = 'bench-product';
+FROM product p WHERE p.product_id = '${PRODUCT}';
 
 SELECT 'Q09 reservation state machine is closed and consistent with decision codes' AS check_name;
 SELECT state, decision_code, COUNT(*) AS rows_found,

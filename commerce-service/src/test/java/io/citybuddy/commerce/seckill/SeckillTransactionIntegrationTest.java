@@ -971,7 +971,7 @@ class SeckillTransactionIntegrationTest {
     SeckillCancellationService untouchedTimeoutHandler = mock(SeckillCancellationService.class);
     SeckillReservation reservation =
         reservationRepository
-            .findByIdempotencyForUpdate(USER, "cb060-commit", "cb060-key-commit")
+            .findByIdempotencyForShare(USER, "cb060-commit", "cb060-key-commit")
             .orElseThrow();
     int orderMovementsBefore = orderCreateMovementCount(reservation.reservationId());
     try (Producer producer = producer(new AtomicInteger())) {
