@@ -8,8 +8,12 @@ archived under `docs/archive/`; it is history, not a ruleset. Do not reintroduce
 1. One branch and one pull request at a time. Do not open a second lane before the first merges.
 2. Implement the smallest design that satisfies the request. No speculative abstractions,
    unrequired fallbacks, or future feature flags.
-3. Run `make ci` before requesting review. The pull request records the commands actually run
-   and their real results.
+3. Before requesting review, run `make java-ci python-ci web-ci repo-ci` and the integration
+   suites the change actually touches. GitHub Actions runs the full matrix across parallel
+   runners and is the merge gate; `make ci` reruns that same matrix serially on one machine,
+   which costs about an hour and adds no information the gate does not already give. Run it
+   locally only when the change is to CI itself or to shared topology. The pull request records
+   the commands actually run and their real results.
 4. Never delete, weaken, or skip existing tests to make work pass. Never fabricate tests,
    results, commits, reviews, or evidence.
 5. Never commit secrets, credentials, personal data, or private planning material.

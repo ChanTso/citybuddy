@@ -1,0 +1,42 @@
+== Where the agent's CPU goes, by path ==
+
+py-spy sampling at 100 Hz for 25 s while the path was driven at concurrency 8, against a
+deployment where every outbound URL is plain http:// and no TLS is ever negotiated.
+
+path         ssl_samples      total    share
+chat               8018      11794    68.0%
+retrieval          9086      10492    86.6%
+prepare             776       2012    38.6%
+
+== The dominant stack ==
+  7829 _bootstrap (threading.py:1002)
+  _bootstrap_inner (threading.py:1045)
+  run (anyio/_backends/_asyncio.py:1029)
+  chat (citybuddy_agent/application.py:963)
+  execute_turn (citybuddy_agent/application.py:898)
+  _execute_turn (citybuddy_agent/application.py:836)
+  run (citybuddy_agent/agent_control.py:1425)
+  complete (citybuddy_agent/agent_control.py:390)
+  post (httpx/_api.py:304)
+  request (httpx/_api.py:102)
+  __init__ (httpx/_client.py:688)
+  _init_transport (httpx/_client.py:731)
+  __init__ (httpx/_transports/default.py:153)
+  create_ssl_context (httpx/_config.py:40)
+  create_default_context (ssl.py:770)
+
+== Cost of one construction, measured in the same container ==
+  ssl.create_default_context: 12.83 ms
+  httpx.Client():            10.81 ms
+
+== Call sites: module-level httpx helpers, each building a fresh client ==
+citybuddy_agent/agent_control.py:390:                    response = httpx.post(
+citybuddy_agent/agent_control.py:488:                response = httpx.post(
+citybuddy_agent/agent_control.py:1005:                response = httpx.post(
+citybuddy_agent/application.py:170:        response = httpx.get(self._url, timeout=3.0)
+citybuddy_agent/application.py:392:            response = httpx.post(
+citybuddy_agent/application.py:433:        response = httpx.post(
+citybuddy_agent/knowledge.py:464:            response = httpx.request(
+
+Reused httpx.Client instances in the agent:
+  none

@@ -1,0 +1,4 @@
+connections opened during the run: 23323
+attempts rejected at max_connections: 0
+peak concurrent connections since FLUSH STATUS: 166
+max_connections limit: 1000
