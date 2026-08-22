@@ -11,6 +11,20 @@ if [[ "$v013_only" != true && "$v013_only" != false ]]; then
   exit 1
 fi
 
+# CI divides the payment corruption matrices across parallel shards; see the selector below the
+# committed-payment metadata. Validate here so a bad shard selection fails before the topology and
+# service startup this suite would otherwise spend minutes on.
+payment_matrix_shards="${SANDBOX_PAYMENT_MATRIX_SHARDS:-1}"
+payment_matrix_shard="${SANDBOX_PAYMENT_MATRIX_SHARD:-0}"
+if [[ ! "$payment_matrix_shards" =~ ^[0-9]+$ || "$payment_matrix_shards" -lt 1 ]]; then
+  echo "SANDBOX_PAYMENT_MATRIX_SHARDS must be a positive integer." >&2
+  exit 1
+fi
+if [[ ! "$payment_matrix_shard" =~ ^[0-9]+$ || "$payment_matrix_shard" -ge "$payment_matrix_shards" ]]; then
+  echo "SANDBOX_PAYMENT_MATRIX_SHARD must be an integer in [0, $payment_matrix_shards)." >&2
+  exit 1
+fi
+
 tmp_dir="$(mktemp -d)"
 env_file="$tmp_dir/.env"
 project="citybuddy-cb101-test-$$"
@@ -3155,6 +3169,23 @@ is_committed_payment_face_index() {
     || "$label" == attempt-row || "$label" == attempt-id || "$label" == order-id ]]
 }
 
+# The two corruption matrices below enumerate 3,080 single/pair cells, roughly seven eighths of
+# this suite's runtime. Every cell restores committed truth before the next one begins, so the
+# cells carry no order dependence and CI divides the mutate/probe/restore work across parallel
+# shards. Metadata classification and cell accounting stay unsharded, so every shard still asserts
+# the complete matrix census and a cell dropped by a sharding mistake breaks the totals instead of
+# passing quietly. The defaults run the whole matrix in one process for `make ci` and local runs.
+payment_matrix_ordinal=0
+payment_matrix_probed_cells=0
+
+# Consume the next matrix cell ordinal and report whether this shard owns its expensive probe.
+payment_matrix_cell_probed() {
+  local owned=$((payment_matrix_ordinal % payment_matrix_shards == payment_matrix_shard))
+  payment_matrix_ordinal=$((payment_matrix_ordinal + 1))
+  payment_matrix_probed_cells=$((payment_matrix_probed_cells + owned))
+  test "$owned" -eq 1
+}
+
 evaluation_integrity_damage_cells=0
 evaluation_equivalence_preserving_transformations=0
 for ((predicate_index = 0; predicate_index < ${#payment_predicate_mutations[@]}; predicate_index++)); do
@@ -3162,52 +3193,56 @@ for ((predicate_index = 0; predicate_index < ${#payment_predicate_mutations[@]};
     EVALUATION "${payment_predicate_targets[$predicate_index]}")"
   assert_equal INTEGRITY_DAMAGE "$classification" \
     "single-column oracle rejects ${payment_predicate_labels[$predicate_index]}"
-  mutation_count="$(mysql_query root "$root_password" commerce_db \
-    "${payment_predicate_mutations[$predicate_index]}; SELECT ROW_COUNT()")"
-  assert_equal 1 "$mutation_count" \
-    "single consistency fault injection changed exactly one row: ${payment_predicate_labels[$predicate_index]}"
-  assert_payment_truth_fails_closed \
-    "single committed-face content corruption ${payment_predicate_labels[$predicate_index]}"
-  restore_complete_payment_truth
+  if payment_matrix_cell_probed; then
+    mutation_count="$(mysql_query root "$root_password" commerce_db \
+      "${payment_predicate_mutations[$predicate_index]}; SELECT ROW_COUNT()")"
+    assert_equal 1 "$mutation_count" \
+      "single consistency fault injection changed exactly one row: ${payment_predicate_labels[$predicate_index]}"
+    assert_payment_truth_fails_closed \
+      "single committed-face content corruption ${payment_predicate_labels[$predicate_index]}"
+    restore_complete_payment_truth
+  fi
   evaluation_integrity_damage_cells=$((evaluation_integrity_damage_cells + 1))
 done
 
 for ((left_index = 0; left_index < ${#payment_predicate_mutations[@]}; left_index++)); do
   for ((right_index = left_index + 1; right_index < ${#payment_predicate_mutations[@]}; right_index++)); do
-    left_mutation="${payment_predicate_mutations[$left_index]}"
-    right_mutation="${payment_predicate_mutations[$right_index]}"
-    if [[ "${payment_predicate_labels[$left_index]}" == audit-row \
-        && "${payment_predicate_labels[$right_index]}" == audit-* ]] \
-      || [[ "${payment_predicate_labels[$left_index]}" == callback-row \
-        && "${payment_predicate_labels[$right_index]}" == callback-* ]] \
-      || [[ "${payment_predicate_labels[$left_index]}" == attempt-row \
-        && "${payment_predicate_labels[$right_index]}" == attempt-* ]] \
-      || [[ "${payment_predicate_labels[$left_index]}" == ledger-row \
-        && "${payment_predicate_labels[$right_index]}" == ledger-* ]]; then
-      first_mutation="$right_mutation"
-      second_mutation="$left_mutation"
-    else
-      first_mutation="$left_mutation"
-      second_mutation="$right_mutation"
-    fi
-    mutation_counts="$(mysql_query root "$root_password" commerce_db \
-      "$first_mutation; SELECT ROW_COUNT(); $second_mutation; SELECT ROW_COUNT()")"
-    assert_equal $'1\n1' "$mutation_counts" \
-      "paired consistency fault injection changed one row per fault: ${payment_predicate_labels[$left_index]} + ${payment_predicate_labels[$right_index]}"
     classification="$(payment_transformation_classification \
       EVALUATION "${payment_predicate_targets[$left_index]}" \
       "${payment_predicate_targets[$right_index]}")"
     assert_equal INTEGRITY_DAMAGE "$classification" \
       "evaluation strict-subset oracle rejects ${payment_predicate_labels[$left_index]} + ${payment_predicate_labels[$right_index]}"
-    if is_committed_payment_face_index "$left_index" \
-      && is_committed_payment_face_index "$right_index"; then
-      assert_payment_truth_fails_closed \
-        "paired committed-face corruption ${payment_predicate_labels[$left_index]} + ${payment_predicate_labels[$right_index]}"
-    else
-      assert_payment_audit_reconciliation_fails_closed \
-        "paired enumerator predicate corruption ${payment_predicate_labels[$left_index]} + ${payment_predicate_labels[$right_index]}"
+    if payment_matrix_cell_probed; then
+      left_mutation="${payment_predicate_mutations[$left_index]}"
+      right_mutation="${payment_predicate_mutations[$right_index]}"
+      if [[ "${payment_predicate_labels[$left_index]}" == audit-row \
+          && "${payment_predicate_labels[$right_index]}" == audit-* ]] \
+        || [[ "${payment_predicate_labels[$left_index]}" == callback-row \
+          && "${payment_predicate_labels[$right_index]}" == callback-* ]] \
+        || [[ "${payment_predicate_labels[$left_index]}" == attempt-row \
+          && "${payment_predicate_labels[$right_index]}" == attempt-* ]] \
+        || [[ "${payment_predicate_labels[$left_index]}" == ledger-row \
+          && "${payment_predicate_labels[$right_index]}" == ledger-* ]]; then
+        first_mutation="$right_mutation"
+        second_mutation="$left_mutation"
+      else
+        first_mutation="$left_mutation"
+        second_mutation="$right_mutation"
+      fi
+      mutation_counts="$(mysql_query root "$root_password" commerce_db \
+        "$first_mutation; SELECT ROW_COUNT(); $second_mutation; SELECT ROW_COUNT()")"
+      assert_equal $'1\n1' "$mutation_counts" \
+        "paired consistency fault injection changed one row per fault: ${payment_predicate_labels[$left_index]} + ${payment_predicate_labels[$right_index]}"
+      if is_committed_payment_face_index "$left_index" \
+        && is_committed_payment_face_index "$right_index"; then
+        assert_payment_truth_fails_closed \
+          "paired committed-face corruption ${payment_predicate_labels[$left_index]} + ${payment_predicate_labels[$right_index]}"
+      else
+        assert_payment_audit_reconciliation_fails_closed \
+          "paired enumerator predicate corruption ${payment_predicate_labels[$left_index]} + ${payment_predicate_labels[$right_index]}"
+      fi
+      restore_complete_payment_truth
     fi
-    restore_complete_payment_truth
     evaluation_integrity_damage_cells=$((evaluation_integrity_damage_cells + 1))
   done
 done
@@ -3345,13 +3380,15 @@ for ((predicate_index = 0;
     PRODUCTION "${production_predicate_targets[$predicate_index]}")"
   assert_equal INTEGRITY_DAMAGE "$classification" \
     "production single-column oracle rejects ${production_predicate_labels[$predicate_index]}"
-  mutation_count="$(mysql_query root "$root_password" commerce_db \
-    "${production_predicate_mutations[$predicate_index]}; SELECT ROW_COUNT()")"
-  assert_equal 1 "$mutation_count" \
-    "production callback single fault changed exactly one row: ${production_predicate_labels[$predicate_index]}"
-  assert_production_callback_truth_fails_closed \
-    "single ${production_predicate_labels[$predicate_index]}"
-  restore_complete_production_payment_truth
+  if payment_matrix_cell_probed; then
+    mutation_count="$(mysql_query root "$root_password" commerce_db \
+      "${production_predicate_mutations[$predicate_index]}; SELECT ROW_COUNT()")"
+    assert_equal 1 "$mutation_count" \
+      "production callback single fault changed exactly one row: ${production_predicate_labels[$predicate_index]}"
+    assert_production_callback_truth_fails_closed \
+      "single ${production_predicate_labels[$predicate_index]}"
+    restore_complete_production_payment_truth
+  fi
   production_integrity_damage_cells=$((production_integrity_damage_cells + 1))
 done
 
@@ -3360,42 +3397,47 @@ for ((left_index = 0; left_index < ${#production_predicate_mutations[@]}; left_i
   for ((right_index = left_index + 1;
         right_index < ${#production_predicate_mutations[@]};
         right_index++)); do
-    left_mutation="${production_predicate_mutations[$left_index]}"
-    right_mutation="${production_predicate_mutations[$right_index]}"
-    if [[ "${production_predicate_labels[$left_index]}" == callback-row \
-        && "${production_predicate_labels[$right_index]}" == callback-* ]] \
-      || [[ "${production_predicate_labels[$left_index]}" == attempt-row \
-        && "${production_predicate_labels[$right_index]}" == attempt-* ]] \
-      || [[ "${production_predicate_labels[$left_index]}" == ledger-row \
-        && "${production_predicate_labels[$right_index]}" == ledger-* ]] \
-      || [[ "${production_predicate_labels[$left_index]}" == order-origin-row \
-        && "${production_predicate_labels[$right_index]}" == order-origin-* ]]; then
-      first_mutation="$right_mutation"
-      second_mutation="$left_mutation"
-    else
-      first_mutation="$left_mutation"
-      second_mutation="$right_mutation"
-    fi
-    mutation_counts="$(mysql_query root "$root_password" commerce_db \
-      "$first_mutation; SELECT ROW_COUNT(); $second_mutation; SELECT ROW_COUNT()")"
-    assert_equal $'1\n1' "$mutation_counts" \
-      "production callback pair changed one row per fault: ${production_predicate_labels[$left_index]} + ${production_predicate_labels[$right_index]}"
     classification="$(payment_transformation_classification \
       PRODUCTION "${production_predicate_targets[$left_index]}" \
       "${production_predicate_targets[$right_index]}")"
     if [[ "$classification" == EQUIVALENCE_PRESERVING ]]; then
-      assert_production_callback_truth_equivalence_preserving \
-        "pair ${production_predicate_labels[$left_index]} + ${production_predicate_labels[$right_index]}"
       production_equivalence_preserving_transformations=$((production_equivalence_preserving_transformations + 1))
     else
       assert_equal INTEGRITY_DAMAGE "$classification" \
         "production pair oracle classifies integrity damage"
-      assert_production_callback_truth_fails_closed \
-        "pair ${production_predicate_labels[$left_index]} + ${production_predicate_labels[$right_index]}"
       production_integrity_damage_cells=$((production_integrity_damage_cells + 1))
     fi
-    restore_complete_production_payment_truth
     production_pair_count=$((production_pair_count + 1))
+    if payment_matrix_cell_probed; then
+      left_mutation="${production_predicate_mutations[$left_index]}"
+      right_mutation="${production_predicate_mutations[$right_index]}"
+      if [[ "${production_predicate_labels[$left_index]}" == callback-row \
+          && "${production_predicate_labels[$right_index]}" == callback-* ]] \
+        || [[ "${production_predicate_labels[$left_index]}" == attempt-row \
+          && "${production_predicate_labels[$right_index]}" == attempt-* ]] \
+        || [[ "${production_predicate_labels[$left_index]}" == ledger-row \
+          && "${production_predicate_labels[$right_index]}" == ledger-* ]] \
+        || [[ "${production_predicate_labels[$left_index]}" == order-origin-row \
+          && "${production_predicate_labels[$right_index]}" == order-origin-* ]]; then
+        first_mutation="$right_mutation"
+        second_mutation="$left_mutation"
+      else
+        first_mutation="$left_mutation"
+        second_mutation="$right_mutation"
+      fi
+      mutation_counts="$(mysql_query root "$root_password" commerce_db \
+        "$first_mutation; SELECT ROW_COUNT(); $second_mutation; SELECT ROW_COUNT()")"
+      assert_equal $'1\n1' "$mutation_counts" \
+        "production callback pair changed one row per fault: ${production_predicate_labels[$left_index]} + ${production_predicate_labels[$right_index]}"
+      if [[ "$classification" == EQUIVALENCE_PRESERVING ]]; then
+        assert_production_callback_truth_equivalence_preserving \
+          "pair ${production_predicate_labels[$left_index]} + ${production_predicate_labels[$right_index]}"
+      else
+        assert_production_callback_truth_fails_closed \
+          "pair ${production_predicate_labels[$left_index]} + ${production_predicate_labels[$right_index]}"
+      fi
+      restore_complete_production_payment_truth
+    fi
   done
 done
 assert_equal 1485 "$production_pair_count" \
@@ -3405,6 +3447,9 @@ assert_equal 1 "$production_equivalence_preserving_transformations" \
 assert_equal 1539 "$production_integrity_damage_cells" \
   "production matrix keeps every independently anchored single/pair as damage"
 echo "Production payment matrix totals: integrity-damage=$production_integrity_damage_cells equivalence-preserving=$production_equivalence_preserving_transformations"
+assert_equal 3080 "$payment_matrix_ordinal" \
+  "every sharded corruption cell is enumerated regardless of which shard probes it"
+echo "Payment matrix shard $payment_matrix_shard of $payment_matrix_shards probed $payment_matrix_probed_cells of $payment_matrix_ordinal enumerated cells."
 
 evaluation_ledger_bound_prefix='cb116-evaluation-ledger-bound-'
 mysql_query root "$root_password" commerce_db "

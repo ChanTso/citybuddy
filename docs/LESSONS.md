@@ -359,3 +359,11 @@ This file records only factual pitfalls supported by merged pull-request, commit
 - 根因：`reserveIntent` 在插入前用 `SELECT ... WHERE user_subject=? AND activity_id=? AND idempotency_key=? FOR UPDATE` 查询一条**尚不存在**的行。InnoDB 对不存在的行加的是 gap lock 而不是记录锁，而 gap lock 之间互相兼容，因此所有并发事务都能同时持有；随后的 `INSERT` 需要该 gap 的 insert-intention lock，它与其他事务持有的 gap lock 冲突，于是形成环。单活动时不会发生，是因为事务开头的 `seckill_activity ... FOR UPDATE` 已经把同活动的并发者完全串行化，任一时刻只有一个事务进入插入段——**限制吞吐的那把行锁同时也在掩盖这个死锁**。
 - 解决：改为先插入、由唯一键判定是否为重放。`INSERT` 成功即新建；抛出 `DuplicateKeyException` 时再用 `FOR SHARE` 当前读取回已存在的行并比对 `intent_hash`。这里必须是当前读，因为 REPEATABLE READ 快照早于造成该重复的并发插入，普通读会看不到那一行（与 CB-071 同类）；而必须是 `FOR SHARE` 而非 `FOR UPDATE`，因为 `INSERT` 命中重复键时 InnoDB 已对被重复的记录加了共享锁，再升级为排他锁会重演 CB-070 的 S→X 升级环。回归证据：12 个活动 × 4 轮并发预约在修复前稳定复现死锁、修复后全部 ADMITTED；同一梯子在 32 活动下由 26.67% 失败率、约 6,200 次死锁变为 0.00% 失败、0 次死锁并跑满 800 req/s。
 - 结论：对"可能不存在的行"加锁读与"随后插入同一键"是一对固有冲突，锁的是间隙而不是行。幂等写入应当由唯一约束裁决，而不是先查后插；先查后插只有在被更外层的锁完全串行化时才是安全的，那种安全性是偶然的，会随着并发维度增加而消失。审计这类路径时要同时确认两件事：重复分支用的是当前读（否则读不到刚提交的行），以及它没有把已持有的共享锁升级为排他锁。
+
+## Maintenance — 评估沙箱套件的 CI 时间归因与矩阵分片
+
+- 现象：`test-evaluation-sandbox-integration` 单个 job 耗时 46.0 分钟，第二慢的 job 只有 7.9 分钟，整条 CI 关键路径完全由它决定，且 45.8 分钟落在同一个步骤里。最初的归因是脚本中的 25 次服务重启、一处 `sleep 60` 中断演练和一处 `1m` TTL 等待。
+- 证据链接：[CI run 32552238967](https://github.com/ChanTso/citybuddy/actions/runs/32552238967)
+- 根因：把该 job 日志按时间戳逐行求差后，≥5 秒的间隙合计只有 2.9 分钟，其中最大的一次正是那处 60 秒到期等待，而每次 Spring Boot 重启只有 5–10 秒。真正的时间均匀铺在 23,372 条日志里：evaluation 与 production 两个物理列腐蚀矩阵合计 3,080 个 cell，每个 cell 做一次 MySQL 变异、一次分类探测和一次完整真值恢复，合计 39.9 分钟，占 87%。结构上最显眼的东西和实际耗时的东西不是同一个。
+- 解决：矩阵每个 cell 都以 `restore_complete_*_payment_truth` 收尾，cell 之间因此没有顺序依赖，可以并行切分。引入 `SANDBOX_PAYMENT_MATRIX_SHARDS` / `SANDBOX_PAYMENT_MATRIX_SHARD`，仅把"变异 + 探测 + 恢复"按全局序号取模分片；纯元数据分类与 cell 计数保持不分片，因此每个 shard 仍然断言完整的 3,080 cell 普查以及 1541/1/1539/1/1485 全部总数。默认 1/0 让 `make ci` 与本地调用保持整套执行不变；分片参数在拓扑启动前校验，避免拼错后先浪费 3 分钟 setup。本地以 shard 3/8 实跑，三组总数与未分片基线逐字相同。
+- 结论：给"慢"归因之前必须先测量，显眼的等待不等于主要成本；均匀铺开的开销在日志里没有尖峰，只能靠逐行累计求和才能发现。可并行化的前提是状态中立性，而这里的中立性由每个 cell 自带的恢复步骤提供。分片的正确性不应该依赖"我相信切分是对的"，而应该落在一条每个 shard 都会执行的完整普查断言上——漏掉一个 cell 必须让总数断言失败，而不是安静地少跑一格。

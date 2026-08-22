@@ -80,7 +80,7 @@ jobs:
         run: make repo-ci
 
   integration:
-    name: integration (${{ matrix.target }})
+    name: integration (${{ matrix.lane || matrix.target }})
     runs-on: ubuntu-latest
     timeout-minutes: ${{ matrix.timeout_minutes }}
     strategy:
@@ -103,11 +103,66 @@ jobs:
             java: true
             python: true
             timeout_minutes: 30
-          # This lane executes complete production/evaluation physical-column single/pair matrices.
+          # This suite executes complete production/evaluation physical-column single/pair matrices.
+          # Those matrices are 3,080 independent mutate/probe/restore cells and about seven eighths
+          # of its runtime, so CI divides the probing across shards. Every shard runs the full
+          # lifecycle and enumerates the whole matrix; only the expensive per-cell probe is split.
           - target: test-evaluation-sandbox-integration
+            lane: test-evaluation-sandbox-integration shard 0 of 8
+            payment_matrix_shards: 8
+            payment_matrix_shard: 0
             java: true
             python: true
-            timeout_minutes: 60
+            timeout_minutes: 30
+          - target: test-evaluation-sandbox-integration
+            lane: test-evaluation-sandbox-integration shard 1 of 8
+            payment_matrix_shards: 8
+            payment_matrix_shard: 1
+            java: true
+            python: true
+            timeout_minutes: 30
+          - target: test-evaluation-sandbox-integration
+            lane: test-evaluation-sandbox-integration shard 2 of 8
+            payment_matrix_shards: 8
+            payment_matrix_shard: 2
+            java: true
+            python: true
+            timeout_minutes: 30
+          - target: test-evaluation-sandbox-integration
+            lane: test-evaluation-sandbox-integration shard 3 of 8
+            payment_matrix_shards: 8
+            payment_matrix_shard: 3
+            java: true
+            python: true
+            timeout_minutes: 30
+          - target: test-evaluation-sandbox-integration
+            lane: test-evaluation-sandbox-integration shard 4 of 8
+            payment_matrix_shards: 8
+            payment_matrix_shard: 4
+            java: true
+            python: true
+            timeout_minutes: 30
+          - target: test-evaluation-sandbox-integration
+            lane: test-evaluation-sandbox-integration shard 5 of 8
+            payment_matrix_shards: 8
+            payment_matrix_shard: 5
+            java: true
+            python: true
+            timeout_minutes: 30
+          - target: test-evaluation-sandbox-integration
+            lane: test-evaluation-sandbox-integration shard 6 of 8
+            payment_matrix_shards: 8
+            payment_matrix_shard: 6
+            java: true
+            python: true
+            timeout_minutes: 30
+          - target: test-evaluation-sandbox-integration
+            lane: test-evaluation-sandbox-integration shard 7 of 8
+            payment_matrix_shards: 8
+            payment_matrix_shard: 7
+            java: true
+            python: true
+            timeout_minutes: 30
           - target: test-catalog-integration
             java: true
             python: true
@@ -168,6 +223,9 @@ jobs:
         name: Install Python toolchain
         run: make setup-python
       - name: Run integration suite
+        env:
+          SANDBOX_PAYMENT_MATRIX_SHARDS: ${{ matrix.payment_matrix_shards }}
+          SANDBOX_PAYMENT_MATRIX_SHARD: ${{ matrix.payment_matrix_shard }}
         run: make ${{ matrix.target }}
 
   ci:
