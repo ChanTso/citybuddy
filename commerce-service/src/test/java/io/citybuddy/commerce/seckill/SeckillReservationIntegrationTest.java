@@ -231,6 +231,67 @@ class SeckillReservationIntegrationTest {
   }
 
   @Test
+  void admitsConcurrentReservationsAcrossDistinctActivitiesWithoutDeadlock() throws Exception {
+    // Reservations for different activities hold different activity row locks, so nothing
+    // serialises them before they reach the shared idempotency index. Preparing the reservation
+    // with an absent-row locking read made every one of them take the same index gap lock and
+    // then request an insert-intention lock inside it, which deadlocks under load.
+    int activities = 12;
+    for (int index = 0; index < activities; index++) {
+      createActivity(
+          "reservation-parallel-" + index,
+          "reservation-product-parallel-" + index,
+          SeckillActivityState.ACTIVE,
+          4);
+    }
+    List<Callable<ReservationResult>> attempts = new ArrayList<>();
+    for (int round = 0; round < 4; round++) {
+      for (int index = 0; index < activities; index++) {
+        String activityId = "reservation-parallel-" + index;
+        String subject = "parallel-subject-" + index + "-" + round;
+        attempts.add(
+            () ->
+                reservationService.reserve(
+                    subject, activityId, "parallel-key-" + subject, request(1, 1)));
+      }
+    }
+
+    List<ReservationResult> results = runConcurrently(attempts);
+
+    assertThat(results).hasSize(activities * 4);
+    assertThat(results)
+        .allSatisfy(result -> assertThat(result.state()).isEqualTo(ReservationState.ADMITTED));
+    for (int index = 0; index < activities; index++) {
+      assertThat(reservationRepository.admittedQuantity("reservation-parallel-" + index))
+          .isEqualTo(4);
+    }
+  }
+
+  @Test
+  void resolvesConcurrentDuplicateIdempotencyKeysToOneReservation() throws Exception {
+    createActivity(
+        "reservation-duplicate-key",
+        "reservation-product-duplicate-key",
+        SeckillActivityState.ACTIVE,
+        5);
+    List<Callable<ReservationResult>> attempts = new ArrayList<>();
+    for (int index = 0; index < 8; index++) {
+      attempts.add(
+          () ->
+              reservationService.reserve(
+                  "duplicate-subject",
+                  "reservation-duplicate-key",
+                  "duplicate-key",
+                  request(1, 1)));
+    }
+
+    List<ReservationResult> results = runConcurrently(attempts);
+
+    assertThat(results.stream().map(ReservationResult::reservationId).distinct()).hasSize(1);
+    assertThat(reservationRepository.admittedQuantity("reservation-duplicate-key")).isEqualTo(1);
+  }
+
+  @Test
   void failsClosedForMysqlRedisVersionWindowsAndUnsafeLuaIntegers() throws Exception {
     createActivity(
         "reservation-lag-current",

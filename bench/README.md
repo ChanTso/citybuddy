@@ -100,37 +100,56 @@ until commit. Every reservation for one activity passes through that row. The Re
 decision happens *after* this transaction, so the ceiling above is MySQL row serialization, not
 the Lua admission.
 
-## Finding: the serializing lock is also suppressing a deadlock
+## Finding and fix: the serializing lock was also suppressing a deadlock
 
-Repeating the identical ladder with traffic spread over 32 activity rows removes the queueing —
-800 requests/s sustained, p99 26.8 ms, no dropped iterations — but from 400 requests/s upward the
-service starts returning HTTP 500. That run produced roughly 6,200 deadlock events; the
-single-activity run produced **zero** (`results/deadlock_count.txt`).
+Repeating the identical ladder with traffic spread over 32 activity rows removed the queueing,
+but from 400 requests/s upward the service began returning HTTP 500. That run produced roughly
+6,200 deadlock events; the single-activity run produced **zero**
+(`results/deadlock_count.txt`).
 
-`SHOW ENGINE INNODB STATUS` (`results/innodb_deadlock.txt`) shows both transactions holding an X
+`SHOW ENGINE INNODB STATUS` (`results/innodb_deadlock.txt`) showed both transactions holding an X
 gap lock on the `supremum` pseudo-record of `uq_seckill_reservation_idempotency`, each then
 waiting for an insert-intention lock in that same gap:
 
-- `findByIdempotencyForUpdate` runs `SELECT ... FOR UPDATE` for a row that does not exist yet, so
-  InnoDB takes a gap lock rather than a record lock;
-- gap locks are mutually compatible, so concurrent transactions all acquire it;
-- the following `INSERT` needs an insert-intention lock in that gap, which conflicts with the gap
-  locks the others hold — a cycle, and InnoDB rolls one back.
+- `findByIdempotencyForUpdate` ran `SELECT ... FOR UPDATE` for a row that does not exist yet, so
+  InnoDB took a gap lock rather than a record lock;
+- gap locks are mutually compatible, so every concurrent transaction acquired it;
+- the following `INSERT` needed an insert-intention lock in that gap, which conflicts with the gap
+  locks the others held — a cycle, and InnoDB rolled one back.
 
 With a single activity this cannot happen: the `seckill_activity` row lock totally orders every
 entrant, so only one transaction is ever inside the insert section. **The row lock that caps
-throughput is simultaneously what prevents this deadlock class.** Concurrent activities are the
-realistic production shape, so this is a real defect rather than a benchmark artifact, and it is
-the same lock-ordering family already recorded for payments and refunds in
+throughput was also what prevented this deadlock class**, which is why a single-activity load test
+could never surface it.
+
+The fix inserts first and lets the unique key decide whether the request is a replay. On
+`DuplicateKeyException` the existing row is read back with `FOR SHARE`: a current read, because a
+REPEATABLE READ snapshot predates the concurrent insert that produced the duplicate, and shared
+rather than exclusive, because `INSERT` already holds a shared lock on the duplicated record and
+upgrading it would recreate the S-to-X cycle recorded for payment callbacks. Details are in
 [docs/LESSONS.md](../docs/LESSONS.md).
 
-Because those 500s are cheap failures, the 800 requests/s spread figure is **not** a capacity
-claim and is not comparable to the contended ceiling. It is reported only as the evidence that
-isolates the serialization point.
+## Results after the fix
 
-A separate, lower-volume error appears in a background scheduled task during the spread run
-(`IllegalStateException: Committed reservation is missing`, 50 occurrences). It is not on the
-request path and has not been diagnosed.
+Same build, same fixture, same ladder.
+
+| | Contended (1 activity) | Spread (32 activities) |
+|---|---:|---:|
+| Achieved at 800 target | 511.5 req/s | 799.9 req/s |
+| p50 at that step | 2844.9 ms | 7.5 ms |
+| p99 at that step | 4466.5 ms | 39.4 ms |
+| Dropped iterations | 2,075 | 0 |
+| Failed requests | 0.00 % | 0.00 % |
+| Deadlocks | 0 | 0 |
+
+Both sides now complete with zero errors, so the comparison is clean: concentrating the same
+offered load on one activity row costs about 1.56x throughput and moves p50 from 7.5 ms to 2.8 s.
+That isolates the `seckill_activity` row serialization as the ceiling, and the single-activity
+ceiling itself is unchanged by the fix (528.5 req/s before, 511.5 after), as expected — the gap
+lock was never the constraint when one row already serialized every entrant.
+
+Correctness was re-verified on the fixed build: 10/10 checks pass, exactly 100 admitted and 500
+exhausted, ledger and stock conserved (`results/correctness_sql.txt`).
 
 ## Reproducing
 
@@ -153,3 +172,8 @@ BENCH_USERS=25000 ./bench/setup_bench_env.sh
 ```bash
 ./bench/run_ladder.sh spread 32
 ```
+
+Each run reuses one RocketMQ topic; set `TOPIC_SUFFIX` to a fresh value to start from an empty
+queue. Order creation is asynchronous, so a previous run's backlog otherwise sits in front of the
+next run's messages — and deleting fixture rows while their transaction messages are still queued
+is what produces `Committed reservation is missing` in the order worker.

@@ -352,3 +352,10 @@ This file records only factual pitfalls supported by merged pull-request, commit
 - 根因：先前只修复了 leading-dash 的 shell argv 传输，没有从 producer 的精确长度、完整字母表和位置分区机械枚举同一 identifier domain 的所有 consumer；常见的字母数字 fixture 掩盖了首字符分区差异。
 - 解决：保持 `secrets.token_urlsafe(32)`、既有持久值和 public API 不变，为 support-session 增加 union validator，并在 evaluation、Action 和 evaluation payment 的真实拒绝边界复用；Auth 保持原样透传。64 个确定性首字符向量、显式 `-`/`_` 跨服务路径、legacy compatibility、rejection matrix、无 normalization 与精确 server-only attribution 共同构成回归证据。
 - 结论：opaque identifier 的合同是 producer 生成的完整语言，不只是字符集合。修复一个传输调用点后仍必须审计同领域的 parser、claim、header、持久过滤和 replay 边界；兼容性 inventory 应区分正常接受 fixture 与故意非法的 rejection/corruption fixture，不能通过修改负向样本制造闭合结论。
+
+## Defect correction — Reservation idempotency gap lock and insert-intention deadlock
+
+- 现象：单活动压测从未出现死锁，但把同一条压测梯子分散到 32 个活动行后，从 400 req/s 起服务开始返回 HTTP 500，一次运行累计约 6,200 次 `Deadlock found when trying to get lock`，全部发生在 `INSERT INTO seckill_reservation`。`SHOW ENGINE INNODB STATUS` 显示两个事务都持有 `uq_seckill_reservation_idempotency` 上 `supremum` 伪记录的 X gap lock，然后又都在同一 gap 上等待 insert intention。
+- 根因：`reserveIntent` 在插入前用 `SELECT ... WHERE user_subject=? AND activity_id=? AND idempotency_key=? FOR UPDATE` 查询一条**尚不存在**的行。InnoDB 对不存在的行加的是 gap lock 而不是记录锁，而 gap lock 之间互相兼容，因此所有并发事务都能同时持有；随后的 `INSERT` 需要该 gap 的 insert-intention lock，它与其他事务持有的 gap lock 冲突，于是形成环。单活动时不会发生，是因为事务开头的 `seckill_activity ... FOR UPDATE` 已经把同活动的并发者完全串行化，任一时刻只有一个事务进入插入段——**限制吞吐的那把行锁同时也在掩盖这个死锁**。
+- 解决：改为先插入、由唯一键判定是否为重放。`INSERT` 成功即新建；抛出 `DuplicateKeyException` 时再用 `FOR SHARE` 当前读取回已存在的行并比对 `intent_hash`。这里必须是当前读，因为 REPEATABLE READ 快照早于造成该重复的并发插入，普通读会看不到那一行（与 CB-071 同类）；而必须是 `FOR SHARE` 而非 `FOR UPDATE`，因为 `INSERT` 命中重复键时 InnoDB 已对被重复的记录加了共享锁，再升级为排他锁会重演 CB-070 的 S→X 升级环。回归证据：12 个活动 × 4 轮并发预约在修复前稳定复现死锁、修复后全部 ADMITTED；同一梯子在 32 活动下由 26.67% 失败率、约 6,200 次死锁变为 0.00% 失败、0 次死锁并跑满 800 req/s。
+- 结论：对"可能不存在的行"加锁读与"随后插入同一键"是一对固有冲突，锁的是间隙而不是行。幂等写入应当由唯一约束裁决，而不是先查后插；先查后插只有在被更外层的锁完全串行化时才是安全的，那种安全性是偶然的，会随着并发维度增加而消失。审计这类路径时要同时确认两件事：重复分支用的是当前读（否则读不到刚提交的行），以及它没有把已持有的共享锁升级为排他锁。

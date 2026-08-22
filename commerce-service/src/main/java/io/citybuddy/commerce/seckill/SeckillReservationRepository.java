@@ -47,13 +47,20 @@ public final class SeckillReservationRepository {
         resolutionWindowMicros);
   }
 
-  public Optional<SeckillReservation> findByIdempotencyForUpdate(
+  /**
+   * Shared current read of an existing idempotency row. {@code FOR SHARE} rather than {@code FOR
+   * UPDATE} because concurrent duplicate inserts already hold a shared lock on the duplicated
+   * record, and upgrading that to exclusive forms the same S-to-X cycle recorded for payment
+   * callbacks. It must remain a locking read: a REPEATABLE READ snapshot predates the concurrent
+   * insert that produced the duplicate, so a plain read can miss the row entirely.
+   */
+  public Optional<SeckillReservation> findByIdempotencyForShare(
       String userSubject, String activityId, String idempotencyKey) {
     return queryOne(
         "SELECT "
             + COLUMNS
             + " FROM seckill_reservation "
-            + "WHERE user_subject = ? AND activity_id = ? AND idempotency_key = ? FOR UPDATE",
+            + "WHERE user_subject = ? AND activity_id = ? AND idempotency_key = ? FOR SHARE",
         userSubject,
         activityId,
         idempotencyKey);
