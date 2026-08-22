@@ -1,0 +1,172 @@
+== EXPLAIN of the mock-payment callback attempt lookup ==
+*************************** 1. row ***************************
+           id: 1
+  select_type: SIMPLE
+        table: mock_payment_attempt
+   partitions: NULL
+         type: ALL
+possible_keys: PRIMARY,uq_mock_payment_callback_correlation
+          key: NULL
+      key_len: NULL
+          ref: NULL
+         rows: 6
+     filtered: 62.96
+        Extra: Using where
+
+== EXPLAIN of the mock-payment start attempt lookup ==
+*************************** 1. row ***************************
+           id: 1
+  select_type: SIMPLE
+        table: mock_payment_attempt
+   partitions: NULL
+         type: index
+possible_keys: uq_mock_payment_order
+          key: uq_mock_payment_order
+      key_len: 145
+          ref: NULL
+         rows: 6
+     filtered: 16.67
+        Extra: Using where; Using index
+
+== indexes available ==
+Table	Non_unique	Key_name	Seq_in_index	Column_name	Collation	Cardinality	Sub_part	Packed	Null	Index_type	Comment	Index_comment	Visible	Expression
+mock_payment_attempt	0	PRIMARY	1	attempt_id	A	6	NULL	NULL		BTREE			YES	NULL
+mock_payment_attempt	0	uq_mock_payment_callback_correlation	1	callback_correlation_id	A	6	NULL	NULL		BTREE			YES	NULL
+mock_payment_attempt	0	uq_mock_payment_request	1	user_subject	A	6	NULL	NULL		BTREE			YES	NULL
+mock_payment_attempt	0	uq_mock_payment_request	2	request_idempotency_key	A	6	NULL	NULL		BTREE			YES	NULL
+mock_payment_attempt	0	uq_mock_payment_order	1	order_kind	A	1	NULL	NULL		BTREE			YES	NULL
+mock_payment_attempt	0	uq_mock_payment_order	2	order_id	A	6	NULL	NULL		BTREE			YES	NULL
+mock_payment_attempt	1	idx_mock_payment_owner_created	1	user_subject	A	6	NULL	NULL		BTREE			YES	NULL
+mock_payment_attempt	1	idx_mock_payment_owner_created	2	created_at	A	6	NULL	NULL		BTREE			YES	NULL
+mock_payment_attempt	1	idx_mock_payment_owner_created	3	attempt_id	A	6	NULL	NULL		BTREE			YES	NULL
+mock_payment_attempt	1	ix_mock_payment_sandbox_created	1	sandbox_id	A	1	NULL	NULL	YES	BTREE			YES	NULL
+mock_payment_attempt	1	ix_mock_payment_sandbox_created	2	created_at	A	6	NULL	NULL		BTREE			YES	NULL
+mock_payment_attempt	1	ix_mock_payment_sandbox_created	3	attempt_id	A	6	NULL	NULL		BTREE			YES	NULL
+
+== LATEST DETECTED DEADLOCK ==
+LATEST DETECTED DEADLOCK
+------------------------
+2026-08-22 13:25:17 281472678096640
+*** (1) TRANSACTION:
+TRANSACTION 533977, ACTIVE 0 sec starting index read
+mysql tables in use 1, locked 1
+LOCK WAIT 4 lock struct(s), heap size 1128, 3 row lock(s)
+MySQL thread id 43630, OS thread handle 281471352827648, query id 2730373 172.18.0.10 commerce_app executing
+SELECT attempt_id, callback_correlation_id, user_subject, order_id, order_kind, sandbox_id, request_idempotency_key, intent_hash, amount_minor, refunded_amount_minor, currency, state, state_version, succeeded_at FROM mock_payment_attempt WHERE attempt_id = '69b91286-e23b-494a-9b25-14884ccc041f' OR callback_correlation_id = 'f8083943-b73d-42ca-8206-bc675454e362' OR order_id = 'b88124b8-3200-4ddd-bdc1-66b58d41cb4d' LIMIT 2 FOR UPDATE
+
+*** (1) HOLDS THE LOCK(S):
+RECORD LOCKS space id 36 page no 4 n bits 72 index PRIMARY of table `commerce_db`.`mock_payment_attempt` trx id 533977 lock_mode X locks rec but not gap
+Record lock, heap no 4 PHYSICAL RECORD: n_fields 17; compact format; info bits 0
+ 0: len 30; hex 36396239313238362d653233622d343934612d396232352d313438383463; asc 69b91286-e23b-494a-9b25-14884c; (total 36 bytes);
+ 1: len 6; hex 0000000825ca; asc     % ;;
+ 2: len 7; hex 81000000980110; asc        ;;
+ 3: len 30; hex 66383038333934332d623733642d343263612d383230362d626336373534; asc f8083943-b73d-42ca-8206-bc6754; (total 36 bytes);
+ 4: len 12; hex 62656e63682d757365722d31; asc bench-user-1;;
+ 5: len 30; hex 62383831323462382d333230302d346464642d626463312d363662353864; asc b88124b8-3200-4ddd-bdc1-66b58d; (total 36 bytes);
+ 6: len 1; hex 01; asc  ;;
+ 7: SQL NULL;
+ 8: len 22; hex 62656e63682d7061792d62656e63682d757365722d31; asc bench-pay-bench-user-1;;
+ 9: len 30; hex 393133663764353164366564326538373433363166623733303733626636; asc 913f7d51d6ed2e874361fb73073bf6; (total 64 bytes);
+ 10: len 8; hex 00000000000007c6; asc         ;;
+ 11: len 8; hex 0000000000000000; asc         ;;
+ 12: len 3; hex 434e59; asc CNY;;
+ 13: len 1; hex 01; asc  ;;
+ 14: len 8; hex 0000000000000001; asc         ;;
+ 15: SQL NULL;
+ 16: len 7; hex 6a89a33c0f27d4; asc j  < ' ;;
+
+
+*** (1) WAITING FOR THIS LOCK TO BE GRANTED:
+RECORD LOCKS space id 36 page no 4 n bits 72 index PRIMARY of table `commerce_db`.`mock_payment_attempt` trx id 533977 lock_mode X waiting
+Record lock, heap no 5 PHYSICAL RECORD: n_fields 17; compact format; info bits 0
+ 0: len 30; hex 34643138333232652d323735652d343835342d626462352d626531663730; asc 4d18322e-275e-4854-bdb5-be1f70; (total 36 bytes);
+ 1: len 6; hex 0000000825cb; asc     % ;;
+ 2: len 7; hex 02000003551329; asc     U );;
+ 3: len 30; hex 32666432363530342d646537382d343135622d383235382d343435376565; asc 2fd26504-de78-415b-8258-4457ee; (total 36 bytes);
+ 4: len 12; hex 62656e63682d757365722d37; asc bench-user-7;;
+ 5: len 30; hex 65326635353935322d323134622d346530652d396166642d343262386664; asc e2f55952-214b-4e0e-9afd-42b8fd; (total 36 bytes);
+ 6: len 1; hex 01; asc  ;;
+ 7: SQL NULL;
+ 8: len 22; hex 62656e63682d7061792d62656e63682d757365722d37; asc bench-pay-bench-user-7;;
+ 9: len 30; hex 613135643535653237303033323433393933633163333766376634333139; asc a15d55e27003243993c1c37f7f4319; (total 64 bytes);
+ 10: len 8; hex 00000000000007c6; asc         ;;
+ 11: len 8; hex 0000000000000000; asc         ;;
+ 12: len 3; hex 434e59; asc CNY;;
+ 13: len 1; hex 02; asc  ;;
+ 14: len 8; hex 0000000000000002; asc         ;;
+ 15: len 7; hex 6a89a33c0f4117; asc j  < A ;;
+ 16: len 7; hex 6a89a33c0ef27f; asc j  <   ;;
+
+
+*** (2) TRANSACTION:
+TRANSACTION 533979, ACTIVE 0 sec fetching rows
+mysql tables in use 1, locked 1
+LOCK WAIT 4 lock struct(s), heap size 1128, 4 row lock(s)
+MySQL thread id 43540, OS thread handle 281471305236224, query id 2730367 172.18.0.10 commerce_app executing
+SELECT attempt_id, callback_correlation_id, user_subject, order_id, order_kind, sandbox_id, request_idempotency_key, intent_hash, amount_minor, refunded_amount_minor, currency, state, state_version, succeeded_at FROM mock_payment_attempt WHERE order_id = '8f88efdf-5520-4d67-8b58-51e538107696' LIMIT 2 FOR UPDATE
+
+*** (2) HOLDS THE LOCK(S):
+RECORD LOCKS space id 36 page no 4 n bits 72 index PRIMARY of table `commerce_db`.`mock_payment_attempt` trx id 533979 lock_mode X
+Record lock, heap no 3 PHYSICAL RECORD: n_fields 17; compact format; info bits 0
+ 0: len 30; hex 36383836646466362d393937372d343166662d383939322d643633346335; asc 6886ddf6-9977-41ff-8992-d634c5; (total 36 bytes);
+ 1: len 6; hex 0000000825bf; asc     % ;;
+ 2: len 7; hex 81000000940110; asc        ;;
+ 3: len 30; hex 34393631613635352d323134342d343165392d626262322d373533373762; asc 4961a655-2144-41e9-bbb2-75377b; (total 36 bytes);
+ 4: len 12; hex 62656e63682d757365722d32; asc bench-user-2;;
+ 5: len 30; hex 36636564343864312d646562632d343834642d616432622d366539346164; asc 6ced48d1-debc-484d-ad2b-6e94ad; (total 36 bytes);
+ 6: len 1; hex 01; asc  ;;
+ 7: SQL NULL;
+ 8: len 22; hex 62656e63682d7061792d62656e63682d757365722d32; asc bench-pay-bench-user-2;;
+ 9: len 30; hex 343233393435613638303461363064376231373863633139396235323630; asc 423945a6804a60d7b178cc199b5260; (total 64 bytes);
+ 10: len 8; hex 00000000000007c6; asc         ;;
+ 11: len 8; hex 0000000000000000; asc         ;;
+ 12: len 3; hex 434e59; asc CNY;;
+ 13: len 1; hex 01; asc  ;;
+ 14: len 8; hex 0000000000000001; asc         ;;
+ 15: SQL NULL;
+ 16: len 7; hex 6a89a33c0f120d; asc j  <   ;;
+
+Record lock, heap no 5 PHYSICAL RECORD: n_fields 17; compact format; info bits 0
+ 0: len 30; hex 34643138333232652d323735652d343835342d626462352d626531663730; asc 4d18322e-275e-4854-bdb5-be1f70; (total 36 bytes);
+ 1: len 6; hex 0000000825cb; asc     % ;;
+ 2: len 7; hex 02000003551329; asc     U );;
+ 3: len 30; hex 32666432363530342d646537382d343135622d383235382d343435376565; asc 2fd26504-de78-415b-8258-4457ee; (total 36 bytes);
+ 4: len 12; hex 62656e63682d757365722d37; asc bench-user-7;;
+ 5: len 30; hex 65326635353935322d323134622d346530652d396166642d343262386664; asc e2f55952-214b-4e0e-9afd-42b8fd; (total 36 bytes);
+ 6: len 1; hex 01; asc  ;;
+ 7: SQL NULL;
+ 8: len 22; hex 62656e63682d7061792d62656e63682d757365722d37; asc bench-pay-bench-user-7;;
+ 9: len 30; hex 613135643535653237303033323433393933633163333766376634333139; asc a15d55e27003243993c1c37f7f4319; (total 64 bytes);
+ 10: len 8; hex 00000000000007c6; asc         ;;
+ 11: len 8; hex 0000000000000000; asc         ;;
+ 12: len 3; hex 434e59; asc CNY;;
+ 13: len 1; hex 02; asc  ;;
+ 14: len 8; hex 0000000000000002; asc         ;;
+ 15: len 7; hex 6a89a33c0f4117; asc j  < A ;;
+ 16: len 7; hex 6a89a33c0ef27f; asc j  <   ;;
+
+
+*** (2) WAITING FOR THIS LOCK TO BE GRANTED:
+RECORD LOCKS space id 36 page no 4 n bits 72 index PRIMARY of table `commerce_db`.`mock_payment_attempt` trx id 533979 lock_mode X waiting
+Record lock, heap no 4 PHYSICAL RECORD: n_fields 17; compact format; info bits 0
+ 0: len 30; hex 36396239313238362d653233622d343934612d396232352d313438383463; asc 69b91286-e23b-494a-9b25-14884c; (total 36 bytes);
+ 1: len 6; hex 0000000825ca; asc     % ;;
+ 2: len 7; hex 81000000980110; asc        ;;
+ 3: len 30; hex 66383038333934332d623733642d343263612d383230362d626336373534; asc f8083943-b73d-42ca-8206-bc6754; (total 36 bytes);
+ 4: len 12; hex 62656e63682d757365722d31; asc bench-user-1;;
+ 5: len 30; hex 62383831323462382d333230302d346464642d626463312d363662353864; asc b88124b8-3200-4ddd-bdc1-66b58d; (total 36 bytes);
+ 6: len 1; hex 01; asc  ;;
+ 7: SQL NULL;
+ 8: len 22; hex 62656e63682d7061792d62656e63682d757365722d31; asc bench-pay-bench-user-1;;
+ 9: len 30; hex 393133663764353164366564326538373433363166623733303733626636; asc 913f7d51d6ed2e874361fb73073bf6; (total 64 bytes);
+ 10: len 8; hex 00000000000007c6; asc         ;;
+ 11: len 8; hex 0000000000000000; asc         ;;
+ 12: len 3; hex 434e59; asc CNY;;
+ 13: len 1; hex 01; asc  ;;
+ 14: len 8; hex 0000000000000001; asc         ;;
+ 15: SQL NULL;
+ 16: len 7; hex 6a89a33c0f27d4; asc j  < ' ;;
+
+*** WE ROLL BACK TRANSACTION (2)
+------------
+TRANSACTIONS
