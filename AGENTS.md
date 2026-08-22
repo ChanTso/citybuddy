@@ -15,6 +15,27 @@ archived under `docs/archive/`; it is history, not a ruleset. Do not reintroduce
 5. Never commit secrets, credentials, personal data, or private planning material.
 6. Comments explain non-obvious reasons, invariants, and external constraints. They do not
    narrate the code or promise future work.
+7. Validate at real trust boundaries — network, messaging, persistence, user, model, and tool
+   edges — and at required invariants. Do not re-check what types, schemas, constructors, or an
+   earlier guard inside the same trusted boundary already enforce, and do not add catch-and-
+   continue handling that hides a programmer or configuration error.
+
+## Authorship
+
+1. Nothing in this repository attributes work to an AI assistant. Commit messages, pull request
+   titles and bodies, code comments, branch names, and documentation carry no `Co-Authored-By`
+   assistant trailer, no "generated with" line, and no reference to Claude, Codex, or any model.
+2. Commit as the repository owner identity already present in the history. Write pull request
+   text in the owner's voice.
+
+## Tooling
+
+1. A failed `gh auth status` inside a sandbox is inconclusive: the sandbox may not expose the
+   host keyring, credential helper, network, or GitHub session. Before reporting an
+   authentication blocker or asking the owner to run `gh auth login`, retry the same
+   non-mutating check outside the sandbox with approval, and report a blocker only if that also
+   fails. The same applies to any tool whose failure could be sandbox isolation rather than a
+   real fault — confirm the cause before acting on it.
 
 ## Evidence
 
