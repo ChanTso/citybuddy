@@ -27,6 +27,7 @@ from citybuddy_agent.agent_control import (
     ToolAdapter,
     ToolBoundaryFailure,
 )
+from citybuddy_agent.evaluation import EvaluationEvidenceResponse, MysqlEvaluationEvidenceStore
 from citybuddy_agent.metrics import PrometheusCityBuddyMetrics
 from fastapi import HTTPException
 from prometheus_client.parser import text_string_to_metric_families
@@ -125,6 +126,89 @@ def test_litellm_transient_retry_and_same_tier_fallback_share_one_budget(
         ("primary", "transient"): 2,
         ("fallback", "success"): 1,
     }
+
+
+def test_sixteen_attempt_budget_keeps_repeated_tool_denials_evaluable(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    model_calls = 0
+
+    def post(*args: Any, **kwargs: Any) -> httpx.Response:
+        nonlocal model_calls
+        del args, kwargs
+        model_calls += 1
+        if model_calls <= 11:
+            return httpx.Response(
+                200,
+                json={
+                    "choices": [
+                        {
+                            "message": {
+                                "tool_calls": [
+                                    {
+                                        "function": {
+                                            "name": "unknown.tool",
+                                            "arguments": "{}",
+                                        }
+                                    }
+                                ]
+                            }
+                        }
+                    ]
+                },
+            )
+        return completion("Completed after bounded tool denials.")
+
+    monkeypatch.setattr(http_client, "post", post)
+    model = LiteLlmClient(
+        "https://proxy.test",
+        ProviderCircuits(minimum_requests=2, open_seconds=10, half_open_probes=1),
+    )
+    result = BoundedAgent(
+        RuleRouter(),
+        ModelRouter((ProviderRoute("support-standard-primary", "provider-a"),), 16),
+        model,
+        ToolAdapter("https://commerce.test", RecordingObo()),
+    ).run(
+        message="help",
+        direct_token="direct",
+        subject="user-1",
+        session_id="session-1",
+        trace_id="00000000-0000-0000-0000-000000000123",
+        turn_id="00000000-0000-0000-0000-000000000122",
+    )
+
+    persisted_events = (
+        AgentEvent("USER_INPUT", {"accepted": True}),
+        *result.events,
+        AgentEvent("ASSISTANT_RESPONSE", {"outcome": result.outcome}),
+        AgentEvent("TURN_COMPLETED", {"outcome": result.outcome}),
+    )
+    now = datetime(2026, 8, 24, tzinfo=UTC)
+    evidence_store = object.__new__(MysqlEvaluationEvidenceStore)
+    projected = [
+        evidence_store._project_event(  # noqa: SLF001
+            sequence,
+            event.event_type,
+            event.payload,
+            now,
+        )
+        for sequence, event in enumerate(persisted_events, start=1)
+    ]
+    MysqlEvaluationEvidenceStore._validate_lifecycle(projected, "completed")  # noqa: SLF001
+    evidence = EvaluationEvidenceResponse(
+        schema_version="agent-evidence-v1",
+        trace_id="00000000-0000-0000-0000-000000000123",
+        session_id="session-1",
+        turn_id="00000000-0000-0000-0000-000000000122",
+        terminal_outcome="completed",
+        events=tuple(projected),
+        feedback=(),
+    )
+
+    assert result.outcome == "completed"
+    assert model_calls == 12
+    assert len(evidence.events) == 52
 
 
 def test_litellm_does_not_retry_non_transient_provider_denial(

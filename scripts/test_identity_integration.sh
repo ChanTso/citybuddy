@@ -356,6 +356,7 @@ AGENT_SERVICE_CLIENT_SECRET="$service_password" \
 AGENT_EXCHANGE_SCOPES=catalog:read \
 AGENT_MODEL_PROXY_URL="http://127.0.0.1:$proxy_port" \
 AGENT_COMMERCE_TOOLS_URL="http://127.0.0.1:$commerce_port" \
+AGENT_ATTEMPT_BUDGET=8 \
 AGENT_CIRCUIT_OPEN_SECONDS=3 \
 uv run citybuddy-agent >"$tmp_dir/agent.log" 2>&1 &
 agent_pid=$!

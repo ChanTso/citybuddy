@@ -4988,10 +4988,10 @@ oversized_turn='00000000-0000-0000-0000-000000000137'
 mysql_query agent_app "$agent_app_password" cs_db \
   "INSERT INTO support_turn (turn_id, conversation_id, session_id, user_subject, trace_id, turn_sequence, correlation_key, request_fingerprint, input_text, response_text, outcome, state, processing_deadline_at, completed_at) VALUES ('$oversized_turn', '$conversation_id', '$session_id', '$direct_subject', '$oversized_trace', 136, 'cb103-oversized', REPEAT('3', 64), 'oversized input', 'oversized response', 'completed', 'COMPLETED', NULL, CURRENT_TIMESTAMP(6))"
 oversized_values="(UUID(), '$oversized_turn', '$oversized_trace', '$session_id', '$direct_subject', 1, 'USER_INPUT', JSON_OBJECT('accepted', true))"
-for sequence in $(seq 2 48); do
+for sequence in $(seq 2 96); do
   oversized_values+=", (UUID(), '$oversized_turn', '$oversized_trace', '$session_id', '$direct_subject', $sequence, 'BUDGET_CHARGED', JSON_OBJECT('attempt', 1, 'limit', 8, 'kind', 'model_http', 'target', 'private-provider'))"
 done
-oversized_values+=", (UUID(), '$oversized_turn', '$oversized_trace', '$session_id', '$direct_subject', 49, 'TURN_COMPLETED', JSON_OBJECT('outcome', 'completed'))"
+oversized_values+=", (UUID(), '$oversized_turn', '$oversized_trace', '$session_id', '$direct_subject', 97, 'TURN_COMPLETED', JSON_OBJECT('outcome', 'completed'))"
 mysql_query agent_app "$agent_app_password" cs_db \
   "INSERT INTO support_event (event_id, turn_id, trace_id, session_id, user_subject, sequence, event_type, payload_json) VALUES $oversized_values"
 assert_status 409 "agent evidence rejects histories beyond the server event bound" \

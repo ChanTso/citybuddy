@@ -24,7 +24,7 @@ from .actions import (
 )
 from .agent_control import TOOL_BOUNDARY_FAILURE_REASONS
 
-MAX_EVIDENCE_EVENTS = 48
+MAX_EVIDENCE_EVENTS = 96
 MAX_FEEDBACK_RECORDS = 8
 MAX_RETRIEVAL_SOURCES = 3
 
@@ -95,7 +95,13 @@ _EVENT_TYPES = {
     "TURN_COMPLETED",
     "TURN_FAILED",
 }
-_ATTEMPT_KINDS = {"model_http", "reranker_http", "identity_http", "tool_http"}
+_ATTEMPT_KINDS = {
+    "model_http",
+    "reranker_http",
+    "identity_http",
+    "tool_http",
+    "knowledge_http",
+}
 _CIRCUIT_STATES = {"open", "opened", "probe-rejected", "half-open", "closed"}
 _MODEL_RESULTS = {
     "ok",

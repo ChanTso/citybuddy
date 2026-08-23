@@ -144,7 +144,7 @@ class AgentSettings(BaseModel):
     elasticsearch_url: str = ""
     knowledge_alias: str = "knowledge_docs_read"
     support_redis_url: str = ""
-    attempt_budget: int = 8
+    attempt_budget: int = 16
     circuit_minimum_requests: int = 2
     circuit_open_seconds: float = 1.0
     circuit_half_open_probes: int = 1

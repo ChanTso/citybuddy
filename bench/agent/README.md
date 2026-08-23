@@ -468,14 +468,15 @@ with the question open. Settling it needs more ladders on both sides, or a comme
 logging the response body it actually sent. Tracked as
 [issue 93](https://github.com/ChanTso/citybuddy/issues/93).
 
-**The default attempt budget cannot fit a successful retrieval turn.** This one is read from the
-code, not observed in these runs — no `budget_exhausted` appears in any committed result, because
-the bench sets `AGENT_ATTEMPT_BUDGET=16` precisely to avoid it. In `knowledge.py`, `search`
-resolves the alias, validates the mapping, and then runs one BM25 and one dense query per query
-text including the rewrite; with the reranker and the opening model call that is eight charged
-attempts. At the default budget of 8 the retrieval itself succeeds and the turn then ends
-`budget_exhausted` with nothing left for the closing model call. Reproducing it deliberately would
-make it a finding rather than a reading.
+**The former default attempt budget could not fit a successful retrieval turn.** In
+`knowledge.py`, `search` resolves the alias, validates the mapping, and then runs one BM25 and one
+dense query per query text including the rewrite; with the reranker and the opening model call
+that is eight charged attempts. The old default of 8 left nothing for the closing model call. The
+default is now 16, matching the benchmark's pinned workload setting, and a regression test proves
+that a rewrite retrieval reaches composition after exactly nine successful charges. The existing
+bounded model fallback and reranker retry policy can raise a successful rewrite path to 14
+physical attempts, so setting the default to the bare minimum of 9 would still turn an ordinary
+transient response into budget exhaustion.
 
 ## What to measure next
 
