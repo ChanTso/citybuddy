@@ -15,9 +15,9 @@ Requires the local topology (`make init-local && make up`) and both service jars
 make demo
 ```
 
-That seeds a demonstration identity, product and FAQ set; starts auth-service and
-commerce-service as containers on the compose network; starts the model fixture and agent-service
-on the host; and prints the login it created. It takes a couple of minutes, and none of it is part
+That seeds a demonstration identity and product, bootstraps the knowledge index with the corpus
+the indexer ships, starts auth-service and commerce-service as containers on the compose network,
+starts the model fixture and agent-service on the host, and prints the login it created. It takes a couple of minutes, and none of it is part
 of the ninety seconds.
 
 Two services run on the host rather than in a container because agent-service binds `127.0.0.1`,
@@ -37,11 +37,11 @@ database rather than believing the HTTP response that produced it.
 | | Beat | What it proves |
 |---|---|---|
 | 1 | A real order, paid through the real endpoints | Refund preparation verifies durable payment truth. A hand-written `PAID` row is rejected as `ACTION_PREPARATION_DURABLE_TRUTH_INCONSISTENT`, so the fixture has to buy and pay like anyone else. |
-| 2 | The agent answers from the knowledge base | Retrieval is a decision with a persisted record — sufficiency outcome, calibration version, candidate and evidence counts — not a hidden step inside a prompt. |
+| 2 | The agent answers from the knowledge base | Retrieval is a decision with a persisted record — sufficiency outcome, calibration version, candidate and evidence counts — not a hidden step inside a prompt. The citations are the indexer's own public corpus. |
 | 3 | The model claims the refund already happened | The JSON path passes the sentence through with `outcome=completed` and no receipt, so no client can render a success state from it. The SSE path refuses to tokenise it at all and fails the turn with `unsafe_output`. Commerce still holds zero refunds. |
 | 4 | The agent prepares the refund | Preparation writes a `PendingAction` in commerce and stops. The turn carries `action_pending` and a null receipt. |
 | 5 | The user confirms | The agent claims the action, commerce executes the refund, and the agent projects an `ActionReceipt`. The receipt is the only thing that lets a client render a success state. |
-| 6 | Confirming again does not refund again | The same idempotency key replays the stored turn byte for byte; a fresh confirmation finds a `CONSUMED` action and nothing to confirm. Exactly one refund exists. |
+| 6 | Confirming again does not refund again | The same idempotency key replays the stored turn; a fresh confirmation finds no live action on the conversation, because the agent-side reference is resolved and commerce's own action is `CONSUMED`. Exactly one refund exists. |
 
 `--pace 0` runs the same thing with no pauses, in about a second, which is the form to use when
 checking that the flow still works rather than watching it.
@@ -82,11 +82,31 @@ The order identifier for step 3 comes from the terminal run, or from
   auth-service mints and exchanges real RS256 tokens; the OBO token bound to that one tool call is
   what commerce checks before it will prepare anything.
 
-Two local details worth knowing. The demonstration owns the auth signing metadata while it is up,
-because every published `kid` has to resolve to a configured runtime key and a leftover row from
-another fixture makes the whole JWKS document fail. And the agent runs with an attempt budget of
-16: a retrieval turn charges the default budget of 8 before the model is ever asked to compose the
-answer, so every retrieval turn would otherwise end `budget_exhausted`.
+### Shared local state
+
+Two rows in the auth schema are singletons the whole local topology contends for, and the
+demonstration takes both over while it runs:
+
+- **The published signing metadata.** auth-service fails the entire JWKS document when any
+  published `kid` has no configured runtime key, and the demonstration cannot configure another
+  fixture's key, so it clears the table and seeds its own.
+- **The `agent-service` client credential.** auth-service and commerce-service both pin that exact
+  client id, so it cannot be namespaced per fixture. Whichever fixture starts last owns it.
+
+`make demo-stop` gives both back. The benchmark rig seeds its own on every setup run, so it does
+not depend on the demonstration having stopped cleanly.
+
+The consequence is that **the demonstration and the benchmark rig cannot be up at the same time**.
+Whichever setup ran last owns the two rows; the other one's login starts answering 500, because its
+signing key is no longer published. Re-running that fixture's setup switches back — `make demo`
+here, `bench/setup_bench_env.sh` and `bench/agent/setup_agent_bench.sh` there. Nothing is lost
+either way.
+
+The agent runs with an attempt budget of 16. A retrieval turn charges the budget once for the model
+call that requests the tool, twice to resolve the alias and validate the mapping, twice per query
+text for BM25 and dense recall, and once for the rerank — eight in all when the tool call carries a
+query rewrite, as this one does. The default budget is 8, so the answer itself never gets an
+attempt.
 
 ## Stop
 

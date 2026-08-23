@@ -106,7 +106,7 @@ The walkthrough, including the browser version and an account of which parts are
 ## Measured performance
 
 Local three-path latency for the support agent, with inference held at zero so what remains is the
-platform's own orchestration cost. Highest rate served with p99 under a second, one process on one
+platform's own orchestration cost. The highest step where nothing was shed, one process on one
 machine:
 
 | Path | Rate | p99 |

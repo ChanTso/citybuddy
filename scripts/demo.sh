@@ -29,23 +29,12 @@ demo_subject="demo-user"
 demo_product="demo-product"
 demo_price_minor=1990
 
-stop_services() {
-  docker rm -f citybuddy-demo-auth citybuddy-demo-commerce >/dev/null 2>&1 || true
-  for name in agent model; do
-    if [ -f "$run_dir/$name.pid" ]; then
-      kill "$(cat "$run_dir/$name.pid")" >/dev/null 2>&1 || true
-      rm -f "$run_dir/$name.pid"
-    fi
-  done
-}
-
-if [ "${1:-start}" = "stop" ]; then
-  stop_services
-  echo "demo services stopped; the data topology and the fixture are untouched"
-  exit 0
-fi
-
+# Everything written here is a generated credential: the demonstration login, the agent service
+# secret, the mock-payment signing secret, the RSA private key and the bootstrap password inside
+# demo.env. The directory is gitignored, and nothing in it should be group or world readable.
 mkdir -p "$run_dir"
+chmod 700 "$run_dir"
+umask 077
 
 read_value() { grep -E "^$1=" .env | head -1 | cut -d= -f2-; }
 auth_pw="$(read_value MYSQL_AUTH_APP_PASSWORD)"
@@ -54,9 +43,46 @@ agent_pw="$(read_value MYSQL_AGENT_APP_PASSWORD)"
 root_pw="$(read_value MYSQL_BOOTSTRAP_PASSWORD)"
 redis_pw="$(read_value REDIS_COMMERCE_PASSWORD)"
 
+# Both starting and stopping need the data topology: stopping hands back rows in the auth schema.
+docker inspect -f '{{.State.Running}}' citybuddy-mysql-1 2>/dev/null | grep -q true || {
+  echo "the local data topology is not running; start it with: make up" >&2; exit 1; }
+
 mysql_port="$(docker port citybuddy-mysql-1 3306/tcp | cut -d: -f2)"
 es_port="$(docker port citybuddy-elasticsearch-1 9200/tcp | cut -d: -f2)"
 sql() { MYSQL_PWD="$2" mysql --protocol=TCP -h 127.0.0.1 -P "$mysql_port" -u "$1" -D "$3" --batch --skip-column-names -e "$4"; }
+
+stop_services() {
+  docker rm -f citybuddy-demo-auth citybuddy-demo-commerce >/dev/null 2>&1 || true
+  for name in agent model; do
+    if [ -f "$run_dir/$name.pid" ]; then
+      pid="$(cat "$run_dir/$name.pid")"
+      kill "$pid" >/dev/null 2>&1 || true
+      # uv forwards the signal to the server it launched, but not instantly, and the next start
+      # binds the same port. Wait for the process to actually leave rather than assume it has.
+      for _ in $(seq 20); do kill -0 "$pid" >/dev/null 2>&1 || break; sleep 0.2; done
+      kill -0 "$pid" >/dev/null 2>&1 && kill -9 "$pid" >/dev/null 2>&1 || true
+      rm -f "$run_dir/$name.pid"
+    fi
+  done
+}
+
+# Two rows in the shared auth schema are singletons that the whole local topology contends for:
+# the published signing metadata, because auth fails the entire JWKS document when any published
+# kid has no configured runtime key, and the agent-service client credential, because both
+# auth-service and commerce-service pin that exact client id. The demonstration takes both over
+# while it runs and gives them back when it stops, so the benchmark rig can reseed its own.
+release_shared_identity() {
+  sql root "$root_pw" commerce_db "
+DELETE FROM auth_signing_key_metadata WHERE kid = 'demo-current';
+DELETE FROM auth_service_identity WHERE service_id = '00000000-0000-0000-0000-0000000d0002';"
+}
+
+if [ "${1:-start}" = "stop" ]; then
+  stop_services
+  release_shared_identity
+  echo "demo services stopped; the data topology and the demonstration fixture are untouched"
+  exit 0
+fi
 
 echo "== stopping any previous demo services =="
 stop_services
@@ -94,10 +120,12 @@ sql root "$root_pw" commerce_db "
 DELETE c FROM auth_login_credential c JOIN auth_user_principal p USING (principal_id)
   WHERE p.subject = '$demo_subject';
 DELETE FROM auth_user_principal WHERE subject = '$demo_subject';
+-- auth-service and commerce-service both pin the client id 'agent-service', so this credential
+-- cannot be namespaced per fixture; whoever starts last owns it, and stopping hands it back.
 DELETE FROM auth_service_identity WHERE client_id = 'agent-service';
 -- Every published kid has to resolve to a configured runtime key, so a leftover row from another
--- local fixture makes the whole JWKS document fail rather than only its own entry. The demo owns
--- the signing metadata while it is up; the benchmark rig reseeds its own.
+-- local fixture makes the whole JWKS document fail rather than only its own entry. The
+-- demonstration cannot configure another fixture's key, so it clears the table and reseeds.
 DELETE FROM auth_signing_key_metadata;"
 
 sql auth_app "$auth_pw" commerce_db "
@@ -120,11 +148,12 @@ VALUES ('$demo_product', '街角咖啡券', '本地演示商品', $demo_price_mi
 
 echo "== bootstrapping the knowledge index =="
 # The retrieval path resolves an alias, validates the mapping, then runs BM25 and dense retrieval
-# and a rerank. Without a real index it fails closed with retrieval_denied and answers nothing.
+# and a rerank. Without a real index it fails closed and answers nothing. Bootstrap creates the
+# index, publishes the alias and indexes the corpus the indexer ships, which is what the
+# demonstration's question is answered from; rerunning it on an existing index is a no-op.
 uv run citybuddy-indexer bootstrap \
   --elasticsearch-url "http://127.0.0.1:$es_port" \
-  --index knowledge_docs_v1 --alias knowledge_docs_read >/dev/null 2>&1 || true
-uv run python scripts/demo_knowledge.py --elasticsearch-url "http://127.0.0.1:$es_port"
+  --index knowledge_docs_v1 --alias knowledge_docs_read
 
 echo "== starting auth-service on $auth_port =="
 test -f auth-service/target/auth-service-0.0.1-SNAPSHOT.jar || {
@@ -232,10 +261,10 @@ until curl -s -o /dev/null "http://127.0.0.1:$model_port/fixture/counts"; do sle
 echo "model fixture ready"
 
 echo "== starting agent-service on $agent_port =="
-# A retrieval turn charges the attempt budget eight times before the model is asked to compose an
-# answer: the model call that requests the tool, an alias resolution, a mapping validation, two
-# recall rounds of BM25 and dense search, and a rerank. The default budget is eight, so the answer
-# itself never gets an attempt and every retrieval turn ends budget_exhausted.
+# A retrieval turn charges the attempt budget once for the model call that requests the tool, twice
+# to resolve the alias and validate the mapping, twice per query text for BM25 and dense recall,
+# and once for the rerank — eight in all when the tool call carries a query rewrite, which the
+# demonstration's does. The default budget is eight, so the answer itself never gets an attempt.
 CITYBUDDY_ENVIRONMENT=development \
 AGENT_PORT="$agent_port" \
 AGENT_IDENTITY_ENABLED=true \
@@ -281,7 +310,6 @@ CITYBUDDY_DEMO_PAYMENT_SECRET=$payment_secret
 CITYBUDDY_DEMO_MYSQL_PORT=$mysql_port
 CITYBUDDY_DEMO_MYSQL_ROOT_PASSWORD=$root_pw
 ENV
-chmod 600 "$run_dir/demo.env"
 
 echo
 echo "CityBuddy is up."

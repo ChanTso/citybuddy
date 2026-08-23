@@ -334,10 +334,12 @@ def main() -> None:
         "One prepared action can produce one refund, however many times it is confirmed.",
     )
     replay = client.say_to_agent("confirm", "demo-confirm")
-    say(f"same key   replayed the stored turn byte for byte: {replay == confirmed}")
+    if replay != confirmed:
+        raise SystemExit("the same idempotency key did not replay the stored turn")
+    say("same key   replayed the stored turn rather than reaching commerce again")
     again = client.say_to_agent("confirm", "demo-confirm-again")
     say(f"fresh key  outcome={again['outcome']} receiptId={again['receiptId']}")
-    say("           the action is CONSUMED, so a second confirmation has nothing to confirm")
+    say("           the conversation carries no live action, and commerce's own is CONSUMED")
     total = database.rows(
         "commerce_db",
         "SELECT COUNT(*) FROM mock_refund WHERE order_id = %s",
