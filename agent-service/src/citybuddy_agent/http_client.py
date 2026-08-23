@@ -15,15 +15,42 @@ from typing import Any
 
 import httpx
 
+
+class _CookielessTransport(httpx.BaseTransport):
+    """Drop Set-Cookie before the client can store it.
+
+    A client built per call was discarded with whatever cookie it had picked up, so no cookie ever
+    travelled from one outbound request to the next. A shared client keeps them. The agent reaches
+    commerce and auth for many different users, with one just-in-time token per request, so a
+    stored cookie would travel from one user's request into another's. No boundary here sets one
+    today; discarding them means that staying true is not a precondition for this change.
+    """
+
+    def __init__(self, inner: httpx.BaseTransport) -> None:
+        self._inner = inner
+
+    def handle_request(self, request: httpx.Request) -> httpx.Response:
+        response = self._inner.handle_request(request)
+        if "set-cookie" in response.headers:
+            del response.headers["set-cookie"]
+        return response
+
+
 # The pool has to cover every outbound request in flight at once, or a turn waits for a
 # connection instead of for its dependency. Starlette runs the sync request handlers on a
 # 40-thread pool and a turn holds one outbound request at a time, so 40 is the ceiling the
 # handlers can reach; the remainder covers the trace exporter, which has its own thread.
+# The limits belong to the transport, not to the client, because a client given its own
+# transport ignores the limits passed alongside it.
 _MAX_CONNECTIONS = 48
 _CLIENT = httpx.Client(
-    limits=httpx.Limits(
-        max_connections=_MAX_CONNECTIONS,
-        max_keepalive_connections=_MAX_CONNECTIONS,
+    transport=_CookielessTransport(
+        httpx.HTTPTransport(
+            limits=httpx.Limits(
+                max_connections=_MAX_CONNECTIONS,
+                max_keepalive_connections=_MAX_CONNECTIONS,
+            )
+        )
     )
 )
 

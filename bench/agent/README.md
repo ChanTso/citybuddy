@@ -167,9 +167,16 @@ the second extension:
 | p99 | 43.7 ms | 44.4 ms | 38.6 ms | 35.3 ms | 45.5 ms | 206.8 ms | 688.7 ms | 6826.5 ms | 11839.9 ms | 19041.4 ms |
 | served/s | 15.0 | 20.0 | 25.0 | 30.0 | 40.0 | 50.0 | 60.0 | **66.2** | **72.1** | **79.7** |
 
-**100 req/s on chat is a boundary, not a served rate.** The main after-ladder served it with zero
-rejections and the extension ladder shed 8 of 2001 at the same rate, so the honest reading is
-75 req/s clean and 100 req/s marginal, not "serves 100".
+**100 req/s on chat is a boundary, not a served rate.** Three ladders reached it and they
+disagree: the main after-ladder served it clean at p99 159.2 ms with 147 peak MySQL connections,
+the extension ladder shed 8 of 2001, and a third run served it clean at p99 40.5 ms with 135
+peak. The honest reading is 75 req/s clean and 100 req/s marginal, not "serves 100".
+
+That third run is also a check on the after column itself. The cookie-discarding transport
+described in §3 was added after these ladders had been taken, so the chat ladder was run again
+against the merged code (`../results/agent_chat_recheck_after_steps.txt`): p99 19.1 ms at
+50 req/s against 20.2, 27.3 ms at 75 against 31.3, and every step clean. It reproduces, so the
+after column describes the code that shipped and not an intermediate version of it.
 
 **The failure mode changed as much as the rate did.** Before, one step past the knee meant p99 in
 seconds and the agent burning five to six cores. After, chat at 150 req/s — twice the old knee —
