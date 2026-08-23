@@ -1,0 +1,16 @@
+
+=== prepare_after (step 30s) ===
+ target  offered  measured  served/s    p50 ms    p95 ms    p99 ms    max ms
+----------------------------------------------------------------------------
+      5      150       151       5.0     259.8     284.9     306.3     387.5
+     10      300       300      10.0     267.6     314.8     343.5     376.7
+     15      450       450      15.0     304.8     361.1     424.4     438.2
+     20      600       600      20.0     520.7    1015.9    1227.2    1464.0
+     30      900       734      24.5    6749.1   11263.9   11930.4   12822.2
+
+outcomes by step (every class, none elided):
+     5: HTTP_502=1, action_pending=150
+    10: HTTP_502=2, action_pending=298
+    15: HTTP_502=1, action_pending=449
+    20: HTTP_429=3, HTTP_502=1, action_pending=596
+    30: HTTP_429=5, HTTP_503=60, action_pending=669

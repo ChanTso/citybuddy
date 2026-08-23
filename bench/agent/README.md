@@ -5,6 +5,10 @@ grounded in retrieved knowledge, and a refund preparation that writes a durable 
 Every number here was produced by the scripts in this directory against the real local topology,
 and the raw tool output is in `../results/`.
 
+The first measurement found that most of the agent's CPU went on work it threw away. This
+document now records that measurement, the change it led to, and the paired re-measurement that
+says what the change was worth.
+
 ## What is and is not being measured
 
 The model provider is [`scripts/fake_litellm_server.py`](../../scripts/fake_litellm_server.py),
@@ -63,112 +67,229 @@ service's shape.
    system still busy with something else reads very differently, so the host has to be quiet.
    Setup stops the previous bench services before clearing the fixture, because a collapsed step
    can still have turns in flight and a turn that lands mid-teardown leaves rows behind.
+8. **Before and after are measured in one sitting.** The before column in §1 is not the original
+   run from the day before; it is a fresh baseline taken from the unmodified code on the same
+   host, immediately before the after pass, because host state moves enough between days to be
+   the weakest link in a comparison. The original runs are still in `../results/`:
+   `agent_chat_steps.txt` gives 50 req/s at p99 36.5 ms against the fresh baseline's 50.1 ms, and
+   `agent_retrieval_repeat_cpu_by_step.txt` gives 126 % median agent CPU at 10 req/s against the
+   fresh baseline's 126 %.
+9. **One of the retrieval baselines is a counterexample, and it is kept.** `agent_retrieval_*`
+   without a suffix is a third retrieval ladder that **collapsed at 10 req/s** — 610 % median
+   agent CPU, p99 24.8 s, 223 of 300 measured — where both `agent_retrieval_repeat_*` and the
+   fresh `agent_retrieval_before_*` served that rate cleanly at p99 237 ms and 222 ms. Same
+   fixture, same script, different run. So the retrieval before column in §1 is a rate that held
+   on two of three attempts rather than one that always holds, and the knee is sharp enough that
+   the same rate can land on either side of it. That cuts both ways here: it makes the retrieval
+   before column the optimistic reading of the old behaviour, which understates rather than
+   overstates the improvement.
 
 ## Results
 
-### 1. What each path serves, and where it stops
+### 1. What each path serves, before and after
 
 Each path gets its own ladder over a freshly rebuilt fixture, one HTTP request per iteration,
-real JWT verification, real retrieval, real MySQL writes (`../results/agent_*_steps.txt`).
+real JWT verification, real retrieval, real MySQL writes. Both columns were measured in one
+sitting, the baseline first from unmodified code
+(`../results/agent_*_before_steps.txt`, `agent_*_after_steps.txt`).
+
 `offered` is what the constant arrival rate asked for and `measured` is what produced a timing;
 where they diverge, k6 could not start the iteration or it was still in flight when the step's
 graceful stop expired, and the row is not a throughput measurement of the server. The percentiles
 are over every request the step measured, a rejection included, so on a step that sheds they
-describe the mix rather than the latency of a served turn — another reason to read the collapsed
-rows as a shape and not as a number.
+describe the mix rather than the latency of a served turn.
 
 **Plain chat turn** — one model call and the durable turn record:
 
-| Target | Offered | Measured | Served/s | p50 | p95 | p99 | Outcomes |
-|---:|---:|---:|---:|---:|---:|---:|---|
-| 10 | 200 | 201 | 10.1 | 22.0 ms | 30.6 ms | 32.2 ms | all completed |
-| 25 | 500 | 501 | 25.1 | 20.3 ms | 30.6 ms | 38.6 ms | all completed |
-| 50 | 1000 | 1000 | 50.0 | 18.3 ms | 30.9 ms | **36.5 ms** | all completed |
-| 75 | 1500 | 1482 | 74.1 | 828.6 ms | 2126.1 ms | 2489.2 ms | 937 completed, 545 HTTP 503 |
-| 100 | 2000 | 1914 | 95.7 | 1074.4 ms | 3338.1 ms | 3880.6 ms | 959 completed, 955 HTTP 503 |
+| Target | | before | after |
+|---:|---|---:|---:|
+| 10 | p99 | 35.7 ms | **21.4 ms** |
+| | outcomes | all 200 completed | all 200 completed |
+| 25 | p99 | 31.9 ms | **20.8 ms** |
+| | outcomes | all 500 completed | all 501 completed |
+| 50 | p99 | 50.1 ms | **20.2 ms** |
+| | outcomes | all 1001 completed | all 1001 completed |
+| 75 | p99 | 1164.9 ms | **31.3 ms** |
+| | outcomes | 1131 completed, **369 HTTP 503** | **all 1501 completed** |
+| 100 | p99 | 1028.5 ms | **159.2 ms** |
+| | outcomes | 1194 completed, **807 HTTP 503** | **all 2000 completed** |
 
 **Knowledge retrieval** — alias resolution, mapping validation, BM25 and dense retrieval, RRF
 fusion, rerank, then the closing model call:
 
-| Target | Offered | Measured | Served/s | p50 | p95 | p99 | Outcomes |
-|---:|---:|---:|---:|---:|---:|---:|---|
-| 2 | 60 | 61 | 2.0 | 119.6 ms | 138.9 ms | 143.1 ms | all completed |
-| 5 | 150 | 151 | 5.0 | 120.4 ms | 140.0 ms | 147.9 ms | all completed |
-| 8 | 240 | 241 | 8.0 | 118.3 ms | 146.0 ms | **171.9 ms** | all completed |
-| 10 | 300 | 301 | 10.0 | 133.0 ms | 196.9 ms | 236.9 ms | all completed |
-| 12 | 360 | 254 | 8.5 | 20809.3 ms | 28402.7 ms | 29063.7 ms | 254 of 360 measured |
+| Target | | before | after |
+|---:|---|---:|---:|
+| 2 | p99 | 210.9 ms | **36.0 ms** |
+| | outcomes | all 60 completed | all 60 completed |
+| 5 | p99 | 176.5 ms | **35.5 ms** |
+| | outcomes | all 151 completed | all 150 completed |
+| 8 | p99 | 169.5 ms | **42.9 ms** |
+| | outcomes | all 241 completed | all 241 completed |
+| 10 | p99 | 221.8 ms | **42.2 ms** |
+| | outcomes | all 301 completed | all 300 completed |
+| 12 | p99 | 27375.5 ms | **40.2 ms** |
+| | outcomes | **257 of 360 measured**, 8.6/s served | **all 361 completed**, 12.0/s served |
 
 **Refund preparation** — a tool call, a just-in-time on-behalf-of token exchange, and a durable
 `PendingAction` written through commerce:
 
-| Target | Offered | Measured | Served/s | p50 | p95 | p99 | Outcomes |
-|---:|---:|---:|---:|---:|---:|---:|---|
-| 5 | 150 | 151 | 5.0 | 294.5 ms | 320.3 ms | 344.7 ms | 151 action_pending |
-| 10 | 300 | 301 | 10.0 | 309.5 ms | 370.5 ms | **380.8 ms** | 301 action_pending |
-| 15 | 450 | 451 | 15.0 | 414.3 ms | 675.0 ms | 832.6 ms | 450 action_pending, 1 HTTP 429 |
-| 20 | 600 | 553 | 18.4 | 3826.1 ms | 5680.4 ms | 6276.3 ms | 466 action_pending, 87 HTTP 503 |
-| 30 | 900 | 671 | 22.4 | 10577.1 ms | 16376.5 ms | 17416.0 ms | 541 action_pending, 130 HTTP 503 |
+| Target | | before | after |
+|---:|---|---:|---:|
+| 5 | p99 | 428.8 ms | **306.3 ms** |
+| | outcomes | 151 action_pending | 150 action_pending, 1 HTTP 502 |
+| 10 | p99 | 425.8 ms | **343.5 ms** |
+| | outcomes | 299 action_pending, 1 HTTP 502 | 298 action_pending, 2 HTTP 502 |
+| 15 | p99 | 945.0 ms | **424.4 ms** |
+| | outcomes | 451 action_pending | 449 action_pending, 1 HTTP 502 |
+| 20 | p99 | 6325.7 ms | **1227.2 ms** |
+| | outcomes | 439 pending, **114 HTTP 503**, 1 HTTP 429; 18.5/s served | 596 pending, 3 HTTP 429, 1 HTTP 502; **20.0/s served** |
+| 30 | p99 | 18445.8 ms | **11930.4 ms** |
+| | outcomes | 511 pending, 169 HTTP 503; 22.7/s served | 669 pending, 60 HTTP 503, 5 HTTP 429; 24.5/s served |
 
-The rate each path serves with every request measured and no error:
+The sporadic HTTP 502 on the preparation path is not load-dependent and appears in the unmodified
+baseline too, so the shared client did not create it — but the after ladders produced more of
+them, and that is unresolved. It is written up under
+[three things found while building the fixture](#three-things-found-while-building-the-fixture).
+Because it is present on both sides, the serving rates below use shedding — HTTP 429 and 503 —
+as the collapse signal rather than "no error of any kind".
 
-| Path | Serves | p99 there |
-|---|---:|---:|
-| Plain chat | 50 req/s | 36.5 ms |
-| Knowledge retrieval | 10 req/s | 236.9 ms |
-| Refund preparation | 10 req/s | 380.8 ms |
+The highest step where nothing was shed:
 
-**The knee is sharp, and the same rate can land on either side of it.** Two retrieval ladders are
-committed here: `../results/agent_retrieval_repeat_steps.txt` serves 10 req/s at p99 237 ms, and
-`../results/agent_retrieval_steps.txt` — same fixture and same script, a different run and a
-different ladder around it — collapses at that same 10 req/s to a 16.6 s p50 and measures only 223
-of 300. The second is kept precisely
-because it is the counterexample. So the rates above are the ones that held, not rates that always
-hold, and a step past the knee shows what collapse looks like rather than a capacity number.
+| Path | before | after |
+|---|---|---|
+| Plain chat | 50 req/s, p99 50.1 ms | **75 req/s, p99 31.3 ms** |
+| Knowledge retrieval | 10 req/s, p99 221.8 ms | **60 req/s, p99 688.7 ms** |
+| Refund preparation | 15 req/s, p99 945.0 ms | 15 req/s, **p99 424.4 ms** |
 
-### 2. At the rate each path serves, nothing is saturated
+Both the chat and the retrieval ladder ran off the top of their range after the change, so where
+each one stops comes from extension ladders that start where the original ones stopped
+(`../results/agent_chat_ext_after_steps.txt`, `agent_retrieval_ext_after_steps.txt`,
+`agent_retrieval_ext2_after_steps.txt`). Chat's clean step above is still the 75 of the main
+ladder, and the extension is what shows it shedding from 100 onward; retrieval's 60 comes from
+the second extension:
+
+| Chat, after | 100 | 110 | 120 | 130 | 150 |
+|---|---:|---:|---:|---:|---:|
+| p99 | 221.4 ms | 338.5 ms | 262.5 ms | 636.2 ms | 428.8 ms |
+| shed (HTTP 503) | 8 | 25 | 21 | 158 | 395 |
+
+| Retrieval, after | 15 | 20 | 25 | 30 | 40 | 50 | 60 | 75 | 90 | 110 |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| p99 | 43.7 ms | 44.4 ms | 38.6 ms | 35.3 ms | 45.5 ms | 206.8 ms | 688.7 ms | 6826.5 ms | 11839.9 ms | 19041.4 ms |
+| served/s | 15.0 | 20.0 | 25.0 | 30.0 | 40.0 | 50.0 | 60.0 | **66.2** | **72.1** | **79.7** |
+
+**100 req/s on chat is a boundary, not a served rate.** Three ladders reached it and they
+disagree: the main after-ladder served it clean at p99 159.2 ms with 147 peak MySQL connections,
+the extension ladder shed 8 of 2001, and a third run served it clean at p99 40.5 ms with 135
+peak. The honest reading is 75 req/s clean and 100 req/s marginal, not "serves 100".
+
+That third run is also a check on the after column itself. The cookie-discarding transport in §3
+was added after these ladders had been taken, so the chat ladder was run again against the merged
+code (`../results/agent_chat_recheck_after_steps.txt`): p99 19.1 ms at 50 req/s against 20.2,
+27.3 ms at 75 against 31.3, and every step clean. **Only the chat ladder was re-run.** The
+retrieval and preparation columns, every CPU table in §2, all six profiles in §3 and the
+connection figures in §4 were taken against the code as it stood before that transport was added.
+The transport adds one dictionary membership test per response, on responses that never carry the
+header, and the chat re-run shows no effect — but that is one ladder of three, so the scope of
+the check is stated rather than generalised.
+
+**The failure mode changed as much as the rate did.** Before, one step past the knee meant p99 in
+seconds and the agent burning five to six cores. After, chat at 150 req/s — twice the old knee —
+holds p99 at 429 ms and sheds the excess. Retrieval degrades the same way rather than collapsing:
+p99 at 60 req/s is 689 ms against 27 s for the old 12 req/s step.
+
+### 2. What a turn costs, and what the ceiling is now
 
 Peak CPU over a whole ladder is dominated by whichever step collapsed, so it says nothing about
 what serving the load costs. The runner reports each step's own window instead
-(`../results/agent_chat_cpu_by_step.txt`, `agent_retrieval_repeat_cpu_by_step.txt`,
-`agent_prepare_cpu_by_step.txt`), median agent CPU:
+(`../results/agent_*_cpu_by_step.txt`). Median agent CPU, before and after:
 
-| Plain chat | 10 | 25 | **50** | 75 | 100 |
+| Plain chat | 10 | 25 | 50 | 75 | 100 |
 |---|---:|---:|---:|---:|---:|
-| median agent CPU | 16 % | 39 % | **73 %** | 483 % | 591 % |
+| before | 15 % | 36 % | 74 % | 506 % | 315 % |
+| after | 4 % | 9 % | 19 % | 29 % | 40 % |
 
-| Knowledge retrieval | 2 | 5 | 8 | **10** | 12 |
+| Knowledge retrieval | 2 | 5 | 8 | 10 | 12 |
 |---|---:|---:|---:|---:|---:|
-| median agent CPU | 22 % | 54 % | 86 % | **126 %** | 665 % |
+| before | 22 % | 56 % | 85 % | 126 % | 589 % |
+| after | 2 % | 4 % | 6 % | 7 % | 10 % |
 
-| Refund preparation | 5 | **10** | 15 | 20 | 30 |
+| Refund preparation | 5 | 10 | 15 | 20 | 30 |
 |---|---:|---:|---:|---:|---:|
-| median agent CPU | 20 % | **44 %** | 105 % | 113 % | 109 % |
+| before | 21 % | 46 % | 96 % | 112 % | 113 % |
+| after | 3 % | 7 % | 16 % | 17 % | 19 % |
 
-Columns are request rates; the bold column is the rate that path serves.
+At the rates where the before ladder was still serving rather than collapsing, a chat turn costs
+about a quarter of what it did (74 % to 19 % at 50 req/s) and a retrieval turn a tenth to a
+twentieth (126 % to 7 % at 10 req/s). The two collapsed before-steps are not a comparison: 506 %
+and 589 % are the cost of being overloaded, not the cost of the work.
 
-At the rate each path actually serves, the agent uses about one core of the eight available, and
-MySQL, commerce and Elasticsearch are all well under half a core. Nothing here is at its limit.
+Pushed past the old range, the agent climbs to a plateau and stops there
+(`agent_chat_ext_after_cpu_by_step.txt`, `agent_retrieval_ext*_after_cpu_by_step.txt`):
 
-Past the knee chat and retrieval jump five- to eight-fold in CPU while latency rises a hundredfold
-and finished work falls — the shape of congestion collapse, where the extra CPU is the cost of
-being overloaded rather than the cost of the work. Preparation behaves differently: its CPU stays
-near 110 % even when it is shedding, because it spends its turn waiting on commerce. Its limit is
-downstream, and this measurement does not resolve where.
+| Chat, after | 100 | 110 | 120 | 130 | 150 |
+|---|---:|---:|---:|---:|---:|
+| median agent CPU | 35 % | 48 % | 78 % | 133 % | 145 % |
 
-### 3. Most of the agent's on-CPU time builds TLS trust stores for plaintext URLs
+| Retrieval, after | 15 | 20 | 25 | 30 | 40 | 50 | 60 | 75 | 90 | 110 |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| median agent CPU | 12 % | 14 % | 17 % | 23 % | 31 % | 35 % | 61 % | 138 % | 135 % | 133 % |
 
-The agent reaches every dependency through the module-level `httpx` helpers — `httpx.post`,
-`httpx.get` and `httpx.request` at seven call sites, plus `httpx.stream` at two more — and holds
+**Both paths stop at about 1.4 cores of the eight available, and nothing downstream is busy when
+they do.** Median CPU per container inside the collapsed steps, read from the same raw samples
+(`../results/agent_retrieval_ext2_after_cpu.txt`, `agent_chat_ext_after_cpu.txt`):
+
+| Step | agent | MySQL | Elasticsearch | model fixture | commerce |
+|---|---:|---:|---:|---:|---:|
+| retrieval, 75 req/s | **138.0 %** | 38.3 % | 17.8 % | 6.6 % | 0.2 % |
+| retrieval, 90 req/s | **134.6 %** | 38.0 % | 17.4 % | 6.4 % | 0.2 % |
+| retrieval, 110 req/s | **133.0 %** | 39.3 % | 18.3 % | 6.3 % | 0.1 % |
+| chat, 130 req/s | **133.2 %** | 49.0 % | 0.2 % | 5.1 % | 0.1 % |
+| chat, 150 req/s | **145.2 %** | 54.5 % | 0.2 % | 5.0 % | 0.1 % |
+
+Each row is the median of the `docker stats` samples inside that step's own twenty- or
+thirty-second window, the same windows the runner prints; a window spanning the gaps between
+steps would mix in the drain and understate every figure.
+
+Throughput stops rising, latency absorbs the rest, and every dependency has capacity to spare.
+Before the change the ceiling was the agent's own wasted CPU; after it, the ceiling is the agent
+process itself.
+
+**What saturates inside the process is not established here, and there are two candidates.** The
+first is the interpreter lock: the endpoints are sync handlers on AnyIO's 40-thread pool, and
+forty threads contending for one GIL produce roughly this shape — a little over one core of
+aggregate progress, the excess coming from C extensions and syscalls that release it.
+
+The second is the connection pool this change introduced. In the retrieval profile at concurrency
+8, 11.5 % of on-CPU samples sit in one httpcore lock, and they split almost exactly in half
+between taking a connection out of the pool (174 samples at `connection_pool.py:218`) and putting
+one back (173 at `:416`). That is contention on a single shared mutex, and §3's claim that the
+pool cannot become a new queue is narrower than it sounds: it is about connection *count*, which
+never binds at 48 against 40 threads, and says nothing about the lock that guards the pool.
+
+**Both are readings, not measurements**, and the evidence available here does not separate them —
+the pool lock is where the samples are, but samples pile up at whichever lock is contended and
+that does not make it the cause. Two cheap experiments would: serve the same ladders from N
+uvicorn worker processes and see whether the plateau moves with N, which separates
+process-from-everything-else; and vary the pool between one shared client and one per dependency,
+which separates the pool mutex from the GIL. Neither has been run. What the measurement does
+support is only the outer claim: the ceiling is the agent process, not any dependency it talks
+to.
+
+### 3. Most of the agent's on-CPU time built TLS trust stores for plaintext URLs
+
+The agent reached every dependency through the module-level `httpx` helpers — `httpx.post`,
+`httpx.get` and `httpx.request` at seven call sites, plus `httpx.stream` at two more — and held
 **no reused `httpx.Client` anywhere**. Each helper call constructs a whole client, and
 constructing a client constructs a default SSL context, which loads and parses the system CA
-bundle. Measured in the same container:
-**13.1 ms of CPU per construction**. Every one of those URLs is `http://` — the model fixture,
-commerce, the auth service and Elasticsearch are all plaintext here — so no handshake ever
-follows the trust store that was just built.
+bundle. Measured in the same container: **13.1 ms of CPU per construction**. Every one of those
+URLs is `http://` — the model fixture, commerce, the auth service and Elasticsearch are all
+plaintext here — so no handshake ever followed the trust store that had just been built.
 
-py-spy at 100 Hz agrees. It excludes idle threads, so the denominator is threads that were
-actually running, and the share of those samples sitting in `ssl.create_default_context` is
-(`../results/agent_pyspy_*.txt`, tallied in `../results/agent_cpu_profile.txt`):
+py-spy at 100 Hz agreed. It excludes idle threads, so the denominator is threads that were
+actually running, and the share of those samples sitting in `ssl.create_default_context`
+(`../results/agent_pyspy_*.txt`, tallied with the call sites and the per-construction cost in
+`../results/agent_cpu_profile.txt`, which records the state before the change):
 
 | Path | concurrency 1 | concurrency 8 |
 |---|---:|---:|
@@ -176,80 +297,122 @@ actually running, and the share of those samples sitting in `ssl.create_default_
 | Knowledge retrieval | 83.8 % | 94.9 % |
 | Refund preparation | 57.0 % | 55.4 % |
 
-Concurrency 1 is at or below where each path sits at the rate it serves — chat holds about one
-turn in flight at 50 req/s, preparation about three at 10 req/s — and concurrency 8 is well past
-every knee. **The share is dominant in both**, so this is not an artifact of overload — it is the
-bulk of the agent's on-CPU work whenever it is doing anything. The share tracks how many outbound
-calls a path makes, which is why retrieval — alias, mapping, two BM25 queries, two dense queries,
-the reranker and two model calls — spends the most, and preparation, which spends much of its turn
-blocked on commerce rather than on CPU, the least. Repeat runs move these by about ten points
-either way.
+Concurrency 1 is at or below where each path sat at the rate it served, and concurrency 8 is well
+past every knee. The share was dominant in both, so it was not an artifact of overload.
 
-The dominant stack is the same every time:
+**The fix** is [`http_client.py`](../../agent-service/src/citybuddy_agent/http_client.py): one
+process-wide `httpx.Client`, with the nine call sites routed through it. Three details matter for
+reading the numbers below.
 
-```
-citybuddy_agent/agent_control.py:390   httpx.post(f"{self._url}/v1/chat/completions", ...)
-  httpx/_api.py:102                    request()
-    httpx/_client.py:688               Client.__init__
-      httpx/_client.py:731             _init_transport
-        httpx/_config.py:40            create_ssl_context
-          ssl.py:770                   create_default_context
-```
+The pool is sized at 48 connections, above the 40-thread AnyIO pool that Starlette runs the sync
+handlers on. A turn holds one outbound request at a time, so forty is the concurrency the
+handlers can reach and the pool cannot become a new queue — otherwise the after column would be
+measuring the new pool limit rather than the change.
 
-What this does **not** show is that removing it would raise the rate each path serves. §2 shows
-the agent is not CPU-bound where it serves cleanly — about one core of eight — so the immediate
-effect would be a cheaper turn rather than a higher ceiling. Where it plausibly does matter is the
-knee: every extra concurrent turn adds another trust store to build, which is the kind of positive
-feedback that turns a knee into a cliff, and §1 shows a very sharp one. Removing the waste and
-rerunning these ladders is what would settle it, and the harness is here to do exactly that.
+A pooled connection can be closed by the peer between two requests, which arrives as
+`httpx.RemoteProtocolError` rather than `httpx.NetworkError`, so the transport-failure
+classification now includes it. Its base class is deliberately not used: the sibling
+`LocalProtocolError` is this service violating HTTP itself, and proxy and unsupported-protocol
+errors are configuration faults. None of those is a dependency failure.
 
-### 4. The connection limit decides how overload fails, not where the ceiling is
+A shared client also carries cookies between requests, where a client built per call was
+discarded along with anything it had picked up. The agent reaches commerce and auth for many
+different users with one just-in-time token per request, so a stored cookie would travel from one
+user's request into another's. None of the four boundaries sets a cookie today, so this was
+latent rather than live; the client discards them in its transport so that staying true is not a
+precondition for the change.
+
+Re-profiled after the change, same script, same concurrencies
+(`../results/agent_pyspy_*_after_c*.txt`, all six with
+`load-still-running-at-end-of-sample=true`):
+
+| Path | concurrency 1 | | concurrency 8 | |
+|---|---:|---|---:|---|
+| | before | after | before | after |
+| Plain chat | 64.3 % | **0.0 %** (525 samples) | 71.2 % | **0.0 %** (3188 samples) |
+| Knowledge retrieval | 83.8 % | **0.0 %** (512 samples) | 94.9 % | **0.0 %** (3022 samples) |
+| Refund preparation | 57.0 % | **0.0 %** (24 samples) | 55.4 % | **0.0 %** (353 samples) |
+
+Sample counts are given because they vary by three orders of magnitude across these cells. The
+preparation path at concurrency 1 yields only 24 on-CPU samples in fifteen seconds — the agent is
+almost never running, because the turn is spent blocked on commerce — so 0.0 % there is not a
+precise estimate. It is still decisive against the old share: zero of twenty-four is not a
+sample drawn from a population where 57 % of samples match.
+
+What the agent's CPU is spent on instead, at retrieval and concurrency 8:
+
+| before | after |
+|---|---|
+| 94.4 % `ssl.create_default_context` | 19.4 % + 11.2 % + 3.0 % `pymysql` socket read and write |
+| 0.8 % `socket.readinto` | 13.8 % `socket.readinto` |
+| 0.8 % `pymysql` socket read | 11.5 % httpcore connection-pool lock |
+| 0.7 % `pymysql` socket write | 7.1 % httpcore socket-readable check |
+
+The profile is now dominated by real I/O, and its single largest item is MySQL wire traffic —
+which is consistent with 5.2 connections per retrieval turn and no pooling, and corroborates §4
+from a second direction.
+
+**A prediction in the first version of this document was wrong.** It said removing this would
+produce "a cheaper turn rather than a higher ceiling", on the grounds that §2 showed the agent
+was not CPU-bound where it served cleanly, and allowed only that the knee might move. The turn
+did get cheaper, but the ceiling moved a great deal too: chat from 50 to 75 req/s clean with
+100 marginal, retrieval from 10 to 60. Being not-CPU-bound at the serving rate did not imply the
+wasted CPU was irrelevant to where serving stopped.
+
+### 4. The connection limit decides how overload fails, and now it decides it later
 
 The agent's conversation store opens a **fresh `pymysql.connect` per persistence call and pools
-nothing** (`conversation.py:1205`, six call sites). Connections opened against MySQL per HTTP
-request over a whole ladder:
+nothing** (`conversation.py:1205`, six call sites). This change does not touch that layer, and
+connections opened per measured request over a whole ladder are unchanged:
 
-| Path | HTTP requests | MySQL connection attempts | Per request |
+| Path | before | after |
+|---|---:|---:|
+| Knowledge retrieval | 5.21 | 5.18 |
+| Refund preparation | 6.09 | 6.09 |
+
+Both are whole-ladder totals divided by whole-ladder measured requests, and every one of these
+four ladders contains steps that shed or failed to measure — a rejected request does less database
+work than a completed turn, so these are a coarse check that the layer is untouched, not a
+per-turn cost.
+
+What changed is when the limit is reached. A shorter turn holds its connections for less time, so
+the same arrival rate keeps fewer of them open at once
+(`../results/agent_*_mysql.txt`):
+
+| Ladder | attempts rejected at `max_connections` | peak concurrent | limit |
 |---|---:|---:|---:|
-| Plain chat | 5,098 | 21,343 | 4.19 |
-| Knowledge retrieval | 1,008 | 5,245 | 5.20 |
-| Refund preparation | 2,127 | 12,954 | 6.09 |
+| chat before, 10–100 req/s | **1,260** | **152** | 151 |
+| chat after, 10–100 req/s | **0** | 147 | 151 |
+| chat after, 100–150 req/s | 618 | 152 | 151 |
+| retrieval before, 2–12 req/s | 0 | 133 | 151 |
+| retrieval after, 50–110 req/s | **0** | 141 | 151 |
 
-At the default `max_connections = 151` the chat ladder reaches 152 concurrent connections and
-MySQL rejects 1,584 attempts, which the agent surfaces as
-`ACTION_SESSION_PERSISTENCE_UNAVAILABLE` and HTTP 503. Raising the limit to 1000 and repeating
-the identical ladder (`../results/agent_chat_control_steps.txt`):
+The counters are whole-ladder totals, so they say the limit was crossed but not at which step.
+The outcome columns say that: before, chat's first shedding step is 75 req/s; after, it is 100.
+Retrieval never rejects at all, even at 110 req/s where it is thoroughly collapsed — its ceiling
+is elsewhere, which is what §2 shows.
 
-| Target | | `max_connections=151` | `max_connections=1000` |
-|---:|---|---:|---:|
-| 50 | served/s | 50.0 | 50.0 |
-| | p99 | 36.5 ms | 48.6 ms |
-| | HTTP 503 | 0 | 0 |
-| 75 | turns completed | 937 | **1,276** |
-| | p99 | 2489.2 ms | **6872.9 ms** |
-| | HTTP 503 | **545** | **3** |
-| 100 | turns completed | 959 | **1,412** |
-| | p99 | 3880.6 ms | **17136.7 ms** |
-| | HTTP 503 | **955** | **2** |
+The original control experiment still stands and was not repeated: raising
+`max_connections` to 1000 and rerunning the identical before-ladder
+(`../results/agent_chat_control_steps.txt`) left the served rate unchanged at 50 req/s, turned
+545 rejections into 3, and let the same load queue to a 6.9 s p99 instead of failing fast. The
+limit was doing admission control, not capping throughput.
 
-The limit is doing admission control. Removing it makes almost nothing shed — 545 rejections
-become 3 — and lets more turns finish, but the same load then queues to seven and seventeen
-seconds instead of failing fast. It does not move the rate the path serves cleanly: 50 req/s is
-identical in both columns, and both hit their knee immediately after.
+MySQL is at 49–54 % of one core when the limit bites, so this is a configured cap on a database
+with capacity to spare rather than a loaded database. That makes connection pooling in the
+conversation store look like free headroom, and the control experiment says it is not: removing
+the cap did not raise what the path served, it converted fast rejections into long queues. Read
+alongside §2 — the agent plateaus at about 1.4 cores while MySQL sits at half of one — the
+expectation is that pooling would change how the chat path fails, and would cut the MySQL wire
+traffic that is now the largest single item in the agent's own profile, without moving the rate
+it serves. Retrieval, which reaches its ceiling without ever touching the limit, is the control
+for that reading.
 
-On the chat path, then, the database's connection limit is the only thing applying backpressure,
-and whether overload appears as a fast 503 or as a seventeen-second wait is decided by a database
-setting rather than by the service. That is a design gap rather than a tuning opportunity: nothing
-in the agent bounds its own concurrency.
+**Nothing in the agent bounds its own concurrency on any path.** What differs is only what
+happens to bite first: a configured database limit on chat, the commerce tool boundary on
+preparation, and on retrieval nothing external at all — just the process running out of itself.
 
-It is only the chat path. Retrieval and preparation shed too — 218 requests on the prepare ladder
-— with `attempts rejected at max_connections: 0` in both
-(`../results/agent_prepare_mysql.txt`, `../results/agent_retrieval_repeat_mysql.txt`). Their
-shedding comes from the commerce tool boundary, which turns a 429 or 503 from commerce into the
-same for the caller. So the agent has no backpressure of its own on any path; on two of the three
-the limit that bites is somewhere else again.
-
-## Two things found while building the fixture
+## Three things found while building the fixture
 
 **Concurrent mock-payment settlement deadlocks, and the payment-start endpoint answers HTTP 500.**
 Building 6,000 paid orders in parallel produced `CannotAcquireLockException` out of
@@ -282,6 +445,29 @@ committed artifact here records the status, so treat it as a lead to confirm rat
 measured result. The fixture builder settles payments serially to avoid the deadlock
 deterministically rather than retrying through it.
 
+**A refund preparation sporadically fails to parse its own commerce response.** A small fraction
+of preparations end `ACTION_PREPARATION_RESPONSE_INVALID` and HTTP 502
+(`agent_control.py`, the handler around `strict_json_object` and
+`PreparedActionResponse.model_validate`): commerce answered 200 or 201, and the agent could not
+turn that body into the expected document. It is not load-dependent — it appears at 5 req/s as
+readily as at 20, and it is not *created* by the connection reuse in §3, because unmodified code
+produces it. But it is more frequent after the change, and that is not resolved here. Four
+ladders, counted from the outcome columns of `../results/agent_prepare_*_steps.txt`:
+
+| Code | HTTP 502 | preparations measured | rate |
+|---|---:|---:|---:|
+| before (`agent_prepare_steps.txt`, `agent_prepare_before_steps.txt`) | 1 | 4,263 | 1 in 4,263 |
+| after (`agent_prepare_after_steps.txt`, `agent_prepare_after2_steps.txt`) | **8** | 4,475 | **1 in 559** |
+
+Conditioning on the nine events observed, a split this lopsided has probability 0.023 under an
+unchanged rate. Nine events, one comparison and no identified mechanism is not enough to call it
+established, and an earlier draft of this document called it noise on the strength of the first
+three ladders alone — the fourth is what makes that untenable. The honest position is that the
+failure exists without this change and may well be more likely with it, and that the change ships
+with the question open. Settling it needs more ladders on both sides, or a commerce instance
+logging the response body it actually sent. Tracked as
+[issue 93](https://github.com/ChanTso/citybuddy/issues/93).
+
 **The default attempt budget cannot fit a successful retrieval turn.** This one is read from the
 code, not observed in these runs — no `budget_exhausted` appears in any committed result, because
 the bench sets `AGENT_ATTEMPT_BUDGET=16` precisely to avoid it. In `knowledge.py`, `search`
@@ -290,6 +476,14 @@ text including the rewrite; with the reranker and the opening model call that is
 attempts. At the default budget of 8 the retrieval itself succeeds and the turn then ends
 `budget_exhausted` with nothing left for the closing model call. Reproducing it deliberately would
 make it a finding rather than a reading.
+
+## What to measure next
+
+The ceiling is now the agent process rather than anything it depends on (§2), and the single
+cheapest experiment that would settle the mechanism is to serve the same ladders from N uvicorn
+worker processes and see whether the plateau at ~1.4 cores moves with N. If it does, the
+structural change is that the agent must not be one process, and MySQL connection pooling becomes
+a follow-on that raises the chat path's own limit rather than the headline.
 
 ## Reproducing
 
@@ -308,12 +502,22 @@ the prepare ladder refuses to start if the fixture still holds prepared actions,
 otherwise measure the clarification path and still report a clean run. `AGENT_BENCH_USERS` must
 exceed the ladder's `sum(rate x step_seconds) + 20 per step`.
 
+`LABEL` names the output files, so a run against changed code or a changed setting does not
+overwrite the baseline it is meant to be compared with. Both the ladder runner and the profiler
+take it.
+
+### The paired ladders
+
+Each pass is three setups and three ladders. Run the baseline pass from the commit before
+[`http_client.py`](../../agent-service/src/citybuddy_agent/http_client.py) exists and the other
+from the commit after it, back to back on an idle host, and give them different labels:
+
 ```bash
 AGENT_BENCH_USERS=6000 ./bench/agent/setup_agent_bench.sh
 ```
 
 ```bash
-RATES=10,25,50,75,100 STEP_SECONDS=20 ./bench/agent/run_agent_ladder.sh chat
+LABEL=chat_after RATES=10,25,50,75,100 STEP_SECONDS=20 ./bench/agent/run_agent_ladder.sh chat
 ```
 
 ```bash
@@ -321,7 +525,7 @@ AGENT_BENCH_USERS=2500 ./bench/agent/setup_agent_bench.sh
 ```
 
 ```bash
-RATES=2,5,8,10,12 STEP_SECONDS=30 ./bench/agent/run_agent_ladder.sh retrieval
+LABEL=retrieval_after RATES=2,5,8,10,12 STEP_SECONDS=30 ./bench/agent/run_agent_ladder.sh retrieval
 ```
 
 ```bash
@@ -329,28 +533,49 @@ AGENT_BENCH_USERS=3000 ./bench/agent/setup_agent_bench.sh
 ```
 
 ```bash
-RATES=5,10,15,20,30 STEP_SECONDS=30 ./bench/agent/run_agent_ladder.sh prepare
+LABEL=prepare_after RATES=5,10,15,20,30 STEP_SECONDS=30 ./bench/agent/run_agent_ladder.sh prepare
 ```
 
 The runner prints the per-step table and writes it to `bench/results/agent_<label>_steps.txt`.
 
-The CPU attribution in §3 comes from a separate script, because it drives a fixed concurrency
-rather than a fixed arrival rate:
+### The extension ladders
+
+After the change both chat and retrieval run off the top of the range above, so the knee comes
+from ladders that start where those stop:
 
 ```bash
-CONCURRENCY=1 ./bench/agent/profile_agent_cpu.sh retrieval
+AGENT_BENCH_USERS=12500 ./bench/agent/setup_agent_bench.sh
+```
+
+```bash
+LABEL=chat_ext_after RATES=100,110,120,130,150 STEP_SECONDS=20 ./bench/agent/run_agent_ladder.sh chat
+```
+
+```bash
+AGENT_BENCH_USERS=11800 ./bench/agent/setup_agent_bench.sh
+```
+
+```bash
+LABEL=retrieval_ext2_after RATES=50,60,75,90,110 STEP_SECONDS=30 ./bench/agent/run_agent_ladder.sh retrieval
+```
+
+### The CPU attribution
+
+This is a separate script, because it drives a fixed concurrency rather than a fixed arrival
+rate. Each profile needs its own fixture: the driver takes pool entries from index 0, so a second
+profile over one fixture would put two turns on every session.
+
+```bash
+AGENT_BENCH_USERS=7500 ./bench/agent/setup_agent_bench.sh
+```
+
+```bash
+LABEL=retrieval_after CONCURRENCY=8 REQUESTS=7200 SECONDS_TO_SAMPLE=15 ./bench/agent/profile_agent_cpu.sh retrieval
 ```
 
 It writes the raw py-spy collapsed stacks to
-`bench/results/agent_pyspy_<path>_c<concurrency>.txt` and prints the tally. Check the header line:
-`load-still-running-at-end-of-sample=false` means the load finished early and part of the window
-sampled an idle process, which dilutes every share — raise `REQUESTS` and run it again.
-
-`LABEL` names the output files, so a control run against a changed setting does not overwrite the
-baseline it is meant to be compared with. The `max_connections` comparison in §4 is:
-
-```bash
-LABEL=chat_control RATES=10,25,50,75,100 STEP_SECONDS=20 ./bench/agent/run_agent_ladder.sh chat
-```
-
-run with `SET GLOBAL max_connections = 1000` and the fixture rebuilt in between.
+`bench/results/agent_pyspy_<label>_c<concurrency>.txt` and prints the tally. Check the header
+line: `load-still-running-at-end-of-sample=false` means the load finished early and part of the
+window sampled an idle process, which dilutes every share — raise `REQUESTS` and run it again.
+`REQUESTS` has to be sized for the code being profiled, and the sizes above are for the faster
+post-change agent; the pre-change profiles in `../results/` used a quarter of them.

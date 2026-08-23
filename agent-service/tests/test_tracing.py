@@ -9,6 +9,7 @@ from typing import Any
 
 import httpx
 import pytest
+from citybuddy_agent import http_client
 from citybuddy_agent.metrics import (
     NoopCityBuddyMetrics,
     Operation,
@@ -104,7 +105,7 @@ def test_enabled_exporter_receives_exact_identifier_free_envelope(
         received.append((args, kwargs))
         return FakeStreamResponse(204, b"")
 
-    monkeypatch.setattr(httpx, "stream", stream)
+    monkeypatch.setattr(http_client, "stream", stream)
     metrics = RecordingMetrics()
     sink = BoundedHttpTraceSink("http://trace.test/export", metrics)
     try:
@@ -187,7 +188,7 @@ def test_only_empty_204_is_sent_and_response_body_is_bounded(
         calls += 1
         return FakeStreamResponse(status, body)
 
-    monkeypatch.setattr(httpx, "stream", stream)
+    monkeypatch.setattr(http_client, "stream", stream)
     metrics = RecordingMetrics()
     sink = BoundedHttpTraceSink("http://trace.test/export", metrics)
     sink.emit(envelope())
@@ -213,7 +214,7 @@ def test_export_failure_is_failed_with_zero_retry(
         calls += 1
         raise failure
 
-    monkeypatch.setattr(httpx, "stream", stream)
+    monkeypatch.setattr(http_client, "stream", stream)
     metrics = RecordingMetrics()
     sink = BoundedHttpTraceSink("https://trace.test/export", metrics)
     sink.emit(envelope())
@@ -289,7 +290,7 @@ def test_trace_metrics_failure_never_escapes_worker_or_close(
         del args, kwargs
         yield FakeStreamResponse(204, b"")
 
-    monkeypatch.setattr(httpx, "stream", stream)
+    monkeypatch.setattr(http_client, "stream", stream)
     sink = BoundedHttpTraceSink("http://trace.test/export", ExplodingMetrics())
     sink.emit(envelope())
     time.sleep(0.03)

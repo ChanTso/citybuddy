@@ -11,8 +11,9 @@ from dataclasses import dataclass
 from typing import Any, Literal, Protocol, cast
 from urllib.parse import quote
 
-import httpx
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator
+
+from . import http_client
 
 KNOWLEDGE_ALIAS = "knowledge_docs_read"
 KNOWLEDGE_SCHEMA_VERSION = "cb090-v1"
@@ -461,13 +462,13 @@ class ElasticsearchKnowledgeSearch:
     ) -> tuple[int, dict[str, Any]]:
         charge("knowledge_http", target)
         try:
-            response = httpx.request(
+            response = http_client.request(
                 method,
                 f"{self._base_url}{path}",
                 json=payload,
                 timeout=self._timeout_seconds,
             )
-        except (httpx.TimeoutException, httpx.NetworkError) as error:
+        except http_client.TRANSPORT_FAILURES as error:
             raise KnowledgeSearchFailure("knowledge_unavailable") from error
         if response.status_code not in expected:
             code = "knowledge_unavailable" if response.status_code >= 500 else "knowledge_rejected"

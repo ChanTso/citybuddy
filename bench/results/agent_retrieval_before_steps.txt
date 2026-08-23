@@ -1,0 +1,16 @@
+
+=== retrieval_before (step 30s) ===
+ target  offered  measured  served/s    p50 ms    p95 ms    p99 ms    max ms
+----------------------------------------------------------------------------
+      2       60        60       2.0     123.7     148.2     210.9     232.2
+      5      150       151       5.0     123.3     151.3     176.5     269.7
+      8      240       241       8.0     119.5     152.1     169.5     234.3
+     10      300       301      10.0     140.4     194.3     221.8     235.5
+     12      360       257       8.6   19541.1   26311.0   27375.5   27554.6
+
+outcomes by step (every class, none elided):
+     2: completed=60
+     5: completed=151
+     8: completed=241
+    10: completed=301
+    12: completed=257

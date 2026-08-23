@@ -3,8 +3,8 @@ from __future__ import annotations
 import json
 from typing import Any
 
-import httpx
 import pytest
+from citybuddy_agent import http_client
 from citybuddy_agent.agent_control import (
     AgentEvent,
     AttemptBudget,
@@ -285,7 +285,7 @@ def test_litellm_reranker_uses_fixed_alias_shared_budget_and_one_retry(
         )
         return Response(200, {"choices": [{"message": {"content": content}}]})
 
-    monkeypatch.setattr(httpx, "post", post)
+    monkeypatch.setattr(http_client, "post", post)
     events: list[AgentEvent] = []
     budget = AttemptBudget(3, events)
     metrics = PrometheusCityBuddyMetrics()
@@ -350,7 +350,7 @@ def test_reranker_denial_and_invalid_response_record_one_actual_attempt(
         calls += 1
         return Response()
 
-    monkeypatch.setattr(httpx, "post", post)
+    monkeypatch.setattr(http_client, "post", post)
     metrics = PrometheusCityBuddyMetrics()
     client = LiteLlmClient(
         "https://proxy.test",

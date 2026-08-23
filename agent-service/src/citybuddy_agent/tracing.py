@@ -14,6 +14,7 @@ from urllib.parse import urlsplit
 
 import httpx
 
+from . import http_client
 from .metrics import (
     CityBuddyMetrics,
     Operation,
@@ -160,7 +161,7 @@ class BoundedHttpTraceSink:
         outcome = TraceExportOutcome.FAILED
         try:
             timeout = httpx.Timeout(TRACE_HTTP_TIMEOUT_SECONDS)
-            with httpx.stream(
+            with http_client.stream(
                 "POST",
                 self._url,
                 content=payload,
