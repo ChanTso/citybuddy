@@ -323,6 +323,21 @@ h2 {
   font-family: Georgia, serif;
   font-size: 1.45rem;
 }
+/* A committed action reads as settled rather than as something still awaiting the user. */
+.pending-card.confirmed {
+  border-color: #3f7d52;
+  background: #eaf5ec;
+  color: #1f3527;
+}
+.pending-card code {
+  font-size: 0.82rem;
+  overflow-wrap: anywhere;
+}
+.pending-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.6rem;
+}
 .danger {
   background: #9b3128;
 }

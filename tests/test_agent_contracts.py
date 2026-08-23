@@ -306,3 +306,33 @@ def test_application_uses_role_aliases_without_concrete_provider_models() -> Non
     assert "gpt-" not in sources.casefold()
     assert "claude-" not in sources.casefold()
     assert "gemini-" not in sources.casefold()
+
+
+def test_action_receipt_projection_is_agent_owned_insert_only_and_least_privilege() -> None:
+    migration = (
+        ROOT / "infra/mysql/migrations/agent/V008__action_receipt_projection.sql"
+    ).read_text(encoding="utf-8")
+    grants = (ROOT / "infra/mysql/grants/V001__migration_access.sql").read_text(encoding="utf-8")
+
+    assert "CREATE TABLE action_receipt_projection" in migration
+    # One receipt per action, per turn, and per refund: the projection cannot describe a second
+    # refund for an action that has already been committed once.
+    assert "UNIQUE KEY uq_action_receipt_projection_pending (pending_action_id)" in migration
+    assert "UNIQUE KEY uq_action_receipt_projection_turn (turn_id)" in migration
+    assert "UNIQUE KEY uq_action_receipt_projection_refund (refund_id)" in migration
+    assert "FOREIGN KEY (pending_action_id)" in migration
+    assert "FOREIGN KEY (turn_id, trace_id, session_id, user_subject)" in migration
+    assert "CHECK (result_state = 'REQUESTED')" in migration
+    # CONFIRMING is the claim taken before the irreversible commerce call, and only a
+    # confirmation may resolve it.
+    assert "state IN ('PENDING', 'CONFIRMING', 'DECLINED', 'EXPIRED', 'CONFIRMED')" in migration
+    assert "CASE WHEN state IN ('PENDING', 'CONFIRMING') THEN session_id ELSE NULL END" in migration
+    assert "'action_completed'," in migration
+    assert "'ACTION_RECEIPT'," in migration
+
+    # A receipt records a refund that already happened, so the agent may add one and never revise
+    # or remove one.
+    assert "GRANT SELECT, INSERT ON cs_db.action_receipt_projection TO 'agent_app'@'%';" in grants
+    assert "UPDATE ON cs_db.action_receipt_projection" not in grants
+    assert "UPDATE (" not in grants.split("action_receipt_projection")[1].split("\n")[0]
+    assert "DELETE ON cs_db.action_receipt_projection" not in grants

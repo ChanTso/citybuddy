@@ -40,6 +40,7 @@ export type Reservation = {
 
 export type ChatOutcome =
   | 'completed'
+  | 'action_completed'
   | 'budget_exhausted'
   | 'provider_denied'
   | 'retrieval_denied'
@@ -62,6 +63,7 @@ export type ChatResponse = {
   turnId: string;
   reply: string;
   outcome: ChatOutcome;
+  receiptId: string | null;
   citations: Citation[];
 };
 
@@ -274,6 +276,14 @@ function decodeCitation(value: unknown): Citation {
   };
 }
 
+// A committed action and its receipt are one truth on this path too: the page must not be able to
+// render a success the server did not record, whichever endpoint it came from.
+function receiptFor(outcome: unknown, receiptId: unknown): string | null {
+  if (outcome === 'action_completed') return uuidValue(receiptId);
+  if (receiptId !== null) throw new Error('Malformed response');
+  return null;
+}
+
 export function decodeChatResponse(value: unknown): ChatResponse {
   const record = closedRecord(value, [
     'conversationId',
@@ -281,6 +291,7 @@ export function decodeChatResponse(value: unknown): ChatResponse {
     'turnId',
     'reply',
     'outcome',
+    'receiptId',
     'citations',
   ]);
   if (!Array.isArray(record.citations) || record.citations.length > 3) {
@@ -293,6 +304,7 @@ export function decodeChatResponse(value: unknown): ChatResponse {
     reply: stringValue(record.reply, 0, 256),
     outcome: enumValue(record.outcome, [
       'completed',
+      'action_completed',
       'budget_exhausted',
       'provider_denied',
       'retrieval_denied',
@@ -301,6 +313,7 @@ export function decodeChatResponse(value: unknown): ChatResponse {
       'action_declined',
       'action_expired',
     ] as const),
+    receiptId: receiptFor(record.outcome, record.receiptId),
     citations: record.citations.map(decodeCitation),
   };
 }

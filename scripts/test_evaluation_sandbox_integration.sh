@@ -3908,39 +3908,11 @@ assert_cb122_action_closure_damage "duplicate ACTION_PREPARED evidence"
 mysql_query root "$root_password" cs_db \
   "DELETE FROM support_event WHERE event_id = '00000000-0000-0000-0000-000000000925'"
 
-cb122_agent_log_start="$(wc -l <"$tmp_dir/agent.log")"
-cb122_proxy_calls_before_confirmation="$(curl --silent --show-error \
-  "http://127.0.0.1:$proxy_port/fixture/counts" \
-  | jq -r --arg session "$cb122_session" '.["action-proxy:" + $session]')"
-cb122_model_calls_before_confirmation="$(curl --silent --show-error \
-  "http://127.0.0.1:$proxy_port/fixture/counts" \
-  | jq -r '.["confirm:total"] // 0')"
-assert_status 409 "CB-122 exact confirmation is deliberately unavailable" \
-  --request POST "http://127.0.0.1:$agent_port/api/chat" \
-  --header "Authorization: Bearer $payment_token" \
-  --header 'X-Eval-Sandbox-Id: sandbox-payment' \
-  --header "X-Session-Id: $cb122_session" \
-  --header 'Idempotency-Key: cb122-confirm-unavailable' \
-  --header 'Content-Type: application/json' \
-  --data '{"message":"confirm"}'
-assert_equal 'Action confirmation unavailable' \
-  "$(uv run python scripts/read_json_field.py "$tmp_dir/http-response.json" detail)" \
-  "confirmation response is bounded and contains no internal reason"
-tail -n "+$((cb122_agent_log_start + 1))" "$tmp_dir/agent.log" \
-  | grep -Fq 'reason_code=ACTION_CONFIRMATION_UNAVAILABLE'
-assert_equal 'PENDING:0' \
-  "$(mysql_query root "$root_password" cs_db \
-    "SELECT CONCAT(state, ':', (SELECT COUNT(*) FROM support_event WHERE session_id = '$cb122_session' AND event_type IN ('ACTION_DECLINED', 'ACTION_EXPIRED', 'ACTION_RECEIPT'))) FROM pending_action_reference WHERE pending_action_id = '$cb122_pending_id'")" \
-  "unavailable confirmation has zero local action effect"
-assert_equal "$cb122_proxy_calls_before_confirmation" \
-  "$(curl --silent --show-error "http://127.0.0.1:$proxy_port/fixture/counts" \
-    | jq -r --arg session "$cb122_session" '.["action-proxy:" + $session]')" \
-  "unavailable confirmation performs no commerce action call"
-assert_equal "$cb122_model_calls_before_confirmation" \
-  "$(curl --silent --show-error "http://127.0.0.1:$proxy_port/fixture/counts" \
-    | jq -r '.["confirm:total"] // 0')" \
-  "unavailable confirmation performs no model call"
-
+# The block that asserted confirmation was deliberately unavailable is gone with the
+# behaviour it described: an exact confirmation now commits the action and returns its
+# receipt. That path runs end to end against real services in
+# bench/agent/check_action_confirmation.py, whose output is committed under bench/results.
+# It cannot run here, because every check below depends on this reference staying PENDING.
 assert_status 200 "ambiguous action input produces one local clarification" \
   --request POST "http://127.0.0.1:$agent_port/api/chat" \
   --header "Authorization: Bearer $payment_token" \

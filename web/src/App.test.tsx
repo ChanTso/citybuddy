@@ -10,7 +10,6 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { ApiFailure } from './api/client';
 import type { ChatResponse, Product, Reservation } from './api/decoders';
-import { UnsupportedReceiptError } from './api/sse';
 import { App } from './App';
 
 vi.mock('./api/auth', () => ({ login: vi.fn() }));
@@ -75,6 +74,7 @@ function response(
     turnId: UUID,
     reply,
     outcome,
+    receiptId: null,
     citations: [],
   };
 }
@@ -103,6 +103,7 @@ beforeEach(() => {
   mockedStreamChat.mockResolvedValue({
     outcome: 'completed',
     reply: 'Streamed answer.',
+    receiptId: null,
   });
   mockedSubmitReservation.mockResolvedValue(ordered);
 });
@@ -418,7 +419,7 @@ describe('CityBuddy portfolio surface', () => {
     expect(screen.queryByText(/receipt/i)).not.toBeInTheDocument();
   });
 
-  it('keeps clarification pending, accepts server expiry, and shows fixed confirmation unavailability', async () => {
+  it('keeps clarification pending, accepts server expiry, and reports a confirmation conflict', async () => {
     mockedSendChat
       .mockResolvedValueOnce(response('action_pending', 'Waiting.'))
       .mockResolvedValueOnce(
@@ -454,8 +455,34 @@ describe('CityBuddy portfolio surface', () => {
       await screen.findByText('服务端已返回过期终态；动作未执行。'),
     ).toBeVisible();
     expect(
-      await screen.findByText('当前 demo 不支持成功确认；敏感动作未执行。'),
+      await screen.findByText(
+        '确认与另一次处理冲突；请稍后重试，动作未重复执行。',
+      ),
     ).toBeVisible();
+  });
+
+  it('confirms a prepared action from the notice and renders its receipt', async () => {
+    const receiptId = '00000000-0000-0000-0000-0000000001a1';
+    mockedSendChat
+      .mockResolvedValueOnce(response('action_pending', 'Waiting.'))
+      .mockResolvedValueOnce({
+        ...response('action_completed', '退款申请已提交并记录。'),
+        receiptId,
+      });
+    render(<App />);
+    await signIn();
+    const input = screen.getByLabelText('消息或澄清说明');
+    fireEvent.change(input, { target: { value: 'prepare refund' } });
+    fireEvent.click(screen.getByRole('button', { name: '发送' }));
+
+    fireEvent.click(await screen.findByRole('button', { name: '确认此动作' }));
+
+    expect(await screen.findByText('敏感动作已提交')).toBeVisible();
+    expect(screen.getByText(receiptId)).toBeVisible();
+    expect(mockedSendChat.mock.calls[1][3]).toBe('confirm');
+    expect(
+      screen.queryByRole('button', { name: '拒绝此动作' }),
+    ).not.toBeInTheDocument();
   });
 
   it('uses exactly one selected chat endpoint and reuses the owned session', async () => {
@@ -541,22 +568,26 @@ describe('CityBuddy portfolio surface', () => {
     expect(mockedSendChat.mock.calls[2][2]).not.toBe(firstKey);
   });
 
-  it('fails closed when a reserved stream action receipt appears', async () => {
-    mockedStreamChat.mockRejectedValue(new UnsupportedReceiptError());
+  it('shows the committed receipt when a confirmed action streams back', async () => {
+    const receiptId = '00000000-0000-0000-0000-0000000001a1';
+    mockedStreamChat.mockResolvedValue({
+      outcome: 'action_completed',
+      reply: '退款申请已提交并记录。',
+      receiptId,
+    });
     render(<App />);
     await signIn();
     fireEvent.click(screen.getByLabelText('流式回复'));
     fireEvent.change(screen.getByLabelText('消息或澄清说明'), {
-      target: { value: 'stream this' },
+      target: { value: 'confirm' },
     });
     fireEvent.click(screen.getByRole('button', { name: '流式发送' }));
 
+    expect(await screen.findByText('敏感动作已提交')).toBeVisible();
+    expect(screen.getByText(receiptId)).toBeVisible();
     expect(
-      await screen.findByText(
-        '收到当前 demo 不支持的动作结果，已停止读取；未建立任何执行状态。',
-      ),
-    ).toBeVisible();
-    expect(screen.queryByText(/receipt/i)).not.toBeInTheDocument();
+      screen.queryByRole('button', { name: '确认此动作' }),
+    ).not.toBeInTheDocument();
   });
 
   it('aborts an active chat stream and clears its session on logout', async () => {

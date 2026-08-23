@@ -45,3 +45,4 @@ GRANT SELECT, INSERT ON commerce_db.faq_draft_command TO 'commerce_app'@'%';
 GRANT SELECT, INSERT ON commerce_db.faq_publication_command TO 'commerce_app'@'%';
 GRANT SELECT, INSERT, UPDATE (state, state_version, consumed_at) ON commerce_db.pending_action TO 'commerce_app'@'%';
 GRANT SELECT, INSERT ON commerce_db.action_receipt TO 'commerce_app'@'%';
+GRANT SELECT, INSERT ON cs_db.action_receipt_projection TO 'agent_app'@'%';

@@ -11,20 +11,18 @@ const UUID_PATTERN =
 type StreamOutcome = Extract<
   ChatOutcome,
   | 'completed'
+  | 'action_completed'
   | 'action_pending'
   | 'action_clarification'
   | 'action_declined'
   | 'action_expired'
 >;
 
-export type StreamResult = { reply: string; outcome: StreamOutcome };
-
-export class UnsupportedReceiptError extends Error {
-  constructor() {
-    super('Unsupported receipt event');
-    this.name = 'UnsupportedReceiptError';
-  }
-}
+export type StreamResult = {
+  reply: string;
+  outcome: StreamOutcome;
+  receiptId: string | null;
+};
 
 function record(
   value: unknown,
@@ -76,6 +74,7 @@ export class SseParser {
   private bytes = 0;
   private sequence = 0;
   private reply = '';
+  private receiptId: string | null = null;
   private terminal: StreamResult | 'error' | null = null;
   private readonly decoder = new TextDecoder('utf-8', { fatal: true });
   private pendingCarriageReturn = false;
@@ -152,12 +151,14 @@ export class SseParser {
       const value = record(data, ['sequence', 'receiptId', 'status']);
       this.next(integer(value.sequence, 1, 5));
       if (
+        this.receiptId !== null ||
         !UUID_PATTERN.test(boundedString(value.receiptId, 36, 36)) ||
         value.status !== 'SUCCEEDED'
       ) {
         throw new ApiFailure('malformed');
       }
-      throw new UnsupportedReceiptError();
+      this.receiptId = value.receiptId as string;
+      return;
     }
     if (name === 'done') {
       const value = record(data, [
@@ -174,6 +175,7 @@ export class SseParser {
       }
       const allowed: StreamOutcome[] = [
         'completed',
+        'action_completed',
         'action_pending',
         'action_clarification',
         'action_declined',
@@ -185,9 +187,18 @@ export class SseParser {
       ) {
         throw new ApiFailure('malformed');
       }
+      // A committed action and its receipt are one truth: neither may arrive without the
+      // other, or the page would render a success the server never recorded.
+      if (
+        (value.outcome === 'action_completed') !==
+        (this.receiptId !== null)
+      ) {
+        throw new ApiFailure('malformed');
+      }
       this.terminal = {
         reply: this.reply,
         outcome: value.outcome as StreamOutcome,
+        receiptId: this.receiptId,
       };
       return;
     }

@@ -3,7 +3,6 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { createSupportSession, sendChat, streamChat } from './agent';
 import { login } from './auth';
 import { listProducts, pollReservation, submitReservation } from './commerce';
-import { UnsupportedReceiptError } from './sse';
 
 const UUID = '00000000-0000-0000-0000-000000000001';
 const TOKEN = 'direct-user-token';
@@ -144,6 +143,7 @@ describe('public API adapters', () => {
       turnId: UUID,
       reply: 'Safe reply.',
       outcome: 'completed',
+      receiptId: null,
       citations: [],
     };
     const fetchMock = vi
@@ -187,16 +187,17 @@ describe('public API adapters', () => {
     });
   });
 
-  it('freezes the POST-SSE request and cancels its reader on unsupported receipt truth', async () => {
-    const cancel = vi.fn();
+  it('returns the committed receipt from a POST-SSE stream', async () => {
     const bytes = new TextEncoder().encode(
-      `event: action_receipt\ndata: {"sequence":1,"receiptId":"${UUID}","status":"SUCCEEDED"}\n\n`,
+      `event: action_receipt\ndata: {"sequence":1,"receiptId":"${UUID}","status":"SUCCEEDED"}\n\n` +
+        `event: token\ndata: {"sequence":2,"text":"issued"}\n\n` +
+        `event: done\ndata: {"sequence":3,"conversationId":"${UUID}","traceId":"${UUID}","turnId":"${UUID}","outcome":"action_completed"}\n\n`,
     );
     const body = new ReadableStream<Uint8Array>({
       start(controller) {
         controller.enqueue(bytes);
+        controller.close();
       },
-      cancel,
     });
     const fetchMock = vi.fn().mockResolvedValue(
       new Response(body, {
@@ -212,11 +213,14 @@ describe('public API adapters', () => {
         TOKEN,
         'owned-session',
         'stream-intent-key',
-        'stream this',
+        'confirm',
         controller.signal,
       ),
-    ).rejects.toBeInstanceOf(UnsupportedReceiptError);
-    expect(cancel).toHaveBeenCalledTimes(1);
+    ).resolves.toEqual({
+      reply: 'issued',
+      outcome: 'action_completed',
+      receiptId: UUID,
+    });
     expect(fetchMock).toHaveBeenCalledWith('/api/chat/stream', {
       method: 'POST',
       headers: {
@@ -225,7 +229,7 @@ describe('public API adapters', () => {
         'X-Session-Id': 'owned-session',
         'Idempotency-Key': 'stream-intent-key',
       },
-      body: JSON.stringify({ message: 'stream this' }),
+      body: JSON.stringify({ message: 'confirm' }),
       signal: controller.signal,
     });
   });

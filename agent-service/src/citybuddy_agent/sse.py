@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import re
 import unicodedata
+import uuid
 from collections.abc import AsyncGenerator, Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass
 
@@ -12,7 +13,12 @@ from .conversation import ConversationResult
 
 TOKEN_CHUNK_SIZE = 64
 MAX_RESPONSE_TEXT = 256
+# A receipted stream carries one more frame than a plain one, and the client caps token sequences
+# at four, so a committed action's response text has this much room and no more. Exceeding it
+# fails the projection rather than emitting a stream the client would reject: the two public paths
+# must not disagree about the same durable turn.
 MAX_PUBLIC_EVENTS = MAX_RESPONSE_TEXT // TOKEN_CHUNK_SIZE + 1
+MAX_RECEIPTED_RESPONSE_TEXT = (MAX_PUBLIC_EVENTS - 2) * TOKEN_CHUNK_SIZE
 
 # This normalized lexicon is intentionally bounded defense in depth. Token prose
 # is never action truth; only an ActionReceipt-derived event can carry that state.
@@ -81,6 +87,7 @@ _ACTION_COMPLETION_CJK = (
 _NEGATION_CJK = ("没有", "尚未", "并未", "还未", "还没", "未", "没", "不")
 _PUBLIC_COMPLETED_OUTCOMES = {
     "completed",
+    "action_completed",
     "action_pending",
     "action_clarification",
     "action_declined",
@@ -153,6 +160,13 @@ def _contains_unreceipted_action_claim(text: str) -> bool:
     )
 
 
+def _is_canonical_uuid(value: str) -> bool:
+    try:
+        return str(uuid.UUID(value)) == value
+    except ValueError:
+        return False
+
+
 class SseProjectionError(Exception):
     """A source event cannot cross the public SSE boundary."""
 
@@ -174,7 +188,28 @@ class SseEgressFilter:
 
     def project_result(self, result: ConversationResult) -> tuple[PublicSseEvent, ...]:
         source: tuple[SseSourceEvent, ...]
-        if result.outcome in _PUBLIC_COMPLETED_OUTCOMES:
+        if result.outcome == "action_completed":
+            # Read from the stored projection, never rebuilt from the response text: the receipt
+            # the user is shown is the one the durable turn recorded.
+            if result.receipt_id is None:
+                raise SseProjectionError("committed action has no receipt")
+            source = (
+                SseSourceEvent(
+                    "ACTION_RECEIPT",
+                    {"receiptId": result.receipt_id, "status": "SUCCEEDED"},
+                ),
+                SseSourceEvent("SAFE_TEXT", {"text": result.response_text}),
+                SseSourceEvent(
+                    "TURN_COMPLETED",
+                    {
+                        "conversationId": result.conversation_id,
+                        "traceId": result.trace_id,
+                        "turnId": result.turn_id,
+                        "outcome": result.outcome,
+                    },
+                ),
+            )
+        elif result.outcome in _PUBLIC_COMPLETED_OUTCOMES:
             source = (
                 SseSourceEvent("SAFE_TEXT", {"text": result.response_text}),
                 SseSourceEvent(
@@ -208,6 +243,7 @@ class SseEgressFilter:
         public: list[PublicSseEvent] = []
         terminal = False
         text_seen = False
+        receipt_seen = False
         for event in source:
             if terminal:
                 raise SseProjectionError("source event follows terminal")
@@ -219,7 +255,8 @@ class SseEgressFilter:
                     not isinstance(text, str)
                     or not text
                     or len(text) > MAX_RESPONSE_TEXT
-                    or _contains_unreceipted_action_claim(text)
+                    or (receipt_seen and len(text) > MAX_RECEIPTED_RESPONSE_TEXT)
+                    or (not receipt_seen and _contains_unreceipted_action_claim(text))
                 ):
                     raise SseProjectionError("unsafe text source")
                 text_seen = True
@@ -242,6 +279,8 @@ class SseEgressFilter:
                     for name in required
                 ):
                     raise SseProjectionError("invalid completed values")
+                if (event.payload["outcome"] == "action_completed") != receipt_seen:
+                    raise SseProjectionError("completed action and receipt disagree")
                 terminal = True
                 public.append(
                     PublicSseEvent("done", {"sequence": len(public) + 1, **event.payload})
@@ -262,9 +301,21 @@ class SseEgressFilter:
                 terminal = True
                 public.append(PublicSseEvent("error", {"sequence": 1, **event.payload}))
             elif event.event_type == "ACTION_RECEIPT":
-                # CB-120/CB-121 own receipt truth. This slice reserves the public
-                # schema but cannot accept or synthesize a receipt source.
-                raise SseProjectionError("receipt truth is unavailable")
+                # The receipt leads the stream: the prose after it is allowed to say the
+                # action happened, and nothing before it is.
+                if receipt_seen or text_seen or set(event.payload) != {"receiptId", "status"}:
+                    raise SseProjectionError("invalid receipt source")
+                receipt_id = event.payload["receiptId"]
+                if (
+                    not isinstance(receipt_id, str)
+                    or not _is_canonical_uuid(receipt_id)
+                    or event.payload["status"] != "SUCCEEDED"
+                ):
+                    raise SseProjectionError("invalid receipt values")
+                receipt_seen = True
+                public.append(
+                    PublicSseEvent("action_receipt", {"sequence": len(public) + 1, **event.payload})
+                )
             else:
                 raise SseProjectionError("unknown source event")
         if not terminal or not public or len(public) > MAX_PUBLIC_EVENTS:

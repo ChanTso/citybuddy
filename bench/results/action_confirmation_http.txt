@@ -1,0 +1,34 @@
+Agent refund confirmation, end to end against the real local topology.
+
+Produced by bench/agent/check_action_confirmation.py running inside the bench network
+namespace, against services started by bench/agent/setup_agent_bench.sh with
+AGENT_BENCH_USERS=8. auth-service, commerce-service, MySQL and Elasticsearch are the real
+local containers; the model provider is scripts/fake_litellm_server.py.
+
+One entry takes the JSON path and one takes the SSE path. Each prepares a refund against
+an order it owns, then confirms it in a second turn. The JSON entry additionally has its
+durable state put back into the exact shape a lost commerce response leaves - reference
+CONFIRMING, no projection, no confirmation turn - and is then confirmed again with a
+fresh idempotency key, which reaches commerce a second time.
+
+== JSON path ==
+prepare: {"conversationId": "f7088032-d51d-49ed-866b-96d97f29b4ac", "traceId": "081506fc-1f83-4992-881d-02c715967359", "turnId": "126b846b-37a3-422c-8efc-50f2ee5cd391", "reply": "Please confirm or decline the prepared refund request.", "outcome": "action_pending", "citations": [], "receiptId": null}
+confirm: {"conversationId": "f7088032-d51d-49ed-866b-96d97f29b4ac", "traceId": "815a14b3-635d-4289-8faa-b9bc75503207", "turnId": "1872740a-24d5-4884-be35-f873464a895c", "reply": "The refund request was submitted and recorded.", "outcome": "action_completed", "citations": [], "receiptId": "5f0c492d-742d-43df-97b3-821506198c63"}
+replay of the same key returned the identical turn
+recovery: {"conversationId": "f7088032-d51d-49ed-866b-96d97f29b4ac", "traceId": "2809f964-0be1-426a-9716-7faefa917bc3", "turnId": "aaddcd62-fb87-40c6-b92a-d6b87f18a844", "reply": "The refund request was submitted and recorded.", "outcome": "action_completed", "citations": [], "receiptId": "5f0c492d-742d-43df-97b3-821506198c63"}
+a second confirmation replayed the same commerce receipt
+
+== stream path ==
+event: action_receipt
+data: {"sequence":1,"receiptId":"99e1340f-68a1-497a-8cf2-52af8bd8c567","status":"SUCCEEDED"}
+
+event: token
+data: {"sequence":2,"text":"The refund request was submitted and recorded."}
+
+event: done
+data: {"sequence":3,"conversationId":"b2b55952-cfa5-4758-939a-f8f4a438da3b","traceId":"a91fffae-19a6-4355-94dc-db52c9c42fd9","turnId":"09a48430-3c9f-46e8-b2ea-2cee7ab4f652","outcome":"action_completed"}
+
+
+json_receipt_id=5f0c492d-742d-43df-97b3-821506198c63
+json_session_id=oc0Nr_1ttsMJ7QLRVQs_mpmY8BlGaQZfeUEqsL8tDlY
+json_order_id=7e9d191f-c009-48b0-90c6-f4eab03e0964

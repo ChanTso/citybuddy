@@ -6,49 +6,195 @@
       "type": "counter",
       "unit": "operations",
       "description": "Completed eligible Agent operation observations.",
-      "labelNames": ["operation", "outcome"],
+      "labelNames": [
+        "operation",
+        "outcome"
+      ],
       "allowedLabelSets": [
-        {"operation": "knowledge_search", "outcome": "sufficient"},
-        {"operation": "knowledge_search", "outcome": "insufficient"},
-        {"operation": "knowledge_search", "outcome": "denied"},
-        {"operation": "knowledge_search", "outcome": "invalid"},
-        {"operation": "knowledge_search", "outcome": "unavailable"},
-        {"operation": "knowledge_search", "outcome": "error"},
-        {"operation": "chat_turn", "outcome": "replay"},
-        {"operation": "chat_turn", "outcome": "success"},
-        {"operation": "chat_turn", "outcome": "pending"},
-        {"operation": "chat_turn", "outcome": "clarification"},
-        {"operation": "chat_turn", "outcome": "declined"},
-        {"operation": "chat_turn", "outcome": "expired"},
-        {"operation": "chat_turn", "outcome": "retrieval_denied"},
-        {"operation": "chat_turn", "outcome": "budget_exhausted"},
-        {"operation": "chat_turn", "outcome": "provider_denied"},
-        {"operation": "chat_turn", "outcome": "denied"},
-        {"operation": "chat_turn", "outcome": "conflict"},
-        {"operation": "chat_turn", "outcome": "unavailable"},
-        {"operation": "chat_turn", "outcome": "error"},
-        {"operation": "pending_action_prepare", "outcome": "success"},
-        {"operation": "pending_action_prepare", "outcome": "replay"},
-        {"operation": "pending_action_prepare", "outcome": "rejected"},
-        {"operation": "pending_action_prepare", "outcome": "denied"},
-        {"operation": "pending_action_prepare", "outcome": "invalid"},
-        {"operation": "pending_action_prepare", "outcome": "conflict"},
-        {"operation": "pending_action_prepare", "outcome": "not_found"},
-        {"operation": "pending_action_prepare", "outcome": "unavailable"},
-        {"operation": "pending_action_prepare", "outcome": "indeterminate"},
-        {"operation": "pending_action_prepare", "outcome": "error"},
-        {"operation": "pending_action_clarification", "outcome": "clarification"},
-        {"operation": "pending_action_clarification", "outcome": "unavailable"},
-        {"operation": "pending_action_clarification", "outcome": "conflict"},
-        {"operation": "pending_action_clarification", "outcome": "error"},
-        {"operation": "pending_action_decline", "outcome": "declined"},
-        {"operation": "pending_action_decline", "outcome": "unavailable"},
-        {"operation": "pending_action_decline", "outcome": "conflict"},
-        {"operation": "pending_action_decline", "outcome": "error"},
-        {"operation": "pending_action_expiry", "outcome": "expired"},
-        {"operation": "pending_action_expiry", "outcome": "unavailable"},
-        {"operation": "pending_action_expiry", "outcome": "conflict"},
-        {"operation": "pending_action_expiry", "outcome": "error"}
+        {
+          "operation": "knowledge_search",
+          "outcome": "sufficient"
+        },
+        {
+          "operation": "knowledge_search",
+          "outcome": "insufficient"
+        },
+        {
+          "operation": "knowledge_search",
+          "outcome": "denied"
+        },
+        {
+          "operation": "knowledge_search",
+          "outcome": "invalid"
+        },
+        {
+          "operation": "knowledge_search",
+          "outcome": "unavailable"
+        },
+        {
+          "operation": "knowledge_search",
+          "outcome": "error"
+        },
+        {
+          "operation": "chat_turn",
+          "outcome": "replay"
+        },
+        {
+          "operation": "chat_turn",
+          "outcome": "success"
+        },
+        {
+          "operation": "chat_turn",
+          "outcome": "pending"
+        },
+        {
+          "operation": "chat_turn",
+          "outcome": "clarification"
+        },
+        {
+          "operation": "chat_turn",
+          "outcome": "declined"
+        },
+        {
+          "operation": "chat_turn",
+          "outcome": "expired"
+        },
+        {
+          "operation": "chat_turn",
+          "outcome": "retrieval_denied"
+        },
+        {
+          "operation": "chat_turn",
+          "outcome": "budget_exhausted"
+        },
+        {
+          "operation": "chat_turn",
+          "outcome": "provider_denied"
+        },
+        {
+          "operation": "chat_turn",
+          "outcome": "denied"
+        },
+        {
+          "operation": "chat_turn",
+          "outcome": "conflict"
+        },
+        {
+          "operation": "chat_turn",
+          "outcome": "unavailable"
+        },
+        {
+          "operation": "chat_turn",
+          "outcome": "error"
+        },
+        {
+          "operation": "chat_turn",
+          "outcome": "confirmed"
+        },
+        {
+          "operation": "pending_action_prepare",
+          "outcome": "success"
+        },
+        {
+          "operation": "pending_action_prepare",
+          "outcome": "replay"
+        },
+        {
+          "operation": "pending_action_prepare",
+          "outcome": "rejected"
+        },
+        {
+          "operation": "pending_action_prepare",
+          "outcome": "denied"
+        },
+        {
+          "operation": "pending_action_prepare",
+          "outcome": "invalid"
+        },
+        {
+          "operation": "pending_action_prepare",
+          "outcome": "conflict"
+        },
+        {
+          "operation": "pending_action_prepare",
+          "outcome": "not_found"
+        },
+        {
+          "operation": "pending_action_prepare",
+          "outcome": "unavailable"
+        },
+        {
+          "operation": "pending_action_prepare",
+          "outcome": "indeterminate"
+        },
+        {
+          "operation": "pending_action_prepare",
+          "outcome": "error"
+        },
+        {
+          "operation": "pending_action_clarification",
+          "outcome": "clarification"
+        },
+        {
+          "operation": "pending_action_clarification",
+          "outcome": "unavailable"
+        },
+        {
+          "operation": "pending_action_clarification",
+          "outcome": "conflict"
+        },
+        {
+          "operation": "pending_action_clarification",
+          "outcome": "error"
+        },
+        {
+          "operation": "pending_action_decline",
+          "outcome": "declined"
+        },
+        {
+          "operation": "pending_action_decline",
+          "outcome": "unavailable"
+        },
+        {
+          "operation": "pending_action_decline",
+          "outcome": "conflict"
+        },
+        {
+          "operation": "pending_action_decline",
+          "outcome": "error"
+        },
+        {
+          "operation": "pending_action_confirm",
+          "outcome": "confirmed"
+        },
+        {
+          "operation": "pending_action_confirm",
+          "outcome": "unavailable"
+        },
+        {
+          "operation": "pending_action_confirm",
+          "outcome": "conflict"
+        },
+        {
+          "operation": "pending_action_confirm",
+          "outcome": "error"
+        },
+        {
+          "operation": "pending_action_expiry",
+          "outcome": "expired"
+        },
+        {
+          "operation": "pending_action_expiry",
+          "outcome": "unavailable"
+        },
+        {
+          "operation": "pending_action_expiry",
+          "outcome": "conflict"
+        },
+        {
+          "operation": "pending_action_expiry",
+          "outcome": "error"
+        }
       ],
       "producerIds": [
         "agent.tool.knowledge_search",
@@ -65,49 +211,195 @@
       "type": "histogram",
       "unit": "seconds",
       "description": "Monotonic duration of eligible Agent operations.",
-      "labelNames": ["operation", "outcome"],
+      "labelNames": [
+        "operation",
+        "outcome"
+      ],
       "allowedLabelSets": [
-        {"operation": "knowledge_search", "outcome": "sufficient"},
-        {"operation": "knowledge_search", "outcome": "insufficient"},
-        {"operation": "knowledge_search", "outcome": "denied"},
-        {"operation": "knowledge_search", "outcome": "invalid"},
-        {"operation": "knowledge_search", "outcome": "unavailable"},
-        {"operation": "knowledge_search", "outcome": "error"},
-        {"operation": "chat_turn", "outcome": "replay"},
-        {"operation": "chat_turn", "outcome": "success"},
-        {"operation": "chat_turn", "outcome": "pending"},
-        {"operation": "chat_turn", "outcome": "clarification"},
-        {"operation": "chat_turn", "outcome": "declined"},
-        {"operation": "chat_turn", "outcome": "expired"},
-        {"operation": "chat_turn", "outcome": "retrieval_denied"},
-        {"operation": "chat_turn", "outcome": "budget_exhausted"},
-        {"operation": "chat_turn", "outcome": "provider_denied"},
-        {"operation": "chat_turn", "outcome": "denied"},
-        {"operation": "chat_turn", "outcome": "conflict"},
-        {"operation": "chat_turn", "outcome": "unavailable"},
-        {"operation": "chat_turn", "outcome": "error"},
-        {"operation": "pending_action_prepare", "outcome": "success"},
-        {"operation": "pending_action_prepare", "outcome": "replay"},
-        {"operation": "pending_action_prepare", "outcome": "rejected"},
-        {"operation": "pending_action_prepare", "outcome": "denied"},
-        {"operation": "pending_action_prepare", "outcome": "invalid"},
-        {"operation": "pending_action_prepare", "outcome": "conflict"},
-        {"operation": "pending_action_prepare", "outcome": "not_found"},
-        {"operation": "pending_action_prepare", "outcome": "unavailable"},
-        {"operation": "pending_action_prepare", "outcome": "indeterminate"},
-        {"operation": "pending_action_prepare", "outcome": "error"},
-        {"operation": "pending_action_clarification", "outcome": "clarification"},
-        {"operation": "pending_action_clarification", "outcome": "unavailable"},
-        {"operation": "pending_action_clarification", "outcome": "conflict"},
-        {"operation": "pending_action_clarification", "outcome": "error"},
-        {"operation": "pending_action_decline", "outcome": "declined"},
-        {"operation": "pending_action_decline", "outcome": "unavailable"},
-        {"operation": "pending_action_decline", "outcome": "conflict"},
-        {"operation": "pending_action_decline", "outcome": "error"},
-        {"operation": "pending_action_expiry", "outcome": "expired"},
-        {"operation": "pending_action_expiry", "outcome": "unavailable"},
-        {"operation": "pending_action_expiry", "outcome": "conflict"},
-        {"operation": "pending_action_expiry", "outcome": "error"}
+        {
+          "operation": "knowledge_search",
+          "outcome": "sufficient"
+        },
+        {
+          "operation": "knowledge_search",
+          "outcome": "insufficient"
+        },
+        {
+          "operation": "knowledge_search",
+          "outcome": "denied"
+        },
+        {
+          "operation": "knowledge_search",
+          "outcome": "invalid"
+        },
+        {
+          "operation": "knowledge_search",
+          "outcome": "unavailable"
+        },
+        {
+          "operation": "knowledge_search",
+          "outcome": "error"
+        },
+        {
+          "operation": "chat_turn",
+          "outcome": "replay"
+        },
+        {
+          "operation": "chat_turn",
+          "outcome": "success"
+        },
+        {
+          "operation": "chat_turn",
+          "outcome": "pending"
+        },
+        {
+          "operation": "chat_turn",
+          "outcome": "clarification"
+        },
+        {
+          "operation": "chat_turn",
+          "outcome": "declined"
+        },
+        {
+          "operation": "chat_turn",
+          "outcome": "expired"
+        },
+        {
+          "operation": "chat_turn",
+          "outcome": "retrieval_denied"
+        },
+        {
+          "operation": "chat_turn",
+          "outcome": "budget_exhausted"
+        },
+        {
+          "operation": "chat_turn",
+          "outcome": "provider_denied"
+        },
+        {
+          "operation": "chat_turn",
+          "outcome": "denied"
+        },
+        {
+          "operation": "chat_turn",
+          "outcome": "conflict"
+        },
+        {
+          "operation": "chat_turn",
+          "outcome": "unavailable"
+        },
+        {
+          "operation": "chat_turn",
+          "outcome": "error"
+        },
+        {
+          "operation": "chat_turn",
+          "outcome": "confirmed"
+        },
+        {
+          "operation": "pending_action_prepare",
+          "outcome": "success"
+        },
+        {
+          "operation": "pending_action_prepare",
+          "outcome": "replay"
+        },
+        {
+          "operation": "pending_action_prepare",
+          "outcome": "rejected"
+        },
+        {
+          "operation": "pending_action_prepare",
+          "outcome": "denied"
+        },
+        {
+          "operation": "pending_action_prepare",
+          "outcome": "invalid"
+        },
+        {
+          "operation": "pending_action_prepare",
+          "outcome": "conflict"
+        },
+        {
+          "operation": "pending_action_prepare",
+          "outcome": "not_found"
+        },
+        {
+          "operation": "pending_action_prepare",
+          "outcome": "unavailable"
+        },
+        {
+          "operation": "pending_action_prepare",
+          "outcome": "indeterminate"
+        },
+        {
+          "operation": "pending_action_prepare",
+          "outcome": "error"
+        },
+        {
+          "operation": "pending_action_clarification",
+          "outcome": "clarification"
+        },
+        {
+          "operation": "pending_action_clarification",
+          "outcome": "unavailable"
+        },
+        {
+          "operation": "pending_action_clarification",
+          "outcome": "conflict"
+        },
+        {
+          "operation": "pending_action_clarification",
+          "outcome": "error"
+        },
+        {
+          "operation": "pending_action_decline",
+          "outcome": "declined"
+        },
+        {
+          "operation": "pending_action_decline",
+          "outcome": "unavailable"
+        },
+        {
+          "operation": "pending_action_decline",
+          "outcome": "conflict"
+        },
+        {
+          "operation": "pending_action_decline",
+          "outcome": "error"
+        },
+        {
+          "operation": "pending_action_confirm",
+          "outcome": "confirmed"
+        },
+        {
+          "operation": "pending_action_confirm",
+          "outcome": "unavailable"
+        },
+        {
+          "operation": "pending_action_confirm",
+          "outcome": "conflict"
+        },
+        {
+          "operation": "pending_action_confirm",
+          "outcome": "error"
+        },
+        {
+          "operation": "pending_action_expiry",
+          "outcome": "expired"
+        },
+        {
+          "operation": "pending_action_expiry",
+          "outcome": "unavailable"
+        },
+        {
+          "operation": "pending_action_expiry",
+          "outcome": "conflict"
+        },
+        {
+          "operation": "pending_action_expiry",
+          "outcome": "error"
+        }
       ],
       "producerIds": [
         "agent.tool.knowledge_search",
@@ -124,18 +416,48 @@
       "type": "counter",
       "unit": "lookups",
       "description": "Terminal FAQ cache observations at each reached layer.",
-      "labelNames": ["level", "result"],
-      "allowedLabelSets": [
-        {"level": "mapping", "result": "hit"},
-        {"level": "mapping", "result": "miss"},
-        {"level": "mapping", "result": "bypass"},
-        {"level": "mapping", "result": "unavailable"},
-        {"level": "mapping", "result": "invalid"},
-        {"level": "answer", "result": "hit"},
-        {"level": "answer", "result": "miss"},
-        {"level": "answer", "result": "invalid"}
+      "labelNames": [
+        "level",
+        "result"
       ],
-      "producerIds": ["agent.redis_faq.lookup", "agent.tool.faq_bypass"],
+      "allowedLabelSets": [
+        {
+          "level": "mapping",
+          "result": "hit"
+        },
+        {
+          "level": "mapping",
+          "result": "miss"
+        },
+        {
+          "level": "mapping",
+          "result": "bypass"
+        },
+        {
+          "level": "mapping",
+          "result": "unavailable"
+        },
+        {
+          "level": "mapping",
+          "result": "invalid"
+        },
+        {
+          "level": "answer",
+          "result": "hit"
+        },
+        {
+          "level": "answer",
+          "result": "miss"
+        },
+        {
+          "level": "answer",
+          "result": "invalid"
+        }
+      ],
+      "producerIds": [
+        "agent.redis_faq.lookup",
+        "agent.tool.faq_bypass"
+      ],
       "cb152Usage": "Separate mapping and answer hit rates use hit/(hit+miss)."
     },
     {
@@ -143,12 +465,20 @@
       "type": "counter",
       "unit": "decisions",
       "description": "Completed FAQ-cache versus issued Elasticsearch backend choices.",
-      "labelNames": ["decision"],
-      "allowedLabelSets": [
-        {"decision": "cache_served"},
-        {"decision": "elasticsearch_issued"}
+      "labelNames": [
+        "decision"
       ],
-      "producerIds": ["agent.tool.knowledge_backend_choice"],
+      "allowedLabelSets": [
+        {
+          "decision": "cache_served"
+        },
+        {
+          "decision": "elasticsearch_issued"
+        }
+      ],
+      "producerIds": [
+        "agent.tool.knowledge_backend_choice"
+      ],
       "cb152Usage": "Elasticsearch avoidance uses cache_served/(cache_served+elasticsearch_issued)."
     },
     {
@@ -156,25 +486,76 @@
       "type": "counter",
       "unit": "attempts",
       "description": "Actual outbound model HTTP attempts by positional role and bounded outcome.",
-      "labelNames": ["role", "outcome"],
-      "allowedLabelSets": [
-        {"role": "primary", "outcome": "success"},
-        {"role": "primary", "outcome": "transient"},
-        {"role": "primary", "outcome": "denied"},
-        {"role": "primary", "outcome": "invalid"},
-        {"role": "primary", "outcome": "error"},
-        {"role": "fallback", "outcome": "success"},
-        {"role": "fallback", "outcome": "transient"},
-        {"role": "fallback", "outcome": "denied"},
-        {"role": "fallback", "outcome": "invalid"},
-        {"role": "fallback", "outcome": "error"},
-        {"role": "reranker", "outcome": "success"},
-        {"role": "reranker", "outcome": "transient"},
-        {"role": "reranker", "outcome": "denied"},
-        {"role": "reranker", "outcome": "invalid"},
-        {"role": "reranker", "outcome": "error"}
+      "labelNames": [
+        "role",
+        "outcome"
       ],
-      "producerIds": ["agent.model.complete", "agent.model.rerank"],
+      "allowedLabelSets": [
+        {
+          "role": "primary",
+          "outcome": "success"
+        },
+        {
+          "role": "primary",
+          "outcome": "transient"
+        },
+        {
+          "role": "primary",
+          "outcome": "denied"
+        },
+        {
+          "role": "primary",
+          "outcome": "invalid"
+        },
+        {
+          "role": "primary",
+          "outcome": "error"
+        },
+        {
+          "role": "fallback",
+          "outcome": "success"
+        },
+        {
+          "role": "fallback",
+          "outcome": "transient"
+        },
+        {
+          "role": "fallback",
+          "outcome": "denied"
+        },
+        {
+          "role": "fallback",
+          "outcome": "invalid"
+        },
+        {
+          "role": "fallback",
+          "outcome": "error"
+        },
+        {
+          "role": "reranker",
+          "outcome": "success"
+        },
+        {
+          "role": "reranker",
+          "outcome": "transient"
+        },
+        {
+          "role": "reranker",
+          "outcome": "denied"
+        },
+        {
+          "role": "reranker",
+          "outcome": "invalid"
+        },
+        {
+          "role": "reranker",
+          "outcome": "error"
+        }
+      ],
+      "producerIds": [
+        "agent.model.complete",
+        "agent.model.rerank"
+      ],
       "cb152Usage": "Diagnostics only; never a cache-saving formula."
     },
     {
@@ -182,13 +563,23 @@
       "type": "counter",
       "unit": "exports",
       "description": "Enabled custom trace mirror export results.",
-      "labelNames": ["outcome"],
-      "allowedLabelSets": [
-        {"outcome": "sent"},
-        {"outcome": "failed"},
-        {"outcome": "dropped"}
+      "labelNames": [
+        "outcome"
       ],
-      "producerIds": ["agent.trace.export"],
+      "allowedLabelSets": [
+        {
+          "outcome": "sent"
+        },
+        {
+          "outcome": "failed"
+        },
+        {
+          "outcome": "dropped"
+        }
+      ],
+      "producerIds": [
+        "agent.trace.export"
+      ],
       "cb152Usage": "Diagnostic custom trace mirror delivery only."
     }
   ],
@@ -197,13 +588,21 @@
       "name": "mapping_faq_hit_rate",
       "numerator": "mapping:hit",
       "denominator": "mapping:hit + mapping:miss",
-      "excludedOutcomes": ["bypass", "unavailable", "invalid"]
+      "excludedOutcomes": [
+        "bypass",
+        "unavailable",
+        "invalid"
+      ]
     },
     {
       "name": "answer_faq_hit_rate",
       "numerator": "answer:hit",
       "denominator": "answer:hit + answer:miss",
-      "excludedOutcomes": ["bypass", "unavailable", "invalid"]
+      "excludedOutcomes": [
+        "bypass",
+        "unavailable",
+        "invalid"
+      ]
     },
     {
       "name": "elasticsearch_knowledge_search_avoidance",

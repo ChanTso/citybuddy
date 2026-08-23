@@ -225,3 +225,102 @@ def test_slow_consumer_and_cancellation_keep_no_queued_or_background_events() ->
 
     assert first.startswith(b"event: token\n")
     assert checks == 1
+
+
+RECEIPT_ID = "00000000-0000-0000-0000-0000000001a1"
+
+
+def confirmed(text: str = "The refund was confirmed and has been issued.") -> ConversationResult:
+    return ConversationResult("c", "t", "u", text, "action_completed", receipt_id=RECEIPT_ID)
+
+
+def test_a_committed_action_leads_with_its_receipt_then_prose_then_the_terminal() -> None:
+    events = SseEgressFilter().project_result(confirmed())
+
+    assert [event.name for event in events] == ["action_receipt", "token", "done"]
+    assert events[0].data == {"sequence": 1, "receiptId": RECEIPT_ID, "status": "SUCCEEDED"}
+    assert events[-1].data["outcome"] == "action_completed"
+
+
+def test_prose_may_say_the_refund_happened_only_behind_a_receipt() -> None:
+    claim = "Your refund was issued."
+
+    receipted = SseEgressFilter().project_result(confirmed(claim))
+    assert [event.name for event in receipted] == ["action_receipt", "token", "done"]
+
+    # The same sentence with no receipt is the forged success the boundary exists to stop.
+    with pytest.raises(SseProjectionError):
+        SseEgressFilter().project_result(ConversationResult("c", "t", "u", claim, "completed"))
+
+
+def test_a_committed_action_without_a_stored_receipt_cannot_be_streamed() -> None:
+    with pytest.raises(SseProjectionError):
+        SseEgressFilter().project_result(
+            ConversationResult("c", "t", "u", "done", "action_completed")
+        )
+
+
+def test_a_terminal_claiming_a_committed_action_needs_the_receipt_before_it() -> None:
+    with pytest.raises(SseProjectionError):
+        SseEgressFilter().project(
+            (
+                SseSourceEvent("SAFE_TEXT", {"text": "ok"}),
+                SseSourceEvent(
+                    "TURN_COMPLETED",
+                    {
+                        "conversationId": "c",
+                        "traceId": "t",
+                        "turnId": "u",
+                        "outcome": "action_completed",
+                    },
+                ),
+            )
+        )
+
+
+def test_a_receipt_without_a_committed_terminal_is_refused() -> None:
+    with pytest.raises(SseProjectionError):
+        SseEgressFilter().project(
+            (
+                SseSourceEvent("ACTION_RECEIPT", {"receiptId": RECEIPT_ID, "status": "SUCCEEDED"}),
+                SseSourceEvent("SAFE_TEXT", {"text": "ok"}),
+                SseSourceEvent(
+                    "TURN_COMPLETED",
+                    {
+                        "conversationId": "c",
+                        "traceId": "t",
+                        "turnId": "u",
+                        "outcome": "completed",
+                    },
+                ),
+            )
+        )
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {"receiptId": "not-a-uuid", "status": "SUCCEEDED"},
+        {"receiptId": RECEIPT_ID, "status": "FAILED"},
+        {"receiptId": RECEIPT_ID},
+        {"receiptId": RECEIPT_ID, "status": "SUCCEEDED", "amountMinor": 400},
+    ],
+)
+def test_a_receipt_source_is_validated_before_it_reaches_the_client(
+    payload: dict[str, object],
+) -> None:
+    with pytest.raises(SseProjectionError):
+        SseEgressFilter().project((SseSourceEvent("ACTION_RECEIPT", payload),))
+
+
+def test_a_receipted_response_text_that_would_overflow_the_client_is_refused() -> None:
+    """The client caps token sequences at four, so a receipt costs one frame of response text."""
+    from citybuddy_agent.sse import MAX_RECEIPTED_RESPONSE_TEXT
+
+    fits = SseEgressFilter().project_result(confirmed("x" * MAX_RECEIPTED_RESPONSE_TEXT))
+    assert len(fits) == MAX_PUBLIC_EVENTS
+    assert [event.name for event in fits[:1]] == ["action_receipt"]
+    assert fits[-1].data["sequence"] == MAX_PUBLIC_EVENTS
+
+    with pytest.raises(SseProjectionError):
+        SseEgressFilter().project_result(confirmed("x" * (MAX_RECEIPTED_RESPONSE_TEXT + 1)))

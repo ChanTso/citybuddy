@@ -16,6 +16,7 @@ class Operation(StrEnum):
     CHAT_TURN = "chat_turn"
     PENDING_ACTION_PREPARE = "pending_action_prepare"
     PENDING_ACTION_CLARIFICATION = "pending_action_clarification"
+    PENDING_ACTION_CONFIRM = "pending_action_confirm"
     PENDING_ACTION_DECLINE = "pending_action_decline"
     PENDING_ACTION_EXPIRY = "pending_action_expiry"
 
@@ -25,6 +26,7 @@ class OperationOutcome(StrEnum):
     REPLAY = "replay"
     PENDING = "pending"
     CLARIFICATION = "clarification"
+    CONFIRMED = "confirmed"
     DECLINED = "declined"
     EXPIRED = "expired"
     SUFFICIENT = "sufficient"
@@ -99,6 +101,7 @@ OPERATION_LABELS = frozenset(
             OperationOutcome.SUCCESS,
             OperationOutcome.PENDING,
             OperationOutcome.CLARIFICATION,
+            OperationOutcome.CONFIRMED,
             OperationOutcome.DECLINED,
             OperationOutcome.EXPIRED,
             OperationOutcome.RETRIEVAL_DENIED,
@@ -129,6 +132,7 @@ OPERATION_LABELS = frozenset(
         (operation, outcome)
         for operation, success in (
             (Operation.PENDING_ACTION_CLARIFICATION, OperationOutcome.CLARIFICATION),
+            (Operation.PENDING_ACTION_CONFIRM, OperationOutcome.CONFIRMED),
             (Operation.PENDING_ACTION_DECLINE, OperationOutcome.DECLINED),
             (Operation.PENDING_ACTION_EXPIRY, OperationOutcome.EXPIRED),
         )

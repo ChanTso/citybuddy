@@ -1,0 +1,39 @@
+Business truth for the confirmations in action_confirmation_http.txt, read with SQL against
+the authoritative databases rather than inferred from the HTTP responses.
+
+Three confirm calls reached commerce across two actions, because the JSON entry was
+confirmed twice to exercise recovery. There are two refunds. That is the point of the
+table: the claim state stops anything else from resolving a reference whose refund may
+already exist, and commerce replays its receipt rather than issuing a second one.
+
+refunded_amount_minor is 0 by design: commerce durably records a refund REQUEST and settles
+it asynchronously, so a receipt proves the request was committed and not that money moved.
+
+=== cs_db: one projection per confirmed reference, bound to its turn ===
++--------------------------------------+--------------+--------------+----------+-----------------+------------------+
+| receipt_id                           | result_state | amount_minor | currency | reference_state | turn_outcome     |
++--------------------------------------+--------------+--------------+----------+-----------------+------------------+
+| 5f0c492d-742d-43df-97b3-821506198c63 | REQUESTED    |          400 | CNY      | CONFIRMED       | action_completed |
+| 99e1340f-68a1-497a-8cf2-52af8bd8c567 | REQUESTED    |          400 | CNY      | CONFIRMED       | action_completed |
++--------------------------------------+--------------+--------------+----------+-----------------+------------------+
+
+=== cs_db: every live or resolved reference accounted for, none stuck mid-claim ===
++-----------+------+--------------+
+| state     | refs | with_receipt |
++-----------+------+--------------+
+| CONFIRMED |    2 |            2 |
++-----------+------+--------------+
+
+=== commerce_db: two confirmations, three confirm calls, and still one refund each ===
++--------------------------------------+---------------+--------------+--------------+------------------------+-----------------------+
+| receipt_id                           | receipt_state | amount_minor | refund_state | requested_amount_minor | refunded_amount_minor |
++--------------------------------------+---------------+--------------+--------------+------------------------+-----------------------+
+| 5f0c492d-742d-43df-97b3-821506198c63 | REQUESTED     |          400 | REQUESTED    |                    400 |                     0 |
+| 99e1340f-68a1-497a-8cf2-52af8bd8c567 | REQUESTED     |          400 | REQUESTED    |                    400 |                     0 |
++--------------------------------------+---------------+--------------+--------------+------------------------+-----------------------+
+
++----------+------------------+---------------+------------------+----------------+
+| receipts | distinct_refunds | refunds_total | consumed_actions | still_prepared |
++----------+------------------+---------------+------------------+----------------+
+|        2 |                2 |             2 |                2 |              0 |
++----------+------------------+---------------+------------------+----------------+

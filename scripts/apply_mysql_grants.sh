@@ -87,6 +87,7 @@ expected=(
   "GRANT SELECT, INSERT ON commerce_db.faq_publication_command TO 'commerce_app'@'%';"
   "GRANT SELECT, INSERT, UPDATE (state, state_version, consumed_at) ON commerce_db.pending_action TO 'commerce_app'@'%';"
   "GRANT SELECT, INSERT ON commerce_db.action_receipt TO 'commerce_app'@'%';"
+  "GRANT SELECT, INSERT ON cs_db.action_receipt_projection TO 'agent_app'@'%';"
 )
 mapfile -t actual < <(sed -e '/^[[:space:]]*$/d' -e '/^[[:space:]]*--/d' "$manifest")
 
@@ -164,6 +165,9 @@ support_lifecycle_grants="$(printf '%s\n' "${actual[@]:23:4}")"
 support_feedback_grants="$(printf '%s\n' "${actual[@]:23:5}")"
 legacy_runtime_sql="$(printf '%s\n' "${actual[@]:5:4}" "$support_grant")"
 agent_action_reference_grant="${actual[30]}"
+# Last in the manifest on purpose. Statements here are addressed by absolute index, so a
+# grant inserted beside the other cs_db ones repoints every index after it.
+receipt_projection_grant="${actual[47]}"
 evaluation_grant="${actual[31]}"
 sandbox_grants="$(printf '%s\n' "${actual[@]:32:3}")"
 evaluation_audit_grant="${actual[35]}"
@@ -247,7 +251,8 @@ runtime_table_state="$(mysql "${mysql_args[@]}" --execute="
       'support_feedback',
       'retrieval_decision',
       'retrieval_evidence',
-      'pending_action_reference'
+      'pending_action_reference',
+      'action_receipt_projection'
     );
   SET ROLE NONE;")"
 
@@ -275,6 +280,7 @@ retrieval_tables_present=false
 retrieval_decision_present=false
 retrieval_evidence_present=false
 agent_action_reference_present=false
+receipt_projection_present=false
 if [[ "$normalized_runtime_table_state" == *"commerce_db.auth_eval_test_principal"* ]]; then
   runtime_table_count="${normalized_runtime_table_state%%:*}"
   runtime_table_list="${normalized_runtime_table_state#*:}"
@@ -467,6 +473,18 @@ if [[ "$runtime_table_state" == *"cs_db.pending_action_reference"* ]]; then
   normalized_runtime_table_state="$((runtime_table_count - 1)):$runtime_table_list"
   agent_action_reference_present=true
 fi
+if [[ "$runtime_table_state" == *"cs_db.action_receipt_projection"* ]]; then
+  if [[ "$agent_action_reference_present" != true ]]; then
+    echo "Grant job found the receipt projection without the PendingAction reference." >&2
+    exit 1
+  fi
+  runtime_table_count="${normalized_runtime_table_state%%:*}"
+  runtime_table_list="${normalized_runtime_table_state#*:}"
+  runtime_table_list="$(remove_runtime_table "$runtime_table_list" \
+    cs_db.action_receipt_projection)"
+  normalized_runtime_table_state="$((runtime_table_count - 1)):$runtime_table_list"
+  receipt_projection_present=true
+fi
 if [[ ",$normalized_runtime_table_state," == *",cs_db.support_feedback,"* ]]; then
   runtime_table_count="${normalized_runtime_table_state%%:*}"
   runtime_table_list="${normalized_runtime_table_state#*:}"
@@ -531,6 +549,9 @@ elif [[ "$normalized_runtime_table_state" == "$cb080_runtime_table_state" ]]; th
       exit 1
     fi
     selected_runtime_sql="$(printf '%s\n' "${actual[@]:5:26}")"
+    if [[ "$receipt_projection_present" == true ]]; then
+      selected_runtime_sql="$(printf '%s\n' "$selected_runtime_sql" "$receipt_projection_grant")"
+    fi
   elif [[ "$retrieval_tables_present" == true ]]; then
     if [[ "$feedback_table_present" != true ]]; then
       echo "Grant job found retrieval tables without the prerequisite feedback schema." >&2

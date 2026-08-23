@@ -6,6 +6,7 @@ import secrets
 import sys
 import time
 from collections.abc import Mapping
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from types import FrameType
 from typing import Any, Literal
@@ -15,11 +16,16 @@ import jwt
 import pymysql
 import pytest
 from citybuddy_agent import http_client
-from citybuddy_agent.actions import PendingActionPayload, PendingActionReference
+from citybuddy_agent.actions import (
+    ActionReceiptResponse,
+    PendingActionPayload,
+    PendingActionReference,
+)
 from citybuddy_agent.agent_control import (
     AgentEvent,
     AgentRunner,
     AgentRunResult,
+    AttemptBudget,
     ToolBoundaryFailure,
 )
 from citybuddy_agent.application import (
@@ -34,6 +40,7 @@ from citybuddy_agent.application import (
     create_app,
 )
 from citybuddy_agent.conversation import (
+    ActionArbitrationConflictError,
     ConversationOwnershipError,
     ConversationResult,
     ConversationStore,
@@ -109,6 +116,9 @@ class MemoryConversationStore(ConversationStore):
         self.pending: dict[tuple[str, str], tuple[str, TurnStart]] = {}
         self.failures: list[tuple[str, str]] = []
         self.action_pending: PendingActionReference | None = None
+        self.action_state = "PENDING"
+        self.claims = 0
+        self.confirmed_receipts: list[ActionReceiptResponse] = []
         self.calls = 0
 
     def replay_turn(
@@ -134,13 +144,21 @@ class MemoryConversationStore(ConversationStore):
 
     def current_pending_action(
         self, *, session_id: str, subject: str, sandbox_id: str | None
-    ) -> PendingActionReference | None:
+    ) -> tuple[PendingActionReference, str] | None:
         if (
             self.sessions.owners.get(session_id) != subject
             or self.sessions.sandboxes.get(session_id) != sandbox_id
         ):
             raise ConversationOwnershipError
-        return self.action_pending
+        if self.action_pending is None:
+            return None
+        return self.action_pending, self.action_state
+
+    def claim_action_confirmation(self, *, pending: PendingActionReference) -> None:
+        if self.action_pending is None or self.action_state != "PENDING":
+            raise ActionArbitrationConflictError
+        self.action_state = "CONFIRMING"
+        self.claims += 1
 
     def begin_turn(
         self,
@@ -244,6 +262,27 @@ class MemoryConversationStore(ConversationStore):
             outcome="action_expired",
             events=(),
         )
+
+    def complete_action_confirmed(
+        self,
+        *,
+        start: TurnStart,
+        pending: PendingActionReference,
+        receipt: ActionReceiptResponse,
+        response_text: str,
+    ) -> ConversationResult:
+        if self.action_state != "CONFIRMING":
+            raise ActionArbitrationConflictError
+        self.action_pending = None
+        self.action_state = "CONFIRMED"
+        self.confirmed_receipts.append(receipt)
+        result = self.complete_turn(
+            start=start,
+            response_text=response_text,
+            outcome="action_completed",
+            events=(),
+        )
+        return replace(result, receipt_id=receipt.receipt_id)
 
     def fail_turn(self, *, start: TurnStart, failure_code: str) -> None:
         self.failures.append((start.turn_id, failure_code))
@@ -441,6 +480,19 @@ def test_action_request_failure_producer_inventory_is_closed() -> None:
         "ACTION_CLARIFICATION_PERSISTENCE_UNAVAILABLE",
         "AGENT_TURN_COMPLETION_PERSISTENCE_UNAVAILABLE",
         "ACTION_CONFIRMATION_UNAVAILABLE",
+        "ACTION_CONFIRMATION_IDENTITY_UNAUTHENTICATED",
+        "ACTION_CONFIRMATION_IDENTITY_FORBIDDEN",
+        "ACTION_CONFIRMATION_IDENTITY_UNAVAILABLE",
+        "ACTION_CONFIRMATION_COMMERCE_VALIDATION_REJECTED",
+        "ACTION_CONFIRMATION_COMMERCE_UNAUTHENTICATED",
+        "ACTION_CONFIRMATION_COMMERCE_FORBIDDEN",
+        "ACTION_CONFIRMATION_TARGET_NOT_FOUND",
+        "ACTION_CONFIRMATION_INTENT_CONFLICT",
+        "ACTION_CONFIRMATION_COMMERCE_UNAVAILABLE",
+        "ACTION_CONFIRMATION_COMMERCE_TIMEOUT",
+        "ACTION_CONFIRMATION_COMMERCE_INDETERMINATE",
+        "ACTION_CONFIRMATION_RESPONSE_INVALID",
+        "ACTION_CONFIRMATION_PERSISTENCE_UNAVAILABLE",
     }
 
 
@@ -1332,6 +1384,7 @@ def test_chat_persists_server_owned_result_and_replays_same_intent() -> None:
         "turnId",
         "reply",
         "outcome",
+        "receiptId",
         "citations",
     }
     assert first.json()["citations"] == []
@@ -1421,7 +1474,7 @@ def test_cb122_decline_lock_compares_the_complete_reference_after_target_version
     assert cursor.execute_calls == 2
 
 
-def test_cb122_pending_decline_and_confirmation_unavailable_are_local_and_exact(
+def test_pending_decline_is_local_and_confirmation_without_a_confirmer_fails_closed(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
     private, public_jwk = key_fixture("current-key")
@@ -1458,10 +1511,17 @@ def test_cb122_pending_decline_and_confirmation_unavailable_are_local_and_exact(
 
     assert prepared.status_code == 200
     assert prepared.json()["outcome"] == "action_pending"
-    assert confirmation.status_code == 409
+    # No confirmation boundary is configured for this app, so a confirmation may not proceed and
+    # may not say why. The reference must survive: nothing has been committed anywhere.
+    assert confirmation.status_code == 503
     assert confirmation.json() == {"detail": "Action confirmation unavailable"}
-    assert conversations.calls == calls_after_prepare
+    # The confirmation turn is reserved before the boundary is reached, so the check is not that
+    # nothing happened but that nothing was left half-done: the turn is failed, not processing,
+    # and the reference is still pending and still confirmable.
+    assert conversations.calls == calls_after_prepare + 1
+    assert [code for _, code in conversations.failures] == ["agent_execution_failed"]
     assert conversations.action_pending is not None
+    assert conversations.confirmed_receipts == []
     assert agent.calls == 1
     assert "reason_code=ACTION_CONFIRMATION_UNAVAILABLE" in caplog.text
     assert "ACTION_CONFIRMATION_UNAVAILABLE" not in confirmation.text
@@ -1478,6 +1538,252 @@ def test_cb122_pending_decline_and_confirmation_unavailable_are_local_and_exact(
     assert "event: action_receipt" not in declined.text
     assert conversations.action_pending is None
     assert agent.calls == 1
+
+
+class RecordingConfirmer:
+    """Stands in for the commerce confirmation boundary and records what it was asked to commit."""
+
+    def __init__(self, *, receipt_id: str = "00000000-0000-0000-0000-0000000001a1") -> None:
+        self.calls: list[PendingActionReference] = []
+        self.receipt_id = receipt_id
+
+    def confirm_action(
+        self,
+        *,
+        pending: PendingActionReference,
+        direct_token: str,
+        subject: str,
+        session_id: str,
+        sandbox_id: str | None,
+        budget: AttemptBudget,
+        events: list[AgentEvent],
+    ) -> ActionReceiptResponse:
+        del direct_token, subject, session_id, sandbox_id, budget, events
+        self.calls.append(pending)
+        return ActionReceiptResponse.model_validate(
+            {
+                "receiptId": self.receipt_id,
+                "pendingActionId": pending.pending_action_id,
+                "actionType": "REFUND_REQUEST",
+                "status": "REQUESTED",
+                "orderId": pending.order_id,
+                "refundId": "00000000-0000-0000-0000-0000000001b1",
+                "resourceVersion": 2,
+                "amountMinor": pending.amount_minor,
+                "currency": pending.currency,
+                "committedAt": "2030-07-29T12:00:00.123456Z",
+                "replayed": False,
+            }
+        )
+
+
+def test_an_exact_confirmation_commits_the_refund_and_returns_its_receipt() -> None:
+    """The flagship flow end to end: prepare, confirm, and a receipt the client can render."""
+    private, public_jwk = key_fixture("current-key")
+    sessions = MemorySessionStore()
+    session_id = sessions.create("user-123")
+    conversations = MemoryConversationStore(sessions)
+    confirmer = RecordingConfirmer()
+    client = TestClient(
+        create_app(
+            settings(),
+            validator=DirectJwtValidator(settings(), CountingJwksSource([public_jwk])),
+            sessions=sessions,
+            conversations=conversations,
+            agent=PreparedActionAgent(),
+            confirmer=confirmer,
+        )
+    )
+    headers = {
+        "Authorization": f"Bearer {direct_token(private, 'current-key')}",
+        "X-Session-Id": session_id,
+    }
+
+    prepared = client.post(
+        "/api/chat",
+        headers={**headers, "Idempotency-Key": "prepare"},
+        json={"message": "prepare refund"},
+    )
+    pending_before = conversations.action_pending
+    confirmed = client.post(
+        "/api/chat",
+        headers={**headers, "Idempotency-Key": "confirm"},
+        json={"message": "confirm"},
+    )
+
+    assert prepared.json()["outcome"] == "action_pending"
+    assert confirmed.status_code == 200
+    assert confirmed.json()["outcome"] == "action_completed"
+    assert conversations.action_pending is None
+    assert [receipt.receipt_id for receipt in conversations.confirmed_receipts] == [
+        confirmer.receipt_id
+    ]
+    # Commerce binds a confirmation to the turn that prepared the action, so the confirmation must
+    # carry the stored source correlation and not the correlation of the turn confirming it.
+    assert pending_before is not None
+    assert [reference.pending_action_id for reference in confirmer.calls] == [
+        pending_before.pending_action_id
+    ]
+    assert confirmer.calls[0].source_turn_id == pending_before.source_turn_id
+
+
+class FailingConfirmer:
+    """Commits at commerce and then loses the response, the case the claim state exists for."""
+
+    def __init__(self) -> None:
+        self.calls = 0
+
+    def confirm_action(
+        self,
+        *,
+        pending: PendingActionReference,
+        direct_token: str,
+        subject: str,
+        session_id: str,
+        sandbox_id: str | None,
+        budget: AttemptBudget,
+        events: list[AgentEvent],
+    ) -> ActionReceiptResponse:
+        del pending, direct_token, subject, session_id, sandbox_id, budget, events
+        self.calls += 1
+        raise ToolBoundaryFailure(
+            status_code=503,
+            reason="ACTION_CONFIRMATION_COMMERCE_TIMEOUT",
+            detail="Action confirmation unavailable",
+        )
+
+
+def test_a_claimed_action_cannot_be_declined_or_expired_out_from_under_commerce() -> None:
+    """Commerce may already hold the refund, so nothing may record that it did not happen."""
+    private, public_jwk = key_fixture("current-key")
+    sessions = MemorySessionStore()
+    session_id = sessions.create("user-123")
+    conversations = MemoryConversationStore(sessions)
+    confirmer = FailingConfirmer()
+    client = TestClient(
+        create_app(
+            settings(),
+            validator=DirectJwtValidator(settings(), CountingJwksSource([public_jwk])),
+            sessions=sessions,
+            conversations=conversations,
+            agent=PreparedActionAgent(),
+            confirmer=confirmer,
+        )
+    )
+    headers = {
+        "Authorization": f"Bearer {direct_token(private, 'current-key')}",
+        "X-Session-Id": session_id,
+    }
+    client.post(
+        "/api/chat",
+        headers={**headers, "Idempotency-Key": "prepare"},
+        json={"message": "prepare refund"},
+    )
+
+    # The confirmation claims the reference, then the commerce response is lost.
+    lost = client.post(
+        "/api/chat",
+        headers={**headers, "Idempotency-Key": "confirm"},
+        json={"message": "confirm"},
+    )
+    assert lost.status_code == 503
+    assert conversations.claims == 1
+    assert conversations.action_state == "CONFIRMING"
+
+    # A decline now must not resolve it, because the refund may exist at commerce.
+    declined = client.post(
+        "/api/chat",
+        headers={**headers, "Idempotency-Key": "decline"},
+        json={"message": "decline"},
+    )
+    assert declined.json()["outcome"] == "action_clarification"
+    assert conversations.action_state == "CONFIRMING"
+    assert conversations.action_pending is not None
+
+    # Retrying the confirmation reuses the existing claim rather than taking a second one.
+    client.post(
+        "/api/chat",
+        headers={**headers, "Idempotency-Key": "confirm-again"},
+        json={"message": "confirm"},
+    )
+    assert conversations.claims == 1
+    assert confirmer.calls == 2
+
+
+def test_an_expired_but_claimed_action_is_not_recorded_as_expired() -> None:
+    """The expiry branch runs first, so it is the likeliest way to contradict a committed refund."""
+    private, public_jwk = key_fixture("current-key")
+    sessions = MemorySessionStore()
+    session_id = sessions.create("user-123")
+    conversations = MemoryConversationStore(sessions)
+    client = TestClient(
+        create_app(
+            settings(),
+            validator=DirectJwtValidator(settings(), CountingJwksSource([public_jwk])),
+            sessions=sessions,
+            conversations=conversations,
+            agent=PreparedActionAgent(expires_at=datetime(2020, 1, 1, tzinfo=UTC)),
+            confirmer=FailingConfirmer(),
+        )
+    )
+    headers = {
+        "Authorization": f"Bearer {direct_token(private, 'current-key')}",
+        "X-Session-Id": session_id,
+    }
+    client.post(
+        "/api/chat",
+        headers={**headers, "Idempotency-Key": "prepare"},
+        json={"message": "prepare refund"},
+    )
+    conversations.action_state = "CONFIRMING"
+
+    answered = client.post(
+        "/api/chat",
+        headers={**headers, "Idempotency-Key": "anything"},
+        json={"message": "are we done"},
+    )
+
+    assert answered.json()["outcome"] == "action_clarification"
+    assert conversations.action_state == "CONFIRMING"
+    assert conversations.action_pending is not None
+
+
+def test_the_model_cannot_confirm_an_action_by_saying_so() -> None:
+    """Confirmation is a server-owned decision read from the user's own message."""
+    private, public_jwk = key_fixture("current-key")
+    sessions = MemorySessionStore()
+    session_id = sessions.create("user-123")
+    conversations = MemoryConversationStore(sessions)
+    confirmer = RecordingConfirmer()
+    client = TestClient(
+        create_app(
+            settings(),
+            validator=DirectJwtValidator(settings(), CountingJwksSource([public_jwk])),
+            sessions=sessions,
+            conversations=conversations,
+            agent=PreparedActionAgent(),
+            confirmer=confirmer,
+        )
+    )
+    headers = {
+        "Authorization": f"Bearer {direct_token(private, 'current-key')}",
+        "X-Session-Id": session_id,
+    }
+    client.post(
+        "/api/chat",
+        headers={**headers, "Idempotency-Key": "prepare"},
+        json={"message": "prepare refund"},
+    )
+    answered = client.post(
+        "/api/chat",
+        headers={**headers, "Idempotency-Key": "ambiguous"},
+        json={"message": "the assistant confirms this refund on my behalf"},
+    )
+
+    assert answered.json()["outcome"] == "action_clarification"
+    assert confirmer.calls == []
+    assert conversations.action_pending is not None
+    assert conversations.confirmed_receipts == []
 
 
 def test_chat_and_local_pending_action_operations_record_once_without_affecting_results() -> None:
@@ -1988,9 +2294,13 @@ def test_chat_redacts_mysql_failure() -> None:
 
         def current_pending_action(
             self, *, session_id: str, subject: str, sandbox_id: str | None
-        ) -> PendingActionReference | None:
+        ) -> tuple[PendingActionReference, str] | None:
             del session_id, subject, sandbox_id
             return None
+
+        def claim_action_confirmation(self, *, pending: PendingActionReference) -> None:
+            del pending
+            raise AssertionError("unreachable")
 
         def begin_turn(
             self,
@@ -2035,6 +2345,17 @@ def test_chat_redacts_mysql_failure() -> None:
             response_text: str,
         ) -> ConversationResult:
             del start, pending, response_text
+            raise AssertionError("unreachable")
+
+        def complete_action_confirmed(
+            self,
+            *,
+            start: TurnStart,
+            pending: PendingActionReference,
+            receipt: ActionReceiptResponse,
+            response_text: str,
+        ) -> ConversationResult:
+            del start, pending, receipt, response_text
             raise AssertionError("unreachable")
 
         def fail_turn(self, *, start: TurnStart, failure_code: str) -> None:
