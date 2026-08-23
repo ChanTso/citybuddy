@@ -261,10 +261,6 @@ until curl -s -o /dev/null "http://127.0.0.1:$model_port/fixture/counts"; do sle
 echo "model fixture ready"
 
 echo "== starting agent-service on $agent_port =="
-# A retrieval turn charges the attempt budget once for the model call that requests the tool, twice
-# to resolve the alias and validate the mapping, twice per query text for BM25 and dense recall,
-# and once for the rerank — eight in all when the tool call carries a query rewrite, which the
-# demonstration's does. The default budget is eight, so the answer itself never gets an attempt.
 CITYBUDDY_ENVIRONMENT=development \
 AGENT_PORT="$agent_port" \
 AGENT_IDENTITY_ENABLED=true \
@@ -283,7 +279,6 @@ AGENT_KNOWLEDGE_ALIAS=knowledge_docs_read \
 MYSQL_HOST=127.0.0.1 \
 MYSQL_PORT="$mysql_port" \
 MYSQL_AGENT_APP_PASSWORD="$agent_pw" \
-AGENT_ATTEMPT_BUDGET=16 \
   uv run citybuddy-agent >"$run_dir/agent.log" 2>&1 &
 echo $! > "$run_dir/agent.pid"
 

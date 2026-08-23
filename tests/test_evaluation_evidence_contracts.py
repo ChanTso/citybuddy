@@ -66,7 +66,7 @@ def test_evaluation_evidence_schema_is_a_closed_safe_projection() -> None:
         "feedback",
     }
     assert response["properties"]["events"]["minItems"] == 2
-    assert response["properties"]["events"]["maxItems"] == 48
+    assert response["properties"]["events"]["maxItems"] == 96
     assert response["properties"]["feedback"]["maxItems"] == 8
     assert set(event["properties"]) == {
         "sequence",

@@ -46,7 +46,7 @@ def _settings() -> AgentSettings:
         ),
         primary_provider_key=os.environ.get("AGENT_PRIMARY_PROVIDER_KEY", "primary"),
         fallback_provider_key=os.environ.get("AGENT_FALLBACK_PROVIDER_KEY", "fallback"),
-        attempt_budget=int(os.environ.get("AGENT_ATTEMPT_BUDGET", "8")),
+        attempt_budget=int(os.environ.get("AGENT_ATTEMPT_BUDGET", "16")),
         circuit_minimum_requests=int(os.environ.get("AGENT_CIRCUIT_MINIMUM_REQUESTS", "2")),
         circuit_open_seconds=float(os.environ.get("AGENT_CIRCUIT_OPEN_SECONDS", "1")),
         circuit_half_open_probes=int(os.environ.get("AGENT_CIRCUIT_HALF_OPEN_PROBES", "1")),

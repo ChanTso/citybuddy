@@ -94,7 +94,7 @@ def main() -> None:
     if payload["terminalOutcome"] != args.outcome:
         raise SystemExit("Evidence terminal outcome mismatch")
     events = payload["events"]
-    if not isinstance(events, list) or not 2 <= len(events) <= 48:
+    if not isinstance(events, list) or not 2 <= len(events) <= 96:
         raise SystemExit("Evidence events are outside bounds")
     kinds: list[str] = []
     for expected, event in enumerate(events, start=1):

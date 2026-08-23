@@ -20,7 +20,7 @@ from . import http_client
 MAX_ACTION_JSON_BYTES = 4096
 MAX_ACTION_JSON_DEPTH = 16
 MAX_ACTION_JSON_VALUES = 256
-MAX_ACTION_SOURCE_TURN_EVENTS = 48
+MAX_ACTION_SOURCE_TURN_EVENTS = 96
 MAX_ACTION_AMOUNT_MINOR = 9_223_372_036_854_775_807
 MAX_ACTION_PENDING_TTL_SECONDS = 86_400
 ACTION_SCOPE = "refund:create"
@@ -372,7 +372,8 @@ class ActionEvidenceEvent:
 ACTION_TURN_EVENTS_SQL = (
     "SELECT event_id, trace_id, session_id, user_subject, sequence, event_type, "
     "IF(OCTET_LENGTH(payload_json) <= 4096, payload_json, NULL) "
-    "FROM support_event WHERE turn_id = %s ORDER BY sequence LIMIT 49"
+    "FROM support_event WHERE turn_id = %s ORDER BY sequence "
+    f"LIMIT {MAX_ACTION_SOURCE_TURN_EVENTS + 1}"
 )
 PENDING_ACTION_SOURCE_TURN_SQL = (
     "SELECT turn_id, trace_id, conversation_id, session_id, user_subject, state, outcome "

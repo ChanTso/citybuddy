@@ -2,11 +2,13 @@ from __future__ import annotations
 
 import json
 from copy import deepcopy
+from datetime import UTC, datetime
 from typing import Any
 
 import httpx
 import pytest
 from citybuddy_agent import http_client
+from citybuddy_agent.__main__ import _settings
 from citybuddy_agent.agent_control import (
     KNOWLEDGE_SEARCH_SPEC,
     AgentEvent,
@@ -21,6 +23,8 @@ from citybuddy_agent.agent_control import (
     RuleRouter,
     ToolAdapter,
 )
+from citybuddy_agent.application import AgentSettings
+from citybuddy_agent.evaluation import MysqlEvaluationEvidenceStore
 from citybuddy_agent.knowledge import (
     EMBEDDING_DIMS,
     FINAL_RESULT_LIMIT,
@@ -128,6 +132,114 @@ def hits(*values: tuple[str, dict[str, object]]) -> dict[str, object]:
 
 def response(status: int, payload: dict[str, object]) -> httpx.Response:
     return httpx.Response(status, json=payload)
+
+
+def test_default_attempt_budget_completes_rewritten_retrieval(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class ForbiddenObo:
+        def exchange(self, *args: object) -> str:
+            raise AssertionError(args)
+
+    def request(method: str, url: str, **kwargs: Any) -> httpx.Response:
+        del method, kwargs
+        if "/_alias/" in url:
+            return response(200, alias())
+        if url.endswith("/_mapping"):
+            return response(200, mapping())
+        return response(200, hits(("faq-refund:answer", source("faq-refund", "answer"))))
+
+    completion_calls = 0
+
+    def post(url: str, **kwargs: Any) -> httpx.Response:
+        nonlocal completion_calls
+        assert url == "https://proxy.test/v1/chat/completions"
+        request_payload = kwargs["json"]
+        if request_payload["model"] == "support-reranker-standard":
+            content = json.dumps({"scores": [{"candidate_id": "faq-refund:answer", "score": 0.9}]})
+            return response(200, {"choices": [{"message": {"content": content}}]})
+        completion_calls += 1
+        if completion_calls == 1:
+            return response(
+                200,
+                {
+                    "choices": [
+                        {
+                            "message": {
+                                "content": None,
+                                "tool_calls": [
+                                    {
+                                        "function": {
+                                            "name": KNOWLEDGE_SEARCH_SPEC.name,
+                                            "arguments": (
+                                                '{"query":"refund","rewrite":"return policy"}'
+                                            ),
+                                        }
+                                    }
+                                ],
+                            }
+                        }
+                    ]
+                },
+            )
+        return response(200, {"choices": [{"message": {"content": "Grounded answer."}}]})
+
+    monkeypatch.delenv("AGENT_ATTEMPT_BUDGET", raising=False)
+    monkeypatch.setattr(http_client, "request", request)
+    monkeypatch.setattr(http_client, "post", post)
+    default_budget = AgentSettings().attempt_budget
+    assert default_budget == 16
+    assert _settings().attempt_budget == default_budget
+
+    model = LiteLlmClient(
+        "https://proxy.test",
+        ProviderCircuits(minimum_requests=2, open_seconds=1, half_open_probes=1),
+    )
+    result = BoundedAgent(
+        RuleRouter(),
+        ModelRouter((ProviderRoute("support-standard-primary", "primary"),), default_budget),
+        model,
+        ToolAdapter(
+            "https://commerce.test",
+            ForbiddenObo(),
+            ElasticsearchKnowledgeSearch("https://elasticsearch.test"),
+            model,
+            load_calibration(),
+        ),
+    ).run(
+        message="What is the refund policy?",
+        direct_token="not-forwarded",
+        subject="not-forwarded",
+        session_id="not-forwarded",
+        trace_id="trace",
+        turn_id="turn",
+    )
+
+    charges = [event for event in result.events if event.event_type == "BUDGET_CHARGED"]
+    assert result.outcome == "completed"
+    assert result.response_text == "Grounded answer."
+    assert [event.payload["attempt"] for event in charges] == list(range(1, 10))
+    evidence_store = object.__new__(MysqlEvaluationEvidenceStore)
+    projected = [
+        evidence_store._project_event(  # noqa: SLF001
+            sequence,
+            event.event_type,
+            event.payload,
+            datetime(2026, 8, 24, tzinfo=UTC),
+        )
+        for sequence, event in enumerate(charges, start=1)
+    ]
+    assert [event.outcome for event in projected] == [
+        "model_http",
+        "knowledge_http",
+        "knowledge_http",
+        "knowledge_http",
+        "knowledge_http",
+        "knowledge_http",
+        "knowledge_http",
+        "reranker_http",
+        "model_http",
+    ]
 
 
 def test_toolspec_is_server_owned_and_forbids_model_control_fields() -> None:

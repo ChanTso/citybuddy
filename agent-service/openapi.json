@@ -396,7 +396,7 @@
           "events": {
             "type": "array",
             "minItems": 2,
-            "maxItems": 48,
+            "maxItems": 96,
             "items": {"$ref": "#/components/schemas/AgentEvaluationEvent"},
             "description": "Complete accepted-to-terminal sequence ordered only by persisted support_event.sequence."
           },
@@ -414,7 +414,7 @@
         "additionalProperties": false,
         "required": ["sequence", "eventKind", "occurredAt"],
         "properties": {
-          "sequence": {"type": "integer", "minimum": 1, "maximum": 48},
+          "sequence": {"type": "integer", "minimum": 1, "maximum": 96},
           "eventKind": {
             "type": "string",
             "enum": [
