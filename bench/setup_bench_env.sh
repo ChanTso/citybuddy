@@ -62,7 +62,9 @@ sql root "$root_pw" commerce_db "
 DELETE c FROM auth_login_credential c JOIN auth_user_principal p USING (principal_id)
   WHERE p.subject LIKE 'bench-user-%';
 DELETE FROM auth_user_principal WHERE subject LIKE 'bench-user-%';
-DELETE FROM auth_signing_key_metadata WHERE kid = 'bench-current';"
+-- Every row here is published, and auth fails the whole JWKS document when any published kid has
+-- no configured runtime key, so a row left behind by another local fixture is not survivable.
+DELETE FROM auth_signing_key_metadata;"
 sql auth_app "$auth_pw" commerce_db "
 INSERT INTO auth_signing_key_metadata (kid, state, activated_at, retire_after)
 VALUES ('bench-current', 'CURRENT', CURRENT_TIMESTAMP(6), NULL);"

@@ -57,6 +57,18 @@ UPDATE auth_user_principal
  WHERE subject LIKE 'bench-user-%'
    AND CAST(SUBSTRING(subject, 12) AS UNSIGNED) < $AGENT_BENCH_USERS;"
 
+# The on-behalf-of exchange authenticates the agent as this client, and both auth-service and
+# commerce-service pin the id, so it is one row the whole local topology shares. Seeded here
+# rather than assumed to exist: nothing else in the repository creates it, and any other fixture
+# that needs the same id replaces it with a secret this rig does not hold.
+echo "== registering the agent service identity =="
+agent_service_hash="$(uv run python scripts/hash_test_credential.py "$agent_secret")"
+sql root "$root_pw" commerce_db "DELETE FROM auth_service_identity WHERE client_id = 'agent-service';"
+sql auth_app "$auth_pw" commerce_db "
+INSERT INTO auth_service_identity (service_id, client_id, credential_hash, state, allowed_scopes)
+VALUES ('00000000-0000-0000-0000-0000000009a3', 'agent-service', '$agent_service_hash', 'ACTIVE',
+        'catalog:read refund:create');"
+
 echo "== stopping the previous bench services =="
 # Before the fixture is cleared, not after: a previous ladder's collapsed step can still have
 # turns in flight, and a turn that lands during teardown writes rows that the delete has already
