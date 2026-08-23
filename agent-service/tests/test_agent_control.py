@@ -551,6 +551,52 @@ def test_tool_timeout_is_structured_and_unexpected_failure_remains_visible(
         )
 
 
+def test_a_connection_the_peer_closed_is_a_dependency_failure_not_a_crash(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A pooled connection closed between two requests arrives as RemoteProtocolError."""
+    obo = RecordingObo()
+    events: list[AgentEvent] = []
+
+    def disconnected(*args: Any, **kwargs: Any) -> httpx.Response:
+        del args, kwargs
+        raise httpx.RemoteProtocolError("Server disconnected without sending a response")
+
+    monkeypatch.setattr(http_client, "post", disconnected)
+    result = ToolAdapter("https://commerce.test", obo).execute(
+        name=CATALOG_PRODUCT_SPEC.name,
+        serialized_arguments='{"productId":"product-1"}',
+        direct_token="direct",
+        subject="user-1",
+        session_id="session-1",
+        budget=AttemptBudget(4, events),
+        events=events,
+    )
+    assert result.model_view["reason"] == "tool_unavailable"
+
+
+def test_a_local_protocol_violation_is_not_reported_as_a_dependency_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """LocalProtocolError is this service breaking HTTP, and must not read as commerce failing."""
+
+    def local_fault(*args: Any, **kwargs: Any) -> httpx.Response:
+        del args, kwargs
+        raise httpx.LocalProtocolError("Illegal header value")
+
+    monkeypatch.setattr(http_client, "post", local_fault)
+    with pytest.raises(httpx.LocalProtocolError):
+        ToolAdapter("https://commerce.test", RecordingObo()).execute(
+            name=CATALOG_PRODUCT_SPEC.name,
+            serialized_arguments='{"productId":"product-1"}',
+            direct_token="direct",
+            subject="user-1",
+            session_id="session-1",
+            budget=AttemptBudget(4, []),
+            events=[],
+        )
+
+
 @pytest.mark.parametrize(
     ("obo", "reason"),
     [(DeniedObo(), "identity_denied"), (UnavailableObo(), "identity_unavailable")],

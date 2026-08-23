@@ -24,9 +24,12 @@ class _CookielessTransport(httpx.BaseTransport):
     commerce and auth for many different users, with one just-in-time token per request, so a
     stored cookie would travel from one user's request into another's. No boundary here sets one
     today; discarding them means that staying true is not a precondition for this change.
+
+    Supplying a transport also turns off httpx's environment proxy support, which the agent does
+    not use: every dependency is a fixed address on the same network.
     """
 
-    def __init__(self, inner: httpx.BaseTransport) -> None:
+    def __init__(self, inner: httpx.HTTPTransport) -> None:
         self._inner = inner
 
     def handle_request(self, request: httpx.Request) -> httpx.Response:
@@ -34,6 +37,11 @@ class _CookielessTransport(httpx.BaseTransport):
         if "set-cookie" in response.headers:
             del response.headers["set-cookie"]
         return response
+
+    def close(self) -> None:
+        # The base class default is a no-op, so without this a close would leave the inner
+        # connection pool open while appearing to have shut it down.
+        self._inner.close()
 
 
 # The pool has to cover every outbound request in flight at once, or a turn waits for a
@@ -55,13 +63,15 @@ _CLIENT = httpx.Client(
 )
 
 # A pooled client can hand out a connection the peer closed between two requests, which surfaces
-# as a protocol error rather than a network error. To every caller here it means what a network
-# error means: the request produced no answer. Proxy and unsupported-protocol errors are not in
-# this set — those are configuration faults and must not be classified as a dependency failure.
+# as a remote protocol error rather than a network error. To every caller here it means what a
+# network error means: the request produced no answer. This names RemoteProtocolError and not its
+# base class: the sibling LocalProtocolError is this service violating HTTP itself, and proxy and
+# unsupported-protocol errors are configuration faults. None of those is a dependency failure and
+# none may be reported as one.
 TRANSPORT_FAILURES: tuple[type[Exception], ...] = (
     httpx.TimeoutException,
     httpx.NetworkError,
-    httpx.ProtocolError,
+    httpx.RemoteProtocolError,
 )
 
 

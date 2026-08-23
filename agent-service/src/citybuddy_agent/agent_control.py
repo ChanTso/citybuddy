@@ -1011,7 +1011,7 @@ class ToolAdapter:
                 )
         except httpx.TimeoutException:
             return self._deny(name, "timeout", events)
-        except (httpx.NetworkError, httpx.ProtocolError):
+        except (httpx.NetworkError, httpx.RemoteProtocolError):
             return self._deny(name, "tool_unavailable", events)
         except ActionJsonError as exception:
             raise ToolBoundaryFailure(
@@ -1178,7 +1178,7 @@ class ToolAdapter:
                     reason="ACTION_PREPARATION_COMMERCE_TIMEOUT",
                     detail="Action preparation unavailable",
                 ) from exception
-            except (httpx.NetworkError, httpx.ProtocolError) as exception:
+            except (httpx.NetworkError, httpx.RemoteProtocolError) as exception:
                 if attempt == 0:
                     continue
                 raise ToolBoundaryFailure(

@@ -70,9 +70,19 @@ service's shape.
 8. **Before and after are measured in one sitting.** The before column in §1 is not the original
    run from the day before; it is a fresh baseline taken from the unmodified code on the same
    host, immediately before the after pass, because host state moves enough between days to be
-   the weakest link in a comparison. The original run is still in `../results/` under the
-   unsuffixed labels, and it agrees with the fresh baseline: 50 req/s at p99 36.5 ms against
-   50.1 ms for chat, and 126 % median agent CPU at 10 req/s against 126 % for retrieval.
+   the weakest link in a comparison. The original runs are still in `../results/`:
+   `agent_chat_steps.txt` gives 50 req/s at p99 36.5 ms against the fresh baseline's 50.1 ms, and
+   `agent_retrieval_repeat_cpu_by_step.txt` gives 126 % median agent CPU at 10 req/s against the
+   fresh baseline's 126 %.
+9. **One of the retrieval baselines is a counterexample, and it is kept.** `agent_retrieval_*`
+   without a suffix is a third retrieval ladder that **collapsed at 10 req/s** — 610 % median
+   agent CPU, p99 24.8 s, 223 of 300 measured — where both `agent_retrieval_repeat_*` and the
+   fresh `agent_retrieval_before_*` served that rate cleanly at p99 237 ms and 222 ms. Same
+   fixture, same script, different run. So the retrieval before column in §1 is a rate that held
+   on two of three attempts rather than one that always holds, and the knee is sharp enough that
+   the same rate can land on either side of it. That cuts both ways here: it makes the retrieval
+   before column the optimistic reading of the old behaviour, which understates rather than
+   overstates the improvement.
 
 ## Results
 
@@ -136,8 +146,9 @@ fusion, rerank, then the closing model call:
 | 30 | p99 | 18445.8 ms | **11930.4 ms** |
 | | outcomes | 511 pending, 169 HTTP 503; 22.7/s served | 669 pending, 60 HTTP 503, 5 HTTP 429; 24.5/s served |
 
-The sporadic HTTP 502 on the preparation path is not caused by this change and is not
-load-dependent — it appears once in the unmodified baseline too. It is written up under
+The sporadic HTTP 502 on the preparation path is not load-dependent and appears in the unmodified
+baseline too, so the shared client did not create it — but the after ladders produced more of
+them, and that is unresolved. It is written up under
 [three things found while building the fixture](#three-things-found-while-building-the-fixture).
 Because it is present on both sides, the serving rates below use shedding — HTTP 429 and 503 —
 as the collapse signal rather than "no error of any kind".
@@ -172,11 +183,15 @@ disagree: the main after-ladder served it clean at p99 159.2 ms with 147 peak My
 the extension ladder shed 8 of 2001, and a third run served it clean at p99 40.5 ms with 135
 peak. The honest reading is 75 req/s clean and 100 req/s marginal, not "serves 100".
 
-That third run is also a check on the after column itself. The cookie-discarding transport
-described in §3 was added after these ladders had been taken, so the chat ladder was run again
-against the merged code (`../results/agent_chat_recheck_after_steps.txt`): p99 19.1 ms at
-50 req/s against 20.2, 27.3 ms at 75 against 31.3, and every step clean. It reproduces, so the
-after column describes the code that shipped and not an intermediate version of it.
+That third run is also a check on the after column itself. The cookie-discarding transport in §3
+was added after these ladders had been taken, so the chat ladder was run again against the merged
+code (`../results/agent_chat_recheck_after_steps.txt`): p99 19.1 ms at 50 req/s against 20.2,
+27.3 ms at 75 against 31.3, and every step clean. **Only the chat ladder was re-run.** The
+retrieval and preparation columns, every CPU table in §2, all six profiles in §3 and the
+connection figures in §4 were taken against the code as it stood before that transport was added.
+The transport adds one dictionary membership test per response, on responses that never carry the
+header, and the chat re-run shows no effect — but that is one ladder of three, so the scope of
+the check is stated rather than generalised.
 
 **The failure mode changed as much as the rate did.** Before, one step past the knee meant p99 in
 seconds and the agent burning five to six cores. After, chat at 150 req/s — twice the old knee —
@@ -240,15 +255,26 @@ Throughput stops rising, latency absorbs the rest, and every dependency has capa
 Before the change the ceiling was the agent's own wasted CPU; after it, the ceiling is the agent
 process itself.
 
-The leading explanation is that one CPython process is the unit that saturates: the endpoints are
-sync handlers on AnyIO's 40-thread pool, and forty threads contending for one interpreter lock
-produce exactly this shape — a little over one core of aggregate progress, with the extra
-fraction coming from C extensions and syscalls that release the lock. The profile in §3 is
-consistent with it: after the fix, 11.5 % of on-CPU samples sit in the httpcore connection-pool
-lock. **This is a reading, not a measurement.** The decisive test is cheap and has not been run:
-serve the same ladders from N uvicorn worker processes and see whether the plateau moves with N.
-Until that is run, the honest statement is that the ceiling is the agent process and not any
-dependency it talks to.
+**What saturates inside the process is not established here, and there are two candidates.** The
+first is the interpreter lock: the endpoints are sync handlers on AnyIO's 40-thread pool, and
+forty threads contending for one GIL produce roughly this shape — a little over one core of
+aggregate progress, the excess coming from C extensions and syscalls that release it.
+
+The second is the connection pool this change introduced. In the retrieval profile at concurrency
+8, 11.5 % of on-CPU samples sit in one httpcore lock, and they split almost exactly in half
+between taking a connection out of the pool (174 samples at `connection_pool.py:218`) and putting
+one back (173 at `:416`). That is contention on a single shared mutex, and §3's claim that the
+pool cannot become a new queue is narrower than it sounds: it is about connection *count*, which
+never binds at 48 against 40 threads, and says nothing about the lock that guards the pool.
+
+**Both are readings, not measurements**, and the evidence available here does not separate them —
+the pool lock is where the samples are, but samples pile up at whichever lock is contended and
+that does not make it the cause. Two cheap experiments would: serve the same ladders from N
+uvicorn worker processes and see whether the plateau moves with N, which separates
+process-from-everything-else; and vary the pool between one shared client and one per dependency,
+which separates the pool mutex from the GIL. Neither has been run. What the measurement does
+support is only the outer claim: the ceiling is the agent process, not any dependency it talks
+to.
 
 ### 3. Most of the agent's on-CPU time built TLS trust stores for plaintext URLs
 
@@ -275,7 +301,7 @@ Concurrency 1 is at or below where each path sat at the rate it served, and conc
 past every knee. The share was dominant in both, so it was not an artifact of overload.
 
 **The fix** is [`http_client.py`](../../agent-service/src/citybuddy_agent/http_client.py): one
-process-wide `httpx.Client`, with the nine call sites routed through it. Two details matter for
+process-wide `httpx.Client`, with the nine call sites routed through it. Three details matter for
 reading the numbers below.
 
 The pool is sized at 48 connections, above the 40-thread AnyIO pool that Starlette runs the sync
@@ -284,9 +310,17 @@ handlers can reach and the pool cannot become a new queue — otherwise the afte
 measuring the new pool limit rather than the change.
 
 A pooled connection can be closed by the peer between two requests, which arrives as
-`httpx.ProtocolError` rather than `httpx.NetworkError`, so the transport-failure classification
-now includes it. Proxy and unsupported-protocol errors are deliberately left out: those are
-configuration faults and must not be reported as a dependency failure.
+`httpx.RemoteProtocolError` rather than `httpx.NetworkError`, so the transport-failure
+classification now includes it. Its base class is deliberately not used: the sibling
+`LocalProtocolError` is this service violating HTTP itself, and proxy and unsupported-protocol
+errors are configuration faults. None of those is a dependency failure.
+
+A shared client also carries cookies between requests, where a client built per call was
+discarded along with anything it had picked up. The agent reaches commerce and auth for many
+different users with one just-in-time token per request, so a stored cookie would travel from one
+user's request into another's. None of the four boundaries sets a cookie today, so this was
+latent rather than live; the client discards them in its transport so that staying true is not a
+precondition for the change.
 
 Re-profiled after the change, same script, same concurrencies
 (`../results/agent_pyspy_*_after_c*.txt`, all six with
@@ -328,14 +362,18 @@ wasted CPU was irrelevant to where serving stopped.
 ### 4. The connection limit decides how overload fails, and now it decides it later
 
 The agent's conversation store opens a **fresh `pymysql.connect` per persistence call and pools
-nothing** (`conversation.py:1205`, six call sites). This change does not touch that layer, and the
-measurement confirms it: on the two paths where neither pass shed anything, connections opened per
-measured request are unchanged.
+nothing** (`conversation.py:1205`, six call sites). This change does not touch that layer, and
+connections opened per measured request over a whole ladder are unchanged:
 
 | Path | before | after |
 |---|---:|---:|
 | Knowledge retrieval | 5.21 | 5.18 |
 | Refund preparation | 6.09 | 6.09 |
+
+Both are whole-ladder totals divided by whole-ladder measured requests, and every one of these
+four ladders contains steps that shed or failed to measure — a rejected request does less database
+work than a completed turn, so these are a coarse check that the layer is untouched, not a
+per-turn cost.
 
 What changed is when the limit is reached. A shorter turn holds its connections for less time, so
 the same arrival rate keeps fewer of them open at once
@@ -412,13 +450,22 @@ of preparations end `ACTION_PREPARATION_RESPONSE_INVALID` and HTTP 502
 (`agent_control.py`, the handler around `strict_json_object` and
 `PreparedActionResponse.model_validate`): commerce answered 200 or 201, and the agent could not
 turn that body into the expected document. It is not load-dependent — it appears at 5 req/s as
-readily as at 20 — and it is **not** caused by the connection reuse in §3, because the unmodified
-baseline produces it too. Counts across three ladders of about 2,130 preparations each: 0, 1 and
-5. That spread is what a low per-request probability looks like at these sample sizes, and it is
-too coarse to say whether pooling changed the rate. What it is not is new. The underlying cause
-is unresolved; the evidence is the outcome column of
-`../results/agent_prepare_before_steps.txt` and `agent_prepare_after_steps.txt`, and it deserves
-its own investigation against a commerce instance logging the response it actually sent.
+readily as at 20, and it is not *created* by the connection reuse in §3, because unmodified code
+produces it. But it is more frequent after the change, and that is not resolved here. Four
+ladders, counted from the outcome columns of `../results/agent_prepare_*_steps.txt`:
+
+| Code | HTTP 502 | preparations measured | rate |
+|---|---:|---:|---:|
+| before (`agent_prepare_steps.txt`, `agent_prepare_before_steps.txt`) | 1 | 4,263 | 1 in 4,263 |
+| after (`agent_prepare_after_steps.txt`, `agent_prepare_after2_steps.txt`) | **8** | 4,475 | **1 in 559** |
+
+Conditioning on the nine events observed, a split this lopsided has probability 0.023 under an
+unchanged rate. Nine events, one comparison and no identified mechanism is not enough to call it
+established, and an earlier draft of this document called it noise on the strength of the first
+three ladders alone — the fourth is what makes that untenable. The honest position is that the
+failure exists without this change and may well be more likely with it, and that the change ships
+with the question open. Settling it needs more ladders on both sides, or a commerce instance
+logging the response body it actually sent.
 
 **The default attempt budget cannot fit a successful retrieval turn.** This one is read from the
 code, not observed in these runs — no `budget_exhausted` appears in any committed result, because
