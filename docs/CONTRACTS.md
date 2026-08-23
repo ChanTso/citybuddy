@@ -20,9 +20,9 @@ The target service set is:
 |---|---|---|
 | `auth-service` | Java 21 / Spring Boot 3.5 | Login, RS256 user tokens, service-authenticated token exchange, OBO tokens, JWKS publication and key rotation, and evaluation-only test identities. |
 | `commerce-service` | Java 21 / Spring Boot 3.5 | Products, inventory, orders, seckill admission and ordering, mock payment, refund, support tickets, CRM and FAQ truth, internal tool APIs, and evaluation-only state APIs. |
-| `agent-service` | Python 3.11 / FastAPI / Pydantic | Customer-support APIs, a single ReAct agent, deterministic control signals, model policy, tool mediation, local PendingAction preparation/clarification/decline/expiry, retrieval, safety, SSE egress, and authoritative support evidence. Agent successful confirmation is vNext, not part of the current portfolio route. |
+| `agent-service` | Python 3.11 / FastAPI / Pydantic | Customer-support APIs, a single ReAct agent, deterministic control signals, model policy, tool mediation, local PendingAction preparation/clarification/decline/expiry, retrieval, safety, SSE egress, authoritative support evidence, and confirmation of a prepared action with the receipt projected from commerce truth. |
 | `knowledge-indexer` | Python 3.11 | Asynchronous FAQ and product indexing, source-version ordering, tombstones, rebuilds, and versioned Elasticsearch alias changes. RocketMQ consumption remains gated by the Python client spike. |
-| `web` | React / TypeScript / Vite | A minimal portfolio demonstration surface for login, products, seckill reservation status, support chat, and PendingAction preparation/clarification/decline/expiry. It does not render successful confirmation or receipt state. |
+| `web` | React / TypeScript / Vite | A minimal portfolio demonstration surface for login, products, seckill reservation status, support chat, and the full PendingAction lifecycle including confirmation and the receipt identifier the server returned. |
 | `litellm-proxy` | LiteLLM Proxy | OpenAI-compatible provider access, key isolation, rate limiting, same-tier provider failover, one bounded network retry, and usage/cost records. It never makes business-tier routing decisions. |
 
 A responsibility listed here describes the designed boundary. It is not by itself an
@@ -197,8 +197,7 @@ Token classes are distinguished explicitly by a token-purpose/type claim or an e
 
 ### 4.8 Explicit non-goals for the current mainline
 
-The current route does not include Agent successful confirmation, Agent ActionReceipt projection,
-`action_completed` Turn commit, receipt cards, MemoryPacker summary/watermarks, the CB-130 PII/prompt
+The current route does not include MemoryPacker summary/watermarks, the CB-130 PII/prompt
 lane, handoff tickets, failure-candidate export, multimodal input, image/audio/video storage, a full
 shopping site or cart, a multi-page commerce product, a full human-agent workstation, multi-agent
 orchestration, a decomposer model, long-term vector memory, a second vector database, a service
@@ -293,7 +292,7 @@ Paths below are stable contract families. Full request/response fields are defer
 | `commerce-service` → `auth-service` | `POST /internal/eval/test-principals/provision` | Dedicated service authentication for `commerce-service`; evaluation profile only | Sandbox id, case correlation, TTL, minimum test-subject attributes, idempotency key | Creates or returns the same TTL-bound provisioning record and opaque test-user handle; returns no credential | Invalid service identity, conflicting duplicate, invalid TTL/subject, dead/revoked correlation, or production profile rejects | `CB-100` |
 | `commerce-service` → `auth-service` | `POST /internal/eval/test-principals/{handle}/revoke` | Dedicated service authentication for `commerce-service`; evaluation profile only | Opaque handle, sandbox/case correlation where required, idempotency key | Idempotently revokes or confirms invalidation of the auth-owned provisioning record | Any other service identity, mismatched handle/correlation, invalid credential, or production profile rejects | `CB-100` |
 | Authorized evaluator → `auth-service` | `POST /auth/eval/test-token` | Independent evaluation API credential; evaluation profile only | `X-Eval-Sandbox-Id`, opaque test-user handle; handle must match an unexpired auth-owned provisioning record | Returns an explicitly typed test direct-user JWT carrying the bound sandbox claim | Arbitrary sandbox id, wrong handle, expired/revoked record, mismatch, invalid credential, or production profile rejects | `CB-100` |
-| `web` or evaluator → `agent-service` | `POST /api/chat` | Direct user JWT | Fixed issuer/user-facing audience/type, principal/permission; `X-Session-Id` support session owned by user; trace headers; eval also supplies matching sandbox header | Returns one complete response; an exact confirmation commits the action and returns `action_completed` with the `receiptId` of the stored receipt projection | Wrong issuer/audience/type, forged/cross-user support session, sandbox mismatch, policy block, or exhausted attempts rejects | conversation lifecycle in `CB-080`; bounded control in `CB-081`; eval enforcement in `CB-101`; action reference/local decisions in `CB-122`; CB-123 receipt integration retained only as blocked vNext design |
+| `web` or evaluator → `agent-service` | `POST /api/chat` | Direct user JWT | Fixed issuer/user-facing audience/type, principal/permission; `X-Session-Id` support session owned by user; trace headers; eval also supplies matching sandbox header | Returns one complete response; an exact confirmation commits the action and returns `action_completed` with the `receiptId` of the stored receipt projection | Wrong issuer/audience/type, forged/cross-user support session, sandbox mismatch, policy block, or exhausted attempts rejects | conversation lifecycle in `CB-080`; bounded control in `CB-081`; eval enforcement in `CB-101`; action reference, claim, and receipt projection in `CB-122` |
 | `web` or evaluator → `agent-service` | `POST /api/chat/stream` | Direct user JWT | Same direct-user and support-session rules as `/api/chat` | SSE emits `token`, `done`, `error`, and `action_receipt`; a receipt is projected from durable truth, leads the stream, and appears only with an `action_completed` terminal | Same identity/session/sandbox failures; no raw tool/retrieval output or synthetic receipt | `CB-082`; local action evidence in `CB-122` |
 | `web` → `agent-service` | `POST /api/feedback` | Direct user JWT | User principal, support session, trace; ownership must match persisted support evidence | Persists authorized feedback in `cs_db` | Wrong issuer/audience/type, unknown trace, forged/cross-user session, or ownership failure rejects | `CB-082` |
 | Authorized evaluator → `agent-service` | `GET /api/eval/evidence/{traceId}` | Independent evaluation API credential; evaluation profile only | Sandbox and trace must be associated | Returns authoritative allowed support evidence from `cs_db` | Production not found; cross-sandbox/unknown trace/invalid credential rejects | `CB-103` |
@@ -453,7 +452,7 @@ sequenceDiagram
             C-->>M: ROLLBACK
         else Marker absent or temporarily indeterminate
             C-->>M: UNKNOWN
-            Note over M,C: UNKNOWN is intermediate only. Broker timeout, check interval, and maximum check count define the terminal boundary; the application cannot rely on unlimited UNKNOWN.
+            Note over M,C: UNKNOWN is intermediate only. Broker timeout, check interval, and maximum check count define the terminal boundary, so the application cannot rely on unlimited UNKNOWN.
         end
     end
 ```
@@ -462,11 +461,10 @@ sequenceDiagram
 
 ### 7.3 PendingAction, atomic confirmation, ActionReceipt, and retry boundary
 
-The diagram below retains the complete vNext end-state boundary. In the current portfolio route,
-CB-118 implements the Commerce prepare/confirm/ActionReceipt transaction and CB-122 implements only
-Agent preparation, clarification, decline, and expiry. The Agent confirmation, local receipt/event
-projection, `action_completed` turn commit, and public receipt path shown below are not implemented
-and are not scheduled in the current route.
+The whole of this diagram is implemented. Commerce owns the prepare/confirm/ActionReceipt
+transaction; the agent claims the reference in `cs_db` before calling commerce, then projects the
+receipt and commits the `action_completed` turn in the transaction that resolves the reference.
+
 
 ```mermaid
 sequenceDiagram
@@ -487,6 +485,7 @@ sequenceDiagram
         Note over G,C: No business mutation is executed
     else User sends confirmation text
         U->>G: Confirm
+        G->>E: Claim the reference, PENDING to CONFIRMING, in its own transaction
         G->>C: Confirm pending_action_id with OBO
         C->>D: Begin one business transaction
         D->>D: Validate owner, scope, args hash, resource version, expiry, and unconsumed state
@@ -501,10 +500,10 @@ sequenceDiagram
             C-->>G: Authoritative ActionReceipt
             G->>E: Persist receipt projection and turn evidence
             G-->>U: SSE action_receipt, then explanation
-            opt Model or network retry after the commit point
-                G->>G: Regenerate explanation from stored receipt
-                Note over G,C: No second commerce execution is allowed
-                G-->>U: token and done events only
+            opt Repeat of the same request after the commit point
+                G->>E: Read the stored turn and receipt projection
+                Note over G,C: No model call and no second commerce execution
+                G-->>U: The stored turn, or the same receipt then explanation on SSE
             end
         end
     end
@@ -529,12 +528,12 @@ sequenceDiagram
 | Risk | Guardrail and owner |
 |---|---|
 | Dependency/version drift | Each owning slice pins exact patches and image digests in build files/lockfiles. Markdown keeps only the compatibility boundary. Renovation is accepted only with real build/contract tests. |
-| Retry amplification across agent, proxy, HTTP, and MQ | One bounded attempt budget is propagated. `ModelRouter` owns tier changes; LiteLLM gets at most one transient/network retry and same-tier fallback. Commerce-side side-effect retries return existing results under CB-118; Agent successful confirmation retry is outside the current route. Owned by `CB-081` and `CB-118`. |
+| Retry amplification across agent, proxy, HTTP, and MQ | One bounded attempt budget is propagated. `ModelRouter` owns tier changes; LiteLLM gets at most one transient/network retry and same-tier fallback. Commerce-side side-effect retries return existing results under CB-118. An Agent confirmation retry re-enters commerce only from a claimed reference and replays the committed receipt; a repeated idempotency key replays the stored turn without reaching commerce at all. Owned by `CB-081`, `CB-118`, and `CB-122`. |
 | Redis or Elasticsearch treated as business truth | Contract tests and reconciliation always compare against MySQL. User-visible order/action success requires durable MySQL state or ActionReceipt. Owned by transaction slices. |
 | Cross-database or cross-service data leakage | Bootstrap/migration/runtime identity separation, `auth_app`/`commerce_app`/`agent_app` grants, no cross-database joins, API-only boundaries, token-derived ownership, private data excluded from RAG, and staged negative tests in `CB-010`, `CB-020`, `CB-030`, and later agent migrations. |
 | Evaluation sandbox leakage, orphaned test identity, or late asynchronous effects | Commerce-orchestrated auth provisioning/revoke, opaque TTL-bound handles, idempotent normal completion, fail-closed activation/compensation, TTL/janitor backstop, header/claim equality, ACTIVE/DEAD registry, SQL/repository filters, sandbox-scoped evaluation reads, introduction-point consumer liveness checks, and sandbox-bound callbacks. Identity, lifecycle, reads, zero-carrier baseline, and callbacks are owned by `CB-100` through `CB-105`; every future slice introducing an evaluation-reachable asynchronous carrier owns its guard. |
-| Model text contradicts action state | Commerce ActionReceipt remains authoritative, but the current Agent route has no receipt projection. `token` remains non-authoritative explanation, the bounded action-claim lexicon remains defense in depth, and current clients render no successful action/receipt status. Owned in the current route by `CB-082` and the CB-140 no-fabrication boundary. |
-| Prepared sensitive action lacks Agent success closure | A sensitive action can be prepared, clarified, declined, or expired through Agent, but successful Agent confirmation and local ActionReceipt/Turn closure are not part of the current portfolio route. Commerce CB-118 authority remains available behind its verified boundary; Agent CB-122 local state must never be presented as successful execution. |
+| Model text contradicts action state | Commerce ActionReceipt remains authoritative. `token` remains non-authoritative explanation, the bounded action-claim lexicon remains defense in depth, and a client renders successful action status only from a projected receipt. Owned by `CB-082` and the CB-140 no-fabrication boundary. |
+| A committed receipt is read as settled money | The receipt proves the refund request is durably recorded and owned by commerce. The mock provider never advances it: `result_state` is fixed at `REQUESTED` and `refunded_amount_minor` stays 0. Client copy and documentation state the request, not the settlement. |
 | Private or provider credentials in repository/CI | Environment/secret injection, safe examples, redaction tests, Gitleaks, deterministic model fakes, and no real provider key in CI. Owned from `CB-000` onward. |
 | Evidence or observability divergence | `commerce_db` and `cs_db` remain authoritative for their domains; optional Langfuse tracing is a mirror and may degrade to a no-op sink. Owned by `CB-080`, `CB-102`, `CB-103`, and `CB-150`. |
 
