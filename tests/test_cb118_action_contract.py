@@ -92,6 +92,15 @@ def test_openapi_exposes_only_closed_prepare_and_confirm_shapes() -> None:
     assert pending["properties"]["requiredScope"]["const"] == "refund:create"
     assert pending["properties"]["sandboxId"]["type"] == ["string", "null"]
     assert pending["properties"]["targetVersion"]["minimum"] == 1
+    timestamp_pattern = (
+        r"^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:"
+        r"[0-9]{2}\.[0-9]{6}Z$"
+    )
+    assert pending["properties"]["expiresAt"] == {
+        "type": "string",
+        "format": "date-time",
+        "pattern": timestamp_pattern,
+    }
     for private in (
         "paymentAttemptId",
         "orderKind",
@@ -104,6 +113,11 @@ def test_openapi_exposes_only_closed_prepare_and_confirm_shapes() -> None:
     receipt = document["components"]["schemas"]["ActionReceipt"]
     assert receipt["additionalProperties"] is False
     assert receipt["properties"]["status"]["const"] == "REQUESTED"
+    assert receipt["properties"]["committedAt"] == {
+        "type": "string",
+        "format": "date-time",
+        "pattern": timestamp_pattern,
+    }
     serialized = json.dumps(
         {
             "action_error": document["components"]["schemas"]["ActionError"],

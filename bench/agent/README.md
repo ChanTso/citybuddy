@@ -146,12 +146,12 @@ fusion, rerank, then the closing model call:
 | 30 | p99 | 18445.8 ms | **11930.4 ms** |
 | | outcomes | 511 pending, 169 HTTP 503; 22.7/s served | 669 pending, 60 HTTP 503, 5 HTTP 429; 24.5/s served |
 
-The sporadic HTTP 502 on the preparation path is not load-dependent and appears in the unmodified
-baseline too, so the shared client did not create it — but the after ladders produced more of
-them, and that is unresolved. It is written up under
+These HTTP 502s are historical observations from before commerce pinned action timestamps to six
+UTC fractional digits. The failure was not load-dependent or created by the shared client; its
+timestamp-format mechanism and fix are written up under
 [three things found while building the fixture](#three-things-found-while-building-the-fixture).
-Because it is present on both sides, the serving rates below use shedding — HTTP 429 and 503 —
-as the collapse signal rather than "no error of any kind".
+Because the measured code produced it on both sides, the serving rates below use shedding — HTTP
+429 and 503 — as the collapse signal rather than "no error of any kind".
 
 The highest step where nothing was shed:
 
@@ -445,28 +445,29 @@ committed artifact here records the status, so treat it as a lead to confirm rat
 measured result. The fixture builder settles payments serially to avoid the deadlock
 deterministically rather than retrying through it.
 
-**A refund preparation sporadically fails to parse its own commerce response.** A small fraction
-of preparations end `ACTION_PREPARATION_RESPONSE_INVALID` and HTTP 502
+**The sporadic refund-preparation HTTP 502 was a timestamp-format mismatch.** A small fraction of
+preparations ended `ACTION_PREPARATION_RESPONSE_INVALID` and HTTP 502
 (`agent_control.py`, the handler around `strict_json_object` and
 `PreparedActionResponse.model_validate`): commerce answered 200 or 201, and the agent could not
-turn that body into the expected document. It is not load-dependent — it appears at 5 req/s as
-readily as at 20, and it is not *created* by the connection reuse in §3, because unmodified code
-produces it. But it is more frequent after the change, and that is not resolved here. Four
-ladders, counted from the outcome columns of `../results/agent_prepare_*_steps.txt`:
+turn that body into the expected document. Commerce stores microseconds, but Jackson's default
+`Instant` rendering uses fractional digits in groups of three. A microsecond timestamp whose last
+three digits are zero is therefore rendered with milliseconds (`.123Z`) while the agent's action
+boundary deliberately requires canonical UTC microseconds (`.123000Z`). The `PendingAction` is
+already durable when that response is rejected. This is independent of load and of connection
+reuse. Four historical ladders, counted from the outcome columns of
+`../results/agent_prepare_*_steps.txt`:
 
 | Code | HTTP 502 | preparations measured | rate |
 |---|---:|---:|---:|
 | before (`agent_prepare_steps.txt`, `agent_prepare_before_steps.txt`) | 1 | 4,263 | 1 in 4,263 |
 | after (`agent_prepare_after_steps.txt`, `agent_prepare_after2_steps.txt`) | **8** | 4,475 | **1 in 559** |
 
-Conditioning on the nine events observed, a split this lopsided has probability 0.023 under an
-unchanged rate. Nine events, one comparison and no identified mechanism is not enough to call it
-established, and an earlier draft of this document called it noise on the strength of the first
-three ladders alone — the fourth is what makes that untenable. The honest position is that the
-failure exists without this change and may well be more likely with it, and that the change ships
-with the question open. Settling it needs more ladders on both sides, or a commerce instance
-logging the response body it actually sent. Tracked as
-[issue 93](https://github.com/ChanTso/citybuddy/issues/93).
+Across both columns the observed rate is 9 in 8,738, or 1 in 971, consistent with one affected
+microsecond value in every 1,000. The before/after split was real evidence that the failure could
+not be dismissed, but it was not evidence of a client-reuse mechanism. Commerce now renders both
+`expiresAt` and the receipt's identically strict `committedAt` with exactly six UTC fractional
+digits. Controller regressions use millisecond-aligned instants, so the former variable-width
+rendering fails deterministically.
 
 **The former default attempt budget could not fit a successful retrieval turn.** In
 `knowledge.py`, `search` resolves the alias, validates the mapping, and then runs one BM25 and one

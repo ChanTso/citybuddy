@@ -228,14 +228,16 @@ handling, and human handoff are out of scope. The payment and refund providers a
 committed receipt means the refund request is durably recorded and owned by commerce, not that
 money moved.
 
-Two known defects, neither hidden. Refund preparation sporadically fails to parse its commerce
-response — 8 occurrences in 4,475 preparations of the shipped code, against 1 in 4,263 before it,
-a difference nine events cannot settle and a mechanism nobody has identified yet — tracked as
-[issue #93](https://github.com/ChanTso/citybuddy/issues/93). And settling two payments in parallel
-deadlocks: the callback's attempt lookup and another order's payment-start lookup scan the same
-rows under `FOR UPDATE`, InnoDB rolls the start back, and the start endpoint answers 500. That one
-has no issue yet; it is written up in [bench/agent/README.md](bench/agent/README.md), and it is why
-the benchmark fixture settles payments serially rather than retrying through them.
+The sporadic preparation HTTP 502 measured by the benchmark was a variable-width timestamp
+mismatch: commerce sometimes rendered millisecond-aligned instants with three fractional digits,
+while the agent requires canonical six-digit UTC microseconds. Commerce now pins both preparation
+expiry and receipt commit time to that wire format; the historical counts and mechanism remain in
+[bench/agent/README.md](bench/agent/README.md).
+
+One known defect remains. Settling two payments in parallel deadlocks: the callback's attempt
+lookup and another order's payment-start lookup scan the same rows under `FOR UPDATE`, InnoDB rolls
+the start back, and the start endpoint answers 500. It is why the benchmark fixture settles
+payments serially rather than retrying through them.
 
 Development rules are in [AGENTS.md](AGENTS.md). Retired process records are in
 [docs/archive/](docs/archive/README.md).
