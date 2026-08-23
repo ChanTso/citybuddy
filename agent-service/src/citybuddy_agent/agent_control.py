@@ -1270,10 +1270,13 @@ class ToolAdapter:
             # not-owned action are all permanent: reporting them as an unavailable dependency
             # would invite a retry that can never succeed.
             if response.status_code in {400, 401, 403, 404, 409, 422}:
+                # A conflict rather than an outage, so the caller is not invited to retry
+                # something that cannot succeed. The public text stays the single fixed string:
+                # which kind of refusal it was is server-only.
                 raise ToolBoundaryFailure(
                     status_code=409,
                     reason=reason,
-                    detail="Action confirmation was refused",
+                    detail="Action confirmation unavailable",
                 )
             raise ToolBoundaryFailure(
                 status_code=429 if response.status_code == 429 else 503,
