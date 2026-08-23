@@ -1,0 +1,125 @@
+Order-idempotency parallel-creation acceptance
+==============================================
+
+Date: 2026-08-24 Australia/Perth (2026-08-23 UTC in MySQL)
+Code boundary: codex/fix-order-idempotency-deadlock candidate based on main f94d273
+Host: Apple M4, 10 cores, 24 GB RAM
+Docker allocation: 8 CPUs, 14 GB RAM
+Services: local Docker MySQL 8.4.10, Redis, Elasticsearch, RocketMQ; current-branch auth and commerce containers
+Commerce limit: 4 CPUs, Hikari maximum pool size 64
+Workload: 6,000 unique bench users, one unique standard-order intent per user, four workers
+Measured window: each worker logs in its user and then calls POST /api/orders; the printed 16.9 seconds therefore includes login
+Excluded: user/product seeding, service startup, token pre-minting, payment, support-session creation, and agent chat
+
+Historical isolated result
+--------------------------
+
+Before this correction, the same four-worker helper eventually created all 6,000 orders in 12.9
+seconds through its bounded same-key retries, but MySQL's cumulative 1213 counter rose from 26,179
+to 26,589. The latest InnoDB graph named two INSERTs into order_idempotency, each holding a gap lock
+on a missing composite-primary-key entry and waiting for insert intention. That raw historical phase
+is also recorded in mock_payment_parallel_settlement_fix.txt because it was separated from the
+payment-settlement acceptance window.
+
+Corrected isolated result
+-------------------------
+
+The data fixture was reseeded with 6,000 users, product bench-product at stock 2,000,000 and no
+bench-user order or idempotency row. Auth and commerce were rebuilt from this code boundary. The
+agent, model and payment paths were not running. No other workload used the shared MySQL instance
+during the samples below.
+
+The helper ran:
+
+  /opt/citybuddy_payment_phase.py orders \
+    --users 6000 \
+    --state /run-data/order-idempotency-20260824-0631.json
+
+Its raw output was:
+
+  created 6000 orders in 16.9s
+
+The helper's ORDER_WORKERS constant was 4. Every user, order idempotency key and order id was
+distinct. All orders targeted bench-product, matching the historical fixture and retaining its
+product-row contention.
+
+MySQL error counters
+--------------------
+
+The exact query before and immediately after the workload was:
+
+  SELECT ERROR_NUMBER, ERROR_NAME, SUM_ERROR_RAISED, LAST_SEEN
+    FROM performance_schema.events_errors_summary_global_by_error
+   WHERE ERROR_NUMBER IN (1205, 1213)
+   ORDER BY ERROR_NUMBER;
+
+Before:
+
+  ERROR_NUMBER  ERROR_NAME             SUM_ERROR_RAISED  LAST_SEEN
+  1205          ER_LOCK_WAIT_TIMEOUT    0                 NULL
+  1213          ER_LOCK_DEADLOCK        26589             2026-08-23 21:14:19
+
+After:
+
+  ERROR_NUMBER  ERROR_NAME             SUM_ERROR_RAISED  LAST_SEEN
+  1205          ER_LOCK_WAIT_TIMEOUT    0                 NULL
+  1213          ER_LOCK_DEADLOCK        26589             2026-08-23 21:14:19
+
+Window deltas:
+
+  ER_LOCK_WAIT_TIMEOUT: 0
+  ER_LOCK_DEADLOCK: 0
+
+Commerce logs from the same window contained no Deadlock, CannotAcquireLock,
+DEPENDENCY_OBSERVATION_INDETERMINATE, or CONCURRENCY_EXHAUSTED line.
+
+Authoritative SQL and raw output
+--------------------------------
+
+  SELECT 'orders' AS metric, COUNT(*) AS value
+    FROM standard_order WHERE user_subject LIKE 'bench-user-%'
+  UNION ALL
+  SELECT 'unpaid_orders', COUNT(*)
+    FROM standard_order
+   WHERE user_subject LIKE 'bench-user-%' AND status = 'UNPAID'
+  UNION ALL
+  SELECT 'idempotency_rows', COUNT(*)
+    FROM order_idempotency WHERE user_subject LIKE 'bench-user-%'
+  UNION ALL
+  SELECT 'matched_idempotency_rows', COUNT(*)
+    FROM order_idempotency i
+    JOIN standard_order o
+      ON o.order_id = i.order_id AND o.user_subject = i.user_subject
+   WHERE i.user_subject LIKE 'bench-user-%'
+  UNION ALL
+  SELECT 'orphan_idempotency_rows', COUNT(*)
+    FROM order_idempotency i
+    LEFT JOIN standard_order o
+      ON o.order_id = i.order_id AND o.user_subject = i.user_subject
+   WHERE i.user_subject LIKE 'bench-user-%' AND o.order_id IS NULL
+  UNION ALL
+  SELECT 'order_outbox_rows', COUNT(*)
+    FROM commerce_outbox e
+    JOIN standard_order o ON o.order_id = e.aggregate_id
+   WHERE o.user_subject LIKE 'bench-user-%'
+     AND e.aggregate_type = 'STANDARD_ORDER'
+     AND e.event_type = 'STANDARD_ORDER_CREATED'
+  UNION ALL
+  SELECT 'distinct_order_users', COUNT(DISTINCT user_subject)
+    FROM standard_order WHERE user_subject LIKE 'bench-user-%'
+  UNION ALL
+  SELECT 'bench_product_stock', stock_quantity
+    FROM product WHERE product_id = 'bench-product';
+
+  metric                    value
+  orders                     6000
+  unpaid_orders              6000
+  idempotency_rows           6000
+  matched_idempotency_rows   6000
+  orphan_idempotency_rows       0
+  order_outbox_rows          6000
+  distinct_order_users       6000
+  bench_product_stock     1994000
+
+This proves the measured order-creation boundary under this workload and environment. It does not
+claim that every possible database deadlock is impossible.

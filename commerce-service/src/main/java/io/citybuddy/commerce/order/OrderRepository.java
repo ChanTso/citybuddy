@@ -18,6 +18,23 @@ public class OrderRepository {
     this.objectMapper = objectMapper;
   }
 
+  public Optional<IdempotencyRecord> findIdempotency(String user, String key) {
+    return jdbc
+        .query(
+            """
+            SELECT intent_hash, order_id
+            FROM order_idempotency
+            WHERE user_subject = ? AND idempotency_key = ?
+            """,
+            (result, row) ->
+                new IdempotencyRecord(
+                    result.getString("intent_hash"), result.getString("order_id")),
+            user,
+            key)
+        .stream()
+        .findFirst();
+  }
+
   public Optional<IdempotencyRecord> findIdempotencyForUpdate(String user, String key) {
     return jdbc
         .query(
