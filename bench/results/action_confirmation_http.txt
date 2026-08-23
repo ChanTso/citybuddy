@@ -1,0 +1,29 @@
+Agent refund confirmation, end to end against the real local topology.
+
+Produced by bench/agent/check_action_confirmation.py running inside the bench network
+namespace, against services started by bench/agent/setup_agent_bench.sh with
+AGENT_BENCH_USERS=8. auth-service, commerce-service, MySQL and Elasticsearch are the real
+local containers; the model provider is scripts/fake_litellm_server.py.
+
+One entry takes the JSON path and one takes the SSE path. Each prepares a refund against
+an order it owns, then confirms it in a second turn.
+
+== JSON path ==
+prepare: {"conversationId": "71f30ecf-54c8-469f-bd3a-ef44f514b7a1", "traceId": "9b6e47ce-a07a-455b-b072-8189b7075881", "turnId": "9d99216a-ff49-4f17-977b-ba3dbe65cd52", "reply": "Please confirm or decline the prepared refund request.", "outcome": "action_pending", "citations": [], "receiptId": null}
+confirm: {"conversationId": "71f30ecf-54c8-469f-bd3a-ef44f514b7a1", "traceId": "f00943dc-45fa-4185-a8a7-719fdc00d0a4", "turnId": "d0a27c0c-56e7-4a11-afa1-5a5303654463", "reply": "The refund request was submitted and recorded.", "outcome": "action_completed", "citations": [], "receiptId": "6301612c-ee51-46f3-8954-4626f19fc154"}
+replay of the same key returned the identical turn
+
+== stream path ==
+event: action_receipt
+data: {"sequence":1,"receiptId":"31ea9e41-0f4d-4141-903d-295003c1a8d5","status":"SUCCEEDED"}
+
+event: token
+data: {"sequence":2,"text":"The refund request was submitted and recorded."}
+
+event: done
+data: {"sequence":3,"conversationId":"8481caa2-b5c0-4620-8aa4-886b745a311c","traceId":"48c1da04-7881-41b4-9730-74b96ad8dd47","turnId":"8ea74271-3594-4dbc-addb-ff04146c54ee","outcome":"action_completed"}
+
+
+json_receipt_id=6301612c-ee51-46f3-8954-4626f19fc154
+json_session_id=-Te1lgxQKQd1TmjQP2Cv_y40mHZ93XztYgBaL6Oh1hQ
+json_order_id=11e79324-ed83-4cb4-82fc-6610a7bfbcbd

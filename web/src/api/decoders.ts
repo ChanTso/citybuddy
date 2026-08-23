@@ -40,6 +40,7 @@ export type Reservation = {
 
 export type ChatOutcome =
   | 'completed'
+  | 'action_completed'
   | 'budget_exhausted'
   | 'provider_denied'
   | 'retrieval_denied'
@@ -62,6 +63,7 @@ export type ChatResponse = {
   turnId: string;
   reply: string;
   outcome: ChatOutcome;
+  receiptId: string | null;
   citations: Citation[];
 };
 
@@ -281,6 +283,7 @@ export function decodeChatResponse(value: unknown): ChatResponse {
     'turnId',
     'reply',
     'outcome',
+    'receiptId',
     'citations',
   ]);
   if (!Array.isArray(record.citations) || record.citations.length > 3) {
@@ -293,6 +296,7 @@ export function decodeChatResponse(value: unknown): ChatResponse {
     reply: stringValue(record.reply, 0, 256),
     outcome: enumValue(record.outcome, [
       'completed',
+      'action_completed',
       'budget_exhausted',
       'provider_denied',
       'retrieval_denied',
@@ -301,6 +305,7 @@ export function decodeChatResponse(value: unknown): ChatResponse {
       'action_declined',
       'action_expired',
     ] as const),
+    receiptId: record.receiptId === null ? null : uuidValue(record.receiptId),
     citations: record.citations.map(decodeCitation),
   };
 }

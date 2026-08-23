@@ -20,8 +20,10 @@ from .actions import (
     ACTION_SCOPE,
     MAX_ACTION_PENDING_TTL_SECONDS,
     ActionJsonError,
+    ActionReceiptResponse,
     BoundedHttpResponse,
     PendingActionPayload,
+    PendingActionReference,
     PreparedActionResponse,
     RefundActionArguments,
     action_argument_commitment,
@@ -95,6 +97,20 @@ class AgentRunner(Protocol):
     ) -> AgentRunResult: ...
 
 
+class ActionConfirmer(Protocol):
+    def confirm_action(
+        self,
+        *,
+        pending: PendingActionReference,
+        direct_token: str,
+        subject: str,
+        session_id: str,
+        sandbox_id: str | None,
+        budget: AttemptBudget,
+        events: list[AgentEvent],
+    ) -> ActionReceiptResponse: ...
+
+
 class OboExchange(Protocol):
     def exchange(
         self,
@@ -146,6 +162,19 @@ TOOL_BOUNDARY_FAILURE_REASONS = frozenset(
         "ACTION_CLARIFICATION_PERSISTENCE_UNAVAILABLE",
         "AGENT_TURN_COMPLETION_PERSISTENCE_UNAVAILABLE",
         "ACTION_CONFIRMATION_UNAVAILABLE",
+        "ACTION_CONFIRMATION_IDENTITY_UNAUTHENTICATED",
+        "ACTION_CONFIRMATION_IDENTITY_FORBIDDEN",
+        "ACTION_CONFIRMATION_IDENTITY_UNAVAILABLE",
+        "ACTION_CONFIRMATION_COMMERCE_VALIDATION_REJECTED",
+        "ACTION_CONFIRMATION_COMMERCE_UNAUTHENTICATED",
+        "ACTION_CONFIRMATION_COMMERCE_FORBIDDEN",
+        "ACTION_CONFIRMATION_TARGET_NOT_FOUND",
+        "ACTION_CONFIRMATION_INTENT_CONFLICT",
+        "ACTION_CONFIRMATION_COMMERCE_UNAVAILABLE",
+        "ACTION_CONFIRMATION_COMMERCE_TIMEOUT",
+        "ACTION_CONFIRMATION_COMMERCE_INDETERMINATE",
+        "ACTION_CONFIRMATION_RESPONSE_INVALID",
+        "ACTION_CONFIRMATION_PERSISTENCE_UNAVAILABLE",
     }
 )
 
@@ -684,6 +713,10 @@ KNOWLEDGE_SEARCH_SPEC = ToolSpec(
     output_schema=KnowledgeSearchOutput,
 )
 
+# The confirmation boundary is server-owned: the model can prepare an action but may never
+# confirm one, so this names the operation for budget and events without being a ToolSpec.
+REFUND_CONFIRM_OPERATION = "actions.refund.confirm"
+
 REFUND_PREPARE_SPEC = ToolSpec(
     name="actions.refund.prepare",
     description=(
@@ -1148,6 +1181,128 @@ class ToolAdapter:
             else None,
         )
 
+    def confirm_action(
+        self,
+        *,
+        pending: PendingActionReference,
+        direct_token: str,
+        subject: str,
+        session_id: str,
+        sandbox_id: str | None,
+        budget: AttemptBudget,
+        events: list[AgentEvent],
+    ) -> ActionReceiptResponse:
+        """Commit the prepared action at commerce and return its validated receipt.
+
+        Commerce binds a confirmation to the turn and trace that prepared the action, so the
+        stored source correlation travels here rather than the confirming turn's: a confirmation
+        is a new turn, but it commits the intent recorded by the old one.
+
+        Commerce is idempotent on the PendingAction: a repeat confirm of a consumed action replays
+        its committed receipt rather than refunding twice. That is what makes a retry safe after a
+        response is lost, and it is why no local claim state is needed to reach exactly one refund.
+        """
+        budget.charge("identity_http", ACTION_SCOPE)
+        try:
+            if sandbox_id is None:
+                obo = self._obo.exchange(direct_token, subject, session_id, ACTION_SCOPE)
+            else:
+                obo = self._obo.exchange(
+                    direct_token, subject, session_id, ACTION_SCOPE, sandbox_id
+                )
+        except HTTPException as exception:
+            raise ToolBoundaryFailure(
+                status_code=503 if exception.status_code not in {401, 403} else 403,
+                reason=(
+                    "ACTION_CONFIRMATION_IDENTITY_FORBIDDEN"
+                    if exception.status_code == 403
+                    else "ACTION_CONFIRMATION_IDENTITY_UNAUTHENTICATED"
+                    if exception.status_code == 401
+                    else "ACTION_CONFIRMATION_IDENTITY_UNAVAILABLE"
+                ),
+                detail="Action confirmation unavailable",
+            ) from exception
+        except http_client.TRANSPORT_FAILURES as exception:
+            raise ToolBoundaryFailure(
+                status_code=503,
+                reason="ACTION_CONFIRMATION_IDENTITY_UNAVAILABLE",
+                detail="Action confirmation unavailable",
+            ) from exception
+
+        headers = {
+            "Authorization": f"Bearer {obo}",
+            "X-Support-Session-Id": session_id,
+            "X-Agent-Trace-Id": pending.source_trace_id,
+            "X-Agent-Turn-Id": pending.source_turn_id,
+        }
+        if sandbox_id is not None:
+            headers["X-Eval-Sandbox-Id"] = sandbox_id
+        budget.charge("tool_http", REFUND_CONFIRM_OPERATION)
+        try:
+            response = bounded_http_post(
+                f"{self._base_url}/internal/tools/actions/{pending.pending_action_id}/confirm",
+                headers=headers,
+                json={},
+                timeout=REFUND_PREPARE_SPEC.timeout_seconds,
+            )
+        except httpx.TimeoutException as exception:
+            raise ToolBoundaryFailure(
+                status_code=503,
+                reason="ACTION_CONFIRMATION_COMMERCE_TIMEOUT",
+                detail="Action confirmation unavailable",
+            ) from exception
+        except (httpx.NetworkError, httpx.RemoteProtocolError) as exception:
+            raise ToolBoundaryFailure(
+                status_code=503,
+                reason="ACTION_CONFIRMATION_COMMERCE_UNAVAILABLE",
+                detail="Action confirmation unavailable",
+            ) from exception
+        except ActionJsonError as exception:
+            raise ToolBoundaryFailure(
+                status_code=502,
+                reason="ACTION_CONFIRMATION_RESPONSE_INVALID",
+                detail="Invalid action confirmation response",
+            ) from exception
+
+        if response.status_code != 200:
+            reason = self._classify_confirm_rejection(response)
+            raise ToolBoundaryFailure(
+                status_code=429 if response.status_code == 429 else 503,
+                reason=reason,
+                detail=(
+                    "Action confirmation remains indeterminate"
+                    if response.status_code == 429
+                    else "Action confirmation unavailable"
+                ),
+            )
+        try:
+            receipt = ActionReceiptResponse.model_validate(strict_json_object(response.content))
+        except (ActionJsonError, ValidationError, ValueError, TypeError) as exception:
+            raise ToolBoundaryFailure(
+                status_code=502,
+                reason="ACTION_CONFIRMATION_RESPONSE_INVALID",
+                detail="Invalid action confirmation response",
+            ) from exception
+        if (
+            receipt.pending_action_id != pending.pending_action_id
+            or receipt.order_id != pending.order_id
+            or receipt.amount_minor != pending.amount_minor
+            or receipt.currency != pending.currency
+            or receipt.action_type != pending.action_type
+        ):
+            raise ToolBoundaryFailure(
+                status_code=502,
+                reason="ACTION_CONFIRMATION_RESPONSE_INVALID",
+                detail="Invalid action confirmation response",
+            )
+        events.append(
+            AgentEvent(
+                "TOOL_LIFECYCLE",
+                {"tool": REFUND_CONFIRM_OPERATION, "state": "succeeded"},
+            )
+        )
+        return receipt
+
     def _prepare_with_bounded_replay(
         self,
         *,
@@ -1222,6 +1377,21 @@ class ToolAdapter:
         if operation is Operation.PENDING_ACTION_PREPARE:
             return cls._prepare_reason_outcome(exception.reason)
         return OperationOutcome.ERROR
+
+    @staticmethod
+    def _classify_confirm_rejection(response: BoundedHttpResponse | httpx.Response) -> str:
+        """Name a confirmation rejection as a confirmation, never as a preparation."""
+        return {
+            400: "ACTION_CONFIRMATION_COMMERCE_VALIDATION_REJECTED",
+            401: "ACTION_CONFIRMATION_COMMERCE_UNAUTHENTICATED",
+            403: "ACTION_CONFIRMATION_COMMERCE_FORBIDDEN",
+            404: "ACTION_CONFIRMATION_TARGET_NOT_FOUND",
+            409: "ACTION_CONFIRMATION_INTENT_CONFLICT",
+            422: "ACTION_CONFIRMATION_COMMERCE_VALIDATION_REJECTED",
+            429: "ACTION_CONFIRMATION_COMMERCE_INDETERMINATE",
+            408: "ACTION_CONFIRMATION_COMMERCE_TIMEOUT",
+            504: "ACTION_CONFIRMATION_COMMERCE_TIMEOUT",
+        }.get(response.status_code, "ACTION_CONFIRMATION_COMMERCE_UNAVAILABLE")
 
     @staticmethod
     def _classify_prepare_rejection(response: BoundedHttpResponse | httpx.Response) -> str:

@@ -14,7 +14,6 @@ import type {
   Product,
   Reservation,
 } from './api/decoders';
-import { UnsupportedReceiptError } from './api/sse';
 import './app.css';
 
 type ProductState = {
@@ -45,8 +44,10 @@ type ChatIntent = {
   phase: 'sending' | 'error';
 };
 type PendingNotice = {
-  phase: 'pending' | 'declined' | 'expired';
+  phase: 'pending' | 'declined' | 'expired' | 'confirmed';
   reply: string;
+  // Shown only for a confirmed action, and only ever the identifier the server sent.
+  receiptId?: string;
 };
 
 const TERMINAL_RESERVATIONS = new Set(['REJECTED', 'ORDERED', 'CANCELLED']);
@@ -83,6 +84,7 @@ function fixedError(kind: ApiFailureKind): string {
 function outcomeLabel(outcome: ChatOutcome): string {
   return {
     completed: '回复已完成',
+    action_completed: '退款申请已提交，服务端已返回回执',
     budget_exhausted: '本次回复预算已用尽',
     provider_denied: '回复服务暂时不可用',
     retrieval_denied: '没有足够的公开资料来回答',
@@ -342,8 +344,20 @@ export function App() {
     return created.sessionId;
   }
 
-  function applyOutcome(outcome: ChatOutcome, reply: string) {
+  function applyOutcome(
+    outcome: ChatOutcome,
+    reply: string,
+    receiptId?: string | null,
+  ) {
     setChatStatus(outcomeLabel(outcome));
+    if (outcome === 'action_completed') {
+      // The receipt identifier comes from the response, never from the reply text.
+      setPending({
+        phase: 'confirmed',
+        reply,
+        ...(receiptId ? { receiptId } : {}),
+      });
+    }
     if (outcome === 'action_pending') setPending({ phase: 'pending', reply });
     if (outcome === 'action_clarification') {
       setPending((current) => (current ? { ...current, reply } : null));
@@ -391,21 +405,16 @@ export function App() {
           citations: 'citations' in result ? result.citations : undefined,
         },
       ]);
-      applyOutcome(result.outcome, result.reply);
+      applyOutcome(result.outcome, result.reply, result.receiptId);
       setChatIntent(null);
     } catch (error) {
       if (generation.current !== expectedGeneration) return;
-      if (error instanceof UnsupportedReceiptError) {
-        setChatStatus(
-          '收到当前 demo 不支持的动作结果，已停止读取；未建立任何执行状态。',
-        );
-        setChatIntent({ ...intent, phase: 'error' });
-      } else if (
+      if (
         error instanceof ApiFailure &&
         error.kind === 'conflict' &&
         isConfirmationMessage(intent.message)
       ) {
-        setChatStatus('当前 demo 不支持成功确认；敏感动作未执行。');
+        setChatStatus('确认与另一次处理冲突；请稍后重试，动作未重复执行。');
         setChatIntent(null);
       } else {
         const message = handleFailure(error);
@@ -692,25 +701,56 @@ export function App() {
                   aria-labelledby="pending-title"
                 >
                   <p className="eyebrow">BOUNDARY NOTICE</p>
-                  <h3 id="pending-title">敏感动作等待处理</h3>
+                  <h3 id="pending-title">
+                    {pending.phase === 'confirmed'
+                      ? '敏感动作已提交'
+                      : '敏感动作等待处理'}
+                  </h3>
                   <p>{pending.reply}</p>
-                  {pending.phase === 'pending' ? (
+                  {pending.phase === 'pending' && (
                     <>
                       <p>
-                        动作尚未执行。可在普通输入中补充说明，或明确拒绝；当前
-                        demo 不支持成功确认。过期状态以服务端结果为准。
+                        动作尚未执行。可在普通输入中补充说明，或明确确认或拒绝。
+                        过期状态以服务端结果为准。
                       </p>
-                      <form onSubmit={(event) => submitChat(event, 'decline')}>
-                        <button
-                          type="submit"
-                          className="danger"
-                          disabled={chatIntent?.phase === 'sending'}
+                      <div className="pending-actions">
+                        <form
+                          onSubmit={(event) => submitChat(event, 'confirm')}
                         >
-                          拒绝此动作
-                        </button>
-                      </form>
+                          <button
+                            type="submit"
+                            disabled={chatIntent?.phase === 'sending'}
+                          >
+                            确认此动作
+                          </button>
+                        </form>
+                        <form
+                          onSubmit={(event) => submitChat(event, 'decline')}
+                        >
+                          <button
+                            type="submit"
+                            className="danger"
+                            disabled={chatIntent?.phase === 'sending'}
+                          >
+                            拒绝此动作
+                          </button>
+                        </form>
+                      </div>
                     </>
-                  ) : (
+                  )}
+                  {pending.phase === 'confirmed' && (
+                    <p>
+                      服务端已记录该退款申请并返回回执
+                      {pending.receiptId ? (
+                        <>
+                          ：<code>{pending.receiptId}</code>
+                        </>
+                      ) : null}
+                      。回执证明申请已被持久记录，实际退款由服务端异步结算。
+                    </p>
+                  )}
+                  {(pending.phase === 'declined' ||
+                    pending.phase === 'expired') && (
                     <p>
                       {pending.phase === 'declined'
                         ? '服务端已返回拒绝终态；动作未执行。'

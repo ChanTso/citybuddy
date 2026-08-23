@@ -207,6 +207,67 @@ class RefundActionArguments(BaseModel):
         return value
 
 
+class ActionReceiptResponse(BaseModel):
+    """The commerce receipt for a committed action, treated as untrusted until validated."""
+
+    model_config = ConfigDict(extra="forbid", populate_by_name=True, strict=True, frozen=True)
+
+    receipt_id: str = Field(alias="receiptId", min_length=36, max_length=36)
+    pending_action_id: str = Field(alias="pendingActionId", min_length=36, max_length=36)
+    action_type: str = Field(alias="actionType", min_length=1, max_length=32)
+    # Commerce sends its own result state under the name "status". For a REFUND_REQUEST that state
+    # is REQUESTED: the request is durably recorded and settlement is asynchronous, so the money
+    # has not moved yet. Storing it under its real name keeps that distinction from being lost.
+    result_state: str = Field(alias="status", min_length=1, max_length=16)
+    order_id: str = Field(alias="orderId", min_length=36, max_length=36)
+    refund_id: str = Field(alias="refundId", min_length=36, max_length=36)
+    resource_version: int = Field(alias="resourceVersion", ge=1)
+    amount_minor: int = Field(alias="amountMinor", ge=1, le=MAX_ACTION_AMOUNT_MINOR)
+    currency: str = Field(pattern=r"^[A-Z]{3}$")
+    committed_at: datetime = Field(alias="committedAt")
+    replayed: bool
+
+    @field_validator("receipt_id", "pending_action_id", "order_id", "refund_id")
+    @classmethod
+    def canonical_uuid(cls, value: str) -> str:
+        if str(uuid.UUID(value)) != value:
+            raise ValueError("Identifier is not a canonical UUID")
+        return value
+
+    @field_validator("action_type")
+    @classmethod
+    def known_action(cls, value: str) -> str:
+        if value != "REFUND_REQUEST":
+            raise ValueError("Unknown action type")
+        return value
+
+    @field_validator("result_state")
+    @classmethod
+    def known_result_state(cls, value: str) -> str:
+        # REQUESTED is the only state commerce's enum can hold for a committed refund request.
+        # A state this agent does not know is a refund whose meaning it cannot report, so it fails
+        # closed rather than presenting an unknown outcome as a success.
+        if value != "REQUESTED":
+            raise ValueError("Receipt result state is not a known committed state")
+        return value
+
+    @field_validator("committed_at", mode="before")
+    @classmethod
+    def canonical_commit_time(cls, value: object) -> datetime:
+        # Same canonical form the prepare boundary requires: the model is strict, so the wire
+        # string is parsed here rather than coerced, and a non-canonical rendering is rejected
+        # instead of being silently normalized into local truth.
+        if not isinstance(value, str) or len(value) != 27:
+            raise ValueError("Receipt commit time must use canonical UTC microseconds")
+        try:
+            parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+        except ValueError as exception:
+            raise ValueError("Receipt commit time must be ISO-8601") from exception
+        if canonical_action_timestamp(parsed) != value:
+            raise ValueError("Receipt commit time must use canonical UTC microseconds")
+        return parsed.astimezone(UTC)
+
+
 class PreparedActionResponse(BaseModel):
     model_config = ConfigDict(extra="forbid", populate_by_name=True, strict=True, frozen=True)
 
@@ -379,7 +440,7 @@ def validate_pending_action_reference(
             or len(row[12]) != 3
             or not row[12].isalpha()
             or row[12] != row[12].upper()
-            or row[13] not in {"PENDING", "DECLINED", "EXPIRED"}
+            or row[13] not in {"PENDING", "DECLINED", "EXPIRED", "CONFIRMED"}
             or not isinstance(row[14], datetime)
             or (row[13] == "PENDING") != (row[15] is None)
             or (row[15] is not None and not isinstance(row[15], datetime))
@@ -449,6 +510,7 @@ def validate_pending_action_resolution(
     outcome = {
         "DECLINED": "action_declined",
         "EXPIRED": "action_expired",
+        "CONFIRMED": "action_completed",
     }.get(state)
     if (
         outcome is None
@@ -560,11 +622,12 @@ def validate_resolved_action_events(
     expected_session_id: str,
     expected_user_subject: str,
     pending_action_id: str,
-    outcome: Literal["action_declined", "action_expired"],
+    outcome: Literal["action_declined", "action_expired", "action_completed"],
 ) -> tuple[ActionEvidenceEvent, ...]:
     event_type, event_outcome = {
         "action_declined": ("ACTION_DECLINED", "declined"),
         "action_expired": ("ACTION_EXPIRED", "expired"),
+        "action_completed": ("ACTION_RECEIPT", "confirmed"),
     }[outcome]
     if len(rows) != 5:
         raise ActionEvidenceError("Resolved action event cardinality is inconsistent")

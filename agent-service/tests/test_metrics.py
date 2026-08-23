@@ -132,8 +132,8 @@ def test_inventory_schema_runtime_labels_and_cardinality_are_closed() -> None:
         * (len(OPERATION_BUCKETS) + 3 if metric["type"] == "histogram" else 1)
         for metric in document["metrics"]
     )
-    assert logical_upper_bound == 110
-    assert exported_upper_bound == 602
+    assert logical_upper_bound == 118
+    assert exported_upper_bound == 658
 
 
 def test_registry_allows_only_inventory_series_and_has_no_created_or_default_collectors() -> None:
@@ -150,7 +150,7 @@ def test_registry_allows_only_inventory_series_and_has_no_created_or_default_col
         metrics.record_trace_export(trace_outcome)
 
     payload = metrics.render().decode("utf-8")
-    assert len(sample_lines(payload)) == 602
+    assert len(sample_lines(payload)) == 658
     assert "_created" not in payload
     assert not re.search(r"^(?:python_gc|process_|python_info|platform)", payload, re.MULTILINE)
     for secret in (

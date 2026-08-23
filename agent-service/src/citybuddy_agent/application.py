@@ -24,8 +24,11 @@ from . import http_client
 from .actions import ConfirmationDecision, confirmation_decision
 from .agent_control import (
     TOOL_BOUNDARY_FAILURE_REASONS,
+    ActionConfirmer,
     AgentEvent,
     AgentRunner,
+    AttemptBudget,
+    AttemptBudgetExhausted,
     BoundedAgent,
     LiteLlmClient,
     ModelRouter,
@@ -354,6 +357,9 @@ class ChatResponse(BaseModel):
     reply: str
     outcome: str
     citations: tuple[CitationResponse, ...] = ()
+    # Present only for a committed action, and read from the stored projection so the non-stream
+    # client sees the same receipt the stream does.
+    receipt_id: str | None = Field(default=None, serialization_alias="receiptId")
 
 
 class FeedbackRequest(BaseModel):
@@ -466,6 +472,7 @@ def create_app(
     sessions: SessionStore | None = None,
     conversations: ConversationStore | None = None,
     agent: AgentRunner | None = None,
+    confirmer: ActionConfirmer | None = None,
     feedback: FeedbackStore | None = None,
     evidence: EvaluationEvidenceStore | None = None,
     liveness: SandboxLiveness | None = None,
@@ -565,6 +572,23 @@ def create_app(
             ),
             resolved_metrics,
         )
+        resolved_tools = ToolAdapter(
+            resolved.commerce_tools_url,
+            resolved_obo,
+            ElasticsearchKnowledgeSearch(
+                resolved.elasticsearch_url,
+                alias=resolved.knowledge_alias,
+            )
+            if resolved.elasticsearch_url
+            else None,
+            model_client,
+            load_calibration(),
+            RedisFaqCache(resolved.support_redis_url, metrics=resolved_metrics)
+            if resolved.support_redis_url
+            else None,
+            resolved_metrics,
+            resolved_trace_sink,
+        )
         resolved_agent = BoundedAgent(
             RuleRouter(),
             ModelRouter(
@@ -576,26 +600,12 @@ def create_app(
                 ProviderRoute(resolved.reranker_role_alias, resolved.reranker_provider_key),
             ),
             model_client,
-            ToolAdapter(
-                resolved.commerce_tools_url,
-                resolved_obo,
-                ElasticsearchKnowledgeSearch(
-                    resolved.elasticsearch_url,
-                    alias=resolved.knowledge_alias,
-                )
-                if resolved.elasticsearch_url
-                else None,
-                model_client,
-                load_calibration(),
-                RedisFaqCache(resolved.support_redis_url, metrics=resolved_metrics)
-                if resolved.support_redis_url
-                else None,
-                resolved_metrics,
-                resolved_trace_sink,
-            ),
+            resolved_tools,
         )
+        resolved_confirmer: ActionConfirmer | None = confirmer or resolved_tools
     else:
         resolved_agent = agent
+        resolved_confirmer = confirmer
     app.state.obo_client = resolved_obo
     app.state.agent = resolved_agent
 
@@ -728,12 +738,6 @@ def create_app(
                 detail="Service unavailable",
             ) from exception
         decision = confirmation_decision(request.message)
-        if pending is not None and decision is ConfirmationDecision.CONFIRM:
-            raise ToolBoundaryFailure(
-                status_code=409,
-                reason="ACTION_CONFIRMATION_UNAVAILABLE",
-                detail="Action confirmation unavailable",
-            )
         require_liveness(principal, token)
         try:
             start = resolved_conversations.begin_turn(
@@ -803,6 +807,70 @@ def create_app(
                                 detail="Service unavailable",
                             ) from exception
                         local_observation.outcome = OperationOutcome.DECLINED
+                        return result
+                if decision is ConfirmationDecision.CONFIRM:
+                    with OperationObservation(
+                        Operation.PENDING_ACTION_CONFIRM,
+                        resolved_metrics,
+                        resolved_trace_sink,
+                    ) as local_observation:
+                        if resolved_confirmer is None:
+                            local_observation.outcome = OperationOutcome.UNAVAILABLE
+                            raise ToolBoundaryFailure(
+                                status_code=503,
+                                reason="ACTION_CONFIRMATION_UNAVAILABLE",
+                                detail="Action confirmation unavailable",
+                            )
+                        confirm_events: list[AgentEvent] = []
+                        try:
+                            receipt = resolved_confirmer.confirm_action(
+                                pending=pending,
+                                direct_token=token,
+                                subject=principal.subject,
+                                session_id=session_id,
+                                sandbox_id=principal.sandbox_id,
+                                budget=AttemptBudget(resolved.attempt_budget, confirm_events),
+                                events=confirm_events,
+                            )
+                        except ToolBoundaryFailure as failure:
+                            local_observation.outcome = OperationOutcome.UNAVAILABLE
+                            record_action_request_failure(failure.reason)
+                            raise
+                        except AttemptBudgetExhausted as exception:
+                            local_observation.outcome = OperationOutcome.UNAVAILABLE
+                            raise ToolBoundaryFailure(
+                                status_code=503,
+                                reason="ACTION_CONFIRMATION_UNAVAILABLE",
+                                detail="Action confirmation unavailable",
+                            ) from exception
+                        try:
+                            # The refund exists in commerce from here on. A failure below leaves
+                            # the reference PENDING, and the next confirmation replays the same
+                            # commerce receipt rather than issuing a second refund.
+                            result = resolved_conversations.complete_action_confirmed(
+                                start=start,
+                                pending=pending,
+                                receipt=receipt,
+                                response_text=(
+                                    # Commerce records a refund request and settles it
+                                    # asynchronously, so this may not claim money moved.
+                                    "The refund request was submitted and recorded."
+                                ),
+                            )
+                        except ActionArbitrationConflictError:
+                            local_observation.outcome = OperationOutcome.CONFLICT
+                            raise
+                        except ConversationIntegrityError:
+                            local_observation.outcome = OperationOutcome.INVALID
+                            raise
+                        except pymysql.MySQLError as exception:
+                            local_observation.outcome = OperationOutcome.UNAVAILABLE
+                            raise ToolBoundaryFailure(
+                                status_code=503,
+                                reason="ACTION_CONFIRMATION_PERSISTENCE_UNAVAILABLE",
+                                detail="Service unavailable",
+                            ) from exception
+                        local_observation.outcome = OperationOutcome.CONFIRMED
                         return result
                 with OperationObservation(
                     Operation.PENDING_ACTION_CLARIFICATION,
@@ -1009,6 +1077,7 @@ def create_app(
                 )
                 for evidence in result.retrieval_evidence
             ),
+            receipt_id=result.receipt_id,
         )
 
     @app.post("/api/chat/stream")
