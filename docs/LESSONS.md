@@ -190,11 +190,12 @@ refunds, two consumed actions. Evidence: [#94](https://github.com/ChanTso/citybu
 
 ### Most of the agent's CPU was building TLS trust stores for `http://` URLs
 
-The first three-path latency measurement found the agent saturating at about 1.4 cores with every
-dependency idle. A sampling profile put **94.4 %** of on-CPU samples in `ssl.create_default_context`
-— 13.1 ms of CPU per construction, measured in the same container — because every outbound call
-built a new `httpx` client, and constructing one loads the system trust store whether or not the
-URL is `https://`.
+The first three-path latency measurement found the agent saturating at about 1.4 cores of the
+eight available with every dependency idle. Sampling it on the retrieval path at concurrency 8 put
+**94.4 %** of on-CPU samples in `ssl.create_default_context` — 13.1 ms of CPU per construction,
+measured in the same container — because every outbound call went through a module-level `httpx`
+helper that builds a whole client, and constructing a client loads and parses the system CA bundle
+whether or not the URL is `https://`. Every one of those URLs was `http://`.
 
 One process-wide client moved the plain-chat knee from 50 req/s at p99 50.1 ms to 75 req/s at p99
 31.3 ms, and knowledge retrieval from 10 req/s to 60. The failure mode past the knee changed too:
