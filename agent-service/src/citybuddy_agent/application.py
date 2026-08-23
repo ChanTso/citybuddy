@@ -20,6 +20,7 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse, Response, StreamingResponse
 from pydantic import BaseModel, ConfigDict, Field
 
+from . import http_client
 from .actions import ConfirmationDecision, confirmation_decision
 from .agent_control import (
     TOOL_BOUNDARY_FAILURE_REASONS,
@@ -167,7 +168,7 @@ class HttpJwksSource:
         self._url = url
 
     def load(self) -> Mapping[str, Any]:
-        response = httpx.get(self._url, timeout=3.0)
+        response = http_client.get(self._url, timeout=3.0)
         response.raise_for_status()
         payload = response.json()
         if not isinstance(payload, dict):
@@ -389,7 +390,7 @@ class HttpSandboxLiveness:
 
     def require_active(self, direct_token: str, sandbox_id: str) -> None:
         try:
-            response = httpx.post(
+            response = http_client.post(
                 f"{self._base_url}/internal/eval/sandboxes/{sandbox_id}/liveness",
                 headers={
                     "Authorization": f"Bearer {direct_token}",
@@ -397,7 +398,7 @@ class HttpSandboxLiveness:
                 },
                 timeout=3.0,
             )
-        except (httpx.TimeoutException, httpx.NetworkError) as exception:
+        except http_client.TRANSPORT_FAILURES as exception:
             raise SandboxLivenessUnavailable from exception
         if response.status_code == 204:
             return
@@ -430,7 +431,7 @@ class OboClient:
         headers = {"X-User-Authorization": f"Bearer {direct_token}"}
         if sandbox_id is not None:
             headers["X-Eval-Sandbox-Id"] = sandbox_id
-        response = httpx.post(
+        response = http_client.post(
             self._settings.auth_exchange_url,
             auth=(self._settings.service_client_id, self._settings.service_client_secret),
             headers=headers,

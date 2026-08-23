@@ -5,6 +5,7 @@ from datetime import UTC, datetime
 
 import httpx
 import pytest
+from citybuddy_agent import http_client
 from citybuddy_agent.actions import (
     ActionEvidenceError,
     ActionJsonError,
@@ -568,7 +569,7 @@ def test_action_response_cap_stops_stream_before_full_materialization(
             stream=source,
         )
 
-    monkeypatch.setattr(httpx, "stream", stream)
+    monkeypatch.setattr(http_client, "stream", stream)
     with pytest.raises(ActionJsonError, match="oversized"):
         bounded_http_post(
             "https://commerce.test/action",

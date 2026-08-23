@@ -6,6 +6,7 @@ from typing import Any
 
 import httpx
 import pytest
+from citybuddy_agent import http_client
 from citybuddy_agent.agent_control import (
     KNOWLEDGE_SEARCH_SPEC,
     AgentEvent,
@@ -659,7 +660,7 @@ def test_separate_recall_and_rrf_are_bounded_deduplicated_and_repeatable(
         requests.append(kwargs.get("json"))
         return response(200, search_payloads[len(requests) - 1])
 
-    monkeypatch.setattr(httpx, "request", request)
+    monkeypatch.setattr(http_client, "request", request)
     charged: list[tuple[str, str]] = []
 
     def charge(kind: str, target: str) -> None:
@@ -728,7 +729,7 @@ def test_rrf_equal_scores_use_stable_source_identity_tie_break(
             return response(200, mapping())
         return response(200, next(search_payloads))
 
-    monkeypatch.setattr(httpx, "request", request)
+    monkeypatch.setattr(http_client, "request", request)
     result = ElasticsearchKnowledgeSearch("http://elasticsearch.test").search(
         KnowledgeSearchInput(query="equal score"), lambda *args: None
     )
@@ -756,7 +757,7 @@ def test_alias_resolution_fails_closed(
     expected: str,
 ) -> None:
     monkeypatch.setattr(
-        httpx,
+        http_client,
         "request",
         lambda *args, **kwargs: response(200, alias_payload),
     )
@@ -784,14 +785,14 @@ def test_mapping_timeout_partial_failure_and_malformed_candidate_are_bounded(
             return response(200, hits(("faq-refund:answer", source("faq-refund", "answer"))))
         return response(503, {"error": "private backend detail"})
 
-    monkeypatch.setattr(httpx, "request", partial)
+    monkeypatch.setattr(http_client, "request", partial)
     with pytest.raises(KnowledgeSearchFailure, match="partial_recall_failed"):
         ElasticsearchKnowledgeSearch("http://elasticsearch.test").search(
             KnowledgeSearchInput(query="refund"), lambda *args: None
         )
 
     monkeypatch.setattr(
-        httpx,
+        http_client,
         "request",
         lambda *args, **kwargs: (_ for _ in ()).throw(httpx.ReadTimeout("private timeout")),
     )
@@ -809,7 +810,7 @@ def test_mapping_timeout_partial_failure_and_malformed_candidate_are_bounded(
             response(200, hits(("faq-refund:answer", malformed))),
         ]
     )
-    monkeypatch.setattr(httpx, "request", lambda *args, **kwargs: next(sequence))
+    monkeypatch.setattr(http_client, "request", lambda *args, **kwargs: next(sequence))
     with pytest.raises(KnowledgeSearchFailure, match="partial_recall_failed"):
         ElasticsearchKnowledgeSearch("http://elasticsearch.test").search(
             KnowledgeSearchInput(query="refund"), lambda *args: None
@@ -849,7 +850,7 @@ def test_http_200_incomplete_or_anomalous_search_response_fails_closed(
             response(200, incomplete),
         ]
     )
-    monkeypatch.setattr(httpx, "request", lambda *args, **kwargs: next(sequence))
+    monkeypatch.setattr(http_client, "request", lambda *args, **kwargs: next(sequence))
 
     with pytest.raises(KnowledgeSearchFailure, match="partial_recall_failed"):
         ElasticsearchKnowledgeSearch("http://elasticsearch.test").search(
@@ -881,7 +882,7 @@ def test_search_rejects_incompatible_or_private_mapping(
     assert isinstance(properties, dict)
     mutation(properties)
     sequence = iter([response(200, alias()), response(200, incompatible)])
-    monkeypatch.setattr(httpx, "request", lambda *args, **kwargs: next(sequence))
+    monkeypatch.setattr(http_client, "request", lambda *args, **kwargs: next(sequence))
 
     with pytest.raises(KnowledgeSearchFailure, match="mapping_incompatible"):
         ElasticsearchKnowledgeSearch("http://elasticsearch.test").search(

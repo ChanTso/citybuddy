@@ -6,6 +6,7 @@ from typing import Any
 
 import httpx
 import pytest
+from citybuddy_agent import http_client
 from citybuddy_agent.agent_control import (
     CATALOG_PRODUCT_SPEC,
     REFUND_PREPARE_SPEC,
@@ -95,7 +96,7 @@ def test_litellm_transient_retry_and_same_tier_fallback_share_one_budget(
         requests.append(kwargs["json"])
         return responses.pop(0)
 
-    monkeypatch.setattr(httpx, "post", post)
+    monkeypatch.setattr(http_client, "post", post)
     events: list[AgentEvent] = []
     budget = AttemptBudget(8, events)
     metrics = PrometheusCityBuddyMetrics()
@@ -137,7 +138,7 @@ def test_litellm_does_not_retry_non_transient_provider_denial(
         calls += 1
         return httpx.Response(400)
 
-    monkeypatch.setattr(httpx, "post", post)
+    monkeypatch.setattr(http_client, "post", post)
     events: list[AgentEvent] = []
     budget = AttemptBudget(8, events)
     metrics = PrometheusCityBuddyMetrics()
@@ -167,7 +168,7 @@ def test_litellm_does_not_retry_invalid_provider_payload(
         calls += 1
         return httpx.Response(200, content=b"{")
 
-    monkeypatch.setattr(httpx, "post", post)
+    monkeypatch.setattr(http_client, "post", post)
     events: list[AgentEvent] = []
     metrics = PrometheusCityBuddyMetrics()
 
@@ -200,7 +201,7 @@ def test_three_route_plan_aggregates_every_nonfirst_actual_attempt_as_fallback(
         requests.append(kwargs["json"]["model"])
         return responses.pop(0)
 
-    monkeypatch.setattr(httpx, "post", post)
+    monkeypatch.setattr(http_client, "post", post)
     routes = tuple(
         ProviderRoute(f"support-route-{index}", f"provider-{index}") for index in range(3)
     )
@@ -243,7 +244,7 @@ def test_budget_and_circuit_rejection_before_http_record_zero_attempts(
         calls += 1
         return completion()
 
-    monkeypatch.setattr(httpx, "post", post)
+    monkeypatch.setattr(http_client, "post", post)
     metrics = PrometheusCityBuddyMetrics()
     events: list[AgentEvent] = []
     circuits = ProviderCircuits(minimum_requests=1, open_seconds=10, half_open_probes=1)
@@ -311,7 +312,7 @@ def test_half_open_non_transient_outcome_releases_probe(
     )
     circuits.transient_failure("provider-a", events)
     now[0] = 106.0
-    monkeypatch.setattr(httpx, "post", lambda *args, **kwargs: httpx.Response(400))
+    monkeypatch.setattr(http_client, "post", lambda *args, **kwargs: httpx.Response(400))
     client = LiteLlmClient("https://proxy.test", circuits)
 
     with pytest.raises(ProviderFailure) as denied:
@@ -410,7 +411,7 @@ def test_tool_adapter_enforces_server_owned_spec_and_bounded_model_view(
             },
         )
 
-    monkeypatch.setattr(httpx, "post", post)
+    monkeypatch.setattr(http_client, "post", post)
     adapter = ToolAdapter("https://commerce.test", obo)
     events: list[AgentEvent] = []
     budget = AttemptBudget(4, events)
@@ -460,7 +461,7 @@ def test_evaluation_tool_propagates_server_correlation_and_deterministic_operati
             },
         )
 
-    monkeypatch.setattr(httpx, "post", post)
+    monkeypatch.setattr(http_client, "post", post)
     adapter = ToolAdapter("https://commerce.test", RecordingObo())
     arguments = '{"productId":"product-1"}'
     for _ in range(2):
@@ -525,7 +526,7 @@ def test_tool_timeout_is_structured_and_unexpected_failure_remains_visible(
         del args, kwargs
         raise httpx.ReadTimeout("bounded timeout")
 
-    monkeypatch.setattr(httpx, "post", timeout)
+    monkeypatch.setattr(http_client, "post", timeout)
     result = ToolAdapter("https://commerce.test", obo).execute(
         name=CATALOG_PRODUCT_SPEC.name,
         serialized_arguments='{"productId":"product-1"}',
@@ -537,7 +538,7 @@ def test_tool_timeout_is_structured_and_unexpected_failure_remains_visible(
     )
     assert result.model_view["reason"] == "timeout"
 
-    monkeypatch.setattr(httpx, "post", lambda *args, **kwargs: httpx.Response(500))
+    monkeypatch.setattr(http_client, "post", lambda *args, **kwargs: httpx.Response(500))
     with pytest.raises(RuntimeError, match="Unexpected commerce tool failure"):
         ToolAdapter("https://commerce.test", obo).execute(
             name=CATALOG_PRODUCT_SPEC.name,
@@ -565,7 +566,7 @@ def test_tool_adapter_fails_closed_when_identity_exchange_rejects_or_is_unavaila
         tool_calls += 1
         return completion()
 
-    monkeypatch.setattr(httpx, "post", post)
+    monkeypatch.setattr(http_client, "post", post)
     events: list[AgentEvent] = []
     budget = AttemptBudget(4, events)
 
@@ -624,7 +625,7 @@ def test_refund_prepare_uses_exact_obo_correlation_and_validates_untrusted_resul
             request=httpx.Request(method, url),
         )
 
-    monkeypatch.setattr(httpx, "stream", stream)
+    monkeypatch.setattr(http_client, "stream", stream)
     metrics = PrometheusCityBuddyMetrics()
     result = ToolAdapter("https://commerce.test", obo, metrics=metrics).execute(
         name=REFUND_PREPARE_SPEC.name,
@@ -766,7 +767,7 @@ def test_refund_prepare_response_cannot_impersonate_another_failure_producer(
             request=httpx.Request(method, url),
         )
 
-    monkeypatch.setattr(httpx, "stream", stream)
+    monkeypatch.setattr(http_client, "stream", stream)
     with pytest.raises(ToolBoundaryFailure) as failure:
         ToolAdapter("https://commerce.test", RecordingObo()).execute(
             name=REFUND_PREPARE_SPEC.name,
@@ -826,7 +827,7 @@ def test_refund_prepare_success_rejects_missing_or_duplicate_binding_fields(
         del kwargs
         yield httpx.Response(201, content=content, request=httpx.Request(method, url))
 
-    monkeypatch.setattr(httpx, "stream", stream)
+    monkeypatch.setattr(http_client, "stream", stream)
     with pytest.raises(ToolBoundaryFailure) as failure:
         ToolAdapter("https://commerce.test", RecordingObo()).execute(
             name=REFUND_PREPARE_SPEC.name,
@@ -873,7 +874,7 @@ def test_refund_prepare_requires_exact_non_null_sandbox_binding(
             request=httpx.Request(method, url),
         )
 
-    monkeypatch.setattr(httpx, "stream", stream)
+    monkeypatch.setattr(http_client, "stream", stream)
     with pytest.raises(ToolBoundaryFailure) as failure:
         ToolAdapter("https://commerce.test", RecordingObo()).execute(
             name=REFUND_PREPARE_SPEC.name,
@@ -1021,7 +1022,7 @@ def test_refund_prepare_replays_once_after_indeterminate_response_loss(
             request=httpx.Request(method, url),
         )
 
-    monkeypatch.setattr(httpx, "stream", stream)
+    monkeypatch.setattr(http_client, "stream", stream)
     events: list[AgentEvent] = []
     metrics = PrometheusCityBuddyMetrics()
     result = ToolAdapter("https://commerce.test", RecordingObo(), metrics=metrics).execute(
@@ -1162,7 +1163,7 @@ def test_refund_prepare_rejection_producer_matrix_is_exact(
             request=httpx.Request(method, url),
         )
 
-    monkeypatch.setattr(httpx, "stream", stream)
+    monkeypatch.setattr(http_client, "stream", stream)
     metrics = PrometheusCityBuddyMetrics()
     adapter = ToolAdapter("https://commerce.test", RecordingObo(), metrics=metrics)
 
@@ -1217,7 +1218,7 @@ def test_refund_prepare_malformed_rejection_is_response_invalid(
         del kwargs
         yield httpx.Response(409, content=body, request=httpx.Request(method, url))
 
-    monkeypatch.setattr(httpx, "stream", stream)
+    monkeypatch.setattr(http_client, "stream", stream)
     with pytest.raises(ToolBoundaryFailure) as failure:
         ToolAdapter("https://commerce.test", RecordingObo()).execute(
             name=REFUND_PREPARE_SPEC.name,

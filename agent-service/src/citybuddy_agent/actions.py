@@ -13,8 +13,9 @@ from datetime import UTC, datetime
 from enum import Enum
 from typing import Literal, cast
 
-import httpx
 from pydantic import BaseModel, ConfigDict, Field, field_validator
+
+from . import http_client
 
 MAX_ACTION_JSON_BYTES = 4096
 MAX_ACTION_JSON_DEPTH = 16
@@ -43,7 +44,7 @@ def bounded_http_post(
     timeout: float,
 ) -> BoundedHttpResponse:
     """Read an untrusted action response without first materializing an unbounded body."""
-    with httpx.stream("POST", url, headers=headers, json=json, timeout=timeout) as response:
+    with http_client.stream("POST", url, headers=headers, json=json, timeout=timeout) as response:
         content = bytearray()
         for chunk in response.iter_bytes():
             if len(content) + len(chunk) > MAX_ACTION_JSON_BYTES:

@@ -15,6 +15,7 @@ import httpx
 from fastapi import HTTPException
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
+from . import http_client
 from .actions import (
     ACTION_SCOPE,
     MAX_ACTION_PENDING_TTL_SECONDS,
@@ -387,7 +388,7 @@ class LiteLlmClient:
                     self._circuits.admit(route.provider_key, events)
                     admitted = True
                     attempt_outcome = ProviderOutcome.ERROR
-                    response = httpx.post(
+                    response = http_client.post(
                         f"{self._url}/v1/chat/completions",
                         json={"model": route.role_alias, "messages": messages, "tools": tools},
                         timeout=2.0,
@@ -421,7 +422,7 @@ class LiteLlmClient:
                         )
                     )
                     return reply
-                except (httpx.TimeoutException, httpx.NetworkError):
+                except http_client.TRANSPORT_FAILURES:
                     attempt_outcome = ProviderOutcome.TRANSIENT
                     transient_failure = ProviderFailure(transient=True)
                 except CircuitOpen as failure:
@@ -485,7 +486,7 @@ class LiteLlmClient:
                 self._circuits.admit(route.provider_key, events)
                 admitted = True
                 attempt_outcome = ProviderOutcome.ERROR
-                response = httpx.post(
+                response = http_client.post(
                     f"{self._url}/v1/chat/completions",
                     json={
                         "model": route.role_alias,
@@ -527,7 +528,7 @@ class LiteLlmClient:
                     )
                 )
                 return output
-            except (httpx.TimeoutException, httpx.NetworkError):
+            except http_client.TRANSPORT_FAILURES:
                 attempt_outcome = ProviderOutcome.TRANSIENT
                 failure = ProviderFailure(transient=True)
             except CircuitOpen:
@@ -962,7 +963,7 @@ class ToolAdapter:
                     detail="Action preparation unavailable",
                 ) from exception
             return self._deny(name, "identity_denied", events)
-        except (httpx.TimeoutException, httpx.NetworkError):
+        except http_client.TRANSPORT_FAILURES:
             if spec is REFUND_PREPARE_SPEC:
                 raise ToolBoundaryFailure(
                     status_code=503,
@@ -1002,7 +1003,7 @@ class ToolAdapter:
                 )
             else:
                 budget.charge("tool_http", name)
-                response = httpx.post(
+                response = http_client.post(
                     f"{self._base_url}/internal/tools/{name}",
                     headers=headers,
                     json=arguments.model_dump(by_alias=True),
@@ -1010,7 +1011,7 @@ class ToolAdapter:
                 )
         except httpx.TimeoutException:
             return self._deny(name, "timeout", events)
-        except httpx.NetworkError:
+        except (httpx.NetworkError, httpx.ProtocolError):
             return self._deny(name, "tool_unavailable", events)
         except ActionJsonError as exception:
             raise ToolBoundaryFailure(
@@ -1177,7 +1178,7 @@ class ToolAdapter:
                     reason="ACTION_PREPARATION_COMMERCE_TIMEOUT",
                     detail="Action preparation unavailable",
                 ) from exception
-            except httpx.NetworkError as exception:
+            except (httpx.NetworkError, httpx.ProtocolError) as exception:
                 if attempt == 0:
                     continue
                 raise ToolBoundaryFailure(

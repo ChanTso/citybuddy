@@ -14,6 +14,7 @@ import httpx
 import jwt
 import pymysql
 import pytest
+from citybuddy_agent import http_client
 from citybuddy_agent.actions import PendingActionPayload, PendingActionReference
 from citybuddy_agent.agent_control import (
     AgentEvent,
@@ -1158,7 +1159,7 @@ def test_obo_client_rechecks_owner_and_server_allowlist(
         requests.append(kwargs)
         return httpx.Response(200, json={"accessToken": "signed-obo"})
 
-    monkeypatch.setattr(httpx, "post", exchange_response)
+    monkeypatch.setattr(http_client, "post", exchange_response)
 
     assert (
         client.exchange("direct-token", principal.subject, session_id, "catalog:read")
@@ -1205,7 +1206,7 @@ def test_obo_client_preserves_exact_canonical_edge_session(
         requests.append(kwargs)
         return httpx.Response(200, json={"accessToken": "signed-eval-obo"})
 
-    monkeypatch.setattr(httpx, "post", exchange_response)
+    monkeypatch.setattr(http_client, "post", exchange_response)
 
     assert (
         client.exchange(
@@ -1228,7 +1229,7 @@ def test_obo_client_preserves_identity_rejection_status(
     session_id = sessions.create("user-123")
     client = OboClient(settings(), sessions)
     monkeypatch.setattr(
-        httpx,
+        http_client,
         "post",
         lambda *args, **kwargs: httpx.Response(status),  # noqa: ARG005
     )
@@ -1251,7 +1252,7 @@ def test_evaluation_obo_preserves_exact_sandbox_header(
         requests.append(kwargs)
         return httpx.Response(200, json={"accessToken": "signed-eval-obo"})
 
-    monkeypatch.setattr(httpx, "post", exchange_response)
+    monkeypatch.setattr(http_client, "post", exchange_response)
 
     assert (
         client.exchange(
@@ -1285,7 +1286,7 @@ def test_obo_client_rejects_malformed_exchange_response(
     session_id = sessions.create("user-123")
     client = OboClient(settings(), sessions)
     monkeypatch.setattr(
-        httpx,
+        http_client,
         "post",
         lambda *args, **kwargs: httpx.Response(200, content=b"{"),
     )
@@ -1597,7 +1598,7 @@ def test_action_liveness_unavailable_has_request_local_reason_without_public_lea
         del args, kwargs
         raise httpx.ConnectError("private network detail")
 
-    monkeypatch.setattr(httpx, "post", unavailable)
+    monkeypatch.setattr(http_client, "post", unavailable)
     client = TestClient(
         create_app(
             resolved,
