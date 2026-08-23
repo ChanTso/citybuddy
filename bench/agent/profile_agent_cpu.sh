@@ -13,6 +13,9 @@ out="$repo_root/bench/results"; mkdir -p "$out"
 
 PATH_NAME="$1"                                   # chat | retrieval | prepare
 CONCURRENCY="${CONCURRENCY:-8}"
+# Output files are named by LABEL, not by path, so a profile taken after a change does not
+# overwrite the baseline it is meant to be compared with, the same way the ladder runner does.
+LABEL="${LABEL:-$PATH_NAME}"
 SECONDS_TO_SAMPLE="${SECONDS_TO_SAMPLE:-25}"
 HERTZ="${HERTZ:-100}"
 
@@ -48,16 +51,18 @@ docker rm -f citybuddy-bench-profile-load >/dev/null 2>&1 || true
   echo "# $command"
   echo "# Collapsed stacks, one per line, trailing field is the sample count."
   docker exec citybuddy-bench-agent cat "/tmp/$PATH_NAME.txt"
-} > "$out/agent_pyspy_${PATH_NAME}_c${CONCURRENCY}.txt"
+} > "$out/agent_pyspy_${LABEL}_c${CONCURRENCY}.txt"
 
 # Collapsed stacks run to thousands of characters, past what the system awk will read as one
 # record, so the tally is done in python.
-uv run python - "$out/agent_pyspy_${PATH_NAME}_c${CONCURRENCY}.txt" "$PATH_NAME" <<'TALLY'
+uv run python - "$out/agent_pyspy_${LABEL}_c${CONCURRENCY}.txt" "$PATH_NAME" <<'TALLY'
 import sys
 
 path, name = sys.argv[1], sys.argv[2]
 total = matched = 0
-with open(path) as handle:
+# py-spy can emit a frame name that is not valid UTF-8, and one such byte anywhere in the
+# file would otherwise abort the tally over an entire profile.
+with open(path, encoding="utf-8", errors="replace") as handle:
     for line in handle:
         if line.startswith("#"):
             continue

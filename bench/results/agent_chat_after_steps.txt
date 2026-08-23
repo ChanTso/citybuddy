@@ -1,0 +1,16 @@
+
+=== chat_after (step 20s) ===
+ target  offered  measured  served/s    p50 ms    p95 ms    p99 ms    max ms
+----------------------------------------------------------------------------
+     10      200       200      10.0       8.6      16.3      21.4      75.0
+     25      500       501      25.1       8.1      14.9      20.8      28.8
+     50     1000      1001      50.0       7.3      15.5      20.2      28.9
+     75     1500      1501      75.0       6.9      19.1      31.3      51.5
+    100     2000      2000     100.0       6.8      50.6     159.2     220.8
+
+outcomes by step (every class, none elided):
+    10: completed=200
+    25: completed=501
+    50: completed=1001
+    75: completed=1501
+   100: completed=2000

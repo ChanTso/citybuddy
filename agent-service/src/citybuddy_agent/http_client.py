@@ -1,8 +1,8 @@
 """One process-wide HTTP client for the agent's outbound boundaries.
 
 httpx's module-level helpers construct a client per call, and constructing a client builds a TLS
-trust store from the system CA bundle. That cost is about 12 ms of CPU and it was paid by every
-outbound request, on turns whose whole p99 is tens of milliseconds
+trust store from the system CA bundle. That was 13.1 ms of CPU on every outbound request, on
+turns whose whole p99 is tens of milliseconds, and none of these URLs is https
 (`bench/agent/README.md`). One long-lived client pays it once at import and reuses connections
 between turns.
 """
