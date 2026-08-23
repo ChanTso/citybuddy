@@ -2,8 +2,9 @@
 
 Problems this project actually hit, what caused them, and what each one changed. Everything here
 was found by running the real thing — real MySQL, real Redis, real Elasticsearch, real RocketMQ,
-under real concurrency — and every entry links to the evidence. The unabridged per-slice record is
-in [docs/archive/SLICE_LESSONS.md](archive/SLICE_LESSONS.md).
+most of it under concurrency — and every entry names where the evidence lives. The unabridged
+per-slice record, with a pull-request or commit link on every entry, is in
+[docs/archive/SLICE_LESSONS.md](archive/SLICE_LESSONS.md).
 
 They are grouped by what they taught, not by when they happened.
 
@@ -12,8 +13,9 @@ They are grouped by what they taught, not by when they happened.
 ### The row lock limiting throughput was also hiding a deadlock
 
 A single-activity seckill ladder never deadlocked. Spreading the same ladder across 32 activity
-rows produced HTTP 500s from 400 req/s upward — about 6,200 `Deadlock found when trying to get
-lock` in one run, all on `INSERT INTO seckill_reservation`.
+rows produced a handful of HTTP 500s at 100 and 200 req/s and then 1,803 of them at 400 and 4,390
+at 800 — about 6,200 `Deadlock found when trying to get lock` across the run, every one on
+`INSERT INTO seckill_reservation`.
 
 `reserveIntent` locked the idempotency row *before* inserting it, with `SELECT … FOR UPDATE` on a
 key that did not exist yet. InnoDB answers that with a gap lock, and gap locks are mutually
@@ -29,7 +31,7 @@ adding a concurrency dimension removed the cover.
 The fix inverts the order: insert first, and let the unique key decide. On `DuplicateKeyException`,
 read the existing row back with `FOR SHARE` and compare the intent hash. Both choices matter, and
 each is a separate lesson below. Failure rate went from 26.67 % to 0.00 %, deadlocks from ~6,200 to
-0, and the ladder ran out at 800 req/s.
+0, and the top step of the ladder served its full 800 req/s clean.
 
 **Lock-read-then-insert on a key that may not exist is inherently self-conflicting.** Idempotent
 writes should be adjudicated by the unique constraint. Read-then-insert is only safe when something
@@ -49,13 +51,18 @@ attempt queue before anything derived is read. `FOR UPDATE` does not help here b
 deadlock" — it helps because it removes the S→X upgrade ring.
 
 A bounded retry survives, because a real transaction can still form a rare lock cycle with an
-unrelated resource, and InnoDB's victim rollback is a recoverable outcome. But it retries **only**
-on 1213: not 1205 lock-wait-timeout, and not `DuplicateKeyException`, which had been folded into
-the same retry and hid two different meanings behind one.
+unrelated resource, and InnoDB's victim rollback is a recoverable outcome. The classification of
+what may be retried went through two rounds. The first fix retried on 1213 alone, because
+`DuplicateKeyException` had been folded into the same retry and two different meanings were hiding
+behind one. A later maintenance pass replaced "retry or fail" with something better: 1205
+lock-wait-timeout and 1213 are both treated as recoverable contention, and every exhausted or
+duplicate-key case re-resolves the committed truth in a fresh transaction, converging on the
+existing result or a stable 409 rather than on a retry.
 
 **Serialize concurrent writers on the aggregate root before reading anything derived from it, and
-keep retry classification exact.** Evidence: five runs of 20 concurrent duplicate-callback rounds,
-100 rounds total, one ledger movement each.
+say exactly what each error class means.** Evidence: five runs of 20 concurrent duplicate-callback
+rounds, 100 rounds total; a controlled 1213 injection proved one retry and a single ledger
+movement.
 
 ### A lock wait does not refresh your snapshot
 
@@ -67,9 +74,11 @@ access; it does not move your read view.
 The same window appeared again in reconciliation, where a plain read after the lock reported a
 freshly committed, entirely legitimate ledger movement as a contradiction.
 
-Reserved amounts are now summed from a `SELECT … FOR UPDATE` current read of that attempt's refund
-rows, and the reconciliation reads use `FOR SHARE`. `FOR UPDATE` and `FOR SHARE` do not only mean
-"take a lock" — in InnoDB they also mean "read the committed version as of now".
+The immediate fix summed the reserved amount from a `SELECT … FOR UPDATE` current read of that
+attempt's refund rows, and moved the reconciliation reads to `FOR SHARE`. `FOR UPDATE` and
+`FOR SHARE` do not only mean "take a lock" — in InnoDB they also mean "read the committed version
+as of now". The reconciliation reads are still `FOR SHARE`; the reserved total later moved into the
+database as a single aggregate, for the reason in *Bounds apply before materialization* below.
 
 **After any lock wait, every derived aggregate or related fact has to be audited individually.**
 Fixing the first query is not fixing the pattern.
@@ -190,18 +199,24 @@ refunds, two consumed actions. Evidence: [#94](https://github.com/ChanTso/citybu
 
 ### Most of the agent's CPU was building TLS trust stores for `http://` URLs
 
-The first three-path latency measurement found the agent saturating at about 1.4 cores of the
-eight available with every dependency idle. Sampling it on the retrieval path at concurrency 8 put
-**94.4 %** of on-CPU samples in `ssl.create_default_context` — 13.1 ms of CPU per construction,
-measured in the same container — because every outbound call went through a module-level `httpx`
-helper that builds a whole client, and constructing a client loads and parses the system CA bundle
-whether or not the URL is `https://`. Every one of those URLs was `http://`.
+The first three-path measurement found the agent comfortably *not* CPU-bound at the rates it
+served cleanly, and burning five to six cores one step past the knee. Profiling it anyway, on the
+retrieval path at concurrency 8, put **94.4 %** of on-CPU samples in `ssl.create_default_context`
+as the leaf frame — 13.1 ms of CPU per construction, measured in the same container — because every
+outbound call went through a module-level `httpx` helper that builds a whole client, and
+constructing a client loads and parses the system CA bundle whether or not the URL is `https://`.
+Every one of those URLs was `http://`.
 
-One process-wide client moved the plain-chat knee from 50 req/s at p99 50.1 ms to 75 req/s at p99
-31.3 ms, and knowledge retrieval from 10 req/s to 60. The failure mode past the knee changed too:
-seconds of p99 and five to six cores burned became graceful shedding.
+I predicted that removing it would make each turn cheaper without moving the ceiling, precisely
+because the agent was not CPU-bound where it served cleanly. That was wrong. One process-wide
+client moved the plain-chat knee from 50 req/s at p99 50.1 ms to 75 req/s at p99 31.3 ms, and
+knowledge retrieval from 10 req/s to 60, and the failure mode past the knee became graceful
+shedding instead of seconds of p99. The new ceiling is about 1.4 cores of the eight available with
+every dependency idle, and what holds it there is not yet established.
 
-**Profile before optimising, and be suspicious of per-request client construction.** Evidence:
+**Not being CPU-bound at the serving rate does not mean the wasted CPU is irrelevant to where
+serving stops.** Profile before optimising, be suspicious of per-request client construction, and
+state a prediction so the measurement can contradict it. Evidence:
 [bench/agent/README.md](../bench/agent/README.md), [#92](https://github.com/ChanTso/citybuddy/pull/92).
 
 ### Measure before attributing slowness; the conspicuous wait is rarely the cost
@@ -228,9 +243,10 @@ that the split was right.
 ### JWKS publishes all keys or none
 
 Standing the local stack up produced a JWKS endpoint returning 500 for every request. auth-service
-publishes every signing-key row in `CURRENT` state and throws if *any* published `kid` has no
-configured runtime key — so one leftover row from a different local fixture takes down the whole
-document, not just its own entry.
+publishes every signing-key row that is `CURRENT`, plus any `OVERLAP` row not yet past its
+retirement time, and throws if *any* published `kid` has no configured runtime key — so one
+leftover row from a different local fixture takes down the whole document, not just its own
+entry.
 
 Two consequences, both real: the failure looks nothing like its cause, and any fixture that seeds a
 signing key owns the whole table for as long as it runs. Both the demonstration and the benchmark

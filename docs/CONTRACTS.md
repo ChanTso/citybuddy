@@ -462,8 +462,9 @@ sequenceDiagram
 ### 7.3 PendingAction, atomic confirmation, ActionReceipt, and retry boundary
 
 The whole of this diagram is implemented. Commerce owns the prepare/confirm/ActionReceipt
-transaction; the agent claims the reference before commerce commits, projects the receipt into
-`cs_db` in the transaction that resolves the reference, and commits the `action_completed` turn.
+transaction; the agent claims the reference in `cs_db` before calling commerce, then projects the
+receipt and commits the `action_completed` turn in the transaction that resolves the reference.
+
 
 ```mermaid
 sequenceDiagram
@@ -484,6 +485,7 @@ sequenceDiagram
         Note over G,C: No business mutation is executed
     else User sends confirmation text
         U->>G: Confirm
+        G->>E: Claim the reference, PENDING to CONFIRMING, in its own transaction
         G->>C: Confirm pending_action_id with OBO
         C->>D: Begin one business transaction
         D->>D: Validate owner, scope, args hash, resource version, expiry, and unconsumed state
@@ -498,10 +500,10 @@ sequenceDiagram
             C-->>G: Authoritative ActionReceipt
             G->>E: Persist receipt projection and turn evidence
             G-->>U: SSE action_receipt, then explanation
-            opt Model or network retry after the commit point
-                G->>G: Regenerate explanation from stored receipt
-                Note over G,C: No second commerce execution is allowed
-                G-->>U: token and done events only
+            opt Repeat of the same request after the commit point
+                G->>E: Read the stored turn and receipt projection
+                Note over G,C: No model call and no second commerce execution
+                G-->>U: The stored turn, or the same receipt then explanation on SSE
             end
         end
     end
@@ -526,7 +528,7 @@ sequenceDiagram
 | Risk | Guardrail and owner |
 |---|---|
 | Dependency/version drift | Each owning slice pins exact patches and image digests in build files/lockfiles. Markdown keeps only the compatibility boundary. Renovation is accepted only with real build/contract tests. |
-| Retry amplification across agent, proxy, HTTP, and MQ | One bounded attempt budget is propagated. `ModelRouter` owns tier changes; LiteLLM gets at most one transient/network retry and same-tier fallback. Commerce-side side-effect retries return existing results under CB-118; Agent successful confirmation retry is outside the current route. Owned by `CB-081` and `CB-118`. |
+| Retry amplification across agent, proxy, HTTP, and MQ | One bounded attempt budget is propagated. `ModelRouter` owns tier changes; LiteLLM gets at most one transient/network retry and same-tier fallback. Commerce-side side-effect retries return existing results under CB-118. An Agent confirmation retry re-enters commerce only from a claimed reference and replays the committed receipt; a repeated idempotency key replays the stored turn without reaching commerce at all. Owned by `CB-081`, `CB-118`, and `CB-122`. |
 | Redis or Elasticsearch treated as business truth | Contract tests and reconciliation always compare against MySQL. User-visible order/action success requires durable MySQL state or ActionReceipt. Owned by transaction slices. |
 | Cross-database or cross-service data leakage | Bootstrap/migration/runtime identity separation, `auth_app`/`commerce_app`/`agent_app` grants, no cross-database joins, API-only boundaries, token-derived ownership, private data excluded from RAG, and staged negative tests in `CB-010`, `CB-020`, `CB-030`, and later agent migrations. |
 | Evaluation sandbox leakage, orphaned test identity, or late asynchronous effects | Commerce-orchestrated auth provisioning/revoke, opaque TTL-bound handles, idempotent normal completion, fail-closed activation/compensation, TTL/janitor backstop, header/claim equality, ACTIVE/DEAD registry, SQL/repository filters, sandbox-scoped evaluation reads, introduction-point consumer liveness checks, and sandbox-bound callbacks. Identity, lifecycle, reads, zero-carrier baseline, and callbacks are owned by `CB-100` through `CB-105`; every future slice introducing an evaluation-reachable asynchronous carrier owns its guard. |

@@ -19,11 +19,14 @@ flowchart LR
     AU -->|OBO token, one tool call,<br/>exact scope| A
     A -->|OBO token| C
     A -.->|prose, never authority| U
-    C ==>|PendingAction, ActionReceipt| M[(MySQL)]
+    C ==>|PendingAction, ActionReceipt| M[(MySQL commerce_db)]
+    A ==>|sessions, evidence,<br/>receipt projection| S[(MySQL cs_db)]
+    AU --> M
     A --> E[(Elasticsearch)]
     C --> R[(Redis)]
-    C --> Q[[RocketMQ]]
     K[knowledge-indexer] --> E
+    K --> R
+    C --> Q[[RocketMQ]]
     Q --> K
 ```
 
@@ -225,10 +228,14 @@ handling, and human handoff are out of scope. The payment and refund providers a
 committed receipt means the refund request is durably recorded and owned by commerce, not that
 money moved.
 
-Known defects are tracked as [open issues](https://github.com/ChanTso/citybuddy/issues), not hidden
-here: refund preparation fails to parse its commerce response roughly once in every 559
-preparations, and the mock-payment callback path deadlocks under parallel settlement, which is why
-the benchmark fixture serializes that phase rather than retrying through it.
+Two known defects, neither hidden. Refund preparation sporadically fails to parse its commerce
+response — 8 occurrences in 4,475 preparations of the shipped code, against 1 in 4,263 before it,
+a difference nine events cannot settle and a mechanism nobody has identified yet — tracked as
+[issue #93](https://github.com/ChanTso/citybuddy/issues/93). And settling two payments in parallel
+deadlocks: the callback's attempt lookup and another order's payment-start lookup scan the same
+rows under `FOR UPDATE`, InnoDB rolls the start back, and the start endpoint answers 500. That one
+has no issue yet; it is written up in [bench/agent/README.md](bench/agent/README.md), and it is why
+the benchmark fixture settles payments serially rather than retrying through them.
 
 Development rules are in [AGENTS.md](AGENTS.md). Retired process records are in
 [docs/archive/](docs/archive/README.md).
