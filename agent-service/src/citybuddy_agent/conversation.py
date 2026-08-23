@@ -118,7 +118,7 @@ class ConversationStore(Protocol):
 
     def current_pending_action(
         self, *, session_id: str, subject: str, sandbox_id: str | None
-    ) -> PendingActionReference | None: ...
+    ) -> tuple[PendingActionReference, str] | None: ...
 
     def complete_action_decline(
         self,
@@ -127,6 +127,8 @@ class ConversationStore(Protocol):
         pending: PendingActionReference,
         response_text: str,
     ) -> ConversationResult: ...
+
+    def claim_action_confirmation(self, *, pending: PendingActionReference) -> None: ...
 
     def complete_action_confirmed(
         self,
@@ -515,7 +517,7 @@ class MysqlConversationStore:
 
     def current_pending_action(
         self, *, session_id: str, subject: str, sandbox_id: str | None
-    ) -> PendingActionReference | None:
+    ) -> tuple[PendingActionReference, str] | None:
         with self._connect() as connection, connection.cursor() as cursor:
             cursor.execute(
                 "SELECT COUNT(*) FROM support_turn turn_record "
@@ -538,15 +540,15 @@ class MysqlConversationStore:
                 )
             cursor.execute(
                 "SELECT COUNT(*), "
-                "COALESCE(SUM(pending_action_reference.state = 'PENDING'), 0), "
+                "COALESCE(SUM(pending_action_reference.state IN ('PENDING', 'CONFIRMING')), 0), "
                 "COALESCE(SUM(pending_action_reference.state "
-                "NOT IN ('PENDING', 'DECLINED', 'EXPIRED', 'CONFIRMED')), 0), "
+                "NOT IN ('PENDING', 'CONFIRMING', 'DECLINED', 'EXPIRED', 'CONFIRMED')), 0), "
                 "COALESCE(SUM("
-                "(pending_action_reference.state = 'PENDING' AND ("
+                "(pending_action_reference.state IN ('PENDING', 'CONFIRMING') AND ("
                 "pending_action_reference.resolved_at IS NOT NULL "
                 "OR pending_action_reference.resolution_turn_id IS NOT NULL "
                 "OR pending_action_reference.resolution_trace_id IS NOT NULL)) "
-                "OR (pending_action_reference.state IN ('DECLINED', 'EXPIRED') AND ("
+                "OR (pending_action_reference.state IN ('DECLINED', 'EXPIRED', 'CONFIRMED') AND ("
                 "pending_action_reference.resolved_at IS NULL "
                 "OR pending_action_reference.resolution_turn_id IS NULL "
                 "OR pending_action_reference.resolution_trace_id IS NULL))), 0), "
@@ -579,7 +581,7 @@ class MysqlConversationStore:
                 "SELECT source_turn_id, source_trace_id, conversation_id "
                 "FROM pending_action_reference "
                 "WHERE session_id = %s AND user_subject = %s AND sandbox_id <=> %s "
-                "AND state = 'PENDING' LIMIT 2",
+                "AND state IN ('PENDING', 'CONFIRMING') LIMIT 2",
                 (session_id, subject, sandbox_id),
             )
             rows = cursor.fetchall()
@@ -597,9 +599,9 @@ class MysqlConversationStore:
                 subject=subject,
                 sandbox_id=sandbox_id,
             )
-            if state != "PENDING":
+            if state not in {"PENDING", "CONFIRMING"}:
                 raise ConversationIntegrityError("PendingAction current state is inconsistent")
-            return reference
+            return reference, state
 
     def complete_action_decline(
         self,
@@ -637,6 +639,29 @@ class MysqlConversationStore:
             require_expired=True,
         )
 
+    def claim_action_confirmation(self, *, pending: PendingActionReference) -> None:
+        """Take the reference from PENDING to CONFIRMING before commerce is asked to commit.
+
+        This is the whole reason a claim state exists. The commerce call is irreversible, so local
+        arbitration has to happen before it, not after: a decline or an expiry that resolved the
+        reference while a refund was in flight would durably record that the refund did not
+        happen, and commerce would disagree with no way to reconcile.
+        """
+        with self._connect() as connection:
+            try:
+                with connection.cursor() as cursor:
+                    cursor.execute(
+                        "UPDATE pending_action_reference SET state = 'CONFIRMING' "
+                        "WHERE pending_action_id = %s AND state = 'PENDING'",
+                        (pending.pending_action_id,),
+                    )
+                    if cursor.rowcount != 1:
+                        raise ActionArbitrationConflictError
+                connection.commit()
+            except Exception:
+                connection.rollback()
+                raise
+
     def complete_action_confirmed(
         self,
         *,
@@ -660,14 +685,14 @@ class MysqlConversationStore:
                 with connection.cursor() as cursor:
                     turn = self._lock_executable_turn(cursor, start)
                     if self._lock_matching_pending(cursor, pending, require_expired=False) != (
-                        "PENDING"
+                        "CONFIRMING"
                     ):
                         raise ActionArbitrationConflictError
                     cursor.execute(
                         "UPDATE pending_action_reference SET state = 'CONFIRMED', "
                         "resolved_at = CURRENT_TIMESTAMP(6), resolution_turn_id = %s, "
                         "resolution_trace_id = %s "
-                        "WHERE pending_action_id = %s AND state = 'PENDING'",
+                        "WHERE pending_action_id = %s AND state = 'CONFIRMING'",
                         (start.turn_id, start.trace_id, pending.pending_action_id),
                     )
                     if cursor.rowcount != 1:
@@ -913,12 +938,16 @@ class MysqlConversationStore:
             raise ConversationIntegrityError("PendingAction reference is inconsistent")
         state = str(row[12])
         expires_at = row[13]
-        if state not in {"PENDING", "DECLINED", "EXPIRED", "CONFIRMED"} or not isinstance(
-            expires_at, datetime
-        ):
+        if state not in {
+            "PENDING",
+            "CONFIRMING",
+            "DECLINED",
+            "EXPIRED",
+            "CONFIRMED",
+        } or not isinstance(expires_at, datetime):
             raise ConversationIntegrityError("PendingAction state is inconsistent")
         if (
-            state == "PENDING"
+            state in {"PENDING", "CONFIRMING"}
             and (row[14] is not None or row[15] is not None or row[16] is not None)
         ) or (
             state in {"DECLINED", "EXPIRED", "CONFIRMED"}
@@ -1245,7 +1274,7 @@ class MysqlConversationStore:
             pending=reference,
             persisted_expiry=expires_at,
         )
-        if state != "PENDING":
+        if state not in {"PENDING", "CONFIRMING"}:
             cls._validate_pending_resolution(cursor, pending=reference, state=state)
         return reference, state
 

@@ -88,6 +88,10 @@
           "outcome": "error"
         },
         {
+          "operation": "chat_turn",
+          "outcome": "confirmed"
+        },
+        {
           "operation": "pending_action_prepare",
           "outcome": "success"
         },
@@ -287,6 +291,10 @@
         {
           "operation": "chat_turn",
           "outcome": "error"
+        },
+        {
+          "operation": "chat_turn",
+          "outcome": "confirmed"
         },
         {
           "operation": "pending_action_prepare",

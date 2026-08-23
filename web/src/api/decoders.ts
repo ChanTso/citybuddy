@@ -276,6 +276,14 @@ function decodeCitation(value: unknown): Citation {
   };
 }
 
+// A committed action and its receipt are one truth on this path too: the page must not be able to
+// render a success the server did not record, whichever endpoint it came from.
+function receiptFor(outcome: unknown, receiptId: unknown): string | null {
+  if (outcome === 'action_completed') return uuidValue(receiptId);
+  if (receiptId !== null) throw new Error('Malformed response');
+  return null;
+}
+
 export function decodeChatResponse(value: unknown): ChatResponse {
   const record = closedRecord(value, [
     'conversationId',
@@ -305,7 +313,7 @@ export function decodeChatResponse(value: unknown): ChatResponse {
       'action_declined',
       'action_expired',
     ] as const),
-    receiptId: record.receiptId === null ? null : uuidValue(record.receiptId),
+    receiptId: receiptFor(record.outcome, record.receiptId),
     citations: record.citations.map(decodeCitation),
   };
 }

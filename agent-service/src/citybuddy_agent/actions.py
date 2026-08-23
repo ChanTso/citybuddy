@@ -440,16 +440,16 @@ def validate_pending_action_reference(
             or len(row[12]) != 3
             or not row[12].isalpha()
             or row[12] != row[12].upper()
-            or row[13] not in {"PENDING", "DECLINED", "EXPIRED", "CONFIRMED"}
+            or row[13] not in {"PENDING", "CONFIRMING", "DECLINED", "EXPIRED", "CONFIRMED"}
             or not isinstance(row[14], datetime)
-            or (row[13] == "PENDING") != (row[15] is None)
+            or (row[13] in {"PENDING", "CONFIRMING"}) != (row[15] is None)
             or (row[15] is not None and not isinstance(row[15], datetime))
-            or (row[13] == "PENDING") != (row[16] is None and row[17] is None)
+            or (row[13] in {"PENDING", "CONFIRMING"}) != (row[16] is None and row[17] is None)
         ):
             raise ActionEvidenceError("PendingAction reference content is invalid")
         resolution_turn_id = None
         resolution_trace_id = None
-        if row[13] != "PENDING":
+        if row[13] not in {"PENDING", "CONFIRMING"}:
             resolution_turn_id = _canonical_uuid(row[16])
             resolution_trace_id = _canonical_uuid(row[17])
             if resolution_turn_id == source_turn_id:
@@ -498,7 +498,7 @@ def validate_pending_action_resolution(
     resolution_event_rows: tuple[tuple[object, ...], ...] | list[tuple[object, ...]],
 ) -> None:
     """Validate a terminal reference against its independently enumerated decision turn."""
-    if state == "PENDING":
+    if state in {"PENDING", "CONFIRMING"}:
         if (
             pending.resolution_turn_id is not None
             or pending.resolution_trace_id is not None

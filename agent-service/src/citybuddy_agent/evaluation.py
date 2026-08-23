@@ -579,7 +579,7 @@ class MysqlEvaluationEvidenceStore:
                 expected_sandbox_id=sandbox_id,
             )
             self._validate_pending_events(event_rows, pending, pending_rows[0][14])
-            if state != "PENDING":
+            if state not in {"PENDING", "CONFIRMING"}:
                 self._validate_pending_resolution(cursor, pending=pending, state=state)
             return
         try:

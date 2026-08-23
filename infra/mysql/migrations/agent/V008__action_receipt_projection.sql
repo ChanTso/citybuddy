@@ -69,12 +69,15 @@ ALTER TABLE support_turn
     )
   );
 
+-- CONFIRMING is the claim taken before the irreversible commerce call. Nothing but a
+-- confirmation may resolve a claimed reference: a decline or an expiry that won a race against a
+-- refund already committed at commerce would record, durably, that the refund did not happen.
 ALTER TABLE pending_action_reference
   DROP CHECK chk_pending_action_reference_state;
 
 ALTER TABLE pending_action_reference
   ADD CONSTRAINT chk_pending_action_reference_state
-    CHECK (state IN ('PENDING', 'DECLINED', 'EXPIRED', 'CONFIRMED'));
+    CHECK (state IN ('PENDING', 'CONFIRMING', 'DECLINED', 'EXPIRED', 'CONFIRMED'));
 
 ALTER TABLE pending_action_reference
   DROP CHECK chk_pending_action_reference_terminal;
@@ -82,7 +85,7 @@ ALTER TABLE pending_action_reference
 ALTER TABLE pending_action_reference
   ADD CONSTRAINT chk_pending_action_reference_terminal CHECK (
     (
-      state = 'PENDING'
+      state IN ('PENDING', 'CONFIRMING')
       AND resolved_at IS NULL
       AND resolution_turn_id IS NULL
       AND resolution_trace_id IS NULL
@@ -95,6 +98,14 @@ ALTER TABLE pending_action_reference
       AND resolution_turn_id <> source_turn_id
     )
   );
+
+-- One live action per session covers the claimed state too, or a second action could be prepared
+-- in the same session while the first is mid-confirmation.
+ALTER TABLE pending_action_reference
+  MODIFY COLUMN active_session_id VARCHAR(64)
+    GENERATED ALWAYS AS (
+      CASE WHEN state IN ('PENDING', 'CONFIRMING') THEN session_id ELSE NULL END
+    ) STORED;
 
 -- The commerce ActionReceipt is the authoritative record of the refund; this is the agent's local
 -- projection of it, written in the same transaction that resolves the reference and commits the

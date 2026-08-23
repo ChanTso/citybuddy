@@ -101,6 +101,7 @@ OPERATION_LABELS = frozenset(
             OperationOutcome.SUCCESS,
             OperationOutcome.PENDING,
             OperationOutcome.CLARIFICATION,
+            OperationOutcome.CONFIRMED,
             OperationOutcome.DECLINED,
             OperationOutcome.EXPIRED,
             OperationOutcome.RETRIEVAL_DENIED,

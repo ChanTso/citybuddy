@@ -13,7 +13,12 @@ from .conversation import ConversationResult
 
 TOKEN_CHUNK_SIZE = 64
 MAX_RESPONSE_TEXT = 256
+# A receipted stream carries one more frame than a plain one, and the client caps token sequences
+# at four, so a committed action's response text has this much room and no more. Exceeding it
+# fails the projection rather than emitting a stream the client would reject: the two public paths
+# must not disagree about the same durable turn.
 MAX_PUBLIC_EVENTS = MAX_RESPONSE_TEXT // TOKEN_CHUNK_SIZE + 1
+MAX_RECEIPTED_RESPONSE_TEXT = (MAX_PUBLIC_EVENTS - 2) * TOKEN_CHUNK_SIZE
 
 # This normalized lexicon is intentionally bounded defense in depth. Token prose
 # is never action truth; only an ActionReceipt-derived event can carry that state.
@@ -250,6 +255,7 @@ class SseEgressFilter:
                     not isinstance(text, str)
                     or not text
                     or len(text) > MAX_RESPONSE_TEXT
+                    or (receipt_seen and len(text) > MAX_RECEIPTED_RESPONSE_TEXT)
                     or (not receipt_seen and _contains_unreceipted_action_claim(text))
                 ):
                     raise SseProjectionError("unsafe text source")

@@ -221,5 +221,16 @@ describe('public API adapters', () => {
       outcome: 'action_completed',
       receiptId: UUID,
     });
+    expect(fetchMock).toHaveBeenCalledWith('/api/chat/stream', {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${TOKEN}`,
+        'Content-Type': 'application/json',
+        'X-Session-Id': 'owned-session',
+        'Idempotency-Key': 'stream-intent-key',
+      },
+      body: JSON.stringify({ message: 'confirm' }),
+      signal: controller.signal,
+    });
   });
 });

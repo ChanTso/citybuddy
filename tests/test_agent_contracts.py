@@ -323,7 +323,10 @@ def test_action_receipt_projection_is_agent_owned_insert_only_and_least_privileg
     assert "FOREIGN KEY (pending_action_id)" in migration
     assert "FOREIGN KEY (turn_id, trace_id, session_id, user_subject)" in migration
     assert "CHECK (result_state = 'REQUESTED')" in migration
-    assert "state IN ('PENDING', 'DECLINED', 'EXPIRED', 'CONFIRMED')" in migration
+    # CONFIRMING is the claim taken before the irreversible commerce call, and only a
+    # confirmation may resolve it.
+    assert "state IN ('PENDING', 'CONFIRMING', 'DECLINED', 'EXPIRED', 'CONFIRMED')" in migration
+    assert "CASE WHEN state IN ('PENDING', 'CONFIRMING') THEN session_id ELSE NULL END" in migration
     assert "'action_completed'," in migration
     assert "'ACTION_RECEIPT'," in migration
 

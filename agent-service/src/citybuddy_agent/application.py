@@ -726,7 +726,7 @@ def create_app(
             observation.outcome = OperationOutcome.REPLAY
             return replay
         try:
-            pending = resolved_conversations.current_pending_action(
+            live_action = resolved_conversations.current_pending_action(
                 session_id=session_id,
                 subject=principal.subject,
                 sandbox_id=principal.sandbox_id,
@@ -738,6 +738,11 @@ def create_app(
                 detail="Service unavailable",
             ) from exception
         decision = confirmation_decision(request.message)
+        # A claimed reference has a refund in flight at commerce, so only a confirmation may
+        # resolve it. Expiry and decline are the two ways a turn could otherwise record that the
+        # action did not happen while commerce is committing it.
+        pending = None if live_action is None else live_action[0]
+        claimed = live_action is not None and live_action[1] == "CONFIRMING"
         require_liveness(principal, token)
         try:
             start = resolved_conversations.begin_turn(
@@ -758,7 +763,7 @@ def create_app(
             return start.replay
         try:
             if pending is not None:
-                if pending.expires_at <= datetime.now(UTC):
+                if not claimed and pending.expires_at <= datetime.now(UTC):
                     with OperationObservation(
                         Operation.PENDING_ACTION_EXPIRY,
                         resolved_metrics,
@@ -782,7 +787,7 @@ def create_app(
                             ) from exception
                         local_observation.outcome = OperationOutcome.EXPIRED
                         return result
-                if decision is ConfirmationDecision.DECLINE:
+                if not claimed and decision is ConfirmationDecision.DECLINE:
                     with OperationObservation(
                         Operation.PENDING_ACTION_DECLINE,
                         resolved_metrics,
@@ -821,6 +826,21 @@ def create_app(
                                 reason="ACTION_CONFIRMATION_UNAVAILABLE",
                                 detail="Action confirmation unavailable",
                             )
+                        if not claimed:
+                            # Fails closed if a decline or an expiry got there first: the refund
+                            # has not been requested yet, so losing the race costs nothing.
+                            try:
+                                resolved_conversations.claim_action_confirmation(pending=pending)
+                            except ActionArbitrationConflictError:
+                                local_observation.outcome = OperationOutcome.CONFLICT
+                                raise
+                            except pymysql.MySQLError as exception:
+                                local_observation.outcome = OperationOutcome.UNAVAILABLE
+                                raise ToolBoundaryFailure(
+                                    status_code=503,
+                                    reason="ACTION_CONFIRMATION_PERSISTENCE_UNAVAILABLE",
+                                    detail="Service unavailable",
+                                ) from exception
                         confirm_events: list[AgentEvent] = []
                         try:
                             receipt = resolved_confirmer.confirm_action(
@@ -845,8 +865,11 @@ def create_app(
                             ) from exception
                         try:
                             # The refund exists in commerce from here on. A failure below leaves
-                            # the reference PENDING, and the next confirmation replays the same
-                            # commerce receipt rather than issuing a second refund.
+                            # the reference CONFIRMING, which nothing but another confirmation can
+                            # resolve, and that confirmation replays the same commerce receipt
+                            # rather than issuing a second refund. Leaving it claimed is
+                            # deliberate: the agent cannot tell a lost response from a refund that
+                            # never happened, so it must not let anything record either.
                             result = resolved_conversations.complete_action_confirmed(
                                 start=start,
                                 pending=pending,
@@ -861,7 +884,9 @@ def create_app(
                             local_observation.outcome = OperationOutcome.CONFLICT
                             raise
                         except ConversationIntegrityError:
-                            local_observation.outcome = OperationOutcome.INVALID
+                            # Recorded as a conflict, matching how the turn-level observation
+                            # classifies it; this operation has no separate invalid label.
+                            local_observation.outcome = OperationOutcome.CONFLICT
                             raise
                         except pymysql.MySQLError as exception:
                             local_observation.outcome = OperationOutcome.UNAVAILABLE
@@ -996,6 +1021,7 @@ def create_app(
                     "completed": OperationOutcome.SUCCESS,
                     "action_pending": OperationOutcome.PENDING,
                     "action_clarification": OperationOutcome.CLARIFICATION,
+                    "action_completed": OperationOutcome.CONFIRMED,
                     "action_declined": OperationOutcome.DECLINED,
                     "action_expired": OperationOutcome.EXPIRED,
                     "retrieval_denied": OperationOutcome.RETRIEVAL_DENIED,

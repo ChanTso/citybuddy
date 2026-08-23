@@ -311,3 +311,16 @@ def test_a_receipt_source_is_validated_before_it_reaches_the_client(
 ) -> None:
     with pytest.raises(SseProjectionError):
         SseEgressFilter().project((SseSourceEvent("ACTION_RECEIPT", payload),))
+
+
+def test_a_receipted_response_text_that_would_overflow_the_client_is_refused() -> None:
+    """The client caps token sequences at four, so a receipt costs one frame of response text."""
+    from citybuddy_agent.sse import MAX_RECEIPTED_RESPONSE_TEXT
+
+    fits = SseEgressFilter().project_result(confirmed("x" * MAX_RECEIPTED_RESPONSE_TEXT))
+    assert len(fits) == MAX_PUBLIC_EVENTS
+    assert [event.name for event in fits[:1]] == ["action_receipt"]
+    assert fits[-1].data["sequence"] == MAX_PUBLIC_EVENTS
+
+    with pytest.raises(SseProjectionError):
+        SseEgressFilter().project_result(confirmed("x" * (MAX_RECEIPTED_RESPONSE_TEXT + 1)))
