@@ -14,11 +14,12 @@ The order is paid through the real endpoints rather than written into MySQL: the
 verifies durable payment truth, and a hand-inserted PAID row has no payment attempt, callback or
 ledger behind it and is rejected as ACTION_PREPARATION_DURABLE_TRUTH_INCONSISTENT.
 
-Logins and order creation run in parallel, but payment settlement is serialized. Both
-mock-payment attempt lookups scan under FOR UPDATE — the callback's a table scan, the start's a
-covering index scan — so two settlements for unrelated orders lock the same rows and deadlock;
-the evidence is in bench/results/mock_payment_callback_deadlock.txt. Serializing this phase avoids
-the defect deterministically rather than retrying through it, which would hide it.
+Logins, order creation and payment settlement run in bounded parallel pools. Mock-payment closure
+reads use explicit point/range indexes, including an order-first unique index, so settlement for
+unrelated orders no longer crosses the callback and payment-start lock paths. Start discovery also
+leaves absent attempt keys unlocked and lets the unique insert constraints adjudicate races. A
+recognized start lock conflict that exhausts its bounded retries is returned as a retryable 503,
+which this setup helper already retries with the same idempotency key.
 """
 
 from __future__ import annotations
@@ -176,8 +177,8 @@ def main() -> None:
     print(f"logged in and created {len(users)} orders in {time.perf_counter() - started:.1f}s")
 
     started = time.perf_counter()
-    for entry in users:
-        settle_payment(entry, args)
+    with concurrent.futures.ThreadPoolExecutor(max_workers=ORDER_WORKERS) as pool:
+        list(pool.map(lambda entry: settle_payment(entry, args), users))
     print(f"settled {len(users)} payments in {time.perf_counter() - started:.1f}s")
 
     # One session per user, so a token and the session it is used with always belong to the same

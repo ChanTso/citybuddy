@@ -374,10 +374,20 @@ public final class MockPaymentService {
         if (attempt == MAXIMUM_CONCURRENCY_ATTEMPTS) {
           throw exception;
         }
+      } catch (PaymentStartObservationChangedException exception) {
+        if (attempt == MAXIMUM_CONCURRENCY_ATTEMPTS) {
+          throw unavailable(
+              MockPaymentRejectionReason.DEPENDENCY_OBSERVATION_INDETERMINATE,
+              "Payment start truth kept changing during observation");
+        }
       } catch (CannotAcquireLockException exception) {
-        if (!isRetryableMySqlLockCompetition(exception)
-            || attempt == MAXIMUM_CONCURRENCY_ATTEMPTS) {
+        if (!isRetryableMySqlLockCompetition(exception)) {
           throw exception;
+        }
+        if (attempt == MAXIMUM_CONCURRENCY_ATTEMPTS) {
+          throw unavailable(
+              MockPaymentRejectionReason.DEPENDENCY_OBSERVATION_INDETERMINATE,
+              "Payment start could not be serialized with its concurrent result");
         }
       }
     }
