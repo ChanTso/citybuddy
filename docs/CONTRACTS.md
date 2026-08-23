@@ -452,7 +452,7 @@ sequenceDiagram
             C-->>M: ROLLBACK
         else Marker absent or temporarily indeterminate
             C-->>M: UNKNOWN
-            Note over M,C: UNKNOWN is intermediate only. Broker timeout, check interval, and maximum check count define the terminal boundary; the application cannot rely on unlimited UNKNOWN.
+            Note over M,C: UNKNOWN is intermediate only. Broker timeout, check interval, and maximum check count define the terminal boundary, so the application cannot rely on unlimited UNKNOWN.
         end
     end
 ```
