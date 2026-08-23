@@ -29,6 +29,8 @@ class ActionControllerTest {
   private static final String TURN = "00000000-0000-0000-0000-000000000120";
   private static final String ORDER = "00000000-0000-0000-0000-000000000121";
   private static final String ACTION = "00000000-0000-0000-0000-000000000122";
+  private static final String RECEIPT = "00000000-0000-0000-0000-000000000123";
+  private static final String REFUND = "00000000-0000-0000-0000-000000000124";
   private OboAuthorizer authorizer;
   private ActionService service;
   private MockMvc mvc;
@@ -66,7 +68,7 @@ class ActionControllerTest {
                 500,
                 "AUD",
                 "PREPARED",
-                Instant.parse("2026-07-27T00:15:00Z"),
+                Instant.parse("2026-07-27T00:15:00.123000Z"),
                 false));
 
     mvc.perform(
@@ -92,6 +94,7 @@ class ActionControllerTest {
         .andExpect(jsonPath("$.requiredScope").value("refund:create"))
         .andExpect(jsonPath("$.sandboxId").value(nullValue()))
         .andExpect(jsonPath("$.targetVersion").value(7))
+        .andExpect(jsonPath("$.expiresAt").value("2026-07-27T00:15:00.123000Z"))
         .andExpect(jsonPath("$.replayed").value(false));
 
     verify(authorizer)
@@ -106,6 +109,37 @@ class ActionControllerTest {
                 new ActionRequestContext(
                     "user-1", "session-1", "trace-1", TURN, null, "refund:create")),
             eq(new PrepareActionCommand("REFUND_REQUEST", ORDER, 500L, "AUD")));
+  }
+
+  @Test
+  void confirmsWithCanonicalUtcMicroseconds() throws Exception {
+    when(authorizer.authorize(anyString(), any(OboAuthorizer.AuthorizationRequest.class)))
+        .thenReturn(new OboAuthorizer.OboPrincipal("user-1", "session-1", "refund:create", null));
+    when(service.confirm(any(ActionRequestContext.class), eq(ACTION)))
+        .thenReturn(
+            new ActionReceiptView(
+                RECEIPT,
+                ACTION,
+                "REFUND_REQUEST",
+                "REQUESTED",
+                ORDER,
+                REFUND,
+                1,
+                500,
+                "AUD",
+                Instant.parse("2026-07-27T00:16:00.123000Z"),
+                false));
+
+    mvc.perform(
+            post("/internal/tools/actions/{id}/confirm", ACTION)
+                .header("Authorization", "Bearer signed-obo")
+                .header("X-Support-Session-Id", "session-1")
+                .header("X-Agent-Trace-Id", "trace-1")
+                .header("X-Agent-Turn-Id", TURN))
+        .andExpect(status().isOk())
+        .andExpect(jsonPath("$.receiptId").value(RECEIPT))
+        .andExpect(jsonPath("$.committedAt").value("2026-07-27T00:16:00.123000Z"))
+        .andExpect(jsonPath("$.replayed").value(false));
   }
 
   @Test

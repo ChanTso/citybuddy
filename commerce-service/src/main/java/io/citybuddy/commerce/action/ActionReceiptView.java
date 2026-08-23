@@ -1,5 +1,6 @@
 package io.citybuddy.commerce.action;
 
+import com.fasterxml.jackson.annotation.JsonFormat;
 import java.time.Instant;
 
 public record ActionReceiptView(
@@ -12,5 +13,9 @@ public record ActionReceiptView(
     long resourceVersion,
     long amountMinor,
     String currency,
-    Instant committedAt,
+    @JsonFormat(
+            shape = JsonFormat.Shape.STRING,
+            pattern = "uuuu-MM-dd'T'HH:mm:ss.SSSSSS'Z'",
+            timezone = "UTC")
+        Instant committedAt,
     boolean replayed) {}

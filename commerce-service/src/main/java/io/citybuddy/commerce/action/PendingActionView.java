@@ -1,5 +1,6 @@
 package io.citybuddy.commerce.action;
 
+import com.fasterxml.jackson.annotation.JsonFormat;
 import java.time.Instant;
 
 public record PendingActionView(
@@ -16,5 +17,9 @@ public record PendingActionView(
     long amountMinor,
     String currency,
     String state,
-    Instant expiresAt,
+    @JsonFormat(
+            shape = JsonFormat.Shape.STRING,
+            pattern = "uuuu-MM-dd'T'HH:mm:ss.SSSSSS'Z'",
+            timezone = "UTC")
+        Instant expiresAt,
     boolean replayed) {}
