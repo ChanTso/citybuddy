@@ -16,10 +16,14 @@ __pycache__/
 dist/
 
 # Web
+web/.env.local
 web/coverage/
 web/dist/
 web/node_modules/
 web/*.tsbuildinfo
+
+# Local demonstration run state
+.citybuddy-demo/
 
 # Local tooling
 .pre-commit-cache/

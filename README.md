@@ -18,9 +18,12 @@ no in-memory substitutes and no mocked infrastructure in the integration suite.
   admission; MySQL holds authoritative reservation, order, inventory, and ledger truth. A
   RocketMQ transaction message binds the admission decision to durable order creation, and the
   transaction checker resolves from a persisted decision marker only.
-- **Sensitive action truth.** Commerce owns `PendingAction` and an immutable `ActionReceipt`.
-  Model prose is explicitly non-authoritative: SSE tokens cannot produce a success state, and a
-  deterministic action-claim lexicon exists only as defense in depth.
+- **Sensitive action truth.** Commerce owns `PendingAction` and an immutable `ActionReceipt`. The
+  agent prepares an action and claims it before commerce commits, so a lost response can never
+  leave a refund executed remotely and recorded locally as never executed. Model prose is
+  explicitly non-authoritative: only a projected receipt lets a client render success, SSE tokens
+  cannot produce a success state, and a deterministic action-claim lexicon exists as defense in
+  depth.
 - **Failure convergence.** Idempotency keys, unique constraints, an inventory ledger, and
   status/version CAS make duplicate delivery, unpaid-timeout cancellation, and partial refunds
   converge to one result. The real deadlock, snapshot, and precision problems found while
@@ -70,29 +73,52 @@ make init-local && make up
 `make down` preserves named volumes. The destructive reset is deliberately explicit:
 `make reset-local CONFIRM_RESET_LOCAL=1`.
 
-Application entry points:
+Each service takes its whole configuration from flags and environment, and there is no default
+profile that turns identity, orders, refunds and actions on together. The one combination that
+runs all four services against each other is `scripts/demo.sh`, described under
+[seeing it run](#seeing-it-run); the entry points themselves are `./mvnw -pl auth-service
+spring-boot:run`, `./mvnw -pl commerce-service spring-boot:run`, `uv run citybuddy-agent` and
+`uv run citybuddy-indexer`.
 
-```bash
-./mvnw -pl auth-service spring-boot:run
-```
-
-```bash
-./mvnw -pl commerce-service spring-boot:run
-```
-
-```bash
-uv run citybuddy-agent
-```
-
-```bash
-uv run citybuddy-indexer
-```
-
-The web surface proxies the three APIs in development:
+The web surface proxies the three APIs in development, at the ports `scripts/demo.sh` publishes:
 
 ```bash
 npm --prefix web ci && cp web/.env.example web/.env.local && npm --prefix web run dev
 ```
+
+## Seeing it run
+
+The flagship flow — an answer with citations, a model claiming a refund that never happened, and a
+real refund that completes only because a human confirmed it and commerce committed it — runs in
+about ninety seconds:
+
+```bash
+make demo
+```
+
+```bash
+make demo-story
+```
+
+The walkthrough, including the browser version and an account of which parts are fixtures, is in
+[docs/DEMO.md](docs/DEMO.md).
+
+## Measured performance
+
+Local three-path latency for the support agent, with inference held at zero so what remains is the
+platform's own orchestration cost. Highest rate served with p99 under a second, one process on one
+machine:
+
+| Path | Rate | p99 |
+|---|---|---|
+| Plain chat | 75 req/s | 31 ms |
+| Knowledge retrieval | 60 req/s | 689 ms |
+| Refund preparation | 15 req/s | 424 ms |
+
+The first measurement found most of the agent's CPU going on work it threw away — a fresh TLS
+context per outbound request. Method, raw output, the profile before and after, and what is still
+unexplained are in [bench/agent/README.md](bench/agent/README.md). The seckill admission
+measurement is in [bench/README.md](bench/README.md).
 
 ## Verification
 
@@ -132,15 +158,13 @@ make ci
 
 ## Current scope
 
-CityBuddy has no cloud deployment, no real model-provider access, and no measured performance
-result; the optional Agent metrics endpoint and JSON trace mirror are diagnostics and do not
-supply one. Load and latency measurement is the next piece of work, and no throughput or
-capacity claim should be read into this repository until raw results land here.
+CityBuddy has no cloud deployment and no real model-provider access; the model is a deterministic
+fixture, so every latency figure here excludes inference by construction.
 
-The agent can prepare, clarify, decline, and expire a sensitive action, but successful agent-side
-confirmation and receipt projection are not implemented; the clients therefore render no
-successful action state. Cart, checkout, a full storefront, agent workstation, multimodal intake,
-PII/output-safety handling, and human handoff are out of scope.
+Cart, checkout, a full storefront, agent workstation, multimodal intake, PII/output-safety
+handling, and human handoff are out of scope. The payment and refund providers are mocked: a
+committed receipt means the refund request is durably recorded and owned by commerce, not that
+money moved.
 
 Development rules are in [AGENTS.md](AGENTS.md). Retired process records are in
 [docs/archive/](docs/archive/README.md).

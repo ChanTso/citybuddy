@@ -10,7 +10,7 @@ COMPOSE_BUILD ?= --build
 COMPOSE := docker compose --project-name "$(COMPOSE_PROJECT_NAME)" --env-file "$(ENV_FILE)" --file compose.yaml
 
 .DEFAULT_GOAL := ci
-.PHONY: setup setup-java setup-python setup-web setup-repo format lint typecheck test build secret-scan java-ci python-ci web-ci repo-ci ci guard-layout init-local up down reset-local grant-access revoke-v013-migration-access migrate-auth migrate-commerce migrate-agent rocketmq-store-init rocketmq-init test-integration test-runtime-integration test-mysql-integration test-identity-integration test-evaluation-identity-integration test-evaluation-sandbox-integration test-catalog-integration test-redis-integration test-elasticsearch-integration test-knowledge-search-integration test-retrieval-evidence-integration test-rocketmq-integration test-knowledge-indexer-rocketmq-spike test-knowledge-sync-integration test-knowledge-rebuild-integration
+.PHONY: demo demo-story demo-stop setup setup-java setup-python setup-web setup-repo format lint typecheck test build secret-scan java-ci python-ci web-ci repo-ci ci guard-layout init-local up down reset-local grant-access revoke-v013-migration-access migrate-auth migrate-commerce migrate-agent rocketmq-store-init rocketmq-init test-integration test-runtime-integration test-mysql-integration test-identity-integration test-evaluation-identity-integration test-evaluation-sandbox-integration test-catalog-integration test-redis-integration test-elasticsearch-integration test-knowledge-search-integration test-retrieval-evidence-integration test-rocketmq-integration test-knowledge-indexer-rocketmq-spike test-knowledge-sync-integration test-knowledge-rebuild-integration
 
 guard-layout:
 	test -x ./mvnw
@@ -207,6 +207,15 @@ test-integration:
 	$(MAKE) test-knowledge-indexer-rocketmq-spike
 	$(MAKE) test-knowledge-sync-integration
 	$(MAKE) test-knowledge-rebuild-integration
+
+demo:
+	./scripts/demo.sh
+
+demo-story:
+	uv run python scripts/demo_story.py
+
+demo-stop:
+	./scripts/demo.sh stop
 
 setup: setup-java setup-python setup-web setup-repo
 
