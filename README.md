@@ -1,5 +1,7 @@
 # CityBuddy
 
+[![ci](https://github.com/ChanTso/citybuddy/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/ChanTso/citybuddy/actions/workflows/ci.yml)
+
 CityBuddy is a local-commerce transaction backend with a text-only AI customer-support agent
 built on top of it. The point of the project is the boundary between the two: an LLM agent can
 read business data and *prepare* sensitive actions such as refunds, but it cannot become the
@@ -7,6 +9,26 @@ authority on whether a transaction happened.
 
 Everything below runs locally against real MySQL, Redis, Elasticsearch, and RocketMQ instances —
 no in-memory substitutes and no mocked infrastructure in the integration suite.
+
+```mermaid
+flowchart LR
+    U([user]) --> W[web]
+    W -->|direct-user JWT| A[agent-service]
+    W -->|direct-user JWT| C[commerce-service]
+    A -->|exchange| AU[auth-service]
+    AU -->|OBO token, one tool call,<br/>exact scope| A
+    A -->|OBO token| C
+    A -.->|prose, never authority| U
+    C ==>|PendingAction, ActionReceipt| M[(MySQL)]
+    A --> E[(Elasticsearch)]
+    C --> R[(Redis)]
+    C --> Q[[RocketMQ]]
+    K[knowledge-indexer] --> E
+    Q --> K
+```
+
+The dashed edge is the whole point. Everything the model says reaches the user as explanation; the
+solid path through commerce into MySQL is the only thing that decides whether a refund happened.
 
 ## What is worth reading here
 
@@ -26,8 +48,9 @@ no in-memory substitutes and no mocked infrastructure in the integration suite.
   depth.
 - **Failure convergence.** Idempotency keys, unique constraints, an inventory ledger, and
   status/version CAS make duplicate delivery, unpaid-timeout cancellation, and partial refunds
-  converge to one result. The real deadlock, snapshot, and precision problems found while
-  proving that are written up in [docs/LESSONS.md](docs/LESSONS.md).
+  converge to one result. The deadlocks, stale snapshots, and precision losses found while proving
+  that — including a gap-lock deadlock that a throughput bottleneck had been hiding — are written
+  up in [docs/LESSONS.md](docs/LESSONS.md).
 
 ## Services
 
@@ -53,6 +76,59 @@ policies, Elasticsearch 8 with the IK analyzer, and RocketMQ 5 Broker/Proxy.
   profile and are never called by the web surface.
 
 Full ownership, invariant, and interface tables are in [docs/CONTRACTS.md](docs/CONTRACTS.md).
+
+## Seeing it run
+
+The flagship flow — an answer with citations, a model claiming a refund that never happened, and a
+real refund that completes only because a human confirmed it and commerce committed it — runs in
+about ninety seconds once the local topology below is up:
+
+```bash
+make demo
+```
+
+```bash
+make demo-story
+```
+
+Six beats, each read back out of the authoritative database rather than believed from the response
+that produced it. The middle three, verbatim from a run:
+
+```
+──────────────────────────────────────────────────────────────────────────────
+  3. The model claims the refund already happened
+     Prose is not a state. Saying it happened does not make it true anywhere that counts.
+──────────────────────────────────────────────────────────────────────────────
+  the model answers  "Your refund has been issued."
+  JSON path  outcome=completed receiptId=None
+             the sentence is passed through: 'Your refund has been issued.'
+             it carries no action state and no receipt, so no client can render one
+  SSE  path  event: error data: {"sequence":1,"code":"unsafe_output"}
+             the egress filter refuses the claim outright rather than tokenising it
+  MySQL      0 refunds exist for this order
+
+──────────────────────────────────────────────────────────────────────────────
+  4. The agent prepares the refund. It cannot execute it.
+     Preparation writes a PendingAction in commerce and stops there.
+──────────────────────────────────────────────────────────────────────────────
+  outcome    action_pending
+  reply      Please confirm or decline the prepared refund request.
+  receiptId  None
+  MySQL      pending action fcce7b0e-8192-479d-993c-c3753f2e0029 is PREPARED
+
+──────────────────────────────────────────────────────────────────────────────
+  5. The user confirms. Commerce executes, and the agent projects the receipt.
+     The receipt is the only thing that lets a client render a success state.
+──────────────────────────────────────────────────────────────────────────────
+  outcome    action_completed
+  reply      The refund request was submitted and recorded.
+  receiptId  d90ffff6-ca46-4238-aaad-de47ae3f0e34
+  MySQL      receipt REQUESTED, refund f1474937-c01a-4485-9147-72ce800c121e
+  MySQL      pending action is now CONSUMED
+```
+
+The walkthrough, including the browser version and an account of which parts are fixtures, is in
+[docs/DEMO.md](docs/DEMO.md).
 
 ## Running it locally
 
@@ -85,23 +161,6 @@ The web surface proxies the three APIs in development, at the ports `scripts/dem
 ```bash
 npm --prefix web ci && cp web/.env.example web/.env.local && npm --prefix web run dev
 ```
-
-## Seeing it run
-
-The flagship flow — an answer with citations, a model claiming a refund that never happened, and a
-real refund that completes only because a human confirmed it and commerce committed it — runs in
-about ninety seconds:
-
-```bash
-make demo
-```
-
-```bash
-make demo-story
-```
-
-The walkthrough, including the browser version and an account of which parts are fixtures, is in
-[docs/DEMO.md](docs/DEMO.md).
 
 ## Measured performance
 
@@ -165,6 +224,11 @@ Cart, checkout, a full storefront, agent workstation, multimodal intake, PII/out
 handling, and human handoff are out of scope. The payment and refund providers are mocked: a
 committed receipt means the refund request is durably recorded and owned by commerce, not that
 money moved.
+
+Known defects are tracked as [open issues](https://github.com/ChanTso/citybuddy/issues), not hidden
+here: refund preparation fails to parse its commerce response roughly once in every 559
+preparations, and the mock-payment callback path deadlocks under parallel settlement, which is why
+the benchmark fixture serializes that phase rather than retrying through it.
 
 Development rules are in [AGENTS.md](AGENTS.md). Retired process records are in
 [docs/archive/](docs/archive/README.md).

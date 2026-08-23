@@ -9,9 +9,11 @@ kept for history and are not part of the current ruleset or repository index.
 - `REVIEW_CHECKLIST.md` — the review checklist that grew alongside those slices.
 - `ROUTE_DECISIONS.md` — the resolved route and contract decisions formerly recorded in
   `docs/CONTRACTS.md`, plus the route outcome catalog.
+- `SLICE_LESSONS.md` — the unabridged per-slice pitfall record. The findings worth reading on
+  their own are collected in English in [docs/LESSONS.md](../LESSONS.md).
 
 The engineering facts these documents produced are recorded in the current documents:
 [docs/CONTRACTS.md](../CONTRACTS.md) holds the ownership, security, and transaction boundaries,
-and [docs/LESSONS.md](../LESSONS.md) holds the verified pitfalls and their root causes.
+and [docs/LESSONS.md](../LESSONS.md) holds the engineering findings and their root causes.
 
 The current development rules are in [AGENTS.md](../../AGENTS.md).
