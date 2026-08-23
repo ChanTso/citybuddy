@@ -11,6 +11,7 @@ import java.util.List;
 import org.junit.jupiter.api.Test;
 
 class CommittedPaymentStartResolutionTest {
+  private static final String NO_LOCK = "";
   private static final String LOCK = " FOR UPDATE";
   private static final String USER = "payment-owner";
   private static final String ORDER_ID = "00000000-0000-0000-0000-000000000120";
@@ -25,14 +26,14 @@ class CommittedPaymentStartResolutionTest {
   @Test
   void concealedResolutionStillConsumesBothDeclaredVisibilityLocators() {
     MockPaymentRepository repository = mock(MockPaymentRepository.class);
-    when(repository.enumerateStartAttemptVisibility(USER, KEY, LOCK)).thenReturn(List.of());
+    when(repository.enumerateStartAttemptVisibility(USER, KEY, NO_LOCK)).thenReturn(List.of());
     when(repository.enumerateStartOrderVisibility(ORDER_ID, USER, null)).thenReturn(List.of());
 
     CommittedPaymentTruthResolver.StartCommandResolution resolution =
         new CommittedPaymentTruthResolver(repository).resolveStartCommandLocked(context());
 
     assertThat(resolution).isInstanceOf(CommittedPaymentTruthResolver.ConcealedStart.class);
-    verify(repository).enumerateStartAttemptVisibility(USER, KEY, LOCK);
+    verify(repository).enumerateStartAttemptVisibility(USER, KEY, NO_LOCK);
     verify(repository).enumerateStartOrderVisibility(ORDER_ID, USER, null);
   }
 
@@ -41,9 +42,10 @@ class CommittedPaymentStartResolutionTest {
     MockPaymentRepository repository = mock(MockPaymentRepository.class);
     MockPaymentRepository.OrderTruth order = unpaidOrder(USER);
     MockPaymentRepository.AttemptRecord damaged = pendingAttempt("damaged-owner");
-    when(repository.enumerateStartAttemptVisibility(USER, KEY, LOCK)).thenReturn(List.of());
+    when(repository.enumerateStartAttemptVisibility(USER, KEY, NO_LOCK)).thenReturn(List.of());
     when(repository.enumerateStartOrderVisibility(ORDER_ID, USER, null))
         .thenReturn(List.of(new PaymentStartOrderVisibility.DirectOwner(order)));
+    when(repository.enumerateAttemptByOrderClosure(ORDER_ID, NO_LOCK)).thenReturn(List.of(damaged));
     when(repository.enumerateAttemptByOrderClosure(ORDER_ID, LOCK)).thenReturn(List.of(damaged));
     when(repository.enumerateOrderClosure(ORDER_ID, LOCK)).thenReturn(List.of(order));
     when(repository.enumerateAttemptClosure(damaged, LOCK)).thenReturn(List.of(damaged));
@@ -55,8 +57,9 @@ class CommittedPaymentStartResolutionTest {
                 new CommittedPaymentTruthResolver(repository).resolveStartCommandLocked(context()))
         .isInstanceOf(CommittedPaymentIntegrityException.class);
 
-    verify(repository).enumerateStartAttemptVisibility(USER, KEY, LOCK);
+    verify(repository).enumerateStartAttemptVisibility(USER, KEY, NO_LOCK);
     verify(repository).enumerateStartOrderVisibility(ORDER_ID, USER, null);
+    verify(repository).enumerateAttemptByOrderClosure(ORDER_ID, NO_LOCK);
     verify(repository).enumerateAttemptByOrderClosure(ORDER_ID, LOCK);
   }
 
@@ -65,6 +68,8 @@ class CommittedPaymentStartResolutionTest {
     MockPaymentRepository repository = mock(MockPaymentRepository.class);
     MockPaymentRepository.OrderTruth damagedOrder = unpaidOrder("damaged-owner");
     MockPaymentRepository.AttemptRecord attempt = pendingAttempt(USER);
+    when(repository.enumerateStartAttemptVisibility(USER, KEY, NO_LOCK))
+        .thenReturn(List.of(attempt));
     when(repository.enumerateStartAttemptVisibility(USER, KEY, LOCK)).thenReturn(List.of(attempt));
     when(repository.enumerateStartOrderVisibility(ORDER_ID, USER, null)).thenReturn(List.of());
     when(repository.enumerateAttemptClosure(attempt, LOCK)).thenReturn(List.of(attempt));
@@ -77,6 +82,7 @@ class CommittedPaymentStartResolutionTest {
                 new CommittedPaymentTruthResolver(repository).resolveStartCommandLocked(context()))
         .isInstanceOf(CommittedPaymentIntegrityException.class);
 
+    verify(repository).enumerateStartAttemptVisibility(USER, KEY, NO_LOCK);
     verify(repository).enumerateStartAttemptVisibility(USER, KEY, LOCK);
     verify(repository).enumerateStartOrderVisibility(ORDER_ID, USER, null);
   }
@@ -100,10 +106,10 @@ class CommittedPaymentStartResolutionTest {
             CURRENCY,
             "PAID",
             2);
-    when(repository.enumerateStartAttemptVisibility(USER, KEY, LOCK)).thenReturn(List.of());
+    when(repository.enumerateStartAttemptVisibility(USER, KEY, NO_LOCK)).thenReturn(List.of());
     when(repository.enumerateStartOrderVisibility(ORDER_ID, USER, null))
         .thenReturn(List.of(new PaymentStartOrderVisibility.DirectOwner(damagedOrder)));
-    when(repository.enumerateAttemptByOrderClosure(ORDER_ID, LOCK)).thenReturn(List.of());
+    when(repository.enumerateAttemptByOrderClosure(ORDER_ID, NO_LOCK)).thenReturn(List.of());
     when(repository.enumerateOrderClosure(ORDER_ID, LOCK)).thenReturn(List.of(damagedOrder));
     when(repository.enumerateLedgerReplayClosure(null, ORDER_ID, "")).thenReturn(List.of());
 
@@ -114,10 +120,44 @@ class CommittedPaymentStartResolutionTest {
   }
 
   @Test
+  void orderChangeAfterEmptyAttemptDiscoveryRequestsAFreshTransaction() {
+    MockPaymentRepository repository = mock(MockPaymentRepository.class);
+    MockPaymentRepository.OrderTruth visible = unpaidOrder(USER);
+    MockPaymentRepository.OrderTruth current =
+        new MockPaymentRepository.OrderTruth(
+            visible.orderKind(),
+            visible.orderId(),
+            visible.userSubject(),
+            visible.sandboxId(),
+            visible.evaluationOwnerHandle(),
+            visible.productId(),
+            visible.reservationId(),
+            visible.activityId(),
+            visible.transactionEventId(),
+            visible.quantity(),
+            visible.amountMinor(),
+            visible.currency(),
+            "PAID",
+            2);
+    when(repository.enumerateStartAttemptVisibility(USER, KEY, NO_LOCK)).thenReturn(List.of());
+    when(repository.enumerateStartOrderVisibility(ORDER_ID, USER, null))
+        .thenReturn(List.of(new PaymentStartOrderVisibility.DirectOwner(visible)));
+    when(repository.enumerateAttemptByOrderClosure(ORDER_ID, NO_LOCK)).thenReturn(List.of());
+    when(repository.enumerateOrderClosure(ORDER_ID, LOCK)).thenReturn(List.of(current));
+
+    assertThatThrownBy(
+            () ->
+                new CommittedPaymentTruthResolver(repository).resolveStartCommandLocked(context()))
+        .isInstanceOf(PaymentStartObservationChangedException.class);
+  }
+
+  @Test
   void bothVisibleLocatorsProduceOnlyTheTypedPendingReplay() {
     MockPaymentRepository repository = mock(MockPaymentRepository.class);
     MockPaymentRepository.OrderTruth order = unpaidOrder(USER);
     MockPaymentRepository.AttemptRecord attempt = pendingAttempt(USER);
+    when(repository.enumerateStartAttemptVisibility(USER, KEY, NO_LOCK))
+        .thenReturn(List.of(attempt));
     when(repository.enumerateStartAttemptVisibility(USER, KEY, LOCK)).thenReturn(List.of(attempt));
     when(repository.enumerateStartOrderVisibility(ORDER_ID, USER, null))
         .thenReturn(List.of(new PaymentStartOrderVisibility.DirectOwner(order)));
@@ -130,8 +170,36 @@ class CommittedPaymentStartResolutionTest {
         new CommittedPaymentTruthResolver(repository).resolveStartCommandLocked(context());
 
     assertThat(resolution).isInstanceOf(CommittedPaymentTruthResolver.PendingReplay.class);
+    verify(repository).enumerateStartAttemptVisibility(USER, KEY, NO_LOCK);
     verify(repository).enumerateStartAttemptVisibility(USER, KEY, LOCK);
     verify(repository).enumerateStartOrderVisibility(ORDER_ID, USER, null);
+  }
+
+  @Test
+  void discoveredAttemptMustStillBeTheSameRowWhenLocked() {
+    MockPaymentRepository repository = mock(MockPaymentRepository.class);
+    MockPaymentRepository.AttemptRecord discovered = pendingAttempt(USER);
+    MockPaymentRepository.AttemptRecord replacement =
+        MockPaymentRepository.AttemptRecord.pending(
+            "00000000-0000-0000-0000-000000000131",
+            "00000000-0000-0000-0000-000000000132",
+            USER,
+            ORDER_ID,
+            "STANDARD",
+            null,
+            KEY,
+            INTENT,
+            AMOUNT,
+            CURRENCY);
+    when(repository.enumerateStartAttemptVisibility(USER, KEY, NO_LOCK))
+        .thenReturn(List.of(discovered));
+    when(repository.enumerateStartAttemptVisibility(USER, KEY, LOCK))
+        .thenReturn(List.of(replacement));
+
+    assertThatThrownBy(
+            () ->
+                new CommittedPaymentTruthResolver(repository).resolveStartCommandLocked(context()))
+        .isInstanceOf(CommittedPaymentIntegrityException.class);
   }
 
   @Test
@@ -165,10 +233,10 @@ class CommittedPaymentStartResolutionTest {
                 ORDER_ID, KEY, AMOUNT, CURRENCY, SANDBOX),
             AMOUNT,
             CURRENCY);
-    when(repository.enumerateStartAttemptVisibility(USER, KEY, LOCK)).thenReturn(List.of());
+    when(repository.enumerateStartAttemptVisibility(USER, KEY, NO_LOCK)).thenReturn(List.of());
     when(repository.enumerateStartOrderVisibility(ORDER_ID, USER, SANDBOX))
         .thenReturn(List.of(visibility));
-    when(repository.enumerateAttemptByOrderClosure(ORDER_ID, LOCK)).thenReturn(List.of());
+    when(repository.enumerateAttemptByOrderClosure(ORDER_ID, NO_LOCK)).thenReturn(List.of());
     when(repository.enumerateOrderClosure(ORDER_ID, LOCK)).thenReturn(List.of(order));
     when(repository.enumerateLedgerReplayClosure(null, ORDER_ID, "")).thenReturn(List.of());
 

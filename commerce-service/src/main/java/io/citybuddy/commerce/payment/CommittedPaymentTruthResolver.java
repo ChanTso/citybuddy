@@ -97,8 +97,11 @@ public final class CommittedPaymentTruthResolver {
    *
    * <p>The attempt-command and owned-order locators are both observed before either result is used.
    * The owned-order lookup is owner scoped; only after it proves visibility may the broader
-   * order-relation enumeration participate in integrity classification. All locking durable
-   * enumerations acquire attempt rows before order rows, matching callback and refund lock order.
+   * order-relation enumeration participate in integrity classification. Attempt locators first use
+   * consistent reads so absent keys do not hold gaps that a new attempt must insert into. A
+   * discovered attempt is then read again under its indexed lock before any result is used. All
+   * locking durable enumerations acquire attempt rows before order rows, matching callback and
+   * refund lock order.
    */
   public StartCommandResolution resolveStartCommandLocked(StartCommandContext context) {
     Objects.requireNonNull(context, "Payment start context is required");
@@ -123,14 +126,22 @@ public final class CommittedPaymentTruthResolver {
     }
 
     List<MockPaymentRepository.AttemptRecord> orderAttempts =
-        repository.enumerateAttemptByOrderClosure(context.orderId(), LOCK);
+        lockDiscoveredStartAttempts(
+            repository.enumerateAttemptByOrderClosure(context.orderId(), ""),
+            () -> repository.enumerateAttemptByOrderClosure(context.orderId(), LOCK));
     if (orderAttempts.size() > 1) {
       throw inconsistent("Payment start order-attempt cardinality is inconsistent");
     }
     List<MockPaymentRepository.OrderTruth> orders =
         repository.enumerateOrderClosure(context.orderId(), LOCK);
     PaymentStartOrderVisibility.Visible visibleOrder = visibleOrders.getFirst();
-    requireSingleEqual(orders, visibleOrder.order(), "Payment start order closure is inconsistent");
+    if (orders.size() != 1) {
+      throw inconsistent("Payment start order closure is inconsistent");
+    }
+    if (!orders.getFirst().equals(visibleOrder.order())) {
+      throw new PaymentStartObservationChangedException(
+          "Payment start order changed after attempt discovery");
+    }
     MockPaymentRepository.OrderTruth order = orders.getFirst();
 
     if (!orderAttempts.isEmpty()) {
@@ -156,8 +167,26 @@ public final class CommittedPaymentTruthResolver {
         .contains(OwnershipVisibilityLocator.START_ATTEMPT_COMMAND)) {
       throw new IllegalStateException("Payment start attempt locator is not registered");
     }
-    return repository.enumerateStartAttemptVisibility(
-        context.userSubject(), context.requestIdempotencyKey(), LOCK);
+    return lockDiscoveredStartAttempts(
+        repository.enumerateStartAttemptVisibility(
+            context.userSubject(), context.requestIdempotencyKey(), ""),
+        () ->
+            repository.enumerateStartAttemptVisibility(
+                context.userSubject(), context.requestIdempotencyKey(), LOCK));
+  }
+
+  private List<MockPaymentRepository.AttemptRecord> lockDiscoveredStartAttempts(
+      List<MockPaymentRepository.AttemptRecord> discovered,
+      java.util.function.Supplier<List<MockPaymentRepository.AttemptRecord>> lockedRead) {
+    if (discovered.size() != 1) {
+      return discovered;
+    }
+    List<MockPaymentRepository.AttemptRecord> locked = lockedRead.get();
+    if (locked.size() != 1
+        || !locked.getFirst().attemptId().equals(discovered.getFirst().attemptId())) {
+      throw inconsistent("Payment start attempt locator changed while being locked");
+    }
+    return locked;
   }
 
   private List<PaymentStartOrderVisibility.Classification> observeStartOwnedOrderLocator(

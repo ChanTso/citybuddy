@@ -234,10 +234,16 @@ while the agent requires canonical six-digit UTC microseconds. Commerce now pins
 expiry and receipt commit time to that wire format; the historical counts and mechanism remain in
 [bench/agent/README.md](bench/agent/README.md).
 
-One known defect remains. Settling two payments in parallel deadlocks: the callback's attempt
-lookup and another order's payment-start lookup scan the same rows under `FOR UPDATE`, InnoDB rolls
-the start back, and the start endpoint answers 500. It is why the benchmark fixture settles
-payments serially rather than retrying through them.
+Parallel mock-payment settlement exposed two lock cycles. Callback closure reads and another
+order's payment start could scan the same attempt rows, while two new starts could both lock an
+empty request/order index gap before trying to insert into it. The attempt-order unique index is
+now order-first, closure reads use bounded explicit indexes, and start discovery locks an existing
+attempt but not an absent key; uniqueness arbitrates a competing insert. An isolated 6,000-payment
+run added zero MySQL deadlocks or lock timeouts, returned no typed payment 503s, and left all six
+authoritative order/attempt/callback/ledger counts at 6,000. The fixture therefore settles payments
+in a bounded parallel pool again. The historical deadlocks, exact result, and a separate
+order-creation deadlock found while isolating the measurement are in
+[bench/agent/README.md](bench/agent/README.md).
 
 Development rules are in [AGENTS.md](AGENTS.md). Retired process records are in
 [docs/archive/](docs/archive/README.md).

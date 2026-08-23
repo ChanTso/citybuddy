@@ -2622,7 +2622,8 @@ mysql_query root "$root_password" commerce_db \
 duplicate_attempt_id='00000000-0000-0000-0000-000000000203'
 duplicate_attempt_order_id='00000000-0000-0000-0000-000000000204'
 mysql_query root "$root_password" commerce_db \
-  "ALTER TABLE mock_payment_attempt DROP INDEX uq_mock_payment_callback_correlation"
+  "ALTER TABLE mock_payment_attempt DROP INDEX uq_mock_payment_callback_correlation,
+    ADD INDEX uq_mock_payment_callback_correlation (callback_correlation_id)"
 mysql_query root "$root_password" commerce_db "
 INSERT INTO mock_payment_attempt (attempt_id, callback_correlation_id, user_subject, order_id,
   order_kind, sandbox_id, request_idempotency_key, intent_hash, amount_minor, refunded_amount_minor,
@@ -2636,7 +2637,8 @@ assert_payment_truth_fails_closed "duplicate attempt correlation cardinality"
 mysql_query root "$root_password" commerce_db \
   "DELETE FROM mock_payment_attempt WHERE attempt_id = '$duplicate_attempt_id'"
 mysql_query root "$root_password" commerce_db \
-  "ALTER TABLE mock_payment_attempt ADD CONSTRAINT uq_mock_payment_callback_correlation UNIQUE (callback_correlation_id)"
+  "ALTER TABLE mock_payment_attempt DROP INDEX uq_mock_payment_callback_correlation,
+    ADD CONSTRAINT uq_mock_payment_callback_correlation UNIQUE (callback_correlation_id)"
 
 mysql_query root "$root_password" commerce_db \
   "ALTER TABLE standard_order DROP PRIMARY KEY"

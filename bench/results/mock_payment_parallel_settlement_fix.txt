@@ -1,0 +1,104 @@
+Mock-payment parallel-settlement acceptance
+===========================================
+
+Date: 2026-08-24 Australia/Perth (2026-08-23 UTC in MySQL)
+Code boundary: fix/mock-payment-deadlock candidate based on main 9ac3cb4
+Host: Apple M4, 10 cores, 24 GB RAM
+Docker allocation: 8 CPUs, 14 GB RAM
+Services: local Docker MySQL 8.4.10, Redis, Elasticsearch, RocketMQ; auth and commerce benchmark containers
+Workload: 6,000 unique bench users, one unique standard order and payment per user, four order workers and four payment-settlement workers
+Excluded: login, order creation, support-session creation, and agent chat are outside the isolated payment-settlement window
+
+The first candidate, with the order-first attempt index and decomposed closure reads but with
+locking reads for absent payment-start keys, produced this mixed fixture output:
+
+  logged in and created 6000 orders in 17.2s
+  settled 6000 payments in 36.2s
+  opened 6000 sessions in 7.7s
+
+MySQL counters around that whole mixed setup moved as follows. This delta includes order creation,
+so it is not presented as a payment-only count:
+
+  ERROR_NUMBER  ERROR_NAME             SUM_ERROR_RAISED before  after
+  1205          ER_LOCK_WAIT_TIMEOUT    0                        0
+  1213          ER_LOCK_DEADLOCK        23562                    25730
+
+Commerce logged 184 typed DEPENDENCY_OBSERVATION_INDETERMINATE responses. The latest InnoDB graph
+from that run was two different mock_payment_attempt INSERTs, each holding an X gap lock and
+waiting for insert intention in uq_mock_payment_request.
+
+After changing payment-start attempt discovery to leave misses unlocked and locking only a
+positive reread, the ordinary full fixture completed as follows:
+
+  logged in and created 6000 orders in 16.6s
+  settled 6000 payments in 16.5s
+  opened 6000 sessions in 8.0s
+
+The full setup still raised the global deadlock counter from 25,730 to 26,179. Its latest InnoDB
+graph named only two INSERTs into order_idempotency, so the phases were rerun separately rather
+than attributing that mixed delta to payment.
+
+Isolated raw counter samples
+----------------------------
+
+Immediately before creating the 6,000 unpaid orders:
+
+  ERROR_NUMBER  ERROR_NAME             SUM_ERROR_RAISED  LAST_SEEN
+  1205          ER_LOCK_WAIT_TIMEOUT    0                 NULL
+  1213          ER_LOCK_DEADLOCK        26179             2026-08-23 21:11:15
+
+Immediately after order creation and before payment settlement:
+
+  created 6000 orders in 12.9s
+
+  ERROR_NUMBER  ERROR_NAME             SUM_ERROR_RAISED  LAST_SEEN
+  1205          ER_LOCK_WAIT_TIMEOUT    0                 NULL
+  1213          ER_LOCK_DEADLOCK        26589             2026-08-23 21:14:19
+
+Immediately after payment settlement:
+
+  settled 6000 payments in 15.6s
+
+  ERROR_NUMBER  ERROR_NAME             SUM_ERROR_RAISED  LAST_SEEN
+  1205          ER_LOCK_WAIT_TIMEOUT    0                 NULL
+  1213          ER_LOCK_DEADLOCK        26589             2026-08-23 21:14:19
+
+Payment-window deltas:
+
+  ER_LOCK_WAIT_TIMEOUT: 0
+  ER_LOCK_DEADLOCK: 0
+  typed DEPENDENCY_OBSERVATION_INDETERMINATE log lines: 0
+
+Authoritative SQL and raw output
+--------------------------------
+
+  SELECT 'orders', COUNT(*)
+    FROM standard_order WHERE user_subject LIKE 'bench-user-%'
+  UNION ALL
+  SELECT 'paid_orders', COUNT(*)
+    FROM standard_order WHERE user_subject LIKE 'bench-user-%' AND status = 'PAID'
+  UNION ALL
+  SELECT 'attempts', COUNT(*)
+    FROM mock_payment_attempt WHERE user_subject LIKE 'bench-user-%'
+  UNION ALL
+  SELECT 'succeeded_attempts', COUNT(*)
+    FROM mock_payment_attempt WHERE user_subject LIKE 'bench-user-%' AND state = 'SUCCEEDED'
+  UNION ALL
+  SELECT 'callbacks', COUNT(*)
+    FROM mock_payment_callback c JOIN mock_payment_attempt a USING (attempt_id)
+   WHERE a.user_subject LIKE 'bench-user-%'
+  UNION ALL
+  SELECT 'payment_movements', COUNT(*)
+    FROM inventory_ledger l JOIN standard_order o USING (order_id)
+   WHERE o.user_subject LIKE 'bench-user-%' AND l.movement_type = 'STANDARD_PAYMENT';
+
+  orders              6000
+  paid_orders         6000
+  attempts            6000
+  succeeded_attempts  6000
+  callbacks           6000
+  payment_movements   6000
+
+The 410 deadlocks in the excluded order-creation phase are a separate defect. The latest graph
+shows two order_idempotency INSERTs holding the same missing-key gap and waiting for insert
+intention. They are not included in the zero-deadlock payment result.

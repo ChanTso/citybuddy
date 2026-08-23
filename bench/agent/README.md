@@ -414,36 +414,77 @@ preparation, and on retrieval nothing external at all — just the process runni
 
 ## Three things found while building the fixture
 
-**Concurrent mock-payment settlement deadlocks, and the payment-start endpoint answers HTTP 500.**
-Building 6,000 paid orders in parallel produced `CannotAcquireLockException` out of
-`POST /api/orders/{orderId}/mock-payment`. The recorded deadlock
-(`../results/mock_payment_callback_deadlock.txt`) is between the callback's attempt lookup —
+**Concurrent mock-payment settlement exposed two deadlocks; both lock paths are now removed.**
+Building 6,000 paid orders in parallel historically produced
+`CannotAcquireLockException` out of `POST /api/orders/{orderId}/mock-payment`. The recorded raw
+deadlock (`../results/mock_payment_callback_deadlock.txt`) is between the callback's attempt
+lookup —
 
 ```sql
 SELECT ... FROM mock_payment_attempt
  WHERE attempt_id = ? OR callback_correlation_id = ? OR order_id = ? LIMIT 2 FOR UPDATE
 ```
 
-— and the payment *start*'s lookup on `order_id`, for two different orders, each holding an X
-lock on `PRIMARY` that the other waits for. InnoDB rolled back the start, which is consistent with
-where the 500 came from: `MockPaymentService.withCallbackDeadlockRetry` retries and then falls
-back to resolving the competing result, while `withStartCompetitionRetry` rethrows once its
-attempts are spent, and no handler maps `CannotAcquireLockException`.
+— and the payment *start*'s lookup on `order_id`, for two different orders, each holding an X lock
+on `PRIMARY` that the other waits for. InnoDB rolled back the start. At the time,
+`MockPaymentService.withCallbackDeadlockRetry` retried and then resolved the competing callback
+result, while `withStartCompetitionRetry` rethrew once its attempts were spent and no handler
+mapped `CannotAcquireLockException`; the fixture failure therefore surfaced as HTTP 500.
+The raw InnoDB artifact records the database cycle, not the HTTP response; the response is the
+observed fixture failure explained by that exception path.
 
-`EXPLAIN` on the callback query reports
-`type: ALL, key: NULL` despite `attempt_id` and `callback_correlation_id` both being uniquely
-indexed, so under `FOR UPDATE` it locks every row it examines. Two caveats on that plan: the
-fixture table held six rows, and on a table that small the optimizer would choose a scan whatever
-the predicate looked like, so this `EXPLAIN` is consistent with the three-way `OR` disqualifying
-every index but does not prove it. The start lookup's plan is a covering index scan of
-`uq_mock_payment_order`, not a table scan, because that index is `(order_kind, order_id)` and the
-predicate names only `order_id`. Confirming the mechanism needs the same `EXPLAIN` against a table
-with realistic cardinality. What is not in doubt is that the deadlock happens under ordinary
-parallel fixture building. That it reaches the client as a 500 rather than a retryable status is
-read from the exception handling above and from the failure that stopped the fixture build; no
-committed artifact here records the status, so treat it as a lead to confirm rather than a
-measured result. The fixture builder settles payments serially to avoid the deadlock
-deterministically rather than retrying through it.
+`EXPLAIN` on the historical callback query reported `type: ALL, key: NULL` despite `attempt_id`
+and `callback_correlation_id` both being uniquely indexed, so under `FOR UPDATE` it could lock
+every row it examined. That plan came from a six-row table, where the optimizer can prefer a scan
+regardless of predicate shape; it is consistent with the three-way `OR` defeating point access,
+but is not proof by itself. The start lookup used a covering scan of `uq_mock_payment_order`
+because the index was `(order_kind, order_id)` while the predicate named only `order_id`.
+
+The first correction removed both scan shapes. Migration V016 preserves the uniqueness rule but
+reverses that index to `(order_id, order_kind)`. Attempt-closure enumeration decomposes the `OR`
+into separately bounded reads and uses `FORCE INDEX` for `PRIMARY`,
+`uq_mock_payment_callback_correlation`, or `uq_mock_payment_order` according to the locator. A
+real-MySQL lock regression holds an unrelated attempt row locked and observes the callback and
+order closure reads for two other orders complete before that lock is released.
+
+Restoring four-way settlement then exposed a second cycle during payment start. A new command
+looked up both its request key and order relation with `FOR UPDATE` before inserting the attempt.
+When neither row existed, InnoDB held compatible next-key gap locks in
+`uq_mock_payment_request` and `uq_mock_payment_order`; two transactions could therefore reach the
+insert together, then each one's insert-intention lock waited for the other's gap lock. The first
+6,000-user run with only the scan correction converged only through the fixture's outer same-key
+retry: it took 36.2 seconds and commerce logged 184 typed
+`DEPENDENCY_OBSERVATION_INDETERMINATE` responses.
+
+Start resolution now performs each bounded attempt lookup as a consistent read. A miss remains
+unlocked and the existing unique constraints adjudicate any competing insert. A hit is immediately
+read again through the same forced index with `FOR UPDATE`; it must still identify the same
+attempt, and the resolver uses that current locked row for complete closure validation. The
+existing duplicate-key retry starts a fresh transaction after the losing insert rolls back. If
+the current locked order differs from the order seen alongside the unlocked attempt misses, the
+resolver likewise abandons that snapshot and retries from a fresh transaction. A deterministic
+start/callback race requires that path to return the committed replay rather than misclassify the
+changed order as an integrity failure; exhausting repeated observation changes returns the same
+typed retryable 503 used for recognized MySQL lock contention. A real-MySQL regression also pauses
+two distinct starts immediately before insert and requires both to commit without any internal
+lock failure.
+
+The acceptance run separates fixture phases because the full setup also has an independent gap
+lock cycle in `order_idempotency`. Creating 6,000 orders raised MySQL's cumulative 1213 counter
+from 26,179 to 26,589. The following 6,000 four-way parallel payment settlements completed in
+15.6 seconds and left it at 26,589, with the 1205 counter at zero, no typed payment 503s, and SQL
+counts of 6,000 paid orders, attempts, succeeded attempts, callbacks, and payment ledger movements.
+The workload, environment, raw counters, and queries are preserved in
+[`../results/mock_payment_parallel_settlement_fix.txt`](../results/mock_payment_parallel_settlement_fix.txt).
+This proves the measured payment boundary; it does not claim that every possible database
+deadlock is impossible, and the newly isolated order-creation defect remains separate work.
+
+Payment start still has bounded retries for MySQL 1205/1213 contention. If a recognized conflict
+exhausts them, commerce now returns typed 503
+`DEPENDENCY_OBSERVATION_INDETERMINATE`, which is retryable with the same idempotency key, instead
+of exposing the lock exception as 500. The fixture builder has returned to bounded parallel
+settlement and already retries 503. The deterministic MySQL cases and isolated acceptance run are
+the regression boundary, and the raw historical deadlock remains preserved above.
 
 **The sporadic refund-preparation HTTP 502 was a timestamp-format mismatch.** A small fraction of
 preparations ended `ACTION_PREPARATION_RESPONSE_INVALID` and HTTP 502

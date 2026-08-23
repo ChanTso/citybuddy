@@ -26,6 +26,9 @@ import java.util.Map;
 import java.util.UUID;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
@@ -1386,6 +1389,291 @@ class MockPaymentIntegrationTest {
                 Long.class,
                 orderId))
         .isOne();
+  }
+
+  @Test
+  void parallelStartsDoNotHoldMissingAttemptGapsBeforeInsert() throws Exception {
+    String user = "payment-gap-" + UUID.randomUUID();
+    String firstOrderId = seedStandardOrder(user, 1821);
+    String secondOrderId = seedStandardOrder(user, 1822);
+    CountDownLatch insertsReady = new CountDownLatch(2);
+    CountDownLatch releaseInserts = new CountDownLatch(1);
+    AtomicInteger lockFailures = new AtomicInteger();
+    MockPaymentRepository observingRepository =
+        new MockPaymentRepository(jdbc) {
+          @Override
+          public void insertAttempt(AttemptRecord attempt) {
+            if (user.equals(attempt.userSubject())) {
+              insertsReady.countDown();
+              awaitSignal(releaseInserts, "parallel payment inserts release");
+            }
+            try {
+              super.insertAttempt(attempt);
+            } catch (CannotAcquireLockException exception) {
+              lockFailures.incrementAndGet();
+              throw exception;
+            }
+          }
+        };
+    MockPaymentService concurrentPayments =
+        new MockPaymentService(observingRepository, transactionTemplate(), Clock.systemUTC());
+
+    CompletableFuture<MockPaymentResult> first =
+        CompletableFuture.supplyAsync(
+            () ->
+                concurrentPayments.start(
+                    user,
+                    firstOrderId,
+                    "payment-gap-first",
+                    new MockPaymentRequest(1821L, "AUD", null)));
+    CompletableFuture<MockPaymentResult> second =
+        CompletableFuture.supplyAsync(
+            () ->
+                concurrentPayments.start(
+                    user,
+                    secondOrderId,
+                    "payment-gap-second",
+                    new MockPaymentRequest(1822L, "AUD", null)));
+    try {
+      assertThat(insertsReady.await(10, TimeUnit.SECONDS)).isTrue();
+    } finally {
+      releaseInserts.countDown();
+    }
+
+    MockPaymentResult firstResult = first.get(10, TimeUnit.SECONDS);
+    MockPaymentResult secondResult = second.get(10, TimeUnit.SECONDS);
+    assertThat(firstResult.state()).isEqualTo("PENDING");
+    assertThat(secondResult.state()).isEqualTo("PENDING");
+    assertThat(firstResult.attemptId()).isNotEqualTo(secondResult.attemptId());
+    assertThat(lockFailures).hasValue(0);
+  }
+
+  @Test
+  void startRetriesFromFreshTruthWhenCallbackWinsAfterEmptyAttemptDiscovery() throws Exception {
+    String orderId = seedStandardOrder(USER, 1823);
+    String requestKey = "payment-start-stale-snapshot";
+    CountDownLatch emptyAttemptObserved = new CountDownLatch(1);
+    CountDownLatch releaseStaleStart = new CountDownLatch(1);
+    AtomicInteger pauses = new AtomicInteger();
+    MockPaymentRepository pausedRepository =
+        new MockPaymentRepository(jdbc) {
+          @Override
+          List<AttemptRecord> enumerateAttemptByOrderClosure(
+              String candidateOrderId, String lockClause) {
+            List<AttemptRecord> attempts =
+                super.enumerateAttemptByOrderClosure(candidateOrderId, lockClause);
+            if (orderId.equals(candidateOrderId)
+                && lockClause.isEmpty()
+                && attempts.isEmpty()
+                && pauses.getAndIncrement() == 0) {
+              emptyAttemptObserved.countDown();
+              awaitSignal(releaseStaleStart, "stale payment start release");
+            }
+            return attempts;
+          }
+        };
+    MockPaymentService staleStart =
+        new MockPaymentService(pausedRepository, transactionTemplate(), Clock.systemUTC());
+    CompletableFuture<MockPaymentResult> replay =
+        CompletableFuture.supplyAsync(
+            () ->
+                staleStart.start(
+                    USER, orderId, requestKey, new MockPaymentRequest(1823L, "AUD", null)));
+
+    assertThat(emptyAttemptObserved.await(10, TimeUnit.SECONDS)).isTrue();
+    MockPaymentResult attempt;
+    MockPaymentCallbackResult committed;
+    try {
+      attempt =
+          payments.start(USER, orderId, requestKey, new MockPaymentRequest(1823L, "AUD", null));
+      committed =
+          payments.callback(
+              "callback-start-stale-snapshot", callback(attempt, UUID.randomUUID().toString()));
+    } finally {
+      releaseStaleStart.countDown();
+    }
+
+    MockPaymentResult replayed = replay.get(10, TimeUnit.SECONDS);
+    assertThat(replayed.attemptId()).isEqualTo(attempt.attemptId());
+    assertThat(replayed.state()).isEqualTo("SUCCEEDED");
+    assertThat(replayed.replayed()).isTrue();
+    assertThat(committed.state()).isEqualTo("SUCCEEDED");
+    assertThat(pauses).hasValue(1);
+  }
+
+  @Test
+  void exhaustedStartObservationChangesReturnTypedRetryableUnavailable() {
+    AtomicInteger calls = new AtomicInteger();
+    MockPaymentRepository changing =
+        new MockPaymentRepository(jdbc) {
+          @Override
+          List<AttemptRecord> enumerateStartAttemptVisibility(
+              String userSubject, String requestIdempotencyKey, String lockClause) {
+            calls.incrementAndGet();
+            throw new PaymentStartObservationChangedException("controlled start change");
+          }
+        };
+    MockPaymentService retrying =
+        new MockPaymentService(changing, transactionTemplate(), Clock.systemUTC());
+
+    assertThatThrownBy(
+            () ->
+                retrying.start(
+                    USER,
+                    UUID.randomUUID().toString(),
+                    "payment-start-changing",
+                    new MockPaymentRequest(1824L, "AUD", null)))
+        .isInstanceOfSatisfying(
+            MockPaymentException.class,
+            exception -> {
+              assertThat(exception.status()).isEqualTo(503);
+              assertThat(exception.category()).isEqualTo("UNAVAILABLE");
+              assertThat(exception.reason())
+                  .isEqualTo(MockPaymentRejectionReason.DEPENDENCY_OBSERVATION_INDETERMINATE);
+            });
+    assertThat(calls).hasValue(2);
+  }
+
+  @Test
+  void exhaustedStartLockCompetitionIsRetryableOnlyForRecognizedMySqlFailures() {
+    for (int errorCode : List.of(1205, 1213)) {
+      AtomicInteger calls = new AtomicInteger();
+      MockPaymentRepository blocked =
+          new MockPaymentRepository(jdbc) {
+            @Override
+            List<AttemptRecord> enumerateStartAttemptVisibility(
+                String userSubject, String requestIdempotencyKey, String lockClause) {
+              calls.incrementAndGet();
+              throw lockFailure(errorCode);
+            }
+          };
+      MockPaymentService retrying =
+          new MockPaymentService(blocked, transactionTemplate(), Clock.systemUTC());
+
+      assertThatThrownBy(
+              () ->
+                  retrying.start(
+                      USER,
+                      UUID.randomUUID().toString(),
+                      "payment-start-lock-" + errorCode,
+                      new MockPaymentRequest(1821L, "AUD", null)))
+          .isInstanceOfSatisfying(
+              MockPaymentException.class,
+              exception -> {
+                assertThat(exception.status()).isEqualTo(503);
+                assertThat(exception.category()).isEqualTo("UNAVAILABLE");
+                assertThat(exception.reason())
+                    .isEqualTo(MockPaymentRejectionReason.DEPENDENCY_OBSERVATION_INDETERMINATE);
+              });
+      assertThat(calls).hasValue(2);
+    }
+
+    CannotAcquireLockException unrecognized = lockFailure(9999);
+    AtomicInteger calls = new AtomicInteger();
+    MockPaymentRepository failing =
+        new MockPaymentRepository(jdbc) {
+          @Override
+          List<AttemptRecord> enumerateStartAttemptVisibility(
+              String userSubject, String requestIdempotencyKey, String lockClause) {
+            calls.incrementAndGet();
+            throw unrecognized;
+          }
+        };
+    MockPaymentService nonRetrying =
+        new MockPaymentService(failing, transactionTemplate(), Clock.systemUTC());
+
+    assertThatThrownBy(
+            () ->
+                nonRetrying.start(
+                    USER,
+                    UUID.randomUUID().toString(),
+                    "payment-start-lock-unrecognized",
+                    new MockPaymentRequest(1821L, "AUD", null)))
+        .isSameAs(unrecognized);
+    assertThat(calls).hasValue(1);
+  }
+
+  @Test
+  void attemptClosureReadsDoNotWaitForAnUnrelatedClusteredRowLock() throws Exception {
+    MockPaymentRepository repository = new MockPaymentRepository(jdbc);
+    MockPaymentRepository.AttemptRecord unrelated =
+        pendingAttempt(
+            "10000000-0000-0000-0000-000000000001",
+            "10000000-0000-0000-0000-000000000011",
+            "10000000-0000-0000-0000-000000000021",
+            "payment-lock-isolation-unrelated");
+    MockPaymentRepository.AttemptRecord byClosure =
+        pendingAttempt(
+            "20000000-0000-0000-0000-000000000001",
+            "20000000-0000-0000-0000-000000000011",
+            "20000000-0000-0000-0000-000000000021",
+            "payment-lock-isolation-closure");
+    MockPaymentRepository.AttemptRecord byOrder =
+        pendingAttempt(
+            "30000000-0000-0000-0000-000000000001",
+            "30000000-0000-0000-0000-000000000011",
+            "30000000-0000-0000-0000-000000000021",
+            "payment-lock-isolation-order");
+    JdbcTemplate root = rootJdbc();
+    root.update(
+        "DELETE FROM mock_payment_attempt WHERE attempt_id IN (?, ?, ?)",
+        unrelated.attemptId(),
+        byClosure.attemptId(),
+        byOrder.attemptId());
+    repository.insertAttempt(unrelated);
+    repository.insertAttempt(byClosure);
+    repository.insertAttempt(byOrder);
+    ExecutorService executor = Executors.newSingleThreadExecutor();
+
+    try {
+      DriverManagerDataSource blockerSource =
+          new DriverManagerDataSource(
+              required("CATALOG_MYSQL_URL"),
+              "commerce_app",
+              required("MYSQL_COMMERCE_APP_PASSWORD"));
+      try (var blocker = blockerSource.getConnection()) {
+        blocker.setAutoCommit(false);
+        try {
+          try (var statement =
+              blocker.prepareStatement(
+                  "SELECT attempt_id FROM mock_payment_attempt FORCE INDEX (PRIMARY)"
+                      + " WHERE attempt_id = ? FOR UPDATE")) {
+            statement.setString(1, unrelated.attemptId());
+            try (var locked = statement.executeQuery()) {
+              assertThat(locked.next()).isTrue();
+            }
+          }
+
+          Future<List<MockPaymentRepository.AttemptRecord>> closure =
+              executor.submit(
+                  () ->
+                      transactionTemplate()
+                          .execute(
+                              status ->
+                                  repository.enumerateAttemptClosure(byClosure, " FOR UPDATE")));
+          assertThat(closure.get(5, TimeUnit.SECONDS)).containsExactly(byClosure);
+
+          Future<List<MockPaymentRepository.AttemptRecord>> order =
+              executor.submit(
+                  () ->
+                      transactionTemplate()
+                          .execute(
+                              status ->
+                                  repository.enumerateAttemptByOrderClosure(
+                                      byOrder.orderId(), " FOR UPDATE")));
+          assertThat(order.get(5, TimeUnit.SECONDS)).containsExactly(byOrder);
+        } finally {
+          blocker.rollback();
+        }
+      }
+    } finally {
+      executor.shutdownNow();
+      root.update(
+          "DELETE FROM mock_payment_attempt WHERE attempt_id IN (?, ?, ?)",
+          unrelated.attemptId(),
+          byClosure.attemptId(),
+          byOrder.attemptId());
+    }
   }
 
   @Test
@@ -2924,6 +3212,21 @@ class MockPaymentIntegrationTest {
     return new CannotAcquireLockException(
         "controlled MySQL lock failure",
         new SQLException("controlled MySQL lock failure", "40001", errorCode));
+  }
+
+  private static MockPaymentRepository.AttemptRecord pendingAttempt(
+      String attemptId, String callbackCorrelationId, String orderId, String requestKey) {
+    return MockPaymentRepository.AttemptRecord.pending(
+        attemptId,
+        callbackCorrelationId,
+        USER,
+        orderId,
+        "STANDARD",
+        null,
+        requestKey,
+        "a".repeat(64),
+        1821,
+        "AUD");
   }
 
   private void assertCallbackRejected(

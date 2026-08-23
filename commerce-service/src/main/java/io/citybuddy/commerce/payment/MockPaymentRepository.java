@@ -5,6 +5,7 @@ import io.citybuddy.commerce.evaluation.EvaluationAuditReferenceIdentity;
 import io.citybuddy.commerce.evaluation.EvaluationAuditReferenceWriter;
 import java.sql.Timestamp;
 import java.time.Instant;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Optional;
 import java.util.UUID;
@@ -187,6 +188,7 @@ public class MockPaymentRepository {
             + attemptColumns()
             + " FROM "
             + attemptTable()
+            + " FORCE INDEX (uq_mock_payment_request)"
             + " WHERE user_subject = ? AND request_idempotency_key = ?"
             + cardinalityBound(lockClause),
         MockPaymentRepository::mapAttempt,
@@ -533,43 +535,27 @@ public class MockPaymentRepository {
   List<AttemptRecord> enumerateAttemptClosure(AttemptRecord target, String lockClause) {
     List<String> keys = EvaluationPaymentCommittedFaces.ATTEMPT.enumerationKeys();
     requireEnumerationKeys(keys, "attempt_id", "callback_correlation_id", "order_id");
-    return jdbc.query(
-        "SELECT "
-            + attemptColumns()
-            + " FROM "
-            + attemptTable()
-            + " WHERE "
-            + keys.get(0)
-            + " = ? OR "
-            + keys.get(1)
-            + " = ? OR "
-            + keys.get(2)
-            + " = ?"
-            + cardinalityBound(lockClause),
-        MockPaymentRepository::mapAttempt,
-        target.attemptId(),
-        target.callbackCorrelationId(),
-        target.orderId());
+    return collectAttemptClosure(
+        List.of(
+            new AttemptLocator("PRIMARY", keys.get(0), target.attemptId()),
+            new AttemptLocator(
+                "uq_mock_payment_callback_correlation",
+                keys.get(1),
+                target.callbackCorrelationId()),
+            new AttemptLocator("uq_mock_payment_order", keys.get(2), target.orderId())),
+        lockClause);
   }
 
   List<AttemptRecord> enumerateAttemptReplayClosure(
       String callbackCorrelationId, String orderId, String lockClause) {
     List<String> keys = EvaluationPaymentCommittedFaces.ATTEMPT.enumerationKeys();
     requireEnumerationKeys(keys, "attempt_id", "callback_correlation_id", "order_id");
-    return jdbc.query(
-        "SELECT "
-            + attemptColumns()
-            + " FROM "
-            + attemptTable()
-            + " WHERE "
-            + keys.get(1)
-            + " = ? OR "
-            + keys.get(2)
-            + " = ?"
-            + cardinalityBound(lockClause),
-        MockPaymentRepository::mapAttempt,
-        callbackCorrelationId,
-        orderId);
+    return collectAttemptClosure(
+        List.of(
+            new AttemptLocator(
+                "uq_mock_payment_callback_correlation", keys.get(1), callbackCorrelationId),
+            new AttemptLocator("uq_mock_payment_order", keys.get(2), orderId)),
+        lockClause);
   }
 
   List<AttemptRecord> enumerateAttemptByOrderClosure(String orderId, String lockClause) {
@@ -580,6 +566,7 @@ public class MockPaymentRepository {
             + attemptColumns()
             + " FROM "
             + attemptTable()
+            + " FORCE INDEX (uq_mock_payment_order)"
             + " WHERE "
             + keys.get(2)
             + " = ?"
@@ -597,6 +584,7 @@ public class MockPaymentRepository {
             + attemptColumns()
             + " FROM "
             + attemptTable()
+            + " FORCE INDEX (uq_mock_payment_order)"
             + " WHERE "
             + keys.get(2)
             + " = ? AND user_subject = ?"
@@ -604,6 +592,46 @@ public class MockPaymentRepository {
         MockPaymentRepository::mapAttempt,
         orderId,
         userSubject);
+  }
+
+  private List<AttemptRecord> collectAttemptClosure(
+      List<AttemptLocator> locators, String lockClause) {
+    LinkedHashMap<String, AttemptRecord> attempts = new LinkedHashMap<>();
+    for (AttemptLocator locator : locators) {
+      if (attempts.size() == 2) {
+        break;
+      }
+      String exclusion = attempts.isEmpty() ? "" : " AND attempt_id <> ?";
+      String query =
+          "SELECT "
+              + attemptColumns()
+              + " FROM "
+              + attemptTable()
+              + " FORCE INDEX ("
+              + locator.indexName()
+              + ") WHERE "
+              + locator.columnName()
+              + " = ?"
+              + exclusion
+              + " LIMIT "
+              + (2 - attempts.size())
+              + lockClause;
+      List<AttemptRecord> rows =
+          attempts.isEmpty()
+              ? jdbc.query(query, MockPaymentRepository::mapAttempt, locator.value())
+              : jdbc.query(
+                  query,
+                  MockPaymentRepository::mapAttempt,
+                  locator.value(),
+                  attempts.keySet().iterator().next());
+      for (AttemptRecord row : rows) {
+        attempts.putIfAbsent(row.attemptId(), row);
+        if (attempts.size() == 2) {
+          break;
+        }
+      }
+    }
+    return List.copyOf(attempts.values());
   }
 
   List<CallbackRecord> discoverCallbackClosure(AttemptRecord target, String lockClause) {
@@ -1012,6 +1040,8 @@ public class MockPaymentRepository {
   private static String callbackTable() {
     return EvaluationPaymentCommittedFaces.onlyTable(EvaluationPaymentCommittedFaces.CALLBACK);
   }
+
+  private record AttemptLocator(String indexName, String columnName, String value) {}
 
   public record OrderTruth(
       String orderKind,
