@@ -465,7 +465,8 @@ established, and an earlier draft of this document called it noise on the streng
 three ladders alone — the fourth is what makes that untenable. The honest position is that the
 failure exists without this change and may well be more likely with it, and that the change ships
 with the question open. Settling it needs more ladders on both sides, or a commerce instance
-logging the response body it actually sent.
+logging the response body it actually sent. Tracked as
+[issue 93](https://github.com/ChanTso/citybuddy/issues/93).
 
 **The default attempt budget cannot fit a successful retrieval turn.** This one is read from the
 code, not observed in these runs — no `budget_exhausted` appears in any committed result, because
