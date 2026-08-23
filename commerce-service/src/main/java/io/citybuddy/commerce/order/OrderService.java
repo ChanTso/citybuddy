@@ -53,7 +53,8 @@ public final class OrderService {
 
   private OrderResult createOnce(
       String user, String idempotencyKey, ValidatedRequest request, String correlationId) {
-    OrderResult committed = resolveCommitted(user, idempotencyKey, request, correlationId);
+    OrderResult committed =
+        resolveCommittedForMutation(user, idempotencyKey, request, correlationId);
     if (committed != null) {
       return committed;
     }
@@ -88,6 +89,16 @@ public final class OrderService {
     repository.insertOrder(user, orderId, product, request.quantity());
     repository.insertOutbox(orderId, product, request.quantity());
     return repository.findOwnedOrder(user, orderId, correlationId);
+  }
+
+  private OrderResult resolveCommittedForMutation(
+      String user, String idempotencyKey, ValidatedRequest request, String correlationId) {
+    // A locking miss would hold an InnoDB gap that reserveIdempotency must insert into. The
+    // primary key adjudicates a miss; a positive discovery is reread under the current lock.
+    if (repository.findIdempotency(user, idempotencyKey).isEmpty()) {
+      return null;
+    }
+    return resolveCommitted(user, idempotencyKey, request, correlationId);
   }
 
   private OrderResult resolveCommittedAfterConcurrency(

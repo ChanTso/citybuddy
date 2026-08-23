@@ -241,9 +241,17 @@ now order-first, closure reads use bounded explicit indexes, and start discovery
 attempt but not an absent key; uniqueness arbitrates a competing insert. An isolated 6,000-payment
 run added zero MySQL deadlocks or lock timeouts, returned no typed payment 503s, and left all six
 authoritative order/attempt/callback/ledger counts at 6,000. The fixture therefore settles payments
-in a bounded parallel pool again. The historical deadlocks, exact result, and a separate
-order-creation deadlock found while isolating the measurement are in
+in a bounded parallel pool again. The historical deadlocks and exact payment result are in
 [bench/agent/README.md](bench/agent/README.md).
+
+That isolation also found the same locking-miss-then-insert shape in order idempotency: unrelated
+new orders could hold compatible gaps in the composite primary key and deadlock when both inserted.
+Order creation now leaves an absent key unlocked, lets the primary key adjudicate a competing
+insert, and locks only a positive reread or a recovery observation. The deterministic real-MySQL
+race commits both orders without 1213, and a four-worker 6,000-order acceptance run moved neither
+the 1205 nor 1213 counter while leaving 6,000 matched orders, idempotency rows and outbox events.
+The exact boundary and raw SQL are recorded in
+[bench/results/order_idempotency_parallel_creation_fix.txt](bench/results/order_idempotency_parallel_creation_fix.txt).
 
 Development rules are in [AGENTS.md](AGENTS.md). Retired process records are in
 [docs/archive/](docs/archive/README.md).

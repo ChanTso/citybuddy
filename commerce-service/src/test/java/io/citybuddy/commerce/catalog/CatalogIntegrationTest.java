@@ -44,6 +44,7 @@ import java.util.Map;
 import java.util.Optional;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.ConcurrentLinkedQueue;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
@@ -348,6 +349,107 @@ class CatalogIntegrationTest {
     proveConcurrentDuplicateIdempotency();
     proveControlledRetryExhaustionClassifications();
     proveOrderDatabaseUnavailabilityClassification();
+  }
+
+  @Test
+  void unrelatedOrderIdempotencyMissesDoNotDeadlockInTheSamePrimaryKeyGap() throws Exception {
+    String namespace = "order-gap-" + UUID.randomUUID().toString().substring(0, 12);
+    String firstUser = namespace + "-a";
+    String secondUser = namespace + "-b";
+    String sentinelUser = namespace + "-z";
+    String firstProduct = namespace + "-product-a";
+    String secondProduct = namespace + "-product-b";
+    String sentinelOrder = UUID.randomUUID().toString();
+
+    var dataSource =
+        new DriverManagerDataSource(
+            required("CATALOG_MYSQL_URL"), "commerce_app", required("MYSQL_COMMERCE_APP_PASSWORD"));
+    var barrierRepository =
+        new OrderIdempotencyGapBarrierRepository(new JdbcTemplate(dataSource), objectMapper);
+    var service =
+        new OrderService(
+            barrierRepository,
+            new TransactionTemplate(new DataSourceTransactionManager(dataSource)),
+            new OrderProperties("order:create", 100, 3, 1));
+    var executor = Executors.newFixedThreadPool(2);
+    Future<OrderResult> first = null;
+    Future<OrderResult> second = null;
+    try {
+      seedOrderProduct(firstProduct, 1, true, "PUBLISHED", 1);
+      seedOrderProduct(secondProduct, 1, true, "PUBLISHED", 1);
+      jdbc.update(
+          """
+          INSERT INTO order_idempotency
+            (user_subject, idempotency_key, intent_hash, order_id)
+          VALUES (?, 'sentinel', ?, ?)
+          """,
+          sentinelUser,
+          "0".repeat(64),
+          sentinelOrder);
+
+      first =
+          executor.submit(
+              () ->
+                  service.create(
+                      firstUser, "candidate-a", orderRequest(firstProduct, 1), "unrelated-gap-a"));
+      second =
+          executor.submit(
+              () ->
+                  service.create(
+                      secondUser,
+                      "candidate-b",
+                      orderRequest(secondProduct, 1),
+                      "unrelated-gap-b"));
+
+      assertThat(barrierRepository.awaitFirstReservations()).isTrue();
+      barrierRepository.allowReservations();
+      OrderResult firstResult = first.get(15, TimeUnit.SECONDS);
+      OrderResult secondResult = second.get(15, TimeUnit.SECONDS);
+
+      assertThat(firstResult.replayed()).isFalse();
+      assertThat(secondResult.replayed()).isFalse();
+      assertThat(barrierRepository.reservationCalls()).isEqualTo(2);
+      assertThat(barrierRepository.mysqlVendorCodes()).doesNotContain(1213);
+      assertOrderCardinality(firstProduct, 0, 1, 1, 1);
+      assertOrderCardinality(secondProduct, 0, 1, 1, 1);
+    } finally {
+      barrierRepository.allowReservations();
+      if (first != null && !first.isDone()) {
+        first.cancel(true);
+      }
+      if (second != null && !second.isDone()) {
+        second.cancel(true);
+      }
+      executor.shutdownNow();
+      try {
+        executor.awaitTermination(10, TimeUnit.SECONDS);
+      } finally {
+        try (Connection cleanupConnection =
+            DriverManager.getConnection(
+                required("CATALOG_MYSQL_URL"), "root", required("MYSQL_BOOTSTRAP_PASSWORD"))) {
+          JdbcTemplate cleanupJdbc =
+              new JdbcTemplate(new SingleConnectionDataSource(cleanupConnection, true));
+          cleanupJdbc.update(
+              """
+              DELETE x
+              FROM commerce_outbox x
+              JOIN standard_order o ON o.order_id = x.aggregate_id
+              WHERE x.aggregate_type = 'STANDARD_ORDER' AND o.product_id IN (?, ?)
+              """,
+              firstProduct,
+              secondProduct);
+          cleanupJdbc.update(
+              "DELETE FROM order_idempotency WHERE user_subject IN (?, ?, ?)",
+              firstUser,
+              secondUser,
+              sentinelUser);
+          cleanupJdbc.update(
+              "DELETE FROM standard_order WHERE product_id IN (?, ?)", firstProduct, secondProduct);
+          cleanupJdbc.update(
+              "DELETE FROM product WHERE product_id IN (?, ?)", firstProduct, secondProduct);
+        }
+      }
+    }
   }
 
   private void proveRealMysqlRollback() {
@@ -659,7 +761,7 @@ class CatalogIntegrationTest {
     assertThat(result.failure()).isNull();
     assertThat(result.target()).isNotNull();
     assertThat(result.target().replayed()).isFalse();
-    assertThat(result.finalResolutionReads()).isEqualTo(2);
+    assertThat(result.finalResolutionReads()).isEqualTo(1);
     assertOrderCardinality(productId, 4, 1, 1, 1);
   }
 
@@ -973,9 +1075,59 @@ class CatalogIntegrationTest {
     }
   }
 
+  private static final class OrderIdempotencyGapBarrierRepository extends OrderRepository {
+    private final AtomicInteger reservationCalls = new AtomicInteger();
+    private final CountDownLatch firstReservations = new CountDownLatch(2);
+    private final CountDownLatch continueReservations = new CountDownLatch(1);
+    private final ConcurrentLinkedQueue<Integer> mysqlVendorCodes = new ConcurrentLinkedQueue<>();
+
+    private OrderIdempotencyGapBarrierRepository(JdbcTemplate jdbc, ObjectMapper objectMapper) {
+      super(jdbc, objectMapper);
+    }
+
+    @Override
+    public void reserveIdempotency(String user, String key, String intentHash, String orderId) {
+      if (reservationCalls.incrementAndGet() <= 2) {
+        firstReservations.countDown();
+        try {
+          if (!continueReservations.await(10, TimeUnit.SECONDS)) {
+            throw new IllegalStateException(
+                "Concurrent idempotency reservations were not released");
+          }
+        } catch (InterruptedException exception) {
+          Thread.currentThread().interrupt();
+          throw new IllegalStateException(
+              "Concurrent idempotency reservation was interrupted", exception);
+        }
+      }
+      try {
+        super.reserveIdempotency(user, key, intentHash, orderId);
+      } catch (RuntimeException failure) {
+        mysqlVendorCode(failure).ifPresent(mysqlVendorCodes::add);
+        throw failure;
+      }
+    }
+
+    private boolean awaitFirstReservations() throws InterruptedException {
+      return firstReservations.await(10, TimeUnit.SECONDS);
+    }
+
+    private void allowReservations() {
+      continueReservations.countDown();
+    }
+
+    private int reservationCalls() {
+      return reservationCalls.get();
+    }
+
+    private List<Integer> mysqlVendorCodes() {
+      return List.copyOf(mysqlVendorCodes);
+    }
+  }
+
   private static final class ExhaustionProbeRepository extends OrderRepository {
     private final JdbcTemplate jdbc;
-    private final AtomicInteger reads = new AtomicInteger();
+    private final AtomicInteger lockingRecoveryReads = new AtomicInteger();
     private final CountDownLatch finalResolutionEntered = new CountDownLatch(1);
     private final CountDownLatch continueFinalResolution = new CountDownLatch(1);
 
@@ -985,12 +1137,15 @@ class CatalogIntegrationTest {
     }
 
     @Override
+    public Optional<IdempotencyRecord> findIdempotency(String user, String key) {
+      jdbc.execute("SET SESSION innodb_lock_wait_timeout = 1");
+      return super.findIdempotency(user, key);
+    }
+
+    @Override
     public Optional<IdempotencyRecord> findIdempotencyForUpdate(String user, String key) {
-      int read = reads.incrementAndGet();
-      if (read == 1) {
-        jdbc.execute("SET SESSION innodb_lock_wait_timeout = 1");
-      } else if (read == 2) {
-        // With one mutation attempt, only the post-exhaustion truth resolver can issue this read.
+      if (lockingRecoveryReads.incrementAndGet() == 1) {
+        // With one mutation attempt, the first locking read belongs to post-exhaustion recovery.
         finalResolutionEntered.countDown();
         try {
           if (!continueFinalResolution.await(10, TimeUnit.SECONDS)) {
@@ -1014,12 +1169,11 @@ class CatalogIntegrationTest {
     }
 
     private int finalResolutionReads() {
-      return Math.max(0, reads.get() - 1);
+      return lockingRecoveryReads.get();
     }
   }
 
   private static final class IndeterminateObservationRepository extends OrderRepository {
-    private final AtomicInteger reads = new AtomicInteger();
     private final AtomicInteger indeterminateObservations = new AtomicInteger();
     private final CountDownLatch indeterminateObservation = new CountDownLatch(1);
 
@@ -1029,16 +1183,13 @@ class CatalogIntegrationTest {
 
     @Override
     public Optional<IdempotencyRecord> findIdempotencyForUpdate(String user, String key) {
-      int read = reads.incrementAndGet();
       try {
         return super.findIdempotencyForUpdate(user, key);
       } catch (org.springframework.dao.PessimisticLockingFailureException
           | org.springframework.dao.QueryTimeoutException
           | org.springframework.transaction.TransactionTimedOutException exception) {
-        if (read > 1) {
-          indeterminateObservations.incrementAndGet();
-          indeterminateObservation.countDown();
-        }
+        indeterminateObservations.incrementAndGet();
+        indeterminateObservation.countDown();
         throw exception;
       }
     }

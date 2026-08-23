@@ -477,7 +477,8 @@ counts of 6,000 paid orders, attempts, succeeded attempts, callbacks, and paymen
 The workload, environment, raw counters, and queries are preserved in
 [`../results/mock_payment_parallel_settlement_fix.txt`](../results/mock_payment_parallel_settlement_fix.txt).
 This proves the measured payment boundary; it does not claim that every possible database
-deadlock is impossible, and the newly isolated order-creation defect remains separate work.
+deadlock is impossible. The order-creation defect isolated from that result is measured separately
+below.
 
 Payment start still has bounded retries for MySQL 1205/1213 contention. If a recognized conflict
 exhausts them, commerce now returns typed 503
@@ -485,6 +486,30 @@ exhausts them, commerce now returns typed 503
 of exposing the lock exception as 500. The fixture builder has returned to bounded parallel
 settlement and already retries 503. The deterministic MySQL cases and isolated acceptance run are
 the regression boundary, and the raw historical deadlock remains preserved above.
+
+**The isolated order-idempotency deadlock had the same locking-miss-then-insert mechanism.** A new
+order first selected its exact `(user_subject, idempotency_key)` primary-key entry with
+`FOR UPDATE`. When the entry was absent, InnoDB protected the containing gap. Two unrelated orders
+in the same gap could both hold those compatible locks; each following insert then waited for an
+insert-intention lock that conflicted with the other's gap lock. The historical isolated phase
+raised the cumulative 1213 counter by 410 while eventually creating all 6,000 orders through the
+fixture's bounded same-key retries.
+
+Mutation discovery now uses a consistent exact-key read. A miss remains unlocked and the primary
+key arbitrates a same-key insert race; a positive discovery is immediately reread with `FOR UPDATE`
+and the current locked row is used for intent and replay validation. Recovery observations remain
+locking current reads because they may follow a rolled-back competing transaction and must classify
+committed truth. A real-MySQL regression pauses two distinct transactions immediately before inserts
+into one primary-key gap and requires two reservations, orders and outbox events with no vendor
+1213.
+
+The matching four-worker acceptance reran 6,000 distinct order creations in 16.9 seconds. MySQL's
+1205 counter remained zero and its 1213 counter remained 26,589; authoritative SQL found 6,000
+unpaid orders, matched idempotency rows, order-created outbox events and distinct owners, with no
+orphaned idempotency row. The printed duration includes each user's login as well as order creation,
+as did the historical fixture phase. The exact workload, raw counter samples and SQL are preserved
+in
+[`../results/order_idempotency_parallel_creation_fix.txt`](../results/order_idempotency_parallel_creation_fix.txt).
 
 **The sporadic refund-preparation HTTP 502 was a timestamp-format mismatch.** A small fraction of
 preparations ended `ACTION_PREPARATION_RESPONSE_INVALID` and HTTP 502
