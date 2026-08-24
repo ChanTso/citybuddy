@@ -2,6 +2,10 @@
   "version": "cb112-v1",
   "reservedSandboxEnvelopeProperty": "citybuddy-eval-sandbox-id",
   "evaluationReachablePathCount": 0,
+  "futureEvaluationReachablePathRequirements": {
+    "sandboxLivenessGuard": "required-in-introducing-change",
+    "acceptanceEvidence": "real-producer-and-broker"
+  },
   "paths": [
     {
       "id": "seckill-order-transaction",

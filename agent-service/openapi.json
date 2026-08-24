@@ -1,6 +1,6 @@
 {
   "openapi": "3.1.0",
-  "info": {"title": "CityBuddy agent API", "version": "CB-122"},
+  "info": {"title": "CityBuddy agent API", "version": "0.0.1"},
   "paths": {
     "/api/sessions": {
       "post": {
@@ -79,7 +79,8 @@
                     "turnId",
                     "reply",
                     "outcome",
-                    "citations"
+                    "citations",
+                    "receiptId"
                   ],
                   "properties": {
                     "conversationId": {"type": "string", "format": "uuid", "readOnly": true},
@@ -94,6 +95,7 @@
                         "provider_denied",
                         "retrieval_denied",
                         "action_pending",
+                        "action_completed",
                         "action_clarification",
                         "action_declined",
                         "action_expired"
@@ -104,6 +106,12 @@
                       "maxItems": 3,
                       "items": {"$ref": "#/components/schemas/RetrievalCitation"},
                       "description": "Source references projected only from sufficient retrieval evidence committed with this turn."
+                    },
+                    "receiptId": {
+                      "type": ["string", "null"],
+                      "format": "uuid",
+                      "readOnly": true,
+                      "description": "The committed receipt projected from durable action truth for action_completed; null for every other outcome."
                     }
                   }
                 }
@@ -302,7 +310,7 @@
           "receiptId": {"type": "string", "format": "uuid", "readOnly": true},
           "status": {"type": "string", "enum": ["SUCCEEDED"]}
         },
-        "description": "The only public action-status carrier, reserved for verified ActionReceipt truth in CB-123; CB-122 never emits it."
+        "description": "Projects a committed ActionReceipt from the agent's durable receipt projection; clients must treat this event, not token prose, as action-completion truth."
       },
       "SseDoneData": {
         "type": "object",
@@ -318,6 +326,7 @@
             "enum": [
               "completed",
               "action_pending",
+              "action_completed",
               "action_clarification",
               "action_declined",
               "action_expired"

@@ -41,7 +41,9 @@ def test_chat_response_is_allowlisted_and_server_ids_are_read_only() -> None:
         "reply",
         "outcome",
         "citations",
+        "receiptId",
     }
+    assert set(response["required"]) == set(response["properties"])
     for name in ("conversationId", "traceId", "turnId"):
         assert response["properties"][name]["readOnly"] is True
     assert response["properties"]["outcome"]["enum"] == [
@@ -50,10 +52,20 @@ def test_chat_response_is_allowlisted_and_server_ids_are_read_only() -> None:
         "provider_denied",
         "retrieval_denied",
         "action_pending",
+        "action_completed",
         "action_clarification",
         "action_declined",
         "action_expired",
     ]
+    assert response["properties"]["receiptId"] == {
+        "type": ["string", "null"],
+        "format": "uuid",
+        "readOnly": True,
+        "description": (
+            "The committed receipt projected from durable action truth for action_completed; "
+            "null for every other outcome."
+        ),
+    }
     citation = contract()["components"]["schemas"]["RetrievalCitation"]
     assert citation["additionalProperties"] is False
     assert set(citation["properties"]) == {
@@ -97,9 +109,18 @@ def test_stream_contract_fixes_headers_event_names_and_allowlisted_payloads() ->
         in payload["components"]["schemas"]["SseTokenData"]["description"]
     )
     assert (
-        "only public action-status carrier"
-        in payload["components"]["schemas"]["SseActionReceiptData"]["description"]
+        payload["components"]["schemas"]["SseActionReceiptData"]["description"]
+        == "Projects a committed ActionReceipt from the agent's durable receipt projection; "
+        "clients must treat this event, not token prose, as action-completion truth."
     )
+    assert payload["components"]["schemas"]["SseDoneData"]["properties"]["outcome"]["enum"] == [
+        "completed",
+        "action_pending",
+        "action_completed",
+        "action_clarification",
+        "action_declined",
+        "action_expired",
+    ]
 
     source = (ROOT / "agent-service/src/citybuddy_agent/sse.py").read_text(encoding="utf-8")
     assert "MAX_PUBLIC_EVENTS" in source
@@ -230,7 +251,7 @@ def test_retrieval_evidence_schema_is_turn_bound_atomic_and_append_only() -> Non
     )
 
 
-def test_cb122_pending_action_reference_is_agent_owned_bounded_and_least_privilege() -> None:
+def test_pending_action_reference_is_agent_owned_bounded_and_least_privilege() -> None:
     migration = (
         ROOT / "infra/mysql/migrations/agent/V007__pending_action_reference.sql"
     ).read_text(encoding="utf-8")
@@ -263,13 +284,21 @@ def test_cb122_pending_action_reference_is_agent_owned_bounded_and_least_privile
     assert "UPDATE (target_version)" not in grants
     assert "UPDATE ON cs_db.support_event" not in grants
     assert "DELETE ON cs_db.support_event" not in grants
-    assert payload["info"]["version"] == "CB-122"
     for route in ("/api/chat", "/api/chat/stream"):
         responses = payload["paths"][route]["post"]["responses"]
         assert set(responses) >= {"409", "502", "503"}
-    assert payload["components"]["schemas"]["SseActionReceiptData"]["description"].endswith(
-        "CB-122 never emits it."
+
+
+def test_service_contracts_use_service_versions_not_retired_slice_ids() -> None:
+    paths = (
+        ROOT / "agent-service/openapi.json",
+        ROOT / "auth-service/src/main/resources/openapi.json",
+        ROOT / "commerce-service/src/main/resources/openapi.json",
     )
+
+    assert {json.loads(path.read_text(encoding="utf-8"))["info"]["version"] for path in paths} == {
+        "0.0.1"
+    }
 
 
 def test_commerce_tool_contract_is_exact_obo_and_bounded_view() -> None:

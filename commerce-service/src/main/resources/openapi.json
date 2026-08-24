@@ -1,6 +1,6 @@
 {
   "openapi": "3.1.0",
-  "info": {"title": "CityBuddy commerce API", "version": "CB-105"},
+  "info": {"title": "CityBuddy commerce API", "version": "0.0.1"},
   "paths": {
     "/api/products": {
       "get": {
