@@ -1,6 +1,6 @@
 {
   "openapi": "3.1.0",
-  "info": {"title": "CityBuddy auth identity API", "version": "CB-100"},
+  "info": {"title": "CityBuddy auth identity API", "version": "0.0.1"},
   "paths": {
     "/auth/login": {
       "post": {

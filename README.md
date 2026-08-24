@@ -38,7 +38,8 @@ solid path through commerce into MySQL is the only thing that decides whether a 
 - **Delegated identity.** RS256 login and JWKS publication, plus just-in-time token exchange
   that mints an exact-scope on-behalf-of token per tool call. The OBO token binds `act.azp`,
   the user subject, the server-owned support session, and resource ownership; commerce rejects
-  body-level identity substitution. See [§6 of the contracts](docs/CONTRACTS.md#6-interface-and-security-boundaries).
+  body-level identity substitution. See the
+  [identity and authorization contracts](docs/CONTRACTS.md#contract-identity-authorization).
 - **Seckill admission under contention.** Redis Lua performs atomic quota and one-order-per-user
   admission; MySQL holds authoritative reservation, order, inventory, and ledger truth. A
   RocketMQ transaction message binds the admission decision to durable order creation, and the

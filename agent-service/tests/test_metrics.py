@@ -278,6 +278,10 @@ def test_internal_endpoint_is_disabled_by_default_custom_only_and_not_openapi() 
         assert response.status_code == 200
         assert response.headers["cache-control"] == "no-store"
         assert response.headers["content-type"].startswith("text/plain")
+        static_openapi = json.loads(
+            (REPOSITORY / "agent-service/openapi.json").read_text(encoding="utf-8")
+        )
+        assert openapi["info"]["version"] == static_openapi["info"]["version"]
         assert "/internal/metrics/prometheus" not in openapi["paths"]
         assert "/api/chat" not in openapi["paths"]
         assert "citybuddy_agent_operation_requests" in response.text

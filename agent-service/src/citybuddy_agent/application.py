@@ -497,6 +497,7 @@ def create_app(
 
     app = FastAPI(
         title=resolved.service_name,
+        version="0.0.1",
         docs_url=None,
         redoc_url=None,
         lifespan=lifespan,
