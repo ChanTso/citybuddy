@@ -399,10 +399,17 @@ class LiteLlmClient:
         url: str,
         circuits: ProviderCircuits,
         metrics: CityBuddyMetrics | None = None,
+        *,
+        api_key: str = "",
+        temperature: float | None = None,
+        timeout_seconds: float = 2.0,
     ) -> None:
         self._url = url.rstrip("/")
         self._circuits = circuits
         self._metrics = SafeCityBuddyMetrics(metrics or NoopCityBuddyMetrics())
+        self._api_key = api_key
+        self._temperature = temperature
+        self._timeout_seconds = timeout_seconds
 
     def complete(
         self,
@@ -427,10 +434,20 @@ class LiteLlmClient:
                     self._circuits.admit(route.provider_key, events)
                     admitted = True
                     attempt_outcome = ProviderOutcome.ERROR
+                    request_body: dict[str, object] = {
+                        "model": route.role_alias,
+                        "messages": messages,
+                        "tools": tools,
+                    }
+                    if self._temperature is not None:
+                        request_body["temperature"] = self._temperature
                     response = http_client.post(
                         f"{self._url}/v1/chat/completions",
-                        json={"model": route.role_alias, "messages": messages, "tools": tools},
-                        timeout=2.0,
+                        headers=(
+                            {"Authorization": f"Bearer {self._api_key}"} if self._api_key else None
+                        ),
+                        json=request_body,
+                        timeout=self._timeout_seconds,
                     )
                     if response.status_code in {408, 429, 502, 503, 504}:
                         attempt_outcome = ProviderOutcome.TRANSIENT
@@ -525,18 +542,24 @@ class LiteLlmClient:
                 self._circuits.admit(route.provider_key, events)
                 admitted = True
                 attempt_outcome = ProviderOutcome.ERROR
+                request_body: dict[str, object] = {
+                    "model": route.role_alias,
+                    "messages": [
+                        {
+                            "role": "user",
+                            "content": request.model_dump_json(by_alias=True),
+                        }
+                    ],
+                }
+                if self._temperature is not None:
+                    request_body["temperature"] = self._temperature
                 response = http_client.post(
                     f"{self._url}/v1/chat/completions",
-                    json={
-                        "model": route.role_alias,
-                        "messages": [
-                            {
-                                "role": "user",
-                                "content": request.model_dump_json(by_alias=True),
-                            }
-                        ],
-                    },
-                    timeout=2.0,
+                    headers=(
+                        {"Authorization": f"Bearer {self._api_key}"} if self._api_key else None
+                    ),
+                    json=request_body,
+                    timeout=self._timeout_seconds,
                 )
                 if response.status_code in {408, 429, 502, 503, 504}:
                     attempt_outcome = ProviderOutcome.TRANSIENT
@@ -660,7 +683,7 @@ class LiteLlmClient:
                 raise ProviderFailure(transient=False)
             return ModelReply(
                 content=None,
-                tool_name=name,
+                tool_name=_logical_tool_name(name),
                 tool_arguments=arguments,
                 tool_call_id=call_id,
             )
@@ -690,6 +713,7 @@ class CatalogProductOutput(BaseModel):
 @dataclass(frozen=True)
 class ToolSpec:
     name: str
+    wire_name: str
     description: str
     authority: Literal["commerce_obo", "elasticsearch"]
     scope: str | None
@@ -703,7 +727,7 @@ class ToolSpec:
         return {
             "type": "function",
             "function": {
-                "name": self.name,
+                "name": self.wire_name,
                 "description": self.description,
                 "parameters": self.input_schema.model_json_schema(by_alias=True),
             },
@@ -712,6 +736,7 @@ class ToolSpec:
 
 CATALOG_PRODUCT_SPEC = ToolSpec(
     name="catalog.product.get",
+    wire_name="catalog_product_get",
     description="Read one published product through commerce authority.",
     authority="commerce_obo",
     scope="catalog:read",
@@ -724,6 +749,7 @@ CATALOG_PRODUCT_SPEC = ToolSpec(
 
 KNOWLEDGE_SEARCH_SPEC = ToolSpec(
     name="knowledge.search",
+    wire_name="knowledge_search",
     description=(
         "Search the derived public-knowledge index with a required original query and one "
         "optional rewrite. Results are not live commerce truth."
@@ -743,6 +769,7 @@ REFUND_CONFIRM_OPERATION = "actions.refund.confirm"
 
 REFUND_PREPARE_SPEC = ToolSpec(
     name="actions.refund.prepare",
+    wire_name="actions_refund_prepare",
     description=(
         "Prepare one refund request for explicit user confirmation. This does not execute "
         "the refund and the model cannot confirm it."
@@ -755,6 +782,24 @@ REFUND_PREPARE_SPEC = ToolSpec(
     input_schema=RefundActionArguments,
     output_schema=PreparedActionResponse,
 )
+
+_TOOL_SPECS = (
+    CATALOG_PRODUCT_SPEC,
+    KNOWLEDGE_SEARCH_SPEC,
+    REFUND_PREPARE_SPEC,
+)
+_LOGICAL_TOOL_NAMES_BY_WIRE_NAME = {spec.wire_name: spec.name for spec in _TOOL_SPECS}
+_WIRE_TOOL_NAMES_BY_LOGICAL_NAME = {spec.name: spec.wire_name for spec in _TOOL_SPECS}
+if len(_LOGICAL_TOOL_NAMES_BY_WIRE_NAME) != len(_TOOL_SPECS):
+    raise RuntimeError("Model tool wire names must be unique")
+
+
+def _logical_tool_name(wire_name: str) -> str:
+    return _LOGICAL_TOOL_NAMES_BY_WIRE_NAME.get(wire_name, wire_name)
+
+
+def _wire_tool_name(logical_name: str) -> str:
+    return _WIRE_TOOL_NAMES_BY_LOGICAL_NAME.get(logical_name, logical_name)
 
 
 @dataclass(frozen=True)
@@ -787,11 +832,7 @@ class ToolAdapter:
         self._faq_cache = faq_cache
         self._metrics = SafeCityBuddyMetrics(metrics or NoopCityBuddyMetrics())
         self._trace_sink = trace_sink or NoopTraceSink()
-        self._specs = {
-            CATALOG_PRODUCT_SPEC.name: CATALOG_PRODUCT_SPEC,
-            KNOWLEDGE_SEARCH_SPEC.name: KNOWLEDGE_SEARCH_SPEC,
-            REFUND_PREPARE_SPEC.name: REFUND_PREPARE_SPEC,
-        }
+        self._specs = {spec.name: spec for spec in _TOOL_SPECS}
 
     def schemas(self) -> list[dict[str, object]]:
         return [spec.model_schema() for spec in self._specs.values()]
@@ -1718,7 +1759,7 @@ class BoundedAgent:
                                 "id": reply.tool_call_id,
                                 "type": "function",
                                 "function": {
-                                    "name": reply.tool_name,
+                                    "name": _wire_tool_name(reply.tool_name),
                                     "arguments": reply.tool_arguments,
                                 },
                             }

@@ -18,6 +18,7 @@ def _strict_bool(name: str) -> bool:
 
 def _settings() -> AgentSettings:
     scopes = tuple(item for item in os.environ.get("AGENT_EXCHANGE_SCOPES", "").split() if item)
+    temperature = os.environ.get("AGENT_MODEL_TEMPERATURE", "").strip()
     return AgentSettings(
         environment=os.environ.get("CITYBUDDY_ENVIRONMENT", "development"),
         identity_enabled=os.environ.get("AGENT_IDENTITY_ENABLED", "false").lower() == "true",
@@ -35,6 +36,9 @@ def _settings() -> AgentSettings:
         service_client_secret=os.environ.get("AGENT_SERVICE_CLIENT_SECRET", ""),
         exchange_scopes=scopes,
         model_proxy_url=os.environ.get("AGENT_MODEL_PROXY_URL", ""),
+        model_proxy_api_key=os.environ.get("AGENT_MODEL_PROXY_API_KEY", ""),
+        model_temperature=float(temperature) if temperature else None,
+        model_timeout_seconds=float(os.environ.get("AGENT_MODEL_TIMEOUT_SECONDS", "2")),
         commerce_tools_url=os.environ.get("AGENT_COMMERCE_TOOLS_URL", ""),
         commerce_liveness_url=os.environ.get("AGENT_COMMERCE_LIVENESS_URL", ""),
         elasticsearch_url=os.environ.get("AGENT_ELASTICSEARCH_URL", ""),

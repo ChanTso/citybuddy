@@ -10,6 +10,7 @@ import pytest
 from citybuddy_agent import http_client
 from citybuddy_agent.agent_control import (
     CATALOG_PRODUCT_SPEC,
+    KNOWLEDGE_SEARCH_SPEC,
     REFUND_PREPARE_SPEC,
     SYSTEM_PROMPT,
     TOOL_BOUNDARY_FAILURE_REASONS,
@@ -128,6 +129,61 @@ def test_litellm_transient_retry_and_same_tier_fallback_share_one_budget(
         ("primary", "transient"): 2,
         ("fallback", "success"): 1,
     }
+
+
+def test_litellm_sends_configured_model_boundary_parameters(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    requests: list[dict[str, Any]] = []
+
+    def post(*args: Any, **kwargs: Any) -> httpx.Response:
+        del args
+        requests.append(kwargs)
+        return completion()
+
+    monkeypatch.setattr(http_client, "post", post)
+    client = LiteLlmClient(
+        "https://proxy.test",
+        ProviderCircuits(minimum_requests=2, open_seconds=10, half_open_probes=1),
+        api_key="runtime-only-model-key",
+        temperature=0,
+        timeout_seconds=30,
+    )
+
+    client.complete(plan(), [{"role": "user", "content": "hello"}], [], AttemptBudget(1, []), [])
+
+    assert requests[0]["headers"] == {"Authorization": "Bearer runtime-only-model-key"}
+    assert requests[0]["json"]["temperature"] == 0
+    assert requests[0]["timeout"] == 30
+
+
+@pytest.mark.parametrize(
+    "spec",
+    (CATALOG_PRODUCT_SPEC, KNOWLEDGE_SEARCH_SPEC, REFUND_PREPARE_SPEC),
+)
+def test_litellm_maps_provider_tool_names_back_to_logical_ids(spec: Any) -> None:
+    reply = LiteLlmClient._parse(  # noqa: SLF001
+        {
+            "choices": [
+                {
+                    "message": {
+                        "tool_calls": [
+                            {
+                                "id": "call-1",
+                                "type": "function",
+                                "function": {
+                                    "name": spec.wire_name,
+                                    "arguments": "{}",
+                                },
+                            }
+                        ]
+                    }
+                }
+            ]
+        }
+    )
+
+    assert reply.tool_name == spec.name
 
 
 def test_sixteen_attempt_budget_keeps_repeated_tool_denials_evaluable(
@@ -1141,6 +1197,10 @@ def test_bounded_agent_carries_exact_denial_producer_without_model_disclosure() 
 
     reason = "ACTION_PREPARATION_IDENTITY_FORBIDDEN"
     assert result.request_reasons == (reason,)
+    assert any(
+        event.event_type == "TOOL_DENIED" and event.payload.get("tool") == REFUND_PREPARE_SPEC.name
+        for event in result.events
+    )
     assert SYSTEM_PROMPT == (
         "You are CityBuddy's customer-support assistant. Use the supplied tools for live commerce "
         "facts and actions; do not invent them. Only prepare a refund for an order owned by the "
@@ -1163,7 +1223,7 @@ def test_bounded_agent_carries_exact_denial_producer_without_model_disclosure() 
                 "id": "call-refund-1",
                 "type": "function",
                 "function": {
-                    "name": REFUND_PREPARE_SPEC.name,
+                    "name": REFUND_PREPARE_SPEC.wire_name,
                     "arguments": (
                         '{"orderId":"00000000-0000-0000-0000-000000000040",'
                         '"amountMinor":400,"currency":"CNY"}'
@@ -1238,10 +1298,18 @@ def test_refund_prepare_replays_once_after_indeterminate_response_loss(
     assert requests[0]["url"] == requests[1]["url"]
     assert requests[0]["headers"] == requests[1]["headers"]
     assert requests[0]["json"] == requests[1]["json"]
-    assert [event.payload["kind"] for event in events if event.event_type == "BUDGET_CHARGED"] == [
-        "identity_http",
-        "tool_http",
-        "tool_http",
+    assert [
+        (event.payload["kind"], event.payload["target"])
+        for event in events
+        if event.event_type == "BUDGET_CHARGED"
+    ] == [
+        ("identity_http", "refund:create"),
+        ("tool_http", REFUND_PREPARE_SPEC.name),
+        ("tool_http", REFUND_PREPARE_SPEC.name),
+    ]
+    assert [event.payload["tool"] for event in events if event.event_type == "TOOL_LIFECYCLE"] == [
+        REFUND_PREPARE_SPEC.name,
+        REFUND_PREPARE_SPEC.name,
     ]
     assert operation_samples(metrics) == {("pending_action_prepare", "replay"): 1.0}
 

@@ -133,6 +133,9 @@ class AgentSettings(BaseModel):
     service_client_secret: str = ""
     exchange_scopes: tuple[str, ...] = ()
     model_proxy_url: str = ""
+    model_proxy_api_key: str = ""
+    model_temperature: float | None = Field(default=None, ge=0, le=2)
+    model_timeout_seconds: float = Field(default=2.0, gt=0, allow_inf_nan=False)
     commerce_tools_url: str = ""
     commerce_liveness_url: str = ""
     primary_role_alias: str = "support-standard-primary"
@@ -572,6 +575,9 @@ def create_app(
                 half_open_probes=resolved.circuit_half_open_probes,
             ),
             resolved_metrics,
+            api_key=resolved.model_proxy_api_key,
+            temperature=resolved.model_temperature,
+            timeout_seconds=resolved.model_timeout_seconds,
         )
         resolved_tools = ToolAdapter(
             resolved.commerce_tools_url,
