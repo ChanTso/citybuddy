@@ -396,6 +396,7 @@ start_commerce() {
   local profile="$1"
   local auth_base="$2"
   local action_pending_ttl="${3:-15m}"
+  local action_ownership_binding_enabled="${4:-true}"
   local -a profile_argument=()
   local -a payment_arguments=()
   local log_offset
@@ -419,6 +420,7 @@ start_commerce() {
       --citybuddy.actions.lock-wait-timeout-seconds=1
       --citybuddy.actions.maximum-observation-attempts=2
       --citybuddy.actions.observation-backoff=25ms
+      --citybuddy.evaluation.action-ownership-binding-enabled="$action_ownership_binding_enabled"
     )
   fi
   port_log_offset log_offset "$tmp_dir/commerce.log"
@@ -5384,6 +5386,123 @@ assert_equal 'PAID:SUCCEEDED:1:1' \
   "$(mysql_query commerce_app "$commerce_app_password" commerce_db \
     "SELECT CONCAT(o.status, ':', a.state, ':', (SELECT COUNT(*) FROM mock_payment_callback WHERE attempt_id = a.attempt_id), ':', (SELECT COUNT(*) FROM inventory_ledger WHERE business_event_key = CONCAT('mock-payment:', a.attempt_id))) FROM standard_order o JOIN mock_payment_attempt a ON a.order_id = o.order_id WHERE o.order_id = '$secondary_order_id' AND a.attempt_id = '$secondary_attempt_id'")" \
   "secondary-owned payment fixture reaches committed business state"
+
+secondary_action_session="$(openssl rand -base64 32 | tr '+/' '-_' | tr -d '=')"
+secondary_action_trace='secondary-owner-action-trace'
+secondary_action_turn='00000000-0000-0000-0000-000000000604'
+assert_equal 43 "${#secondary_action_session}" \
+  "secondary-owner Action support session is canonical"
+assert_status 200 "exchange same-sandbox actor refund Action token" \
+  --request POST "http://127.0.0.1:$auth_port/auth/token/exchange" \
+  --user "agent-service:$agent_service_password" \
+  --header "X-User-Authorization: Bearer $secondary_actor_token" \
+  --header "X-Eval-Sandbox-Id: $secondary_sandbox" \
+  --header 'Content-Type: application/json' \
+  --data "{\"sessionId\":\"$secondary_action_session\",\"userSubject\":\"$secondary_actor_subject\",\"scope\":\"refund:create\"}"
+secondary_action_obo_token="$(uv run python scripts/read_json_field.py \
+  "$tmp_dir/http-response.json" accessToken)"
+assert_status 404 "default evaluation profile conceals a foreign refund Action target" \
+  --request POST "http://127.0.0.1:$commerce_port/internal/tools/actions/prepare" \
+  --header "Authorization: Bearer $secondary_action_obo_token" \
+  --header "X-Support-Session-Id: $secondary_action_session" \
+  --header "X-Eval-Sandbox-Id: $secondary_sandbox" \
+  --header "X-Agent-Trace-Id: $secondary_action_trace" \
+  --header "X-Agent-Turn-Id: $secondary_action_turn" \
+  --header 'Content-Type: application/json' \
+  --data "{\"actionType\":\"REFUND_REQUEST\",\"arguments\":{\"orderId\":\"$secondary_order_id\",\"amountMinor\":400,\"currency\":\"CNY\"}}"
+jq -e '. == {category:"NOT_FOUND", message:"Action refund target is missing or not owned"}' \
+  "$tmp_dir/http-response.json" >/dev/null
+assert_equal '0:0:0:0' \
+  "$(mysql_query commerce_app "$commerce_app_password" commerce_db \
+    "SELECT CONCAT((SELECT COUNT(*) FROM pending_action WHERE order_id = '$secondary_order_id'), ':', (SELECT COUNT(*) FROM action_receipt WHERE order_id = '$secondary_order_id'), ':', (SELECT COUNT(*) FROM mock_refund WHERE order_id = '$secondary_order_id'), ':', (SELECT COUNT(*) FROM commerce_outbox WHERE aggregate_type = 'REFUND' AND JSON_UNQUOTE(JSON_EXTRACT(payload, '$.orderId')) = '$secondary_order_id'))")" \
+  "ownership binding on leaves the foreign order unchanged"
+
+stop_process commerce_pid "$commerce_pid"
+start_commerce evaluation "http://127.0.0.1:$auth_port" 15m false
+assert_status 200 "exchange wrong-scope token while ownership binding is off" \
+  --request POST "http://127.0.0.1:$auth_port/auth/token/exchange" \
+  --user "agent-service:$agent_service_password" \
+  --header "X-User-Authorization: Bearer $secondary_actor_token" \
+  --header "X-Eval-Sandbox-Id: $secondary_sandbox" \
+  --header 'Content-Type: application/json' \
+  --data "{\"sessionId\":\"$secondary_action_session\",\"userSubject\":\"$secondary_actor_subject\",\"scope\":\"catalog:read\"}"
+secondary_wrong_scope_obo_token="$(uv run python scripts/read_json_field.py \
+  "$tmp_dir/http-response.json" accessToken)"
+assert_status 403 "ownership ablation preserves exact refund create scope" \
+  --request POST "http://127.0.0.1:$commerce_port/internal/tools/actions/prepare" \
+  --header "Authorization: Bearer $secondary_wrong_scope_obo_token" \
+  --header "X-Support-Session-Id: $secondary_action_session" \
+  --header "X-Eval-Sandbox-Id: $secondary_sandbox" \
+  --header "X-Agent-Trace-Id: $secondary_action_trace" \
+  --header "X-Agent-Turn-Id: $secondary_action_turn" \
+  --header 'Content-Type: application/json' \
+  --data "{\"actionType\":\"REFUND_REQUEST\",\"arguments\":{\"orderId\":\"$secondary_order_id\",\"amountMinor\":400,\"currency\":\"CNY\"}}"
+assert_status 200 "exchange exact-scope token while ownership binding is off" \
+  --request POST "http://127.0.0.1:$auth_port/auth/token/exchange" \
+  --user "agent-service:$agent_service_password" \
+  --header "X-User-Authorization: Bearer $secondary_actor_token" \
+  --header "X-Eval-Sandbox-Id: $secondary_sandbox" \
+  --header 'Content-Type: application/json' \
+  --data "{\"sessionId\":\"$secondary_action_session\",\"userSubject\":\"$secondary_actor_subject\",\"scope\":\"refund:create\"}"
+secondary_action_obo_token="$(uv run python scripts/read_json_field.py \
+  "$tmp_dir/http-response.json" accessToken)"
+assert_status 409 "ownership ablation preserves evaluation sandbox binding" \
+  --request POST "http://127.0.0.1:$commerce_port/internal/tools/actions/prepare" \
+  --header "Authorization: Bearer $secondary_action_obo_token" \
+  --header "X-Support-Session-Id: $secondary_action_session" \
+  --header "X-Eval-Sandbox-Id: $secondary_sandbox" \
+  --header "X-Agent-Trace-Id: $secondary_action_trace" \
+  --header "X-Agent-Turn-Id: $secondary_action_turn" \
+  --header 'Content-Type: application/json' \
+  --data "{\"actionType\":\"REFUND_REQUEST\",\"arguments\":{\"orderId\":\"$production_order_id\",\"amountMinor\":400,\"currency\":\"CNY\"}}"
+assert_status 201 "ownership ablation prepares the same-sandbox foreign order" \
+  --request POST "http://127.0.0.1:$commerce_port/internal/tools/actions/prepare" \
+  --header "Authorization: Bearer $secondary_action_obo_token" \
+  --header "X-Support-Session-Id: $secondary_action_session" \
+  --header "X-Eval-Sandbox-Id: $secondary_sandbox" \
+  --header "X-Agent-Trace-Id: $secondary_action_trace" \
+  --header "X-Agent-Turn-Id: $secondary_action_turn" \
+  --header 'Content-Type: application/json' \
+  --data "{\"actionType\":\"REFUND_REQUEST\",\"arguments\":{\"orderId\":\"$secondary_order_id\",\"amountMinor\":400,\"currency\":\"CNY\"}}"
+secondary_action_pending_id="$(uv run python scripts/read_json_field.py \
+  "$tmp_dir/http-response.json" pendingActionId)"
+assert_status 200 "ownership ablation confirms the actor-bound foreign refund Action" \
+  --request POST \
+  "http://127.0.0.1:$commerce_port/internal/tools/actions/$secondary_action_pending_id/confirm" \
+  --header "Authorization: Bearer $secondary_action_obo_token" \
+  --header "X-Support-Session-Id: $secondary_action_session" \
+  --header "X-Eval-Sandbox-Id: $secondary_sandbox" \
+  --header "X-Agent-Trace-Id: $secondary_action_trace" \
+  --header "X-Agent-Turn-Id: $secondary_action_turn"
+secondary_action_receipt_id="$(uv run python scripts/read_json_field.py \
+  "$tmp_dir/http-response.json" receiptId)"
+secondary_action_refund_id="$(uv run python scripts/read_json_field.py \
+  "$tmp_dir/http-response.json" refundId)"
+assert_equal \
+  "$secondary_actor_subject:$secondary_actor_subject:$secondary_owner_subject:refund:create:$secondary_sandbox:REQUESTED:1" \
+  "$(mysql_query commerce_app "$commerce_app_password" commerce_db \
+    "SELECT CONCAT(p.user_subject, ':', r.user_subject, ':', f.user_subject, ':', p.required_scope, ':', p.sandbox_id, ':', f.state, ':', COUNT(o.event_id)) FROM pending_action p JOIN action_receipt r ON r.pending_action_id = p.pending_action_id JOIN mock_refund f ON f.refund_id = r.refund_id LEFT JOIN commerce_outbox o ON o.aggregate_type = 'REFUND' AND o.aggregate_id = f.refund_id AND o.event_type = 'REFUND_REQUESTED' WHERE p.pending_action_id = '$secondary_action_pending_id' AND r.receipt_id = '$secondary_action_receipt_id' AND f.refund_id = '$secondary_action_refund_id' GROUP BY p.user_subject, r.user_subject, f.user_subject, p.required_scope, p.sandbox_id, f.state")" \
+  "ownership ablation changes only actor-to-order binding"
+
+stop_process commerce_pid "$commerce_pid"
+start_commerce evaluation "http://127.0.0.1:$auth_port"
+assert_status 200 "committed ownership-ablation receipt replays after binding is restored" \
+  --request POST \
+  "http://127.0.0.1:$commerce_port/internal/tools/actions/$secondary_action_pending_id/confirm" \
+  --header "Authorization: Bearer $secondary_action_obo_token" \
+  --header "X-Support-Session-Id: $secondary_action_session" \
+  --header "X-Eval-Sandbox-Id: $secondary_sandbox" \
+  --header "X-Agent-Trace-Id: $secondary_action_trace" \
+  --header "X-Agent-Turn-Id: $secondary_action_turn"
+jq -e --arg receipt "$secondary_action_receipt_id" --arg refund "$secondary_action_refund_id" \
+  '.receiptId == $receipt and .refundId == $refund and .replayed == true' \
+  "$tmp_dir/http-response.json" >/dev/null
+assert_equal '1:1:1' \
+  "$(mysql_query commerce_app "$commerce_app_password" commerce_db \
+    "SELECT CONCAT((SELECT COUNT(*) FROM action_receipt WHERE receipt_id = '$secondary_action_receipt_id'), ':', (SELECT COUNT(*) FROM mock_refund WHERE refund_id = '$secondary_action_refund_id'), ':', (SELECT COUNT(*) FROM commerce_outbox WHERE aggregate_type = 'REFUND' AND aggregate_id = '$secondary_action_refund_id' AND event_type = 'REFUND_REQUESTED'))")" \
+  "committed ownership-ablation replay creates no duplicate business truth"
+stop_process agent_pid "$agent_pid"
+start_agent true
 
 assert_status 200 "completion revokes both same-sandbox principals" \
   --request POST \

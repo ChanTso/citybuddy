@@ -169,12 +169,14 @@ def test_default_attempt_budget_completes_rewritten_retrieval(
                                 "content": None,
                                 "tool_calls": [
                                     {
+                                        "id": "call-knowledge-1",
+                                        "type": "function",
                                         "function": {
                                             "name": KNOWLEDGE_SEARCH_SPEC.name,
                                             "arguments": (
                                                 '{"query":"refund","rewrite":"return policy"}'
                                             ),
-                                        }
+                                        },
                                     }
                                 ],
                             }

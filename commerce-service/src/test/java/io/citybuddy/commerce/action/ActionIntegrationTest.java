@@ -563,6 +563,15 @@ class ActionIntegrationTest {
         .isOne();
     assertReplayIntegrityFailure(missingRefund);
 
+    ConfirmedAction corruptedOwner = confirmAction("action-refund-owner", 500, 200);
+    assertColumnDamage(
+        "mock_refund",
+        "refund_id",
+        corruptedOwner.receipt().refundId(),
+        new ColumnFault("user_subject", "other-owner"),
+        () ->
+            actions.confirm(corruptedOwner.context(), corruptedOwner.pending().pendingActionId()));
+
     ConfirmedAction missingLedger = confirmAction("action-ledger-missing", 900, 300);
     refunds.markProcessing(missingLedger.receipt().refundId());
     refunds.succeed(missingLedger.receipt().refundId());
@@ -738,7 +747,8 @@ class ActionIntegrationTest {
             new BoundedMySqlTransactions(jdbc, transaction, 1), 2, Duration.ofMillis(25)),
         properties,
         clock,
-        sandboxAccess);
+        sandboxAccess,
+        true);
   }
 
   private void assertPreparedWithoutEffects(String pendingId, String orderId) {
@@ -877,8 +887,8 @@ class ActionIntegrationTest {
       ActionRejectionReason reason,
       int status,
       Runnable replay) {
-    if (!List.of("pending_action", "action_receipt").contains(table)
-        || !List.of("pending_action_id", "receipt_id").contains(key)
+    if (!List.of("pending_action", "action_receipt", "mock_refund").contains(table)
+        || !List.of("pending_action_id", "receipt_id", "refund_id").contains(key)
         || !List.of(
                 "action_idempotency_key",
                 "pending_hash",
