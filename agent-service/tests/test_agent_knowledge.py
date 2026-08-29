@@ -10,7 +10,9 @@ import pytest
 from citybuddy_agent import http_client
 from citybuddy_agent.__main__ import _settings
 from citybuddy_agent.agent_control import (
+    CATALOG_PRODUCT_SPEC,
     KNOWLEDGE_SEARCH_SPEC,
+    REFUND_PREPARE_SPEC,
     AgentEvent,
     AttemptBudget,
     BoundedAgent,
@@ -172,7 +174,7 @@ def test_default_attempt_budget_completes_rewritten_retrieval(
                                         "id": "call-knowledge-1",
                                         "type": "function",
                                         "function": {
-                                            "name": KNOWLEDGE_SEARCH_SPEC.name,
+                                            "name": KNOWLEDGE_SEARCH_SPEC.wire_name,
                                             "arguments": (
                                                 '{"query":"refund","rewrite":"return policy"}'
                                             ),
@@ -242,6 +244,33 @@ def test_default_attempt_budget_completes_rewritten_retrieval(
         "reranker_http",
         "model_http",
     ]
+
+
+def test_model_temperature_is_optional_validated_runtime_configuration(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("AGENT_MODEL_TEMPERATURE", raising=False)
+    monkeypatch.delenv("AGENT_MODEL_PROXY_API_KEY", raising=False)
+    monkeypatch.delenv("AGENT_MODEL_TIMEOUT_SECONDS", raising=False)
+    assert _settings().model_temperature is None
+    assert _settings().model_proxy_api_key == ""
+    assert _settings().model_timeout_seconds == 2
+    monkeypatch.setenv("AGENT_MODEL_PROXY_API_KEY", "runtime-only-model-key")
+    monkeypatch.setenv("AGENT_MODEL_TEMPERATURE", "0")
+    assert _settings().model_temperature == 0
+    assert _settings().model_proxy_api_key == "runtime-only-model-key"
+    monkeypatch.setenv("AGENT_MODEL_TIMEOUT_SECONDS", "30")
+    assert _settings().model_timeout_seconds == 30
+    monkeypatch.setenv("AGENT_MODEL_TEMPERATURE", "2.1")
+    with pytest.raises(ValidationError):
+        _settings()
+    monkeypatch.setenv("AGENT_MODEL_TEMPERATURE", "0")
+    monkeypatch.setenv("AGENT_MODEL_TIMEOUT_SECONDS", "0")
+    with pytest.raises(ValidationError):
+        _settings()
+    monkeypatch.setenv("AGENT_MODEL_TIMEOUT_SECONDS", "inf")
+    with pytest.raises(ValidationError):
+        _settings()
 
 
 def test_toolspec_is_server_owned_and_forbids_model_control_fields() -> None:
@@ -415,6 +444,15 @@ def test_tool_adapter_uses_elasticsearch_without_obo_or_caller_authority() -> No
         assert isinstance(name, str)
         tool_names.add(name)
     assert tool_names == {
+        "actions_refund_prepare",
+        "catalog_product_get",
+        "knowledge_search",
+    }
+    assert {
+        CATALOG_PRODUCT_SPEC.name,
+        KNOWLEDGE_SEARCH_SPEC.name,
+        REFUND_PREPARE_SPEC.name,
+    } == {
         "actions.refund.prepare",
         "catalog.product.get",
         "knowledge.search",

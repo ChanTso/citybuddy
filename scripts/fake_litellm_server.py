@@ -16,6 +16,10 @@ from fastapi.responses import JSONResponse, Response
 
 app = FastAPI(docs_url=None, redoc_url=None)
 ACTION_ORDER_PATTERN = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}")
+WIRE_TOOL_NAME_PATTERN = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
+CATALOG_PRODUCT_WIRE_NAME = "catalog_product_get"
+KNOWLEDGE_SEARCH_WIRE_NAME = "knowledge_search"
+REFUND_PREPARE_WIRE_NAME = "actions_refund_prepare"
 counts: Counter[str] = Counter()
 commerce_base_url = ""
 
@@ -71,13 +75,48 @@ def tool_message(name: str, arguments: str) -> dict[str, object]:
     }
 
 
+def valid_tool_schemas(value: object) -> bool:
+    if not isinstance(value, list):
+        return False
+    for item in value:
+        function = item.get("function") if isinstance(item, dict) else None
+        name = function.get("name") if isinstance(function, dict) else None
+        if not isinstance(name, str) or WIRE_TOOL_NAME_PATTERN.fullmatch(name) is None:
+            return False
+    return True
+
+
+def valid_message_tool_names(value: object) -> bool:
+    if not isinstance(value, list):
+        return False
+    for item in value:
+        tool_calls = item.get("tool_calls") if isinstance(item, dict) else None
+        if tool_calls is None:
+            continue
+        if not isinstance(tool_calls, list):
+            return False
+        for call in tool_calls:
+            function = call.get("function") if isinstance(call, dict) else None
+            name = function.get("name") if isinstance(function, dict) else None
+            if not isinstance(name, str) or WIRE_TOOL_NAME_PATTERN.fullmatch(name) is None:
+                return False
+    return True
+
+
 @app.post("/v1/chat/completions")
 async def complete(request: Request) -> JSONResponse:
     payload = await request.json()
     model = payload.get("model") if isinstance(payload, dict) else None
     messages = payload.get("messages") if isinstance(payload, dict) else None
-    if not isinstance(model, str) or not isinstance(messages, list):
+    tools = payload.get("tools") if isinstance(payload, dict) else None
+    if (
+        not isinstance(model, str)
+        or not isinstance(messages, list)
+        or not valid_message_tool_names(messages)
+    ):
         return JSONResponse(status_code=400, content={"error": "invalid request"})
+    if tools is not None and not valid_tool_schemas(tools):
+        return JSONResponse(status_code=400, content={"error": "invalid tool schema"})
     user_messages = [
         item.get("content")
         for item in messages
@@ -137,14 +176,14 @@ async def complete(request: Request) -> JSONResponse:
     if selected in {"same-tier-fallback", "circuit-fail"} and model.endswith("primary"):
         return JSONResponse(status_code=503, content={"error": "transient"})
     if selected == "budget-exhaustion":
-        return JSONResponse(content=tool_message("unknown.tool", "{}"))
+        return JSONResponse(content=tool_message("unknown_tool", "{}"))
     if selected == "action-prepare" and not has_tool_feedback:
         # A caller that owns a different order names it in the message; the fixture order stays
         # the default so existing scenarios are unaffected.
         order_match = ACTION_ORDER_PATTERN.search(user_messages[0])
         return JSONResponse(
             content=tool_message(
-                "actions.refund.prepare",
+                REFUND_PREPARE_WIRE_NAME,
                 json.dumps(
                     {
                         "orderId": (
@@ -165,24 +204,24 @@ async def complete(request: Request) -> JSONResponse:
             tool_arguments["rewrite"] = "delivery guide"
         return JSONResponse(
             content=tool_message(
-                "knowledge.search",
+                KNOWLEDGE_SEARCH_WIRE_NAME,
                 json.dumps(tool_arguments, separators=(",", ":")),
             )
         )
     if selected in {"tool-success", "tool-timeout"} and not has_tool_feedback:
         product_id = "timeout-product" if selected == "tool-timeout" else "product-1"
         return JSONResponse(
-            content=tool_message("catalog.product.get", f'{{"productId":"{product_id}"}}')
+            content=tool_message(CATALOG_PRODUCT_WIRE_NAME, f'{{"productId":"{product_id}"}}')
         )
     if selected == "tool-malformed" and not has_tool_feedback:
         return JSONResponse(
             content=tool_message(
-                "catalog.product.get",
+                CATALOG_PRODUCT_WIRE_NAME,
                 '{"productId":"product-1","scope":"catalog:*"}',
             ),
         )
     if selected == "tool-unknown" and not has_tool_feedback:
-        return JSONResponse(content=tool_message("model.selected.tool", "{}"))
+        return JSONResponse(content=tool_message("model_selected_tool", "{}"))
     if has_tool_feedback:
         counts[f"{selected}:feedback"] += 1
         return JSONResponse(content=response_message("The requested information is available."))
