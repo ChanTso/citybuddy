@@ -46,12 +46,13 @@ public final class MockPaymentService {
 
   public MockPaymentResult start(
       String userSubject, String orderId, String idempotencyKey, MockPaymentRequest request) {
-    return start(userSubject, null, orderId, idempotencyKey, request);
+    return start(userSubject, null, null, orderId, idempotencyKey, request);
   }
 
   public MockPaymentResult start(
       String userSubject,
       String sandboxId,
+      String evaluationHandle,
       String orderId,
       String idempotencyKey,
       MockPaymentRequest request) {
@@ -67,6 +68,7 @@ public final class MockPaymentService {
         new CommittedPaymentTruthResolver.StartCommandContext(
             userSubject,
             sandboxId,
+            evaluationHandle,
             orderId,
             idempotencyKey,
             intentHash,

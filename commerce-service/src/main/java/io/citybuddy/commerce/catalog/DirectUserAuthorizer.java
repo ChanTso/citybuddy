@@ -19,8 +19,10 @@ import java.util.Date;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.regex.Pattern;
 
 public final class DirectUserAuthorizer {
+  private static final Pattern EVALUATION_HANDLE = Pattern.compile("[A-Za-z0-9_-]{43}");
   private final String issuer;
   private final String userAudience;
   private final Duration jwksCacheTtl;
@@ -101,9 +103,10 @@ public final class DirectUserAuthorizer {
       require(key != null, "Unknown signing key");
       require(verify(jwt, key), "Invalid signature");
       JWTClaimsSet claims = jwt.getJWTClaimsSet();
-      String sandboxId =
+      DirectTokenContext context =
           validateClaims(claims, requiredPermission, evalSandboxHeader, evaluationAllowed);
-      return new DirectPrincipal(claims.getSubject(), sandboxId);
+      return new DirectPrincipal(
+          claims.getSubject(), context.sandboxId(), context.evaluationHandle());
     } catch (ParseException | RuntimeException exception) {
       if (exception instanceof IdentityVerificationUnavailableException unavailableException) {
         throw unavailableException;
@@ -115,7 +118,7 @@ public final class DirectUserAuthorizer {
     }
   }
 
-  private String validateClaims(
+  private DirectTokenContext validateClaims(
       JWTClaimsSet claims,
       String requiredPermission,
       String evalSandboxHeader,
@@ -125,13 +128,18 @@ public final class DirectUserAuthorizer {
     require(claims.getAudience().equals(List.of(userAudience)), "Wrong audience");
     String tokenType = claims.getClaimAsString("token_type");
     String sandboxId = claims.getClaimAsString("sandbox");
+    String evaluationHandle = claims.getClaimAsString("evaluation_handle");
     if ("direct_user".equals(tokenType)) {
       require(sandboxId == null, "Production token carries evaluation sandbox");
+      require(evaluationHandle == null, "Production token carries evaluation handle");
       require(evalSandboxHeader == null, "Production token cannot use evaluation header");
     } else if ("eval_direct_user".equals(tokenType)) {
       require(evaluationProfile && evaluationAllowed, "Evaluation token is not enabled");
       require(hasText(sandboxId), "Missing evaluation sandbox");
       require(sandboxId.equals(evalSandboxHeader), "Evaluation sandbox mismatch");
+      require(
+          evaluationHandle == null || EVALUATION_HANDLE.matcher(evaluationHandle).matches(),
+          "Invalid evaluation handle");
     } else {
       throw new CatalogException(401, "Wrong token type");
     }
@@ -149,7 +157,7 @@ public final class DirectUserAuthorizer {
       throw new CatalogException(403, "Missing permission");
     }
     validateTime(claims);
-    return sandboxId;
+    return new DirectTokenContext(sandboxId, evaluationHandle);
   }
 
   private void validateTime(JWTClaimsSet claims) {
@@ -201,5 +209,7 @@ public final class DirectUserAuthorizer {
     return value != null && !value.isBlank();
   }
 
-  public record DirectPrincipal(String subject, String sandboxId) {}
+  public record DirectPrincipal(String subject, String sandboxId, String evaluationHandle) {}
+
+  private record DirectTokenContext(String sandboxId, String evaluationHandle) {}
 }

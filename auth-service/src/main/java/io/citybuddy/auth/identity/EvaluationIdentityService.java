@@ -146,7 +146,11 @@ public class EvaluationIdentityService {
     }
     String token =
         keys.evaluationDirectToken(
-            principal.subject(), principal.permissionList(), sandboxId, tokenExpiry);
+            principal.subject(),
+            principal.permissionList(),
+            sandboxId,
+            principal.opaqueHandle(),
+            tokenExpiry);
     return new AuthController.TokenResponse(
         token, "Bearer", Math.max(1, tokenExpiry.getEpochSecond() - now.getEpochSecond()));
   }

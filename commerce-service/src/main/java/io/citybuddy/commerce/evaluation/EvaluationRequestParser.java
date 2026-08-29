@@ -37,6 +37,8 @@ public final class EvaluationRequestParser {
   private static final Set<String> COMPLETE_FIELDS = Set.of("caseCorrelation");
   private static final Set<String> PAYMENT_ORDER_FIELDS =
       Set.of("orderId", "productId", "quantity");
+  private static final Set<String> PAYMENT_ORDER_FIELDS_WITH_OWNER =
+      Set.of("orderId", "productId", "quantity", "ownerTestUserLabel");
 
   private EvaluationRequestParser() {}
 
@@ -90,10 +92,18 @@ public final class EvaluationRequestParser {
     EvaluationResetRequest.PaymentOrderFixture paymentOrder = null;
     if (body.has("paymentOrder")) {
       JsonNode payment = body.get("paymentOrder");
-      requireExactObject(payment, PAYMENT_ORDER_FIELDS);
+      requireExactObject(payment, PAYMENT_ORDER_FIELDS, PAYMENT_ORDER_FIELDS_WITH_OWNER);
       String orderId = uuid(payment.get("orderId"), "Invalid payment order fixture");
       String productId = boundedId(payment.get("productId"), 64, "Invalid payment order fixture");
       int quantity = exactInt(payment.get("quantity"), 1, 100, "Invalid payment order fixture");
+      String ownerTestUserLabel = null;
+      if (payment.has("ownerTestUserLabel")) {
+        ownerTestUserLabel =
+            boundedId(payment.get("ownerTestUserLabel"), 128, "Invalid payment order fixture");
+        if (ownerTestUserLabel.equals(testUserLabel)) {
+          throw invalid("Invalid payment order fixture");
+        }
+      }
       EvaluationResetRequest.ProductFixture product =
           products.stream()
               .filter(item -> item.productId().equals(productId))
@@ -102,7 +112,9 @@ public final class EvaluationRequestParser {
       if (!product.available() || product.stockQuantity() < quantity) {
         throw invalid("Invalid payment order fixture");
       }
-      paymentOrder = new EvaluationResetRequest.PaymentOrderFixture(orderId, productId, quantity);
+      paymentOrder =
+          new EvaluationResetRequest.PaymentOrderFixture(
+              orderId, productId, quantity, ownerTestUserLabel);
     }
     return new EvaluationResetRequest(
         sandboxId, caseCorrelation, ttlSeconds, testUserLabel, List.copyOf(products), paymentOrder);
@@ -135,6 +147,9 @@ public final class EvaluationRequestParser {
       append(canonical, paymentOrder.orderId());
       append(canonical, paymentOrder.productId());
       append(canonical, Integer.toString(paymentOrder.quantity()));
+      if (paymentOrder.ownerTestUserLabel() != null) {
+        append(canonical, paymentOrder.ownerTestUserLabel());
+      }
     }
     try {
       byte[] digest =

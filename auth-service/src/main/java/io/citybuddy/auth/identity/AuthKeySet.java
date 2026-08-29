@@ -27,11 +27,13 @@ import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import java.util.UUID;
+import java.util.regex.Pattern;
 
 public final class AuthKeySet {
   public static final String DIRECT_TYPE = "direct_user";
   public static final String EVALUATION_DIRECT_TYPE = "eval_direct_user";
   public static final String OBO_TYPE = "agent_obo";
+  private static final Pattern OPAQUE_HANDLE = Pattern.compile("^[A-Za-z0-9_-]{43}$");
 
   private final IdentityProperties properties;
   private final Clock clock;
@@ -53,13 +55,20 @@ public final class AuthKeySet {
   public String directToken(String subject, List<String> permissions) {
     Instant now = clock.instant();
     JWTClaimsSet claims =
-        directClaims(subject, permissions, DIRECT_TYPE, null, now.plus(properties.directTtl()));
+        directClaims(
+            subject, permissions, DIRECT_TYPE, null, null, now.plus(properties.directTtl()));
     return sign(claims);
   }
 
   public String evaluationDirectToken(
-      String subject, List<String> permissions, String sandboxId, Instant expiresAt) {
-    return sign(directClaims(subject, permissions, EVALUATION_DIRECT_TYPE, sandboxId, expiresAt));
+      String subject,
+      List<String> permissions,
+      String sandboxId,
+      String evaluationHandle,
+      Instant expiresAt) {
+    return sign(
+        directClaims(
+            subject, permissions, EVALUATION_DIRECT_TYPE, sandboxId, evaluationHandle, expiresAt));
   }
 
   public IssuedToken oboToken(
@@ -111,14 +120,21 @@ public final class AuthKeySet {
     Object tokenType = claims.getClaim("token_type");
     Object sandboxClaim = claims.getClaim("sandbox");
     String sandbox = sandboxClaim instanceof String string ? string : null;
+    Object evaluationHandleClaim = claims.getClaim("evaluation_handle");
+    String evaluationHandle = evaluationHandleClaim instanceof String string ? string : null;
     if (DIRECT_TYPE.equals(tokenType)) {
       requireClaim(sandboxClaim == null, "Production token carries evaluation sandbox");
+      requireClaim(evaluationHandleClaim == null, "Production token carries evaluation handle");
       requireClaim(sandboxHeader == null, "Production token cannot use Evaluation header");
     } else if (EVALUATION_DIRECT_TYPE.equals(tokenType)) {
       requireClaim(evaluationProfile, "Evaluation token is not enabled");
       requireClaim(
           sandboxClaim instanceof String && hasText(sandbox), "Missing evaluation sandbox");
       requireClaim(sandbox.equals(sandboxHeader), "Evaluation sandbox mismatch");
+      requireClaim(
+          evaluationHandleClaim instanceof String
+              && OPAQUE_HANDLE.matcher(evaluationHandle).matches(),
+          "Invalid evaluation handle");
     } else {
       throw new IdentityException(401, "Wrong token type");
     }
@@ -142,6 +158,7 @@ public final class AuthKeySet {
         claims.getSubject(),
         List.copyOf(permissions),
         sandbox,
+        evaluationHandle,
         claims.getExpirationTime().toInstant());
   }
 
@@ -150,6 +167,7 @@ public final class AuthKeySet {
       List<String> permissions,
       String tokenType,
       String sandboxId,
+      String evaluationHandle,
       Instant expiresAt) {
     Instant now = clock.instant();
     requireClaim(expiresAt.isAfter(now), "Evaluation token is already expired");
@@ -167,6 +185,9 @@ public final class AuthKeySet {
             .jwtID(UUID.randomUUID().toString());
     if (hasText(sandboxId)) {
       builder.claim("sandbox", sandboxId);
+    }
+    if (hasText(evaluationHandle)) {
+      builder.claim("evaluation_handle", evaluationHandle);
     }
     return builder.build();
   }
@@ -271,7 +292,11 @@ public final class AuthKeySet {
   }
 
   public record DirectPrincipal(
-      String subject, List<String> permissions, String sandboxId, Instant expiresAt) {}
+      String subject,
+      List<String> permissions,
+      String sandboxId,
+      String evaluationHandle,
+      Instant expiresAt) {}
 
   public record IssuedToken(String value, long expiresIn) {}
 }

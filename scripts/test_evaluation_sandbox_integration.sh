@@ -517,8 +517,13 @@ payment_reset_body() {
   local case_id="$2"
   local order_id="$3"
   local ttl_seconds="${4:-300}"
-  printf '{"sandboxId":"%s","caseCorrelation":"%s","ttlSeconds":%s,"testUserLabel":"user-%s","products":[{"productId":"payment-product","name":"Payment fixture","description":"sandbox payment fixture","priceMinor":900,"currency":"CNY","stockQuantity":3,"available":true}],"paymentOrder":{"orderId":"%s","productId":"payment-product","quantity":2}}' \
-    "$sandbox" "$case_id" "$ttl_seconds" "$sandbox" "$order_id"
+  local owner_test_user_label="${5:-}"
+  local owner_field=''
+  if [[ -n "$owner_test_user_label" ]]; then
+    owner_field=",\"ownerTestUserLabel\":\"$owner_test_user_label\""
+  fi
+  printf '{"sandboxId":"%s","caseCorrelation":"%s","ttlSeconds":%s,"testUserLabel":"user-%s","products":[{"productId":"payment-product","name":"Payment fixture","description":"sandbox payment fixture","priceMinor":900,"currency":"CNY","stockQuantity":3,"available":true}],"paymentOrder":{"orderId":"%s","productId":"payment-product","quantity":2%s}}' \
+    "$sandbox" "$case_id" "$ttl_seconds" "$sandbox" "$order_id" "$owner_field"
 }
 
 reset_payment_sandbox() {
@@ -527,12 +532,14 @@ reset_payment_sandbox() {
   local key="$3"
   local order_id="$4"
   local ttl_seconds="${5:-300}"
+  local owner_test_user_label="${6:-}"
   assert_status 200 "reset payment sandbox $sandbox" \
     --request POST "http://127.0.0.1:$commerce_port/api/eval/reset" \
     --user "evaluation-manager:$management_password" \
     --header "Idempotency-Key: $key" \
     --header 'Content-Type: application/json' \
-    --data "$(payment_reset_body "$sandbox" "$case_id" "$order_id" "$ttl_seconds")"
+    --data "$(payment_reset_body "$sandbox" "$case_id" "$order_id" "$ttl_seconds" \
+      "$owner_test_user_label")"
 }
 
 sign_payment_callback() {
@@ -1355,6 +1362,7 @@ uv run python scripts/check_evaluation_token.py \
   --token-file "$tmp_dir/direct.jwt" --jwks-file "$tmp_dir/jwks.json" \
   --issuer https://identity.citybuddy.test --audience citybuddy-web \
   --token-type eval_direct_user --sandbox sandbox-main \
+  --evaluation-handle="$main_handle" \
   --maximum-expiry "$(date -u -v+901S +%s 2>/dev/null || date -u -d '+901 seconds' +%s)" \
   --output "$tmp_dir/direct.json"
 direct_subject="$(uv run python scripts/read_json_field.py "$tmp_dir/direct.json" subject)"
@@ -1375,6 +1383,7 @@ uv run python scripts/check_evaluation_token.py \
   --token-file "$tmp_dir/payment-direct.jwt" --jwks-file "$tmp_dir/jwks.json" \
   --issuer https://identity.citybuddy.test --audience citybuddy-web \
   --token-type eval_direct_user --sandbox sandbox-payment \
+  --evaluation-handle="$payment_handle" \
   --maximum-expiry "$(date -u -v+3601S +%s 2>/dev/null || date -u -d '+3601 seconds' +%s)" \
   --output "$tmp_dir/payment-direct.json"
 payment_subject="$(uv run python scripts/read_json_field.py "$tmp_dir/payment-direct.json" subject)"
@@ -4448,6 +4457,7 @@ uv run python scripts/check_evaluation_token.py \
   --token-file "$tmp_dir/direct.jwt" --jwks-file "$tmp_dir/jwks.json" \
   --issuer https://identity.citybuddy.test --audience citybuddy-web \
   --token-type eval_direct_user --sandbox sandbox-main \
+  --evaluation-handle="$main_handle" \
   --maximum-expiry "$(date -u -v+901S +%s 2>/dev/null || date -u -d '+901 seconds' +%s)" \
   --output "$tmp_dir/direct.json"
 direct_expiry="$(uv run python scripts/read_json_field.py "$tmp_dir/direct.json" expiresAt)"
@@ -5206,6 +5216,191 @@ assert_status 401 "evaluation chat rejects sandbox header substitution" \
   --header 'Content-Type: application/json' \
   --data '{"message":"tool-success"}'
 
+# The payment owner must share the actor's sandbox so this path isolates ownership from sandbox
+# isolation. The primary principal is the actor; the payment-order principal is the owner.
+secondary_invalid_sandbox='sandbox-secondary-owner-invalid'
+secondary_invalid_order_id='00000000-0000-0000-0000-000000000603'
+assert_status 400 "payment owner must be distinct from the primary test principal" \
+  --request POST "http://127.0.0.1:$commerce_port/api/eval/reset" \
+  --user "evaluation-manager:$management_password" \
+  --header 'Idempotency-Key: reset-secondary-owner-invalid' \
+  --header 'Content-Type: application/json' \
+  --data "$(payment_reset_body "$secondary_invalid_sandbox" \
+    case-secondary-owner-invalid "$secondary_invalid_order_id" 3600 \
+    "user-$secondary_invalid_sandbox")"
+assert_equal '0:0:0' \
+  "$(mysql_query root "$root_password" commerce_db \
+    "SELECT CONCAT((SELECT COUNT(*) FROM eval_sandbox WHERE sandbox_id = '$secondary_invalid_sandbox'), ':', (SELECT COUNT(*) FROM standard_order WHERE order_id = '$secondary_invalid_order_id'), ':', (SELECT COUNT(*) FROM auth_eval_test_principal WHERE sandbox_id = '$secondary_invalid_sandbox'))")" \
+  "equal primary and payment-owner labels leave no lifecycle residue"
+
+secondary_sandbox='sandbox-secondary-payment-owner'
+secondary_case='case-secondary-payment-owner'
+secondary_owner_label='payment-owner-secondary'
+secondary_order_id='00000000-0000-0000-0000-000000000601'
+reset_payment_sandbox "$secondary_sandbox" "$secondary_case" reset-secondary-owner \
+  "$secondary_order_id" 3600 "$secondary_owner_label"
+cp "$tmp_dir/http-response.json" "$tmp_dir/reset-secondary-owner.json"
+secondary_actor_handle="$(uv run python scripts/read_json_field.py \
+  "$tmp_dir/reset-secondary-owner.json" testUserHandle)"
+secondary_owner_handle="$(uv run python scripts/read_json_field.py \
+  "$tmp_dir/reset-secondary-owner.json" paymentOrderOwnerTestUserHandle)"
+assert_equal 43 "${#secondary_actor_handle}" "secondary-owner actor handle length"
+assert_equal 43 "${#secondary_owner_handle}" "secondary-owner payment handle length"
+if [[ "$secondary_actor_handle" == "$secondary_owner_handle" ]]; then
+  echo "Secondary payment owner reused the primary test-principal handle." >&2
+  exit 1
+fi
+jq -e --arg sandbox "$secondary_sandbox" --arg actor "$secondary_actor_handle" \
+  --arg owner "$secondary_owner_handle" '
+    . == {
+      sandboxId: $sandbox,
+      testUserHandle: $actor,
+      paymentOrderOwnerTestUserHandle: $owner
+    }
+  ' "$tmp_dir/reset-secondary-owner.json" >/dev/null
+reset_payment_sandbox "$secondary_sandbox" "$secondary_case" reset-secondary-owner \
+  "$secondary_order_id" 3600 "$secondary_owner_label"
+cmp "$tmp_dir/reset-secondary-owner.json" "$tmp_dir/http-response.json"
+assert_status 409 "payment-owner mutation conflicts with the persisted reset intent" \
+  --request POST "http://127.0.0.1:$commerce_port/api/eval/reset" \
+  --user "evaluation-manager:$management_password" \
+  --header 'Idempotency-Key: reset-secondary-owner' \
+  --header 'Content-Type: application/json' \
+  --data "$(payment_reset_body "$secondary_sandbox" "$secondary_case" \
+    "$secondary_order_id" 3600 payment-owner-mutated)"
+assert_equal 1 \
+  "$(mysql_query commerce_app "$commerce_app_password" commerce_db \
+    "SELECT test_user_label = 'user-$secondary_sandbox' AND payment_owner_test_user_label = '$secondary_owner_label' AND case_correlation <> payment_owner_case_correlation AND opaque_handle = '$secondary_actor_handle' AND payment_owner_opaque_handle = '$secondary_owner_handle' AND auth_invalidation_state = 'PROVISIONED' AND payment_owner_auth_invalidation_state = 'PROVISIONED' FROM eval_sandbox WHERE sandbox_id = '$secondary_sandbox'")" \
+  "secondary payment owner has an independent provisioned lifecycle"
+assert_equal '2:2:2:1:1' \
+  "$(mysql_query auth_app "$auth_app_password" commerce_db \
+    "SELECT CONCAT(COUNT(*), ':', COUNT(DISTINCT case_correlation), ':', COUNT(DISTINCT opaque_handle), ':', SUM(test_user_label = 'user-$secondary_sandbox'), ':', SUM(test_user_label = '$secondary_owner_label')) FROM auth_eval_test_principal WHERE sandbox_id = '$secondary_sandbox' AND state = 'PROVISIONED'")" \
+  "two distinct auth principals share the evaluation sandbox"
+assert_equal "eval-handle:$secondary_owner_handle:$secondary_sandbox:$secondary_owner_handle:UNPAID:1" \
+  "$(mysql_query commerce_app "$commerce_app_password" commerce_db \
+    "SELECT CONCAT(user_subject, ':', sandbox_id, ':', evaluation_owner_handle, ':', status, ':', state_version) FROM standard_order WHERE order_id = '$secondary_order_id'")" \
+  "payment fixture is bound to the secondary owner"
+
+assert_status 200 "issue same-sandbox actor token" \
+  --request POST "http://127.0.0.1:$auth_port/auth/eval/test-token" \
+  --user "evaluation-client:$evaluator_password" \
+  --header "X-Eval-Sandbox-Id: $secondary_sandbox" \
+  --header 'Content-Type: application/json' \
+  --data "{\"handle\":\"$secondary_actor_handle\"}"
+secondary_actor_token="$(uv run python scripts/read_json_field.py \
+  "$tmp_dir/http-response.json" accessToken)"
+printf '%s' "$secondary_actor_token" >"$tmp_dir/secondary-actor.jwt"
+uv run python scripts/check_evaluation_token.py \
+  --token-file "$tmp_dir/secondary-actor.jwt" --jwks-file "$tmp_dir/jwks.json" \
+  --issuer https://identity.citybuddy.test --audience citybuddy-web \
+  --token-type eval_direct_user --sandbox "$secondary_sandbox" \
+  --evaluation-handle="$secondary_actor_handle" \
+  --maximum-expiry "$(date -u -v+3601S +%s 2>/dev/null || date -u -d '+3601 seconds' +%s)" \
+  --output "$tmp_dir/secondary-actor.json"
+secondary_actor_subject="$(uv run python scripts/read_json_field.py \
+  "$tmp_dir/secondary-actor.json" subject)"
+assert_status 200 "issue same-sandbox payment-owner token" \
+  --request POST "http://127.0.0.1:$auth_port/auth/eval/test-token" \
+  --user "evaluation-client:$evaluator_password" \
+  --header "X-Eval-Sandbox-Id: $secondary_sandbox" \
+  --header 'Content-Type: application/json' \
+  --data "{\"handle\":\"$secondary_owner_handle\"}"
+secondary_owner_token="$(uv run python scripts/read_json_field.py \
+  "$tmp_dir/http-response.json" accessToken)"
+printf '%s' "$secondary_owner_token" >"$tmp_dir/secondary-owner.jwt"
+uv run python scripts/check_evaluation_token.py \
+  --token-file "$tmp_dir/secondary-owner.jwt" --jwks-file "$tmp_dir/jwks.json" \
+  --issuer https://identity.citybuddy.test --audience citybuddy-web \
+  --token-type eval_direct_user --sandbox "$secondary_sandbox" \
+  --evaluation-handle="$secondary_owner_handle" \
+  --maximum-expiry "$(date -u -v+3601S +%s 2>/dev/null || date -u -d '+3601 seconds' +%s)" \
+  --output "$tmp_dir/secondary-owner.json"
+secondary_owner_subject="$(uv run python scripts/read_json_field.py \
+  "$tmp_dir/secondary-owner.json" subject)"
+if [[ "$secondary_actor_subject" == "$secondary_owner_subject" ]]; then
+  echo "Secondary payment owner reused the primary test-principal subject." >&2
+  exit 1
+fi
+
+secondary_actor_effects_before="$(mysql_query commerce_app "$commerce_app_password" commerce_db \
+  "SELECT CONCAT(o.user_subject, ':', o.status, ':', o.state_version, ':', (SELECT COUNT(*) FROM mock_payment_attempt WHERE order_id = o.order_id), ':', (SELECT COUNT(*) FROM mock_payment_callback callback_record JOIN mock_payment_attempt attempt_record ON attempt_record.attempt_id = callback_record.attempt_id WHERE attempt_record.order_id = o.order_id), ':', (SELECT COUNT(*) FROM inventory_ledger WHERE order_id = o.order_id), ':', (SELECT COUNT(*) FROM mock_refund WHERE order_id = o.order_id), ':', (SELECT COUNT(*) FROM commerce_outbox)) FROM standard_order o WHERE o.order_id = '$secondary_order_id'")"
+secondary_actor_log_start="$(wc -l <"$tmp_dir/commerce.log")"
+assert_status 404 "same-sandbox actor cannot start the owner's payment" \
+  --request POST \
+  "http://127.0.0.1:$commerce_port/api/orders/$secondary_order_id/mock-payment" \
+  --header "Authorization: Bearer $secondary_actor_token" \
+  --header "X-Eval-Sandbox-Id: $secondary_sandbox" \
+  --header 'Idempotency-Key: payment-secondary-actor' \
+  --header 'Content-Type: application/json' \
+  --data '{"amountMinor":1800,"currency":"CNY"}'
+secondary_actor_log_end="$(wc -l <"$tmp_dir/commerce.log")"
+jq -e '. == {category:"NOT_FOUND", message:"Payment order is missing or not owned"}' \
+  "$tmp_dir/http-response.json" >/dev/null
+assert_equal CONCEALED_NOT_FOUND \
+  "$(payment_start_reason_since "$secondary_actor_log_start" "$secondary_actor_log_end")" \
+  "same-sandbox cross-owner payment has concealment attribution"
+assert_equal "$secondary_actor_effects_before" \
+  "$(mysql_query commerce_app "$commerce_app_password" commerce_db \
+    "SELECT CONCAT(o.user_subject, ':', o.status, ':', o.state_version, ':', (SELECT COUNT(*) FROM mock_payment_attempt WHERE order_id = o.order_id), ':', (SELECT COUNT(*) FROM mock_payment_callback callback_record JOIN mock_payment_attempt attempt_record ON attempt_record.attempt_id = callback_record.attempt_id WHERE attempt_record.order_id = o.order_id), ':', (SELECT COUNT(*) FROM inventory_ledger WHERE order_id = o.order_id), ':', (SELECT COUNT(*) FROM mock_refund WHERE order_id = o.order_id), ':', (SELECT COUNT(*) FROM commerce_outbox)) FROM standard_order o WHERE o.order_id = '$secondary_order_id'")" \
+  "same-sandbox cross-owner payment creates no durable effect"
+
+assert_status 201 "same-sandbox owner starts the payment" \
+  --request POST \
+  "http://127.0.0.1:$commerce_port/api/orders/$secondary_order_id/mock-payment" \
+  --header "Authorization: Bearer $secondary_owner_token" \
+  --header "X-Eval-Sandbox-Id: $secondary_sandbox" \
+  --header 'Idempotency-Key: payment-secondary-owner' \
+  --header 'Content-Type: application/json' \
+  --data '{"amountMinor":1800,"currency":"CNY"}'
+secondary_attempt_id="$(uv run python scripts/read_json_field.py \
+  "$tmp_dir/http-response.json" attemptId)"
+secondary_correlation_id="$(uv run python scripts/read_json_field.py \
+  "$tmp_dir/http-response.json" callbackCorrelationId)"
+assert_equal "$secondary_owner_subject:$secondary_owner_handle:1" \
+  "$(mysql_query commerce_app "$commerce_app_password" commerce_db \
+    "SELECT CONCAT(o.user_subject, ':', o.evaluation_owner_handle, ':', COUNT(a.attempt_id)) FROM standard_order o LEFT JOIN mock_payment_attempt a ON a.order_id = o.order_id AND a.user_subject = '$secondary_owner_subject' WHERE o.order_id = '$secondary_order_id' GROUP BY o.user_subject, o.evaluation_owner_handle")" \
+  "only the secondary owner binds and starts the fixture payment"
+
+secondary_event_id='00000000-0000-0000-0000-000000000602'
+secondary_callback_key='callback-secondary-owner'
+secondary_payment_session="$(openssl rand -base64 32 | tr '+/' '-_' | tr -d '=')"
+secondary_payment_trace='secondary-owner-payment-trace'
+secondary_payment_operation="$(openssl rand -hex 32)"
+secondary_callback_timestamp="$(date +%s)"
+secondary_callback_signature="$(sign_payment_callback "$secondary_callback_timestamp" \
+  "$secondary_callback_key" "$secondary_event_id" "$secondary_correlation_id" \
+  "$secondary_order_id" "$secondary_sandbox" "$secondary_payment_session" \
+  "$secondary_payment_trace" "$secondary_payment_operation")"
+secondary_callback_body="{\"callbackEventId\":\"$secondary_event_id\",\"callbackCorrelationId\":\"$secondary_correlation_id\",\"orderId\":\"$secondary_order_id\",\"amountMinor\":1800,\"currency\":\"CNY\",\"outcome\":\"SUCCEEDED\",\"sandboxId\":\"$secondary_sandbox\",\"supportSessionId\":\"$secondary_payment_session\",\"traceId\":\"$secondary_payment_trace\",\"operationId\":\"$secondary_payment_operation\"}"
+assert_status 200 "secondary owner's signed callback commits payment" \
+  --request POST "http://127.0.0.1:$commerce_port/internal/mock-payments/callback" \
+  --header "X-Mock-Payment-Key-Id: $mock_payment_key" \
+  --header "X-Mock-Payment-Timestamp: $secondary_callback_timestamp" \
+  --header "X-Mock-Payment-Signature: $secondary_callback_signature" \
+  --header "Idempotency-Key: $secondary_callback_key" \
+  --header 'Content-Type: application/json' \
+  --data "$secondary_callback_body"
+assert_equal 'PAID:SUCCEEDED:1:1' \
+  "$(mysql_query commerce_app "$commerce_app_password" commerce_db \
+    "SELECT CONCAT(o.status, ':', a.state, ':', (SELECT COUNT(*) FROM mock_payment_callback WHERE attempt_id = a.attempt_id), ':', (SELECT COUNT(*) FROM inventory_ledger WHERE business_event_key = CONCAT('mock-payment:', a.attempt_id))) FROM standard_order o JOIN mock_payment_attempt a ON a.order_id = o.order_id WHERE o.order_id = '$secondary_order_id' AND a.attempt_id = '$secondary_attempt_id'")" \
+  "secondary-owned payment fixture reaches committed business state"
+
+assert_status 200 "completion revokes both same-sandbox principals" \
+  --request POST \
+  "http://127.0.0.1:$commerce_port/api/eval/sandboxes/$secondary_sandbox/complete" \
+  --user "evaluation-manager:$management_password" \
+  --header 'Idempotency-Key: complete-secondary-owner' \
+  --header 'Content-Type: application/json' \
+  --data "{\"caseCorrelation\":\"$secondary_case\"}"
+assert_equal 'DEAD:REVOKED:REVOKED:1' \
+  "$(mysql_query commerce_app "$commerce_app_password" commerce_db \
+    "SELECT CONCAT(lifecycle_state, ':', auth_invalidation_state, ':', payment_owner_auth_invalidation_state, ':', closed_at IS NOT NULL) FROM eval_sandbox WHERE sandbox_id = '$secondary_sandbox'")" \
+  "secondary-owner completion closes both identity lifecycles"
+assert_equal '2:2' \
+  "$(mysql_query auth_app "$auth_app_password" commerce_db \
+    "SELECT CONCAT(COUNT(*), ':', SUM(state = 'REVOKED')) FROM auth_eval_test_principal WHERE sandbox_id = '$secondary_sandbox'")" \
+  "secondary-owner completion revokes both auth principals"
+
 assert_status 404 "completion hides cross-case sandbox" \
   --request POST "http://127.0.0.1:$commerce_port/api/eval/sandboxes/sandbox-main/complete" \
   --user "evaluation-manager:$management_password" \
@@ -5317,6 +5512,7 @@ assert_equal 0 "$(mysql_query commerce_app "$commerce_app_password" commerce_db 
   "payment activation failure leaves no order"
 
 # Auth commits provisioning but every response is lost. A commerce restart must recover by key.
+response_loss_order_id='00000000-0000-0000-0000-000000000605'
 uv run python scripts/drop_response_proxy.py \
   --port 0 --upstream "http://127.0.0.1:$auth_port" \
   --path-prefix /internal/eval/test-principals/provision --drop-count 20 \
@@ -5331,29 +5527,37 @@ assert_status 502 "lost provisioning response cannot activate sandbox" \
   --user "evaluation-manager:$management_password" \
   --header 'Idempotency-Key: reset-response-loss' \
   --header 'Content-Type: application/json' \
-  --data "$(reset_body sandbox-response-loss case-response-loss never-active)"
+  --data "$(payment_reset_body sandbox-response-loss case-response-loss \
+    "$response_loss_order_id" 300 response-loss-payment-owner)"
 assert_equal 1 "$(mysql_query auth_app "$auth_app_password" commerce_db \
   "SELECT COUNT(*) FROM auth_eval_test_principal WHERE sandbox_id = 'sandbox-response-loss' AND state = 'PROVISIONED'")" \
   "lost response leaves one provisioned auth identity"
-assert_equal 'DEAD:UNPROVISIONED:1' "$(mysql_query commerce_app "$commerce_app_password" commerce_db \
-  "SELECT CONCAT(lifecycle_state, ':', auth_invalidation_state, ':', closed_at IS NULL) FROM eval_sandbox WHERE sandbox_id = 'sandbox-response-loss'")" \
-  "lost response leaves a fail-closed registry pending durable handle recovery"
+assert_equal 'DEAD:UNPROVISIONED:UNPROVISIONED:1:0' \
+  "$(mysql_query commerce_app "$commerce_app_password" commerce_db \
+    "SELECT CONCAT(lifecycle_state, ':', auth_invalidation_state, ':', payment_owner_auth_invalidation_state, ':', closed_at IS NULL, ':', (SELECT COUNT(*) FROM standard_order WHERE order_id = '$response_loss_order_id')) FROM eval_sandbox WHERE sandbox_id = 'sandbox-response-loss'")" \
+  "lost response leaves both identity roles fail closed and no payment fixture"
 stop_process commerce_pid "$commerce_pid"
 stop_process drop_proxy_pid "$drop_proxy_pid"
 start_commerce evaluation "http://127.0.0.1:$auth_port"
 for _ in {1..15}; do
   response_loss_state="$(mysql_query commerce_app "$commerce_app_password" commerce_db \
-    "SELECT CONCAT(auth_invalidation_state, ':', closed_at IS NOT NULL) FROM eval_sandbox WHERE sandbox_id = 'sandbox-response-loss'")"
-  [[ "$response_loss_state" == 'REVOKED:1' ]] && break
+    "SELECT CONCAT(auth_invalidation_state, ':', payment_owner_auth_invalidation_state, ':', closed_at IS NOT NULL) FROM eval_sandbox WHERE sandbox_id = 'sandbox-response-loss'")"
+  [[ "$response_loss_state" == 'REVOKED:REVOKED:1' ]] && break
   sleep 1
 done
-test "$response_loss_state" = 'REVOKED:1'
-test "$(mysql_query auth_app "$auth_app_password" commerce_db \
-  "SELECT state FROM auth_eval_test_principal WHERE sandbox_id = 'sandbox-response-loss'")" = REVOKED
+test "$response_loss_state" = 'REVOKED:REVOKED:1'
+assert_equal '2:2' \
+  "$(mysql_query auth_app "$auth_app_password" commerce_db \
+    "SELECT CONCAT(COUNT(*), ':', SUM(state = 'REVOKED')) FROM auth_eval_test_principal WHERE sandbox_id = 'sandbox-response-loss'")" \
+  "response-loss recovery revokes both intended principals"
 
 # Completion becomes DEAD immediately but cannot claim safe success while auth is unavailable.
-reset_sandbox sandbox-revoke-retry case-revoke-retry reset-revoke-retry retry-product
+retry_order_id='00000000-0000-0000-0000-000000000606'
+reset_payment_sandbox sandbox-revoke-retry case-revoke-retry reset-revoke-retry \
+  "$retry_order_id" 300 retry-payment-owner
 retry_handle="$(uv run python scripts/read_json_field.py "$tmp_dir/http-response.json" testUserHandle)"
+retry_owner_handle="$(uv run python scripts/read_json_field.py \
+  "$tmp_dir/http-response.json" paymentOrderOwnerTestUserHandle)"
 stop_process auth_pid "$auth_pid"
 assert_status 503 "completion revocation outage cannot report success" \
   --request POST "http://127.0.0.1:$commerce_port/api/eval/sandboxes/sandbox-revoke-retry/complete" \
@@ -5362,7 +5566,7 @@ assert_status 503 "completion revocation outage cannot report success" \
   --header 'Content-Type: application/json' \
   --data '{"caseCorrelation":"case-revoke-retry"}'
 test "$(mysql_query commerce_app "$commerce_app_password" commerce_db \
-  "SELECT CONCAT(lifecycle_state, ':', closed_at IS NULL) FROM eval_sandbox WHERE sandbox_id = 'sandbox-revoke-retry'")" = 'DEAD:1'
+  "SELECT CONCAT(lifecycle_state, ':', auth_invalidation_state, ':', payment_owner_auth_invalidation_state, ':', closed_at IS NULL) FROM eval_sandbox WHERE sandbox_id = 'sandbox-revoke-retry'")" = 'DEAD:PROVISIONED:PROVISIONED:1'
 start_auth evaluation
 stop_process commerce_pid "$commerce_pid"
 start_commerce evaluation "http://127.0.0.1:$auth_port"
@@ -5373,31 +5577,41 @@ assert_status 200 "completion retry converges after auth recovery" \
   --header 'Idempotency-Key: complete-revoke-retry' \
   --header 'Content-Type: application/json' \
   --data '{"caseCorrelation":"case-revoke-retry"}'
-test "$(mysql_query auth_app "$auth_app_password" commerce_db \
-  "SELECT state FROM auth_eval_test_principal WHERE opaque_handle = '$retry_handle'")" = REVOKED
+assert_equal '2:2' \
+  "$(mysql_query auth_app "$auth_app_password" commerce_db \
+    "SELECT CONCAT(COUNT(*), ':', SUM(state = 'REVOKED')) FROM auth_eval_test_principal WHERE opaque_handle IN ('$retry_handle', '$retry_owner_handle')")" \
+  "completion retry revokes both principals before reporting success"
 
-# Force only the persisted due/expiry clocks, restart commerce, and let the bounded janitor close it.
-reset_sandbox sandbox-expiry case-expiry reset-expiry expiry-product
+# Force only the persisted due/expiry clocks, restart commerce, and let the bounded janitor close
+# both identity roles.
+expiry_order_id='00000000-0000-0000-0000-000000000604'
+reset_payment_sandbox sandbox-expiry case-expiry reset-expiry "$expiry_order_id" 300 \
+  expiry-payment-owner
 expiry_handle="$(uv run python scripts/read_json_field.py "$tmp_dir/http-response.json" testUserHandle)"
+expiry_owner_handle="$(uv run python scripts/read_json_field.py \
+  "$tmp_dir/http-response.json" paymentOrderOwnerTestUserHandle)"
 mysql_query commerce_app "$commerce_app_password" commerce_db \
   "UPDATE eval_sandbox SET expires_at = TIMESTAMPADD(SECOND, -1, CURRENT_TIMESTAMP(6)), cleanup_due_at = TIMESTAMPADD(SECOND, -1, CURRENT_TIMESTAMP(6)) WHERE sandbox_id = 'sandbox-expiry'"
 stop_process commerce_pid "$commerce_pid"
 start_commerce evaluation "http://127.0.0.1:$auth_port"
 for _ in {1..15}; do
   expiry_state="$(mysql_query commerce_app "$commerce_app_password" commerce_db \
-    "SELECT CONCAT(lifecycle_state, ':', auth_invalidation_state, ':', closed_at IS NOT NULL) FROM eval_sandbox WHERE sandbox_id = 'sandbox-expiry'")"
-  [[ "$expiry_state" == 'DEAD:REVOKED:1' ]] && break
+    "SELECT CONCAT(lifecycle_state, ':', auth_invalidation_state, ':', payment_owner_auth_invalidation_state, ':', closed_at IS NOT NULL) FROM eval_sandbox WHERE sandbox_id = 'sandbox-expiry'")"
+  [[ "$expiry_state" == 'DEAD:REVOKED:REVOKED:1' ]] && break
   sleep 1
 done
-test "$expiry_state" = 'DEAD:REVOKED:1'
-test "$(mysql_query auth_app "$auth_app_password" commerce_db \
-  "SELECT state FROM auth_eval_test_principal WHERE opaque_handle = '$expiry_handle'")" = REVOKED
+test "$expiry_state" = 'DEAD:REVOKED:REVOKED:1'
+assert_equal '2:2' \
+  "$(mysql_query auth_app "$auth_app_password" commerce_db \
+    "SELECT CONCAT(COUNT(*), ':', SUM(state = 'REVOKED')) FROM auth_eval_test_principal WHERE opaque_handle IN ('$expiry_handle', '$expiry_owner_handle')")" \
+  "expiry janitor revokes both same-sandbox principals"
 test "$(mysql_query commerce_app "$commerce_app_password" commerce_db \
   "SELECT COUNT(*) FROM eval_sandbox_product_fixture WHERE sandbox_id = 'sandbox-expiry'")" = 0
 
 for private_value in \
   "$management_password" "$commerce_service_password" "$evaluator_password" \
-  "$agent_service_password" "$mock_payment_secret" "$payment_token" "$payment_signature"; do
+  "$agent_service_password" "$mock_payment_secret" "$payment_token" "$payment_signature" \
+  "$secondary_actor_token" "$secondary_owner_token" "$secondary_callback_signature"; do
   if grep -Fq "$private_value" "$tmp_dir/auth.log" "$tmp_dir/commerce.log" "$tmp_dir/agent.log"; then
     echo "Private evaluation credential leaked into service logs." >&2
     exit 1

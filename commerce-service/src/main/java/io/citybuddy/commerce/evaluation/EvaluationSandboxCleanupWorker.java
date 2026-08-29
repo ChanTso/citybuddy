@@ -46,28 +46,80 @@ public final class EvaluationSandboxCleanupWorker {
 
   private boolean invalidate(Sandbox claimed) {
     try {
-      Sandbox bound = claimed;
-      if ("UNPROVISIONED".equals(bound.authState())) {
-        EvaluationIdentityClient.Provisioned provisioned =
-            identity.provision(
-                bound.sandboxId(),
-                bound.caseCorrelation(),
-                bound.testUserLabel(),
-                bound.ttlSeconds(),
-                bound.provisionIdempotencyKey());
-        bound =
-            repository.bindCleanupHandle(
-                bound.sandboxId(), provisioned.handle(), provisioned.expiresAt());
-      }
-      if (!"PROVISIONED".equals(bound.authState()) || bound.handle() == null) {
-        throw new IllegalStateException("Claimed cleanup has no revocable identity");
-      }
-      identity.revoke(
-          bound.handle(), bound.sandboxId(), bound.caseCorrelation(), bound.revokeIdempotencyKey());
-      repository.markRevoked(bound.sandboxId(), bound.handle(), clock.instant());
-      return true;
+      Sandbox current = invalidatePrimary(claimed);
+      current = invalidatePaymentOwner(current);
+      return current.closedAt() != null;
     } catch (HttpEvaluationIdentityClient.EvaluationIdentityUnavailableException exception) {
       return false;
     }
+  }
+
+  private Sandbox invalidatePrimary(Sandbox sandbox) {
+    Sandbox bound = sandbox;
+    if (isFinal(bound.authState())) {
+      return bound;
+    }
+    if ("UNPROVISIONED".equals(bound.authState())) {
+      if (!provisioningRecoveryOpen(bound)) {
+        return bound;
+      }
+      EvaluationIdentityClient.Provisioned provisioned =
+          identity.provision(
+              bound.sandboxId(),
+              bound.caseCorrelation(),
+              bound.testUserLabel(),
+              bound.ttlSeconds(),
+              bound.provisionIdempotencyKey());
+      bound =
+          repository.bindCleanupHandle(
+              bound.sandboxId(), provisioned.handle(), provisioned.expiresAt());
+    }
+    if (!"PROVISIONED".equals(bound.authState()) || bound.handle() == null) {
+      throw new IllegalStateException("Claimed cleanup has no revocable identity");
+    }
+    identity.revoke(
+        bound.handle(), bound.sandboxId(), bound.caseCorrelation(), bound.revokeIdempotencyKey());
+    return repository.markRevoked(bound.sandboxId(), bound.handle(), clock.instant());
+  }
+
+  private Sandbox invalidatePaymentOwner(Sandbox sandbox) {
+    if (sandbox.paymentOwnerTestUserLabel() == null || isFinal(sandbox.paymentOwnerAuthState())) {
+      return sandbox;
+    }
+    Sandbox bound = sandbox;
+    if ("UNPROVISIONED".equals(bound.paymentOwnerAuthState())) {
+      if (!provisioningRecoveryOpen(bound)) {
+        return bound;
+      }
+      EvaluationIdentityClient.Provisioned provisioned =
+          identity.provision(
+              bound.sandboxId(),
+              bound.paymentOwnerCaseCorrelation(),
+              bound.paymentOwnerTestUserLabel(),
+              bound.ttlSeconds(),
+              bound.paymentOwnerProvisionIdempotencyKey());
+      bound =
+          repository.bindPaymentOwnerCleanupHandle(
+              bound.sandboxId(), provisioned.handle(), provisioned.expiresAt());
+    }
+    if (!"PROVISIONED".equals(bound.paymentOwnerAuthState())
+        || bound.paymentOwnerHandle() == null) {
+      throw new IllegalStateException("Claimed cleanup has no revocable payment owner");
+    }
+    identity.revoke(
+        bound.paymentOwnerHandle(),
+        bound.sandboxId(),
+        bound.paymentOwnerCaseCorrelation(),
+        bound.paymentOwnerRevokeIdempotencyKey());
+    return repository.markPaymentOwnerRevoked(
+        bound.sandboxId(), bound.paymentOwnerHandle(), clock.instant());
+  }
+
+  private boolean provisioningRecoveryOpen(Sandbox sandbox) {
+    return sandbox.provisioningDueAt().isAfter(clock.instant());
+  }
+
+  private static boolean isFinal(String state) {
+    return "REVOKED".equals(state) || "EXPIRY_PROVEN".equals(state);
   }
 }

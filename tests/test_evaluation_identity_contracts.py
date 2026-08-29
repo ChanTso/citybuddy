@@ -106,8 +106,40 @@ def test_sandbox_claim_can_only_flow_from_evaluation_direct_token_to_obo() -> No
     assert 'EVALUATION_DIRECT_TYPE = "eval_direct_user"' in keyset
     assert 'builder.claim("sandbox", sandboxId)' in keyset
     assert 'claims.getClaim("sandbox")' in keyset
+    assert 'claims.getClaim("evaluation_handle")' in keyset
     assert 'claims.getClaim("eval_sandbox") == null' in keyset
     assert "sandbox.equals(sandboxHeader)" in keyset
+    assert "OPAQUE_HANDLE.matcher(evaluationHandle).matches()" in keyset
     assert "principal.sandboxId()" in controller
     assert "principal.expiresAt()" in controller
     assert "isActiveEvaluationSubject" in controller
+
+
+def test_evaluation_token_checks_bind_direct_handles_and_exclude_them_from_obo() -> None:
+    checker = (ROOT / "scripts/check_evaluation_token.py").read_text(encoding="utf-8")
+    assert 'claims.get("evaluation_handle")' in checker
+    assert "evaluation_handle != args.evaluation_handle" in checker
+    assert 'if "evaluation_handle" in claims' in checker
+
+    commands: list[str] = []
+    for script_name in (
+        "scripts/test_evaluation_identity_integration.sh",
+        "scripts/test_evaluation_sandbox_integration.sh",
+    ):
+        lines = (ROOT / script_name).read_text(encoding="utf-8").splitlines()
+        for index, line in enumerate(lines):
+            if "uv run python scripts/check_evaluation_token.py" not in line:
+                continue
+            command_lines = [line]
+            while command_lines[-1].rstrip().endswith("\\"):
+                command_lines.append(lines[index + len(command_lines)])
+            commands.append("\n".join(command_lines))
+
+    assert commands
+    for command in commands:
+        if "--token-type eval_direct_user" in command:
+            assert "--evaluation-handle" in command
+        elif "--token-type agent_obo" in command:
+            assert "--evaluation-handle" not in command
+        else:
+            raise AssertionError(f"Unchecked evaluation token type:\n{command}")

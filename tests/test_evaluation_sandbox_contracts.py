@@ -38,8 +38,24 @@ def test_evaluation_sandbox_openapi_is_profile_bound_bounded_and_redacted() -> N
     assert fixture["additionalProperties"] is False
     assert payment_fixture["additionalProperties"] is False
     assert payment_fixture["properties"]["quantity"]["maximum"] == 100
+    assert payment_fixture["properties"]["ownerTestUserLabel"] == {
+        "type": "string",
+        "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$",
+        "description": (
+            "Optional secondary test principal in the same sandbox that owns this order. "
+            "Must differ from the reset testUserLabel."
+        ),
+    }
     assert response["additionalProperties"] is False
-    assert set(response["properties"]) == {"sandboxId", "testUserHandle"}
+    assert set(response["required"]) == {"sandboxId", "testUserHandle"}
+    assert set(response["properties"]) == {
+        "sandboxId",
+        "testUserHandle",
+        "paymentOrderOwnerTestUserHandle",
+    }
+    assert response["properties"]["paymentOrderOwnerTestUserHandle"]["pattern"] == (
+        "^[A-Za-z0-9_-]{43}$"
+    )
     serialized = json.dumps(response)
     for private_name in (
         "password",
@@ -77,6 +93,45 @@ def test_registry_cleanup_and_fixture_sql_are_sandbox_scoped() -> None:
     assert "LIMIT ? FOR UPDATE SKIP LOCKED" in repository
     assert "DELETE FROM eval_sandbox_product_fixture WHERE sandbox_id = ?" in repository
     assert "WHERE sandbox_id = ? AND product_id = ?" in audit
+
+
+def test_payment_owner_principal_is_optional_durable_and_cleanup_safe() -> None:
+    migration = (
+        ROOT / "infra/mysql/migrations/commerce" / "V017__evaluation_payment_owner_principal.sql"
+    ).read_text(encoding="utf-8")
+
+    role_columns = (
+        "payment_owner_test_user_label",
+        "payment_owner_case_correlation",
+        "payment_owner_auth_provision_idempotency_key",
+        "payment_owner_auth_revoke_idempotency_key",
+        "payment_owner_opaque_handle",
+        "payment_owner_auth_invalidation_state",
+        "payment_owner_auth_expiry_upper_bound",
+        "payment_owner_expires_at",
+    )
+    for column in role_columns:
+        assert f"{column} IS NULL" in migration
+        assert f"{column} IS NOT NULL" in migration
+
+    assert "payment_owner_test_user_label <> test_user_label" in migration
+    assert "payment_owner_case_correlation <> case_correlation" in migration
+    assert "payment_owner_auth_expiry_upper_bound > provisioning_due_at" in migration
+    assert "payment_owner_expires_at = payment_owner_auth_expiry_upper_bound" in migration
+    for index in (
+        "uq_eval_sandbox_payment_owner_provision_key",
+        "uq_eval_sandbox_payment_owner_revoke_key",
+        "uq_eval_sandbox_payment_owner_handle",
+    ):
+        assert f"ADD UNIQUE KEY {index}" in migration
+
+    assert "DROP CHECK chk_eval_sandbox_active" in migration
+    assert "DROP CHECK chk_eval_sandbox_closed" in migration
+    assert migration.count("ADD CONSTRAINT chk_eval_sandbox_active CHECK") == 1
+    assert migration.count("ADD CONSTRAINT chk_eval_sandbox_closed CHECK") == 1
+    assert "expires_at <= payment_owner_expires_at" in migration
+    assert "payment_owner_auth_invalidation_state IN ('REVOKED', 'EXPIRY_PROVEN')" in migration
+    assert "GRANT " not in migration
 
 
 def test_evaluation_paths_are_explicitly_profile_gated_and_do_not_enable_later_slices() -> None:

@@ -38,6 +38,18 @@ class PaymentStartOrderVisibilityTest {
   }
 
   @Test
+  void sameSandboxFixtureIsVisibleOnlyToThePrincipalWhoseSignedHandleMatches() {
+    MockPaymentRepository.OrderTruth order = order(FIXTURE_OWNER, SANDBOX, HANDLE);
+
+    assertThat(PaymentStartOrderVisibility.classify(order, USER, SANDBOX, "B".repeat(43)))
+        .isInstanceOf(PaymentStartOrderVisibility.Concealed.class);
+    assertThat(PaymentStartOrderVisibility.classify(order, USER, SANDBOX, null))
+        .isInstanceOf(PaymentStartOrderVisibility.Concealed.class);
+    assertThat(PaymentStartOrderVisibility.classify(order, USER, SANDBOX, HANDLE))
+        .isInstanceOf(PaymentStartOrderVisibility.BindableFixture.class);
+  }
+
+  @Test
   void everyUnprovableOwnershipShapeIsConcealedWithoutAnException() {
     assertThat(classify(FIXTURE_OWNER, SANDBOX, null))
         .isInstanceOf(PaymentStartOrderVisibility.Concealed.class);
@@ -60,22 +72,25 @@ class PaymentStartOrderVisibilityTest {
   private static PaymentStartOrderVisibility.Classification classify(
       String storedOwner, String storedSandbox, String handle) {
     return PaymentStartOrderVisibility.classify(
-        new MockPaymentRepository.OrderTruth(
-            "STANDARD",
-            ORDER_ID,
-            storedOwner,
-            storedSandbox,
-            handle,
-            "payment-product",
-            null,
-            null,
-            null,
-            null,
-            1800,
-            "AUD",
-            "UNPAID",
-            1),
-        USER,
-        SANDBOX);
+        order(storedOwner, storedSandbox, handle), USER, SANDBOX, handle);
+  }
+
+  private static MockPaymentRepository.OrderTruth order(
+      String storedOwner, String storedSandbox, String handle) {
+    return new MockPaymentRepository.OrderTruth(
+        "STANDARD",
+        ORDER_ID,
+        storedOwner,
+        storedSandbox,
+        handle,
+        "payment-product",
+        null,
+        null,
+        null,
+        null,
+        1800,
+        "AUD",
+        "UNPAID",
+        1);
   }
 }

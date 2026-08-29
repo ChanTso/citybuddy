@@ -16,6 +16,7 @@ class MockPaymentStartVisibilityRepositoryTest {
   private static final String ORDER_ID = "00000000-0000-0000-0000-000000000120";
   private static final String USER = "payment-owner";
   private static final String SANDBOX = "sandbox-payment";
+  private static final String HANDLE = "A".repeat(43);
   private static final String QUERY =
       EvaluationPaymentCommittedFaces.standardOrderByIdSql("") + " AND sandbox_id = ?";
   private static final String ATTEMPT_COLUMNS =
@@ -48,7 +49,7 @@ class MockPaymentStartVisibilityRepositoryTest {
 
     assertThat(
             new MockPaymentRepository(unknownJdbc)
-                .enumerateStartOrderVisibility(ORDER_ID, USER, SANDBOX))
+                .enumerateStartOrderVisibility(ORDER_ID, USER, SANDBOX, HANDLE))
         .isEmpty();
     verify(unknownJdbc)
         .query(
@@ -63,7 +64,7 @@ class MockPaymentStartVisibilityRepositoryTest {
         new MockPaymentRepository.OrderTruth(
             "STANDARD",
             ORDER_ID,
-            "eval-handle:" + "A".repeat(43),
+            "eval-handle:" + HANDLE,
             SANDBOX,
             "short",
             "payment-product",
@@ -84,7 +85,7 @@ class MockPaymentStartVisibilityRepositoryTest {
 
     assertThat(
             new MockPaymentRepository(malformedJdbc)
-                .enumerateStartOrderVisibility(ORDER_ID, USER, SANDBOX))
+                .enumerateStartOrderVisibility(ORDER_ID, USER, SANDBOX, HANDLE))
         .singleElement()
         .isInstanceOf(PaymentStartOrderVisibility.Concealed.class);
     verify(malformedJdbc)

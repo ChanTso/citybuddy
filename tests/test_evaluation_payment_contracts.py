@@ -429,6 +429,9 @@ def test_terminal_payment_callers_use_the_shared_complete_closure() -> None:
     assert "BindableFixture" in visibility
     assert "Concealed" in visibility
     assert "tryFixtureOwner(order.evaluationOwnerHandle())" in visibility
+    assert "Objects.equals(evaluationHandle, order.evaluationOwnerHandle())" in visibility
+    assert "String evaluationHandle" in resolver
+    assert "subject.evaluationHandle()" in controller
     assert "catch (" not in visibility
     assert "return tryFixtureOwner(ownerHandle)" in sandbox_repository
     assert 'Optional.of("eval-handle:" + ownerHandle)' in sandbox_repository
