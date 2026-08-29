@@ -137,6 +137,8 @@ public final class DirectUserAuthorizer {
       require(evaluationProfile && evaluationAllowed, "Evaluation token is not enabled");
       require(hasText(sandboxId), "Missing evaluation sandbox");
       require(sandboxId.equals(evalSandboxHeader), "Evaluation sandbox mismatch");
+      // Tokens issued before owner binding had no handle. They retain the legacy same-subject
+      // path, while payment visibility never accepts a missing handle as fixture-owner proof.
       require(
           evaluationHandle == null || EVALUATION_HANDLE.matcher(evaluationHandle).matches(),
           "Invalid evaluation handle");

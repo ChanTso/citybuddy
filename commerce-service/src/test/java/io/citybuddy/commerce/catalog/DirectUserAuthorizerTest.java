@@ -1,6 +1,7 @@
 package io.citybuddy.commerce.catalog;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 
 import com.nimbusds.jose.JWSAlgorithm;
@@ -187,6 +188,35 @@ class DirectUserAuthorizerTest {
         () ->
             evaluation.authorizeEvaluation(
                 "Bearer " + evaluationWithMalformedHandle, "sandbox-1", "support:chat"));
+  }
+
+  @Test
+  void evaluationModeAcceptsHandlelessTokenFromBeforeOwnerBinding() throws Exception {
+    DirectUserAuthorizer evaluation =
+        new DirectUserAuthorizer(
+            properties.issuer(),
+            properties.userAudience(),
+            properties.jwksCacheTtl(),
+            properties.clockSkew(),
+            properties.requiredPermission(),
+            () -> jwks(signingKey),
+            Clock.fixed(NOW, ZoneOffset.UTC),
+            true);
+    String token =
+        token(
+            signingKey,
+            "eval_direct_user",
+            "citybuddy-web",
+            List.of("support:chat"),
+            "sandbox-1",
+            null);
+
+    DirectUserAuthorizer.DirectPrincipal principal =
+        evaluation.authorizeEvaluation("Bearer " + token, "sandbox-1", "support:chat");
+
+    assertEquals("user-123", principal.subject());
+    assertEquals("sandbox-1", principal.sandboxId());
+    assertNull(principal.evaluationHandle());
   }
 
   @Test
