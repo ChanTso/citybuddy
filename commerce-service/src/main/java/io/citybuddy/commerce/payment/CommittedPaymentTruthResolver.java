@@ -91,6 +91,30 @@ public final class CommittedPaymentTruthResolver {
     return Optional.of(resolve(caller, attempts.getFirst(), LOCK));
   }
 
+  public Optional<CommittedPaymentTruth> resolveActionByOrderLocked(
+      String orderId, String userSubject, boolean ownershipBindingEnabled) {
+    if (ownershipBindingEnabled) {
+      return resolveByOrderLocked(
+          CommittedPaymentCaller.ACTION_PREPARE_CONFIRM_AND_RECEIPT_REPLAY, orderId, userSubject);
+    }
+    return resolveActionByOrderLocked(orderId);
+  }
+
+  public Optional<CommittedPaymentTruth> resolveActionByOrderLocked(String orderId) {
+    List<MockPaymentRepository.AttemptRecord> attempts =
+        repository.enumerateAttemptByOrderClosure(orderId, LOCK);
+    List<MockPaymentRepository.OrderTruth> orders = repository.enumerateOrderClosure(orderId, LOCK);
+    if (attempts.isEmpty() && orders.isEmpty()) {
+      return Optional.empty();
+    }
+    requireCardinality(attempts, "Payment attempt closure is inconsistent");
+    return Optional.of(
+        resolve(
+            CommittedPaymentCaller.ACTION_PREPARE_CONFIRM_AND_RECEIPT_REPLAY,
+            attempts.getFirst(),
+            LOCK));
+  }
+
   /**
    * Classifies one payment-start command from both declared visibility locators and the complete
    * durable payment closure.

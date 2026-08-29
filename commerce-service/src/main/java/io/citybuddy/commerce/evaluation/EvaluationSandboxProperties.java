@@ -22,7 +22,8 @@ public record EvaluationSandboxProperties(
     int maxCleanupAttempts,
     int janitorBatchSize,
     String buildId,
-    String schemaCompatibility) {
+    String schemaCompatibility,
+    Boolean actionOwnershipBindingEnabled) {
 
   public EvaluationSandboxProperties {
     provisioningTimeout = defaultDuration(provisioningTimeout, Duration.ofSeconds(30));
@@ -35,6 +36,8 @@ public record EvaluationSandboxProperties(
     janitorBatchSize = janitorBatchSize == 0 ? 10 : janitorBatchSize;
     buildId = defaultText(buildId, "commerce-service-local");
     schemaCompatibility = defaultText(schemaCompatibility, "commerce-evaluation-v1");
+    actionOwnershipBindingEnabled =
+        actionOwnershipBindingEnabled == null ? Boolean.TRUE : actionOwnershipBindingEnabled;
     requireText(managementClientId, "managementClientId");
     requireText(managementClientSecret, "managementClientSecret");
     requireText(authBaseUrl, "authBaseUrl");

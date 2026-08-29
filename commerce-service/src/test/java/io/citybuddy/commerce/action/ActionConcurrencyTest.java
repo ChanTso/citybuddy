@@ -51,7 +51,8 @@ class ActionConcurrencyTest {
             new ActionProperties(
                 "refund:create", Duration.ofMinutes(15), 1, 2, Duration.ofMillis(1)),
             Clock.systemUTC(),
-            sandboxAccess);
+            sandboxAccess,
+            true);
   }
 
   @Test
@@ -156,7 +157,11 @@ class ActionConcurrencyTest {
         new IllegalStateException("controlled missing Action transaction");
     executePrepareMutation();
     when(refunds.prepareActionInCurrentTransaction(
-            eq("action-owner"), eq("00000000-0000-0000-0000-000000000123"), any(), eq(null)))
+            eq("action-owner"),
+            eq("00000000-0000-0000-0000-000000000123"),
+            any(),
+            eq(null),
+            eq(true)))
         .thenThrow(programmerFailure);
 
     assertThatThrownBy(
@@ -172,7 +177,11 @@ class ActionConcurrencyTest {
   void typedRefundIntegrityFailureRemainsAnAttributedDurableConflict() {
     executePrepareMutation();
     when(refunds.prepareActionInCurrentTransaction(
-            eq("action-owner"), eq("00000000-0000-0000-0000-000000000123"), any(), eq(null)))
+            eq("action-owner"),
+            eq("00000000-0000-0000-0000-000000000123"),
+            any(),
+            eq(null),
+            eq(true)))
         .thenThrow(new RefundIntegrityException("controlled refund uniqueness corruption"));
 
     assertThatThrownBy(

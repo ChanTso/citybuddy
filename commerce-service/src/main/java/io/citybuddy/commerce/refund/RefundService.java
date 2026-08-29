@@ -69,12 +69,17 @@ public final class RefundService {
    * the enclosing Action transaction so that its rollback completes before Action recovery begins.
    */
   public ActionTarget prepareActionInCurrentTransaction(
-      String userSubject, String orderId, RefundRequest request, String sandboxId) {
+      String userSubject,
+      String orderId,
+      RefundRequest request,
+      String sandboxId,
+      boolean ownershipBindingEnabled) {
     requireCurrentTransaction();
     requireText(userSubject, 128, "Validated refund owner is missing");
     requireUuid(orderId, "Refund order id is invalid");
     RefundRequest valid = requireRequest(request);
-    RefundTarget target = resolveRefundTarget(userSubject, orderId, valid);
+    RefundTarget target =
+        resolveActionRefundTarget(userSubject, orderId, valid, ownershipBindingEnabled);
     requireActionSandbox(target.payment(), sandboxId);
     requireCapacity(target.payment().attempt(), valid.amountMinor());
     return new ActionTarget(target.payment().order(), target.payment().attempt());
@@ -91,53 +96,66 @@ public final class RefundService {
       String orderId,
       String idempotencyKey,
       RefundRequest request,
-      String sandboxId) {
+      String sandboxId,
+      boolean ownershipBindingEnabled) {
     requireCurrentTransaction();
     requireText(userSubject, 128, "Validated refund owner is missing");
     requireUuid(orderId, "Refund order id is invalid");
     requireIdempotency(idempotencyKey);
     RefundRequest valid = requireRequest(request);
     String intentHash = hash(orderId + "\n" + valid.amountMinor() + "\n" + valid.currency());
-    RefundTarget target = resolveRefundTarget(userSubject, orderId, valid);
+    RefundTarget target =
+        resolveActionRefundTarget(userSubject, orderId, valid, ownershipBindingEnabled);
     requireActionSandbox(target.payment(), sandboxId);
+    String refundOwner = target.payment().order().userSubject();
     RefundMutation mutation =
         requestOnceWithTarget(
-            userSubject, orderId, idempotencyKey, valid, intentHash, target.payment());
+            refundOwner, orderId, idempotencyKey, valid, intentHash, target.payment());
     return new ActionMutation(mutation.refund(), mutation.outbox());
   }
 
   /**
    * Reconciles the complete Action refund truth while retaining the caller's Action transaction.
+   * The committed receipt supplies the refund identity, so replay does not reapply mutable
+   * authorization configuration.
    */
   public ActionReplayTruth validateActionReplayInCurrentTransaction(
-      String userSubject,
       String orderId,
       String idempotencyKey,
       RefundRequest request,
       String expectedRefundId,
       String sandboxId) {
     requireCurrentTransaction();
-    requireText(userSubject, 128, "Validated refund owner is missing");
     requireUuid(orderId, "Refund order id is invalid");
     requireUuid(expectedRefundId, "Refund id is invalid");
     requireIdempotency(idempotencyKey);
     RefundRequest valid = requireRequest(request);
     String intentHash = hash(orderId + "\n" + valid.amountMinor() + "\n" + valid.currency());
-    RefundTarget target = resolveRefundTarget(userSubject, orderId, valid);
-    requireActionSandbox(target.payment(), sandboxId);
+    if (refunds.findById(expectedRefundId).isEmpty()) {
+      throw durableConflict("Action refund truth is missing");
+    }
+    CommittedPaymentTruthResolver.CommittedPaymentTruth committed;
+    try {
+      committed =
+          paymentTruth
+              .resolveActionByOrderLocked(orderId)
+              .orElseThrow(() -> durableConflict("Action refund payment truth is missing"));
+    } catch (CommittedPaymentIntegrityException exception) {
+      throw durableConflict("Action refund payment truth is inconsistent");
+    }
+    requireActionSandbox(committed, sandboxId);
     RefundRepository.RefundRecord existing =
         refunds
-            .findByRequestForUpdate(userSubject, orderId, idempotencyKey)
+            .findByRequestForUpdate(committed.order().userSubject(), orderId, idempotencyKey)
             .orElseThrow(() -> durableConflict("Action refund truth is missing"));
     requireIntent(existing.intentHash(), intentHash);
     if (!expectedRefundId.equals(existing.refundId())) {
       throw durableConflict("Action refund identity conflicts with its receipt");
     }
-    requireRefundIdentity(existing, target.payment());
-    requireStateSpecificTruth(existing, target.payment());
+    requireRefundIdentity(existing, committed);
+    requireStateSpecificTruth(existing, committed);
     return new ActionReplayTruth(
-        result(existing, true),
-        new ActionTarget(target.payment().order(), target.payment().attempt()));
+        result(existing, true), new ActionTarget(committed.order(), committed.attempt()));
   }
 
   public RefundResult status(String userSubject, String refundId) {
@@ -444,6 +462,26 @@ public final class RefundService {
                   CommittedPaymentTruthResolver.CommittedPaymentCaller.DIRECT_REFUND_ELIGIBILITY,
                   orderId,
                   userSubject)
+              .orElse(null);
+    } catch (CommittedPaymentIntegrityException exception) {
+      throw durableConflict("Order has no eligible successful payment");
+    }
+    if (committed == null) {
+      throw notFound("Refund order is missing or not owned");
+    }
+    if (!committed.attempt().currency().equals(request.currency())) {
+      throw businessConflict("Refund request conflicts with authoritative payment currency");
+    }
+    return new RefundTarget(committed);
+  }
+
+  private RefundTarget resolveActionRefundTarget(
+      String userSubject, String orderId, RefundRequest request, boolean ownershipBindingEnabled) {
+    CommittedPaymentTruthResolver.CommittedPaymentTruth committed;
+    try {
+      committed =
+          paymentTruth
+              .resolveActionByOrderLocked(orderId, userSubject, ownershipBindingEnabled)
               .orElse(null);
     } catch (CommittedPaymentIntegrityException exception) {
       throw durableConflict("Order has no eligible successful payment");

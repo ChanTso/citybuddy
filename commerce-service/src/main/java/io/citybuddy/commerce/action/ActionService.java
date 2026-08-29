@@ -41,6 +41,7 @@ public final class ActionService {
   private final ActionProperties properties;
   private final Clock clock;
   private final ObjectProvider<EvaluationSandboxAccess> sandboxAccess;
+  private final boolean evaluationOwnershipBindingEnabled;
 
   public ActionService(
       ActionRepository actions,
@@ -48,13 +49,15 @@ public final class ActionService {
       ActionTransactions transactions,
       ActionProperties properties,
       Clock clock,
-      ObjectProvider<EvaluationSandboxAccess> sandboxAccess) {
+      ObjectProvider<EvaluationSandboxAccess> sandboxAccess,
+      boolean evaluationOwnershipBindingEnabled) {
     this.actions = actions;
     this.refunds = refunds;
     this.transactions = transactions;
     this.properties = properties;
     this.clock = clock;
     this.sandboxAccess = sandboxAccess;
+    this.evaluationOwnershipBindingEnabled = evaluationOwnershipBindingEnabled;
   }
 
   public PendingActionView prepare(ActionRequestContext context, PrepareActionCommand command) {
@@ -137,7 +140,8 @@ public final class ActionService {
                     context.userSubject(),
                     command.orderId(),
                     refundRequest(command),
-                    context.sandboxId()));
+                    context.sandboxId(),
+                    ownershipBindingEnabled(context.sandboxId())));
     Instant createdAt = clock.instant().truncatedTo(ChronoUnit.MICROS);
     String pendingActionId = UUID.randomUUID().toString();
     Instant expiresAt = createdAt.plus(properties.pendingTtl());
@@ -216,7 +220,8 @@ public final class ActionService {
                     context.userSubject(),
                     command.orderId(),
                     refundRequest(command),
-                    context.sandboxId()));
+                    context.sandboxId(),
+                    ownershipBindingEnabled(context.sandboxId())));
     requireTarget(pending, target);
 
     RefundService.ActionMutation mutation =
@@ -227,7 +232,8 @@ public final class ActionService {
                     pending.orderId(),
                     refundIdempotencyKey(pending.pendingActionId()),
                     refundRequest(command),
-                    context.sandboxId()));
+                    context.sandboxId(),
+                    ownershipBindingEnabled(context.sandboxId())));
     if (mutation.refund().replayed() || mutation.outbox() == null) {
       throw integrityFailure("Prepared PendingAction points to an existing refund result");
     }
@@ -355,7 +361,8 @@ public final class ActionService {
                       context.userSubject(),
                       command.orderId(),
                       refundRequest(command),
-                      context.sandboxId()));
+                      context.sandboxId(),
+                      ownershipBindingEnabled(context.sandboxId())));
       requireTarget(pending, target);
     }
     return pendingView(pending, true);
@@ -491,7 +498,6 @@ public final class ActionService {
         refundBoundary(
             () ->
                 refunds.validateActionReplayInCurrentTransaction(
-                    pending.userSubject(),
                     pending.orderId(),
                     refundIdempotencyKey(pending.pendingActionId()),
                     new RefundRequest(pending.amountMinor(), pending.currency(), null),
@@ -616,6 +622,15 @@ public final class ActionService {
         || !pending.requiredScope().equals(context.requiredScope())) {
       throw conflict("PendingAction confirmation binding conflicts");
     }
+  }
+
+  private boolean ownershipBindingEnabled(String sandboxId) {
+    return effectiveOwnershipBinding(sandboxId, evaluationOwnershipBindingEnabled);
+  }
+
+  static boolean effectiveOwnershipBinding(
+      String sandboxId, boolean evaluationOwnershipBindingEnabled) {
+    return sandboxId == null || evaluationOwnershipBindingEnabled;
   }
 
   private static RefundOutboxRecord requireRefundOutboxClosure(
