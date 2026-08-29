@@ -2,6 +2,7 @@
 
 import argparse
 import json
+import re
 from pathlib import Path
 from typing import Any
 
@@ -16,6 +17,7 @@ def main() -> None:
     parser.add_argument("--audience", required=True)
     parser.add_argument("--token-type", required=True)
     parser.add_argument("--sandbox", required=True)
+    parser.add_argument("--evaluation-handle")
     parser.add_argument("--session")
     parser.add_argument("--maximum-expiry", required=True, type=int)
     parser.add_argument("--output", required=True, type=Path)
@@ -64,6 +66,16 @@ def main() -> None:
     if forbidden & claims.keys():
         raise ValueError("Private provisioning metadata leaked into JWT")
     if args.token_type == "eval_direct_user":
+        evaluation_handle = claims.get("evaluation_handle")
+        if (
+            not isinstance(evaluation_handle, str)
+            or re.fullmatch(r"[A-Za-z0-9_-]{43}", evaluation_handle) is None
+        ):
+            raise ValueError("Evaluation direct token has an invalid evaluation handle")
+        if args.evaluation_handle is None:
+            raise ValueError("Expected evaluation handle is required")
+        if evaluation_handle != args.evaluation_handle:
+            raise ValueError("Unexpected evaluation handle")
         if claims.get("principal_state") != "ACTIVE":
             raise ValueError("Evaluation direct token is not active")
         if claims.get("permissions") != ["support:session:create", "support:chat"]:
@@ -71,6 +83,10 @@ def main() -> None:
         if "act" in claims or "session" in claims or "scope" in claims:
             raise ValueError("Evaluation direct token carries delegated authority")
     elif args.token_type == "agent_obo":
+        if args.evaluation_handle is not None:
+            raise ValueError("OBO validation cannot expect an evaluation handle")
+        if "evaluation_handle" in claims:
+            raise ValueError("OBO token carries an evaluation handle")
         if args.session is None:
             raise ValueError("Expected OBO session is required")
         if claims.get("user_id") != claims["sub"]:

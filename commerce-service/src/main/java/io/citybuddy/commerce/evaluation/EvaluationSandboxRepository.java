@@ -18,7 +18,11 @@ public class EvaluationSandboxRepository {
       "sandbox_id, case_correlation, reset_idempotency_key, fixture_digest, fixture_count, "
           + "test_user_label, requested_ttl_seconds, auth_provision_idempotency_key, "
           + "auth_revoke_idempotency_key, opaque_handle, lifecycle_state, "
-          + "auth_invalidation_state, death_reason, completion_idempotency_key, "
+          + "auth_invalidation_state, payment_owner_test_user_label, "
+          + "payment_owner_case_correlation, payment_owner_auth_provision_idempotency_key, "
+          + "payment_owner_auth_revoke_idempotency_key, payment_owner_opaque_handle, "
+          + "payment_owner_auth_invalidation_state, payment_owner_auth_expiry_upper_bound, "
+          + "payment_owner_expires_at, death_reason, completion_idempotency_key, "
           + "cleanup_attempts, cleanup_due_at, provisioning_due_at, "
           + "auth_expiry_upper_bound, expires_at, activated_at, dead_at, closed_at, version";
 
@@ -35,9 +39,13 @@ public class EvaluationSandboxRepository {
         INSERT IGNORE INTO eval_sandbox
           (sandbox_id, case_correlation, reset_idempotency_key, fixture_digest, fixture_count,
            test_user_label, requested_ttl_seconds, auth_provision_idempotency_key,
-           auth_revoke_idempotency_key, lifecycle_state, auth_invalidation_state,
+           auth_revoke_idempotency_key, payment_owner_test_user_label,
+           payment_owner_case_correlation, payment_owner_auth_provision_idempotency_key,
+           payment_owner_auth_revoke_idempotency_key, payment_owner_auth_invalidation_state,
+           payment_owner_auth_expiry_upper_bound, lifecycle_state, auth_invalidation_state,
            cleanup_due_at, provisioning_due_at, auth_expiry_upper_bound)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'PROVISIONING', 'UNPROVISIONED', ?, ?, ?)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+                'PROVISIONING', 'UNPROVISIONED', ?, ?, ?)
         """,
         request.sandboxId(),
         request.caseCorrelation(),
@@ -48,6 +56,12 @@ public class EvaluationSandboxRepository {
         request.ttlSeconds(),
         request.provisionIdempotencyKey(),
         request.revokeIdempotencyKey(),
+        request.paymentOwnerTestUserLabel(),
+        request.paymentOwnerCaseCorrelation(),
+        request.paymentOwnerProvisionIdempotencyKey(),
+        request.paymentOwnerRevokeIdempotencyKey(),
+        request.paymentOwnerTestUserLabel() == null ? null : "UNPROVISIONED",
+        timestamp(request.paymentOwnerAuthExpiryUpperBound()),
         Timestamp.from(request.provisioningDueAt()),
         Timestamp.from(request.provisioningDueAt()),
         Timestamp.from(request.authExpiryUpperBound()));
@@ -215,7 +229,8 @@ public class EvaluationSandboxRepository {
   public Sandbox recordProvisioned(String sandboxId, String handle, Instant authExpiresAt) {
     Sandbox sandbox = lock(sandboxId);
     if ("PROVISIONED".equals(sandbox.authState())) {
-      if (!handle.equals(sandbox.handle()) || !authExpiresAt.equals(sandbox.expiresAt())) {
+      if (!handle.equals(sandbox.handle())
+          || !authExpiresAt.equals(sandbox.authExpiryUpperBound())) {
         throw new EvaluationSandboxException(409, "Conflicting evaluation identity");
       }
       return sandbox;
@@ -244,12 +259,59 @@ public class EvaluationSandboxRepository {
   }
 
   @Transactional
+  public Sandbox recordPaymentOwnerProvisioned(
+      String sandboxId, String handle, Instant authExpiresAt) {
+    Sandbox sandbox = lock(sandboxId);
+    if (sandbox.paymentOwnerTestUserLabel() == null) {
+      throw new EvaluationSandboxException(409, "Evaluation payment owner was not requested");
+    }
+    if ("PROVISIONED".equals(sandbox.paymentOwnerAuthState())) {
+      if (!handle.equals(sandbox.paymentOwnerHandle())
+          || !authExpiresAt.equals(sandbox.paymentOwnerAuthExpiryUpperBound())) {
+        throw new EvaluationSandboxException(409, "Conflicting evaluation payment owner");
+      }
+      return sandbox;
+    }
+    if (!"PROVISIONING".equals(sandbox.lifecycleState())
+        || !"PROVISIONED".equals(sandbox.authState())
+        || !"UNPROVISIONED".equals(sandbox.paymentOwnerAuthState())
+        || handle.equals(sandbox.handle())) {
+      throw new EvaluationSandboxException(409, "Evaluation payment owner is not provisionable");
+    }
+    int changed =
+        jdbc.update(
+            """
+            UPDATE eval_sandbox
+            SET payment_owner_opaque_handle = ?,
+                payment_owner_auth_invalidation_state = 'PROVISIONED',
+                payment_owner_auth_expiry_upper_bound = ?, payment_owner_expires_at = ?,
+                expires_at = LEAST(expires_at, ?), version = version + 1
+            WHERE sandbox_id = ? AND lifecycle_state = 'PROVISIONING'
+              AND auth_invalidation_state = 'PROVISIONED'
+              AND payment_owner_auth_invalidation_state = 'UNPROVISIONED'
+            """,
+            handle,
+            Timestamp.from(authExpiresAt),
+            Timestamp.from(authExpiresAt),
+            Timestamp.from(authExpiresAt),
+            sandboxId);
+    if (changed != 1) {
+      throw new IllegalStateException("Evaluation payment owner binding did not persist");
+    }
+    return lock(sandboxId);
+  }
+
+  @Transactional
   public Sandbox activateWithPaymentOrder(
       String sandboxId,
       String ownerHandle,
       EvaluationResetRequest.PaymentOrderFixture paymentOrder,
       Instant now) {
     Sandbox sandbox = lock(sandboxId);
+    String expectedOwnerHandle = paymentOrderOwnerHandle(sandbox);
+    if (!expectedOwnerHandle.equals(ownerHandle)) {
+      throw new EvaluationSandboxException(409, "Conflicting payment order owner");
+    }
     if ("ACTIVE".equals(sandbox.lifecycleState())) {
       verifyPaymentOrder(sandboxId, ownerHandle, paymentOrder);
       return sandbox;
@@ -259,7 +321,8 @@ public class EvaluationSandboxRepository {
         || sandbox.handle() == null
         || sandbox.expiresAt() == null
         || !sandbox.expiresAt().isAfter(now)
-        || !sandbox.provisioningDueAt().isAfter(now)) {
+        || !sandbox.provisioningDueAt().isAfter(now)
+        || !paymentOwnerProvisioned(sandbox)) {
       throw new EvaluationSandboxException(409, "Evaluation sandbox cannot activate");
     }
     createOrVerifyPaymentOrder(sandboxId, ownerHandle, paymentOrder);
@@ -271,6 +334,8 @@ public class EvaluationSandboxRepository {
                 version = version + 1
             WHERE sandbox_id = ? AND lifecycle_state = 'PROVISIONING'
               AND auth_invalidation_state = 'PROVISIONED'
+              AND (payment_owner_auth_invalidation_state IS NULL
+                   OR payment_owner_auth_invalidation_state = 'PROVISIONED')
             """,
             Timestamp.from(now),
             sandboxId);
@@ -418,7 +483,7 @@ public class EvaluationSandboxRepository {
       throw new IllegalStateException("Cleanup handle can bind only to a dead sandbox");
     }
     if ("PROVISIONED".equals(sandbox.authState())) {
-      if (!handle.equals(sandbox.handle())) {
+      if (!handle.equals(sandbox.handle()) || !expiresAt.equals(sandbox.authExpiryUpperBound())) {
         throw new EvaluationSandboxException(409, "Conflicting evaluation identity");
       }
       return sandbox;
@@ -430,11 +495,17 @@ public class EvaluationSandboxRepository {
         """
         UPDATE eval_sandbox
         SET opaque_handle = ?, auth_invalidation_state = 'PROVISIONED',
-            auth_expiry_upper_bound = ?, expires_at = ?, version = version + 1
+            auth_expiry_upper_bound = ?,
+            expires_at = CASE
+              WHEN payment_owner_expires_at IS NULL THEN ?
+              ELSE LEAST(?, payment_owner_expires_at)
+            END,
+            version = version + 1
         WHERE sandbox_id = ? AND lifecycle_state = 'DEAD'
           AND auth_invalidation_state = 'UNPROVISIONED'
         """,
         handle,
+        Timestamp.from(expiresAt),
         Timestamp.from(expiresAt),
         Timestamp.from(expiresAt),
         sandboxId);
@@ -442,10 +513,48 @@ public class EvaluationSandboxRepository {
   }
 
   @Transactional
-  public void markRevoked(String sandboxId, String handle, Instant now) {
+  public Sandbox bindPaymentOwnerCleanupHandle(String sandboxId, String handle, Instant expiresAt) {
+    Sandbox sandbox = lock(sandboxId);
+    if (!"DEAD".equals(sandbox.lifecycleState()) || sandbox.paymentOwnerTestUserLabel() == null) {
+      throw new IllegalStateException(
+          "Payment-owner cleanup handle can bind only to a dead sandbox that requested one");
+    }
+    if ("PROVISIONED".equals(sandbox.paymentOwnerAuthState())) {
+      if (!handle.equals(sandbox.paymentOwnerHandle())
+          || !expiresAt.equals(sandbox.paymentOwnerAuthExpiryUpperBound())) {
+        throw new EvaluationSandboxException(409, "Conflicting evaluation payment owner");
+      }
+      return sandbox;
+    }
+    if (!"UNPROVISIONED".equals(sandbox.paymentOwnerAuthState())
+        || handle.equals(sandbox.handle())) {
+      throw new IllegalStateException("Sandbox payment owner is already invalidated");
+    }
+    jdbc.update(
+        """
+        UPDATE eval_sandbox
+        SET payment_owner_opaque_handle = ?,
+            payment_owner_auth_invalidation_state = 'PROVISIONED',
+            payment_owner_auth_expiry_upper_bound = ?, payment_owner_expires_at = ?,
+            expires_at = CASE WHEN expires_at IS NULL THEN ? ELSE LEAST(expires_at, ?) END,
+            version = version + 1
+        WHERE sandbox_id = ? AND lifecycle_state = 'DEAD'
+          AND payment_owner_auth_invalidation_state = 'UNPROVISIONED'
+        """,
+        handle,
+        Timestamp.from(expiresAt),
+        Timestamp.from(expiresAt),
+        Timestamp.from(expiresAt),
+        Timestamp.from(expiresAt),
+        sandboxId);
+    return lock(sandboxId);
+  }
+
+  @Transactional
+  public Sandbox markRevoked(String sandboxId, String handle, Instant now) {
     Sandbox sandbox = lock(sandboxId);
     if ("REVOKED".equals(sandbox.authState())) {
-      return;
+      return sandbox;
     }
     if (!"DEAD".equals(sandbox.lifecycleState())
         || !"PROVISIONED".equals(sandbox.authState())
@@ -456,17 +565,45 @@ public class EvaluationSandboxRepository {
         jdbc.update(
             """
             UPDATE eval_sandbox
-            SET auth_invalidation_state = 'REVOKED', closed_at = ?, cleanup_due_at = NULL,
-                version = version + 1
+            SET auth_invalidation_state = 'REVOKED', version = version + 1
             WHERE sandbox_id = ? AND lifecycle_state = 'DEAD'
               AND auth_invalidation_state = 'PROVISIONED' AND opaque_handle = ?
             """,
-            Timestamp.from(now),
             sandboxId,
             handle);
     if (changed != 1) {
       throw new IllegalStateException("Evaluation revocation did not converge");
     }
+    return closeIfSafe(sandboxId, now);
+  }
+
+  @Transactional
+  public Sandbox markPaymentOwnerRevoked(String sandboxId, String handle, Instant now) {
+    Sandbox sandbox = lock(sandboxId);
+    if ("REVOKED".equals(sandbox.paymentOwnerAuthState())) {
+      return sandbox;
+    }
+    if (!"DEAD".equals(sandbox.lifecycleState())
+        || !"PROVISIONED".equals(sandbox.paymentOwnerAuthState())
+        || !handle.equals(sandbox.paymentOwnerHandle())) {
+      throw new IllegalStateException(
+          "Payment-owner revocation result does not match sandbox truth");
+    }
+    int changed =
+        jdbc.update(
+            """
+            UPDATE eval_sandbox
+            SET payment_owner_auth_invalidation_state = 'REVOKED', version = version + 1
+            WHERE sandbox_id = ? AND lifecycle_state = 'DEAD'
+              AND payment_owner_auth_invalidation_state = 'PROVISIONED'
+              AND payment_owner_opaque_handle = ?
+            """,
+            sandboxId,
+            handle);
+    if (changed != 1) {
+      throw new IllegalStateException("Evaluation payment-owner revocation did not converge");
+    }
+    return closeIfSafe(sandboxId, now);
   }
 
   private Sandbox prepareDead(Sandbox sandbox, Instant now) {
@@ -491,24 +628,22 @@ public class EvaluationSandboxRepository {
 
   private Sandbox claimInvalidation(
       Sandbox sandbox, Instant now, int maxAttempts, Duration retryDelay) {
-    if (isFinalInvalidation(sandbox.authState())) {
-      closeWithoutExternalCall(sandbox.sandboxId(), now, sandbox.authState());
+    Sandbox current = proveExpiredIdentities(sandbox, now);
+    if (allIdentitiesInvalidated(current)) {
+      closeIfSafe(current.sandboxId(), now);
       return null;
     }
-    if (!sandbox.authExpiryUpperBound().isAfter(now)) {
-      closeWithoutExternalCall(sandbox.sandboxId(), now, "EXPIRY_PROVEN");
-      return null;
-    }
-    if (sandbox.cleanupAttempts() >= maxAttempts) {
+    if (current.cleanupAttempts() >= maxAttempts) {
       jdbc.update(
           "UPDATE eval_sandbox SET cleanup_due_at = ? WHERE sandbox_id = ?",
-          Timestamp.from(sandbox.authExpiryUpperBound()),
-          sandbox.sandboxId());
+          Timestamp.from(latestUnresolvedExpiry(current)),
+          current.sandboxId());
       return null;
     }
     Instant nextAttempt = now.plus(retryDelay);
-    if (nextAttempt.isAfter(sandbox.authExpiryUpperBound())) {
-      nextAttempt = sandbox.authExpiryUpperBound();
+    Instant unresolvedExpiry = latestUnresolvedExpiry(current);
+    if (nextAttempt.isAfter(unresolvedExpiry)) {
+      nextAttempt = unresolvedExpiry;
     }
     jdbc.update(
         """
@@ -517,21 +652,70 @@ public class EvaluationSandboxRepository {
         WHERE sandbox_id = ? AND lifecycle_state = 'DEAD'
         """,
         Timestamp.from(nextAttempt),
+        current.sandboxId());
+    return lock(current.sandboxId());
+  }
+
+  private Sandbox proveExpiredIdentities(Sandbox sandbox, Instant now) {
+    boolean primaryExpired =
+        !isFinalInvalidation(sandbox.authState()) && !sandbox.authExpiryUpperBound().isAfter(now);
+    boolean paymentOwnerExpired =
+        sandbox.paymentOwnerTestUserLabel() != null
+            && !isFinalInvalidation(sandbox.paymentOwnerAuthState())
+            && !sandbox.paymentOwnerAuthExpiryUpperBound().isAfter(now);
+    if (!primaryExpired && !paymentOwnerExpired) {
+      return sandbox;
+    }
+    jdbc.update(
+        """
+        UPDATE eval_sandbox
+        SET auth_invalidation_state = CASE
+              WHEN ? THEN 'EXPIRY_PROVEN' ELSE auth_invalidation_state
+            END,
+            payment_owner_auth_invalidation_state = CASE
+              WHEN ? THEN 'EXPIRY_PROVEN' ELSE payment_owner_auth_invalidation_state
+            END,
+            version = version + 1
+        WHERE sandbox_id = ? AND lifecycle_state = 'DEAD'
+        """,
+        primaryExpired,
+        paymentOwnerExpired,
         sandbox.sandboxId());
     return lock(sandbox.sandboxId());
   }
 
-  private void closeWithoutExternalCall(String sandboxId, Instant now, String authState) {
+  private Sandbox closeIfSafe(String sandboxId, Instant now) {
+    Sandbox sandbox = lock(sandboxId);
+    if (!"DEAD".equals(sandbox.lifecycleState())) {
+      throw new IllegalStateException("Only a dead evaluation sandbox can close");
+    }
+    if (!allIdentitiesInvalidated(sandbox)) {
+      return sandbox;
+    }
     jdbc.update(
         """
         UPDATE eval_sandbox
-        SET auth_invalidation_state = ?, closed_at = COALESCE(closed_at, ?),
-            cleanup_due_at = NULL, version = version + 1
-        WHERE sandbox_id = ? AND lifecycle_state = 'DEAD'
+        SET closed_at = COALESCE(closed_at, ?), cleanup_due_at = NULL,
+            version = version + 1
+        WHERE sandbox_id = ? AND lifecycle_state = 'DEAD' AND closed_at IS NULL
         """,
-        authState,
         Timestamp.from(now),
         sandboxId);
+    return lock(sandboxId);
+  }
+
+  private static Instant latestUnresolvedExpiry(Sandbox sandbox) {
+    Instant latest =
+        isFinalInvalidation(sandbox.authState()) ? null : sandbox.authExpiryUpperBound();
+    if (sandbox.paymentOwnerTestUserLabel() != null
+        && !isFinalInvalidation(sandbox.paymentOwnerAuthState())
+        && (latest == null || sandbox.paymentOwnerAuthExpiryUpperBound().isAfter(latest))) {
+      latest = sandbox.paymentOwnerAuthExpiryUpperBound();
+    }
+    if (latest == null) {
+      throw new IllegalStateException("Closed evaluation sandbox has no unresolved expiry");
+    }
+    return latest;
   }
 
   private List<EvaluationResetRequest.ProductFixture> fixtures(String sandboxId, boolean locking) {
@@ -579,11 +763,39 @@ public class EvaluationSandboxRepository {
         && sandbox.testUserLabel().equals(request.testUserLabel())
         && sandbox.ttlSeconds() == request.ttlSeconds()
         && sandbox.provisionIdempotencyKey().equals(request.provisionIdempotencyKey())
-        && sandbox.revokeIdempotencyKey().equals(request.revokeIdempotencyKey());
+        && sandbox.revokeIdempotencyKey().equals(request.revokeIdempotencyKey())
+        && java.util.Objects.equals(
+            sandbox.paymentOwnerTestUserLabel(), request.paymentOwnerTestUserLabel())
+        && java.util.Objects.equals(
+            sandbox.paymentOwnerCaseCorrelation(), request.paymentOwnerCaseCorrelation())
+        && java.util.Objects.equals(
+            sandbox.paymentOwnerProvisionIdempotencyKey(),
+            request.paymentOwnerProvisionIdempotencyKey())
+        && java.util.Objects.equals(
+            sandbox.paymentOwnerRevokeIdempotencyKey(), request.paymentOwnerRevokeIdempotencyKey());
   }
 
   private static boolean isFinalInvalidation(String state) {
     return "REVOKED".equals(state) || "EXPIRY_PROVEN".equals(state);
+  }
+
+  public static boolean allIdentitiesInvalidated(Sandbox sandbox) {
+    return isFinalInvalidation(sandbox.authState())
+        && (sandbox.paymentOwnerTestUserLabel() == null
+            || isFinalInvalidation(sandbox.paymentOwnerAuthState()));
+  }
+
+  public static String paymentOrderOwnerHandle(Sandbox sandbox) {
+    return sandbox.paymentOwnerTestUserLabel() == null
+        ? sandbox.handle()
+        : sandbox.paymentOwnerHandle();
+  }
+
+  private static boolean paymentOwnerProvisioned(Sandbox sandbox) {
+    return sandbox.paymentOwnerTestUserLabel() == null
+        || ("PROVISIONED".equals(sandbox.paymentOwnerAuthState())
+            && sandbox.paymentOwnerHandle() != null
+            && sandbox.paymentOwnerExpiresAt() != null);
   }
 
   private static Sandbox mapSandbox(ResultSet result, int row) throws SQLException {
@@ -600,6 +812,14 @@ public class EvaluationSandboxRepository {
         result.getString("opaque_handle"),
         result.getString("lifecycle_state"),
         result.getString("auth_invalidation_state"),
+        result.getString("payment_owner_test_user_label"),
+        result.getString("payment_owner_case_correlation"),
+        result.getString("payment_owner_auth_provision_idempotency_key"),
+        result.getString("payment_owner_auth_revoke_idempotency_key"),
+        result.getString("payment_owner_opaque_handle"),
+        result.getString("payment_owner_auth_invalidation_state"),
+        instant(result, "payment_owner_auth_expiry_upper_bound"),
+        instant(result, "payment_owner_expires_at"),
         result.getString("death_reason"),
         result.getString("completion_idempotency_key"),
         result.getInt("cleanup_attempts"),
@@ -618,6 +838,10 @@ public class EvaluationSandboxRepository {
     return value == null ? null : value.toInstant();
   }
 
+  private static Timestamp timestamp(Instant value) {
+    return value == null ? null : Timestamp.from(value);
+  }
+
   public record NewSandbox(
       String sandboxId,
       String caseCorrelation,
@@ -628,8 +852,13 @@ public class EvaluationSandboxRepository {
       int ttlSeconds,
       String provisionIdempotencyKey,
       String revokeIdempotencyKey,
+      String paymentOwnerTestUserLabel,
+      String paymentOwnerCaseCorrelation,
+      String paymentOwnerProvisionIdempotencyKey,
+      String paymentOwnerRevokeIdempotencyKey,
       Instant provisioningDueAt,
-      Instant authExpiryUpperBound) {}
+      Instant authExpiryUpperBound,
+      Instant paymentOwnerAuthExpiryUpperBound) {}
 
   public record Sandbox(
       String sandboxId,
@@ -644,6 +873,14 @@ public class EvaluationSandboxRepository {
       String handle,
       String lifecycleState,
       String authState,
+      String paymentOwnerTestUserLabel,
+      String paymentOwnerCaseCorrelation,
+      String paymentOwnerProvisionIdempotencyKey,
+      String paymentOwnerRevokeIdempotencyKey,
+      String paymentOwnerHandle,
+      String paymentOwnerAuthState,
+      Instant paymentOwnerAuthExpiryUpperBound,
+      Instant paymentOwnerExpiresAt,
       String deathReason,
       String completionIdempotencyKey,
       int cleanupAttempts,

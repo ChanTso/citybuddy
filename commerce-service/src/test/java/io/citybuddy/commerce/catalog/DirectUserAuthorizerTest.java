@@ -1,6 +1,7 @@
 package io.citybuddy.commerce.catalog;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 
 import com.nimbusds.jose.JWSAlgorithm;
@@ -26,6 +27,7 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
 class DirectUserAuthorizerTest {
+  private static final String EVALUATION_HANDLE = "A".repeat(43);
   private static final Instant NOW = Instant.parse("2026-07-15T00:00:00Z");
 
   private RSAKey signingKey;
@@ -133,9 +135,10 @@ class DirectUserAuthorizerTest {
         token(
             signingKey, "eval_direct_user", "citybuddy-web", List.of("support:chat"), "sandbox-1");
 
-    assertEquals(
-        "sandbox-1",
-        evaluation.authorizeEvaluation("Bearer " + token, "sandbox-1", "support:chat").sandboxId());
+    DirectUserAuthorizer.DirectPrincipal principal =
+        evaluation.authorizeEvaluation("Bearer " + token, "sandbox-1", "support:chat");
+    assertEquals("sandbox-1", principal.sandboxId());
+    assertEquals(EVALUATION_HANDLE, principal.evaluationHandle());
     assertThrows(
         CatalogException.class,
         () -> evaluation.authorizeEvaluation("Bearer " + token, "sandbox-2", "support:chat"));
@@ -145,6 +148,75 @@ class DirectUserAuthorizerTest {
     assertThrows(
         CatalogException.class,
         () -> authorizer(() -> jwks(signingKey)).authorize("Bearer " + token, "sandbox-1"));
+  }
+
+  @Test
+  void evaluationHandleIsSignedEvaluationContextOnly() throws Exception {
+    DirectUserAuthorizer evaluation =
+        new DirectUserAuthorizer(
+            properties.issuer(),
+            properties.userAudience(),
+            properties.jwksCacheTtl(),
+            properties.clockSkew(),
+            properties.requiredPermission(),
+            () -> jwks(signingKey),
+            Clock.fixed(NOW, ZoneOffset.UTC),
+            true);
+
+    String productionWithHandle =
+        token(
+            signingKey,
+            "direct_user",
+            "citybuddy-web",
+            List.of("catalog:read"),
+            null,
+            EVALUATION_HANDLE);
+    String evaluationWithMalformedHandle =
+        token(
+            signingKey,
+            "eval_direct_user",
+            "citybuddy-web",
+            List.of("support:chat"),
+            "sandbox-1",
+            "short");
+
+    assertThrows(
+        CatalogException.class,
+        () -> authorizer(() -> jwks(signingKey)).authorize("Bearer " + productionWithHandle, null));
+    assertThrows(
+        CatalogException.class,
+        () ->
+            evaluation.authorizeEvaluation(
+                "Bearer " + evaluationWithMalformedHandle, "sandbox-1", "support:chat"));
+  }
+
+  @Test
+  void evaluationModeAcceptsHandlelessTokenFromBeforeOwnerBinding() throws Exception {
+    DirectUserAuthorizer evaluation =
+        new DirectUserAuthorizer(
+            properties.issuer(),
+            properties.userAudience(),
+            properties.jwksCacheTtl(),
+            properties.clockSkew(),
+            properties.requiredPermission(),
+            () -> jwks(signingKey),
+            Clock.fixed(NOW, ZoneOffset.UTC),
+            true);
+    String token =
+        token(
+            signingKey,
+            "eval_direct_user",
+            "citybuddy-web",
+            List.of("support:chat"),
+            "sandbox-1",
+            null);
+
+    DirectUserAuthorizer.DirectPrincipal principal =
+        evaluation.authorizeEvaluation("Bearer " + token, "sandbox-1", "support:chat");
+
+    assertEquals("user-123", principal.subject());
+    assertEquals("sandbox-1", principal.sandboxId());
+    assertNull(principal.evaluationHandle());
   }
 
   @Test
@@ -205,6 +277,23 @@ class DirectUserAuthorizerTest {
   private String token(
       RSAKey key, String type, String audience, List<String> permissions, String sandboxId)
       throws Exception {
+    return token(
+        key,
+        type,
+        audience,
+        permissions,
+        sandboxId,
+        "eval_direct_user".equals(type) ? EVALUATION_HANDLE : null);
+  }
+
+  private String token(
+      RSAKey key,
+      String type,
+      String audience,
+      List<String> permissions,
+      String sandboxId,
+      String evaluationHandle)
+      throws Exception {
     JWTClaimsSet.Builder claims =
         new JWTClaimsSet.Builder()
             .issuer("https://identity.citybuddy.test")
@@ -219,6 +308,9 @@ class DirectUserAuthorizerTest {
             .jwtID(UUID.randomUUID().toString());
     if (sandboxId != null) {
       claims.claim("sandbox", sandboxId);
+    }
+    if (evaluationHandle != null) {
+      claims.claim("evaluation_handle", evaluationHandle);
     }
     SignedJWT jwt =
         new SignedJWT(

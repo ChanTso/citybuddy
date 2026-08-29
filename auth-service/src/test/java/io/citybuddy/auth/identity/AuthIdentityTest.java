@@ -31,6 +31,8 @@ import org.springframework.mock.env.MockEnvironment;
 import org.springframework.security.crypto.bcrypt.BCryptPasswordEncoder;
 
 class AuthIdentityTest {
+  private static final String EVALUATION_HANDLE = "A".repeat(43);
+
   @TempDir Path tempDirectory;
 
   private AuthRepository repository;
@@ -107,6 +109,7 @@ class AuthIdentityTest {
     assertThat(jwt.getJWTClaimsSet().getClaim("principal_state")).isEqualTo("ACTIVE");
     assertThat(jwt.getJWTClaimsSet().getAudience()).containsExactly("citybuddy-web");
     assertThat(jwt.getJWTClaimsSet().getSubject()).isEqualTo("user-123");
+    assertThat(jwt.getJWTClaimsSet().getClaim("evaluation_handle")).isNull();
     assertThat(
             keys.validateDirect(
                     response.accessToken(),
@@ -114,6 +117,13 @@ class AuthIdentityTest {
                     Set.of("current-key", "overlap-key"))
                 .subject())
         .isEqualTo("user-123");
+    assertThat(
+            keys.validateDirect(
+                    response.accessToken(),
+                    "support:session:create",
+                    Set.of("current-key", "overlap-key"))
+                .evaluationHandle())
+        .isNull();
 
     assertThatThrownBy(
             () ->
@@ -267,6 +277,54 @@ class AuthIdentityTest {
                     true))
         .isInstanceOf(IdentityException.class)
         .hasMessage("Missing evaluation sandbox");
+  }
+
+  @Test
+  void directValidationRequiresEvaluationHandleOnlyOnEvaluationTokens() throws Exception {
+    for (String validHandle :
+        List.of(EVALUATION_HANDLE, "-" + "B".repeat(42), "_" + "C".repeat(42))) {
+      var validated =
+          keys.validateDirect(
+              signedSandboxToken("eval_direct_user", "sandbox-1", validHandle),
+              "support:session:create",
+              Set.of("current-key"),
+              "sandbox-1",
+              true);
+
+      assertThat(validated.evaluationHandle()).isEqualTo(validHandle);
+    }
+
+    for (Object invalidHandle :
+        List.of("A".repeat(42), "A".repeat(42) + "+", List.of(EVALUATION_HANDLE))) {
+      assertThatThrownBy(
+              () ->
+                  keys.validateDirect(
+                      signedSandboxToken("eval_direct_user", "sandbox-1", invalidHandle),
+                      "support:session:create",
+                      Set.of("current-key"),
+                      "sandbox-1",
+                      true))
+          .isInstanceOf(IdentityException.class)
+          .hasMessage("Invalid evaluation handle");
+    }
+    assertThatThrownBy(
+            () ->
+                keys.validateDirect(
+                    signedSandboxToken("eval_direct_user", "sandbox-1"),
+                    "support:session:create",
+                    Set.of("current-key"),
+                    "sandbox-1",
+                    true))
+        .isInstanceOf(IdentityException.class)
+        .hasMessage("Invalid evaluation handle");
+    assertThatThrownBy(
+            () ->
+                keys.validateDirect(
+                    signedSandboxToken("direct_user", null, EVALUATION_HANDLE),
+                    "support:session:create",
+                    Set.of("current-key")))
+        .isInstanceOf(IdentityException.class)
+        .hasMessage("Production token carries evaluation handle");
   }
 
   @Test
@@ -532,8 +590,13 @@ class AuthIdentityTest {
   }
 
   private String signedSandboxToken(String tokenType, Object sandbox) throws Exception {
+    return signedSandboxToken(tokenType, sandbox, null);
+  }
+
+  private String signedSandboxToken(String tokenType, Object sandbox, Object evaluationHandle)
+      throws Exception {
     Instant now = Instant.now();
-    JWTClaimsSet claims =
+    JWTClaimsSet.Builder builder =
         new JWTClaimsSet.Builder()
             .issuer("https://identity.citybuddy.test")
             .audience("citybuddy-web")
@@ -541,11 +604,16 @@ class AuthIdentityTest {
             .claim("token_type", tokenType)
             .claim("principal_state", "ACTIVE")
             .claim("permissions", List.of("support:session:create"))
-            .claim("sandbox", sandbox)
             .issueTime(Date.from(now))
             .notBeforeTime(Date.from(now))
-            .expirationTime(Date.from(now.plusSeconds(60)))
-            .build();
+            .expirationTime(Date.from(now.plusSeconds(60)));
+    if (sandbox != null) {
+      builder.claim("sandbox", sandbox);
+    }
+    if (evaluationHandle != null) {
+      builder.claim("evaluation_handle", evaluationHandle);
+    }
+    JWTClaimsSet claims = builder.build();
     SignedJWT jwt =
         new SignedJWT(
             new JWSHeader.Builder(JWSAlgorithm.RS256).keyID("current-key").build(), claims);

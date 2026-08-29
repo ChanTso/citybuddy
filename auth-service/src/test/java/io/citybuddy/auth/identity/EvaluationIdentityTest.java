@@ -128,6 +128,7 @@ class EvaluationIdentityTest {
     assertThat(direct.getJWTClaimsSet().getClaim("token_type"))
         .isEqualTo(AuthKeySet.EVALUATION_DIRECT_TYPE);
     assertThat(direct.getJWTClaimsSet().getClaim("sandbox")).isEqualTo("sandbox-1");
+    assertThat(direct.getJWTClaimsSet().getClaim("evaluation_handle")).isEqualTo(HANDLE);
     assertThat(direct.getJWTClaimsSet().getExpirationTime().toInstant())
         .isEqualTo(principal.expiresAt());
     assertThat(direct.getJWTClaimsSet().getClaims().keySet())
@@ -141,6 +142,7 @@ class EvaluationIdentityTest {
             Set.of("current-key"),
             "sandbox-1",
             true);
+    assertThat(validated.evaluationHandle()).isEqualTo(HANDLE);
     var obo =
         keys.oboToken(
             validated.subject(),
@@ -151,6 +153,7 @@ class EvaluationIdentityTest {
             validated.expiresAt());
     SignedJWT derived = SignedJWT.parse(obo.value());
     assertThat(derived.getJWTClaimsSet().getClaim("sandbox")).isEqualTo("sandbox-1");
+    assertThat(derived.getJWTClaimsSet().getClaim("evaluation_handle")).isNull();
     assertThat(derived.getJWTClaimsSet().getExpirationTime().toInstant())
         .isEqualTo(principal.expiresAt());
 
@@ -210,6 +213,17 @@ class EvaluationIdentityTest {
     assertThat(
             service.revoke(UNDERSCORE_HANDLE, "sandbox-1", "case-1", "underscore-revoke").state())
         .isEqualTo("REVOKED");
+  }
+
+  @Test
+  void tokenUsesThePersistedCanonicalHandleAfterACaseInsensitiveLookup() throws Exception {
+    String lookupVariant = HANDLE.toLowerCase(java.util.Locale.ROOT);
+    EvaluationPrincipal principal = principal(HANDLE, "provision-key", "PROVISIONED", null, null);
+    when(repository.findEvaluationByHandle(lookupVariant)).thenReturn(Optional.of(principal));
+
+    SignedJWT token = SignedJWT.parse(service.issueToken(lookupVariant, "sandbox-1").accessToken());
+
+    assertThat(token.getJWTClaimsSet().getClaim("evaluation_handle")).isEqualTo(HANDLE);
   }
 
   @Test

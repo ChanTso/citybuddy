@@ -19,5 +19,6 @@ public record EvaluationResetRequest(
       long stockQuantity,
       boolean available) {}
 
-  public record PaymentOrderFixture(String orderId, String productId, int quantity) {}
+  public record PaymentOrderFixture(
+      String orderId, String productId, int quantity, String ownerTestUserLabel) {}
 }

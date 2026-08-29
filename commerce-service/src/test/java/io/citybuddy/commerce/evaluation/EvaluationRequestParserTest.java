@@ -109,6 +109,7 @@ class EvaluationRequestParserTest {
                 """));
 
     assertThat(request.paymentOrder().quantity()).isEqualTo(2);
+    assertThat(request.paymentOrder().ownerTestUserLabel()).isNull();
     assertThat(EvaluationRequestParser.fixtureDigest(request.products(), request.paymentOrder()))
         .isNotEqualTo(EvaluationRequestParser.fixtureDigest(request.products()));
 
@@ -129,6 +130,81 @@ class EvaluationRequestParserTest {
       assertThatThrownBy(() -> EvaluationRequestParser.parseReset(mapper.readTree(body)))
           .isInstanceOf(EvaluationSandboxException.class);
     }
+  }
+
+  @Test
+  void paymentOrderCanNameOneDistinctBoundedOwnerAndIncludesItInTheResetIntent() throws Exception {
+    EvaluationResetRequest request =
+        EvaluationRequestParser.parseReset(
+            mapper.readTree(
+                """
+                {
+                  "sandboxId":"sandbox-pay",
+                  "caseCorrelation":"case-pay",
+                  "ttlSeconds":300,
+                  "testUserLabel":"test-user-pay",
+                  "products":[{
+                    "productId":"product-pay",
+                    "name":"Tea",
+                    "description":"Evaluation tea",
+                    "priceMinor":500,
+                    "currency":"CNY",
+                    "stockQuantity":10,
+                    "available":true
+                  }],
+                  "paymentOrder":{
+                    "orderId":"00000000-0000-0000-0000-000000000105",
+                    "productId":"product-pay",
+                    "quantity":2,
+                    "ownerTestUserLabel":"payment-owner"
+                  }
+                }
+                """));
+
+    assertThat(request.paymentOrder().ownerTestUserLabel()).isEqualTo("payment-owner");
+    EvaluationResetRequest.PaymentOrderFixture primaryOwned =
+        new EvaluationResetRequest.PaymentOrderFixture(
+            request.paymentOrder().orderId(),
+            request.paymentOrder().productId(),
+            request.paymentOrder().quantity(),
+            null);
+    assertThat(EvaluationRequestParser.fixtureDigest(request.products(), request.paymentOrder()))
+        .isNotEqualTo(EvaluationRequestParser.fixtureDigest(request.products(), primaryOwned));
+  }
+
+  @Test
+  void paymentOrderOwnerMustDifferFromThePrimaryAndUseTheBoundedIdGrammar() {
+    for (String invalidOwner :
+        List.of("test-user-pay", "-payment-owner", "payment owner", "x".repeat(129))) {
+      String body =
+          """
+          {"sandboxId":"sandbox-pay","caseCorrelation":"case-pay","ttlSeconds":300,
+           "testUserLabel":"test-user-pay","products":[{"productId":"product-pay",
+           "name":"Tea","description":"Evaluation tea","priceMinor":500,
+           "currency":"CNY","stockQuantity":10,"available":true}],
+           "paymentOrder":{"orderId":"00000000-0000-0000-0000-000000000105",
+           "productId":"product-pay","quantity":2,"ownerTestUserLabel":"%s"}}
+          """
+              .formatted(invalidOwner);
+
+      assertThatThrownBy(() -> EvaluationRequestParser.parseReset(mapper.readTree(body)))
+          .isInstanceOf(EvaluationSandboxException.class);
+    }
+  }
+
+  @Test
+  void resetResponseOmitsTheSecondaryHandleWhenItWasNotRequested() throws Exception {
+    String primaryOnly =
+        mapper.writeValueAsString(
+            new EvaluationSandboxService.ResetResult("sandbox-pay", "primary-handle", null));
+    String withSecondary =
+        mapper.writeValueAsString(
+            new EvaluationSandboxService.ResetResult(
+                "sandbox-pay", "primary-handle", "payment-owner-handle"));
+
+    assertThat(mapper.readTree(primaryOnly).has("paymentOrderOwnerTestUserHandle")).isFalse();
+    assertThat(mapper.readTree(withSecondary).get("paymentOrderOwnerTestUserHandle").textValue())
+        .isEqualTo("payment-owner-handle");
   }
 
   @Test

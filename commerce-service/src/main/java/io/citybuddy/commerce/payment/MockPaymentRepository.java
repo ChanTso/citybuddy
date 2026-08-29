@@ -131,7 +131,7 @@ public class MockPaymentRepository {
   }
 
   List<PaymentStartOrderVisibility.Classification> enumerateStartOrderVisibility(
-      String orderId, String userSubject, String sandboxId) {
+      String orderId, String userSubject, String sandboxId, String evaluationHandle) {
     List<OrderTruth> rows;
     if (sandboxId == null) {
       rows = enumerateOwnedOrderVisibility(orderId, userSubject, "");
@@ -144,7 +144,10 @@ public class MockPaymentRepository {
               sandboxId);
     }
     return rows.stream()
-        .map(order -> PaymentStartOrderVisibility.classify(order, userSubject, sandboxId))
+        .map(
+            order ->
+                PaymentStartOrderVisibility.classify(
+                    order, userSubject, sandboxId, evaluationHandle))
         .toList();
   }
 

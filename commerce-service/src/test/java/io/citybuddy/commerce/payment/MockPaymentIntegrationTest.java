@@ -658,6 +658,7 @@ class MockPaymentIntegrationTest {
                 evaluation.start(
                     second.userSubject(),
                     second.sandboxId(),
+                    second.ownerHandle(),
                     first.orderId(),
                     "payment-cross-order",
                     new MockPaymentRequest(1800L, "CNY", null)));
@@ -667,6 +668,7 @@ class MockPaymentIntegrationTest {
                 evaluation.start(
                     second.userSubject(),
                     second.sandboxId(),
+                    second.ownerHandle(),
                     UUID.randomUUID().toString(),
                     "payment-unknown-order",
                     new MockPaymentRequest(1800L, "CNY", null)));
@@ -676,6 +678,7 @@ class MockPaymentIntegrationTest {
         evaluation.start(
             first.userSubject(),
             first.sandboxId(),
+            first.ownerHandle(),
             first.orderId(),
             "payment-full-intent",
             new MockPaymentRequest(1800L, "CNY", null));
@@ -794,6 +797,7 @@ class MockPaymentIntegrationTest {
           evaluation.start(
               fixture.userSubject(),
               fixture.sandboxId(),
+              fixture.ownerHandle(),
               fixture.orderId(),
               "payment-session-edge-" + index,
               new MockPaymentRequest(1800L, "CNY", null));
@@ -841,6 +845,7 @@ class MockPaymentIntegrationTest {
         evaluation.start(
             invalidFixture.userSubject(),
             invalidFixture.sandboxId(),
+            invalidFixture.ownerHandle(),
             invalidFixture.orderId(),
             "payment-session-whitespace",
             new MockPaymentRequest(1800L, "CNY", null));
@@ -896,6 +901,7 @@ class MockPaymentIntegrationTest {
         evaluation.start(
             fixture.userSubject(),
             fixture.sandboxId(),
+            fixture.ownerHandle(),
             fixture.orderId(),
             "payment-ordering-first",
             new MockPaymentRequest(1800L, "CNY", null));
@@ -904,6 +910,7 @@ class MockPaymentIntegrationTest {
         evaluation.start(
             fixture.userSubject(),
             fixture.sandboxId(),
+            fixture.ownerHandle(),
             secondOrder,
             "payment-ordering-second",
             new MockPaymentRequest(1800L, "CNY", null));
@@ -931,6 +938,7 @@ class MockPaymentIntegrationTest {
         evaluation.start(
             fixture.userSubject(),
             fixture.sandboxId(),
+            fixture.ownerHandle(),
             fixture.orderId(),
             "view-order-origin-damage",
             new MockPaymentRequest(1800L, "CNY", null));
@@ -1124,6 +1132,7 @@ class MockPaymentIntegrationTest {
           evaluationPayments.start(
               fixture.userSubject(),
               fixture.sandboxId(),
+              fixture.ownerHandle(),
               fixture.orderId(),
               "payment-eval-duplicate-" + iteration,
               new MockPaymentRequest(1800L, "CNY", null));
@@ -1157,6 +1166,7 @@ class MockPaymentIntegrationTest {
         evaluation.start(
             fixture.userSubject(),
             fixture.sandboxId(),
+            fixture.ownerHandle(),
             fixture.orderId(),
             "payment-committed-replay-dead",
             new MockPaymentRequest(1800L, "CNY", null));
@@ -1210,6 +1220,7 @@ class MockPaymentIntegrationTest {
         evaluation.start(
             complete.userSubject(),
             complete.sandboxId(),
+            complete.ownerHandle(),
             complete.orderId(),
             completeKey,
             new MockPaymentRequest(1800L, "CNY", null));
@@ -1222,6 +1233,7 @@ class MockPaymentIntegrationTest {
         evaluation.start(
             complete.userSubject(),
             complete.sandboxId(),
+            complete.ownerHandle(),
             complete.orderId(),
             completeKey,
             new MockPaymentRequest(1800L, "CNY", null));
@@ -1232,6 +1244,7 @@ class MockPaymentIntegrationTest {
                 evaluation.start(
                     complete.userSubject(),
                     complete.sandboxId(),
+                    complete.ownerHandle(),
                     complete.orderId(),
                     completeKey,
                     new MockPaymentRequest(1801L, "CNY", null)))
@@ -1256,6 +1269,7 @@ class MockPaymentIntegrationTest {
         evaluation.start(
             fixture.userSubject(),
             fixture.sandboxId(),
+            fixture.ownerHandle(),
             fixture.orderId(),
             startKey,
             new MockPaymentRequest(1800L, "CNY", null));
@@ -1276,6 +1290,7 @@ class MockPaymentIntegrationTest {
                 evaluation.start(
                     fixture.userSubject(),
                     fixture.sandboxId(),
+                    fixture.ownerHandle(),
                     fixture.orderId(),
                     startKey,
                     new MockPaymentRequest(1800L, "CNY", null)))
@@ -1302,6 +1317,7 @@ class MockPaymentIntegrationTest {
         evaluation.start(
             fixture.userSubject(),
             fixture.sandboxId(),
+            fixture.ownerHandle(),
             fixture.orderId(),
             startKey,
             new MockPaymentRequest(1800L, "CNY", null));
@@ -1312,6 +1328,7 @@ class MockPaymentIntegrationTest {
                 evaluation.start(
                     fixture.userSubject(),
                     fixture.sandboxId(),
+                    fixture.ownerHandle(),
                     fixture.orderId(),
                     startKey,
                     new MockPaymentRequest(1800L, "CNY", null)))
@@ -1334,6 +1351,7 @@ class MockPaymentIntegrationTest {
                 evaluation.start(
                     fixture.userSubject(),
                     fixture.sandboxId(),
+                    fixture.ownerHandle(),
                     fixture.orderId(),
                     "payment-new-start-dead",
                     new MockPaymentRequest(1800L, "CNY", null)))
@@ -2118,6 +2136,7 @@ class MockPaymentIntegrationTest {
         evaluation.start(
             fixture.userSubject(),
             fixture.sandboxId(),
+            fixture.ownerHandle(),
             fixture.orderId(),
             "payment-committed-replay-corrupt",
             new MockPaymentRequest(1800L, "CNY", null));
@@ -2144,6 +2163,7 @@ class MockPaymentIntegrationTest {
         evaluation.start(
             fixture.userSubject(),
             fixture.sandboxId(),
+            fixture.ownerHandle(),
             fixture.orderId(),
             "payment-committed-replay-duplicate",
             new MockPaymentRequest(1800L, "CNY", null));
@@ -2181,6 +2201,7 @@ class MockPaymentIntegrationTest {
         healthy.start(
             fixture.userSubject(),
             fixture.sandboxId(),
+            fixture.ownerHandle(),
             fixture.orderId(),
             "payment-committed-replay-unavailable",
             new MockPaymentRequest(1800L, "CNY", null));
@@ -2212,6 +2233,7 @@ class MockPaymentIntegrationTest {
             .start(
                 fixture.userSubject(),
                 fixture.sandboxId(),
+                fixture.ownerHandle(),
                 fixture.orderId(),
                 "payment-committed-toctou",
                 new MockPaymentRequest(1800L, "CNY", null));
@@ -2277,6 +2299,7 @@ class MockPaymentIntegrationTest {
         healthy.start(
             fixture.userSubject(),
             fixture.sandboxId(),
+            fixture.ownerHandle(),
             fixture.orderId(),
             "payment-eval-callback-wins",
             new MockPaymentRequest(1800L, "CNY", null));
@@ -2340,6 +2363,7 @@ class MockPaymentIntegrationTest {
         healthy.start(
             fixture.userSubject(),
             fixture.sandboxId(),
+            fixture.ownerHandle(),
             fixture.orderId(),
             "payment-eval-completion-wins",
             new MockPaymentRequest(1800L, "CNY", null));
@@ -2416,6 +2440,7 @@ class MockPaymentIntegrationTest {
         healthy.start(
             fixture.userSubject(),
             fixture.sandboxId(),
+            fixture.ownerHandle(),
             fixture.orderId(),
             "payment-eval-expiry-wait",
             new MockPaymentRequest(1800L, "CNY", null));
@@ -2491,6 +2516,7 @@ class MockPaymentIntegrationTest {
           healthy.start(
               fixture.userSubject(),
               fixture.sandboxId(),
+              fixture.ownerHandle(),
               fixture.orderId(),
               "payment-eval-rollback-" + failurePoint.name(),
               new MockPaymentRequest(1800L, "CNY", null));

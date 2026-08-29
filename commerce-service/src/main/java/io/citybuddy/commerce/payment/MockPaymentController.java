@@ -63,7 +63,13 @@ public final class MockPaymentController {
           exception.status(), "AUTHENTICATION", "Direct-user payment authorization failed");
     }
     MockPaymentResult result =
-        service.start(subject.subject(), subject.sandboxId(), orderId, idempotencyKey, request);
+        service.start(
+            subject.subject(),
+            subject.sandboxId(),
+            subject.evaluationHandle(),
+            orderId,
+            idempotencyKey,
+            request);
     return ResponseEntity.status(result.replayed() ? HttpStatus.OK : HttpStatus.CREATED)
         .body(result);
   }

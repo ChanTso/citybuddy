@@ -12,7 +12,10 @@ final class PaymentStartOrderVisibility {
   private PaymentStartOrderVisibility() {}
 
   static Classification classify(
-      MockPaymentRepository.OrderTruth order, String userSubject, String sandboxId) {
+      MockPaymentRepository.OrderTruth order,
+      String userSubject,
+      String sandboxId,
+      String evaluationHandle) {
     Objects.requireNonNull(order, "Payment order visibility candidate is required");
     if (!Objects.equals(sandboxId, order.sandboxId())) {
       return new Concealed();
@@ -23,6 +26,9 @@ final class PaymentStartOrderVisibility {
     Optional<String> fixtureOwner =
         EvaluationSandboxRepository.tryFixtureOwner(order.evaluationOwnerHandle());
     if (fixtureOwner.isEmpty() || !fixtureOwner.get().equals(order.userSubject())) {
+      return new Concealed();
+    }
+    if (!Objects.equals(evaluationHandle, order.evaluationOwnerHandle())) {
       return new Concealed();
     }
     return new BindableFixture(

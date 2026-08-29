@@ -513,6 +513,7 @@ uv run python scripts/check_evaluation_token.py \
   --audience citybuddy-web \
   --token-type eval_direct_user \
   --sandbox sandbox-1 \
+  --evaluation-handle="$handle" \
   --maximum-expiry "$record_expiry" \
   --output "$tmp_dir/evaluation-direct.json"
 evaluation_subject="$(uv run python scripts/read_json_field.py "$tmp_dir/evaluation-direct.json" subject)"
