@@ -52,6 +52,9 @@ archived under `docs/archive/`; it is history, not a ruleset. Do not reintroduce
    output. Do not reimplement the business model inside a checker.
 4. Report achieved numbers with their exact boundary — workload, hardware, and what is
    excluded. Do not present a local topology result as a capacity or production claim.
+5. Every newly produced result file that contains measured numbers records the full CityBuddy
+   commit SHA it measured. Run measurements only from a committed, source-clean tree; generated
+   files under `bench/results/` and ignored state under `bench/.run/` may differ.
 
 ## Review
 

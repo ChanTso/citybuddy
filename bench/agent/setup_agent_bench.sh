@@ -23,6 +23,22 @@ AGENT_BENCH_USERS="${AGENT_BENCH_USERS:-6000}"
 AGENT_ATTEMPT_BUDGET="${AGENT_ATTEMPT_BUDGET:-16}"
 run_dir="$repo_root/bench/.run"
 mkdir -p "$run_dir"
+commit_file="$run_dir/citybuddy_commit"
+
+source_changes() {
+  git status --porcelain --untracked-files=all -- . \
+    ':(exclude)bench/results/**' \
+    ':(exclude)bench/.run/**'
+}
+changes="$(source_changes)"
+if [ -n "$changes" ]; then
+  echo "The agent benchmark requires a committed, source-clean tree:" >&2
+  printf '%s\n' "$changes" >&2
+  exit 1
+fi
+citybuddy_commit="$(git rev-parse --verify HEAD)"
+# An interrupted setup must not leave a previous image's commit looking current.
+: > "$commit_file"
 
 read_value() { grep -E "^$1=" .env | head -1 | cut -d= -f2-; }
 commerce_pw="$(read_value MYSQL_COMMERCE_APP_PASSWORD)"
@@ -261,4 +277,11 @@ docker run --rm --name citybuddy-bench-pool \
   --payment-secret "$payment_secret" \
   --out /run-data/agent_pool.json
 
+changes="$(source_changes)"
+if [ "$(git rev-parse --verify HEAD)" != "$citybuddy_commit" ] || [ -n "$changes" ]; then
+  echo "The checkout changed while the agent benchmark fixture was being built; rerun setup." >&2
+  [ -z "$changes" ] || printf '%s\n' "$changes" >&2
+  exit 1
+fi
+printf '%s\n' "$citybuddy_commit" > "$commit_file"
 echo "== agent bench environment ready =="

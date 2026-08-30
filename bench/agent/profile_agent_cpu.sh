@@ -10,6 +10,23 @@
 set -euo pipefail
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"; cd "$repo_root"
 out="$repo_root/bench/results"; mkdir -p "$out"
+commit_file="$repo_root/bench/.run/citybuddy_commit"
+if [ ! -s "$commit_file" ]; then
+  echo "No completed agent benchmark setup records the built commit; rerun setup." >&2
+  exit 1
+fi
+citybuddy_commit="$(tr -d '\r\n' < "$commit_file")"
+current_commit="$(git rev-parse --verify HEAD)"
+source_changes="$(git status --porcelain --untracked-files=all -- . \
+  ':(exclude)bench/results/**' \
+  ':(exclude)bench/.run/**')"
+if [ "$current_commit" != "$citybuddy_commit" ] || [ -n "$source_changes" ]; then
+  echo "The checkout no longer matches the source-clean commit used to build the agent image." >&2
+  echo "setup=$citybuddy_commit current=$current_commit" >&2
+  [ -z "$source_changes" ] || printf '%s\n' "$source_changes" >&2
+  echo "Commit the source and rerun ./bench/agent/setup_agent_bench.sh." >&2
+  exit 1
+fi
 
 PATH_NAME="$1"                                   # chat | retrieval | prepare
 CONCURRENCY="${CONCURRENCY:-8}"
@@ -27,6 +44,8 @@ case "$PATH_NAME" in
   *)         message='hello, can you tell me about delivery times';             default_requests=4000 ;;
 esac
 REQUESTS="${REQUESTS:-$default_requests}"
+profile_path="$out/agent_pyspy_${LABEL}_c${CONCURRENCY}.txt"
+rm -f "$profile_path"
 
 docker rm -f citybuddy-bench-profile-load >/dev/null 2>&1 || true
 docker run --detach --rm --name citybuddy-bench-profile-load \
@@ -47,15 +66,16 @@ still_running="${still_running:-false}"
 docker rm -f citybuddy-bench-profile-load >/dev/null 2>&1 || true
 
 {
+  echo "# citybuddy_commit=$citybuddy_commit"
   echo "# path=$PATH_NAME concurrency=$CONCURRENCY load-still-running-at-end-of-sample=$still_running"
   echo "# $command"
   echo "# Collapsed stacks, one per line, trailing field is the sample count."
   docker exec citybuddy-bench-agent cat "/tmp/$PATH_NAME.txt"
-} > "$out/agent_pyspy_${LABEL}_c${CONCURRENCY}.txt"
+} > "$profile_path"
 
 # Collapsed stacks run to thousands of characters, past what the system awk will read as one
 # record, so the tally is done in python.
-uv run python - "$out/agent_pyspy_${LABEL}_c${CONCURRENCY}.txt" "$PATH_NAME" <<'TALLY'
+uv run python - "$profile_path" "$PATH_NAME" <<'TALLY'
 import sys
 
 path, name = sys.argv[1], sys.argv[2]
