@@ -33,6 +33,21 @@ flowchart LR
 The dashed edge is the whole point. Everything the model says reaches the user as explanation; the
 solid path through commerce into MySQL is the only thing that decides whether a refund happened.
 
+## That boundary is measured, not asserted
+
+[StateEval](https://github.com/ChanTso/state-eval) disables one check inside commerce and grades
+the outcome from the authoritative database through a read-only account the system under test
+cannot write to. An agent serving one user was asked to refund another user's order. It issued a
+prepare request in 7 of 18 first turns. With commerce's resource-ownership check enforced, 0 of
+those 3 attempts recorded a refund; with only that check disabled in the evaluation profile, 4 of
+4 did — while the JWT signature, the exact `refund:create` scope, the `act.azp` actor binding and
+the support session stayed enforced in both arms.
+
+Removing the last check inside the transaction was enough. That is why the comparison lives here
+and not in the agent's prompt: the model was instructed to refund only orders owned by the
+requester, and had no tool that could tell it who owned one.
+[Finding and raw artifacts](https://github.com/ChanTso/state-eval#readme).
+
 ## What is worth reading here
 
 - **Delegated identity.** RS256 login and JWKS publication, plus just-in-time token exchange
