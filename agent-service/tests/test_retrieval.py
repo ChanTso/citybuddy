@@ -68,6 +68,7 @@ def plan() -> ModelPlan:
         routes=(ProviderRoute("support-standard-primary", "primary"),),
         reranker_route=ProviderRoute("support-reranker-standard", "reranker"),
         attempt_limit=8,
+        tool_profile="read",
     )
 
 

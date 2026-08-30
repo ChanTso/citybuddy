@@ -76,18 +76,151 @@ def operation_samples(metrics: PrometheusCityBuddyMetrics) -> dict[tuple[str, st
     return samples
 
 
-def test_rule_and_model_routers_keep_signals_separate_from_tier_policy() -> None:
-    signals = RuleRouter().signals("Please refund my order and explain the product price")
-    selected = plan()
+@pytest.mark.parametrize(
+    ("message", "expected"),
+    [
+        ("hello", (False, True)),
+        ("hello, can you tell me about delivery times", (False, False)),
+        ("retrieval-sufficient what does the refund policy cover", (True, False)),
+        ("What is the refund policy?", (True, False)),
+        ("I need a refund policy summary", (True, False)),
+        ("How do refunds work?", (True, False)),
+        ("When are you open?", (False, False)),
+        ("Are you open tomorrow?", (False, False)),
+        ("今天营业吗？", (False, False)),
+        ("Tell me about jasmine tea", (False, False)),
+        ("茉莉花茶多少钱？", (False, False)),
+        (
+            "action-prepare refund my order 00000000-0000-0000-0000-000000000001",
+            (True, False),
+        ),
+        (
+            "Please prepare a CNY 4.00 refund for 00000000-0000-0000-0000-000000000001",
+            (True, False),
+        ),
+        (
+            "Please prepare a CNY 4.00 refund for order "
+            "00000000-0000-0000-0000-000000000001. I believe it was placed from my account.",
+            (True, False),
+        ),
+        (
+            "Could you refund the order 00000000-0000-0000-0000-000000000001?",
+            (True, False),
+        ),
+        (
+            "Can you issue a CNY 4 refund on my order 00000000-0000-0000-0000-000000000001?",
+            (True, False),
+        ),
+        (
+            "I would like a refund for 00000000-0000-0000-0000-000000000001",
+            (True, False),
+        ),
+        (
+            "Please refund my order 00000000-0000-0000-0000-000000000001 "
+            "and explain the product price",
+            (True, False),
+        ),
+        (
+            "I need a refund policy summary for order 00000000-0000-0000-0000-000000000001",
+            (True, False),
+        ),
+        (
+            "What is the refund status for 00000000-0000-0000-0000-000000000001?",
+            (True, False),
+        ),
+        (
+            "I do not want a refund for order 00000000-0000-0000-0000-000000000001",
+            (True, False),
+        ),
+        (
+            "I don't need a refund for order 00000000-0000-0000-0000-000000000001",
+            (True, False),
+        ),
+        (
+            "Could you check the refund for order 00000000-0000-0000-0000-000000000001?",
+            (True, False),
+        ),
+        (
+            "I need information about the refund for order 00000000-0000-0000-0000-000000000001",
+            (True, False),
+        ),
+        (
+            "I'd like a CNY 4 refund for order 00000000-0000-0000-0000-000000000001",
+            (True, False),
+        ),
+        (
+            "Please give me a CNY 4 refund for order 00000000-0000-0000-0000-000000000001",
+            (True, False),
+        ),
+        ("退款政策和配送时间是什么？", (True, False)),
+        ("请退款 4 元人民币，订单 00000000-0000-0000-0000-000000000001", (True, False)),
+        ("退款订单 00000000-0000-0000-0000-000000000001，金额 4 元", (True, False)),
+        ("我要退款，订单 00000000-0000-0000-0000-000000000001", (True, False)),
+        ("I need some help", (False, False)),
+    ],
+)
+def test_rule_router_classifies_stable_contexts(message: str, expected: tuple[bool, bool]) -> None:
+    signals = RuleRouter().signals(message)
 
-    assert signals.high_risk is True
-    assert signals.private_action is True
-    assert signals.public_faq is True
+    assert (signals.refund_context, signals.chitchat) == expected
+    assert signals.evidence() == {
+        "refundContext": expected[0],
+        "chitchat": expected[1],
+    }
+
+
+@pytest.mark.parametrize(
+    ("message", "tool_profile", "attempt_limit"),
+    [
+        ("hello", "none", 3),
+        ("What is the refund policy?", "all", 16),
+        ("What are your opening hours?", "read", 16),
+        ("I need a refund policy summary", "all", 16),
+        ("Please refund my order", "all", 16),
+        (
+            "Please refund my order 00000000-0000-0000-0000-000000000001",
+            "all",
+            16,
+        ),
+        (
+            "I need a refund policy summary for order 00000000-0000-0000-0000-000000000001",
+            "all",
+            16,
+        ),
+        (
+            "I do not want a refund for order 00000000-0000-0000-0000-000000000001",
+            "all",
+            16,
+        ),
+        ("I need some help", "read", 16),
+    ],
+)
+def test_model_router_uses_context_for_tools_and_budget_without_inventing_a_tier(
+    message: str, tool_profile: str, attempt_limit: int
+) -> None:
+    selected = ModelRouter(
+        (
+            ProviderRoute("support-standard-primary", "provider-a"),
+            ProviderRoute("support-standard-fallback", "provider-b"),
+        ),
+        16,
+    ).plan(RuleRouter().signals(message))
+
     assert selected.tier == "standard"
+    assert selected.tool_profile == tool_profile
+    assert selected.attempt_limit == attempt_limit
     assert [route.role_alias for route in selected.routes] == [
         "support-standard-primary",
         "support-standard-fallback",
     ]
+
+
+def test_chitchat_budget_never_exceeds_the_configured_limit() -> None:
+    selected = ModelRouter((ProviderRoute("primary", "provider-a"),), 2).plan(
+        RuleRouter().signals("hello")
+    )
+
+    assert selected.attempt_limit == 2
 
 
 def test_litellm_transient_retry_and_same_tier_fallback_share_one_budget(
@@ -511,6 +644,77 @@ class RecordingObo:
         del sandbox_id
         self.calls.append((direct_token, subject, session_id, scope))
         return "signed-obo"
+
+
+@pytest.mark.parametrize(
+    ("message", "expected"),
+    [
+        ("hello", set()),
+        (
+            "What are your opening hours?",
+            {CATALOG_PRODUCT_SPEC.wire_name, KNOWLEDGE_SEARCH_SPEC.wire_name},
+        ),
+        (
+            "What is the refund policy?",
+            {
+                CATALOG_PRODUCT_SPEC.wire_name,
+                KNOWLEDGE_SEARCH_SPEC.wire_name,
+                REFUND_PREPARE_SPEC.wire_name,
+            },
+        ),
+    ],
+)
+def test_tool_schemas_follow_the_server_selected_profile(message: str, expected: set[str]) -> None:
+    selected = ModelRouter((ProviderRoute("primary", "provider-a"),), 16).plan(
+        RuleRouter().signals(message)
+    )
+    schemas = ToolAdapter("https://commerce.test", RecordingObo()).schemas(selected)
+    names: set[str] = set()
+    for schema in schemas:
+        function = schema.get("function")
+        assert isinstance(function, dict)
+        name = function.get("name")
+        assert isinstance(name, str)
+        names.add(name)
+
+    assert names == expected
+
+
+def test_hidden_known_tool_is_denied_before_identity_or_commerce_io(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    obo = RecordingObo()
+    events: list[AgentEvent] = []
+    budget = AttemptBudget(4, events)
+    selected = ModelRouter((ProviderRoute("primary", "provider-a"),), 16).plan(
+        RuleRouter().signals("What are your opening hours?")
+    )
+
+    def forbidden(*args: Any, **kwargs: Any) -> Any:
+        del args, kwargs
+        raise AssertionError("hidden tool crossed an I/O boundary")
+
+    monkeypatch.setattr(http_client, "post", forbidden)
+    monkeypatch.setattr(http_client, "stream", forbidden)
+    result = ToolAdapter("https://commerce.test", obo).execute(
+        name=REFUND_PREPARE_SPEC.name,
+        serialized_arguments=(
+            '{"orderId":"00000000-0000-0000-0000-000000000040","amountMinor":400,"currency":"CNY"}'
+        ),
+        direct_token="direct",
+        subject="user-1",
+        session_id="session-1",
+        budget=budget,
+        events=events,
+        plan=selected,
+    )
+
+    assert result.model_view == {
+        "outcome": "deny_with_feedback",
+        "reason": "tool_not_available_for_route",
+    }
+    assert obo.calls == []
+    assert budget.used == 0
 
 
 class DeniedObo:
@@ -1156,6 +1360,7 @@ def test_bounded_agent_carries_exact_denial_producer_without_model_disclosure() 
         def __init__(self) -> None:
             self.calls = 0
             self.messages: list[list[dict[str, object]]] = []
+            self.tool_names: list[set[str]] = []
 
         def complete(
             self,
@@ -1165,9 +1370,17 @@ def test_bounded_agent_carries_exact_denial_producer_without_model_disclosure() 
             budget: AttemptBudget,
             events: list[AgentEvent],
         ) -> ModelReply:
-            del plan, tools, budget, events
+            del plan, budget, events
             self.calls += 1
             self.messages.append(list(messages))
+            names: set[str] = set()
+            for schema in tools:
+                function = schema.get("function")
+                assert isinstance(function, dict)
+                name = function.get("name")
+                assert isinstance(name, str)
+                names.add(name)
+            self.tool_names.append(names)
             if self.calls == 1:
                 return ModelReply(
                     content=None,
@@ -1187,7 +1400,7 @@ def test_bounded_agent_carries_exact_denial_producer_without_model_disclosure() 
         model,  # type: ignore[arg-type]
         ToolAdapter("https://commerce.test", StatusObo(403)),
     ).run(
-        message="refund my order",
+        message="refund my order 00000000-0000-0000-0000-000000000040",
         direct_token="direct",
         subject="user-1",
         session_id="session-1",
@@ -1197,6 +1410,20 @@ def test_bounded_agent_carries_exact_denial_producer_without_model_disclosure() 
 
     reason = "ACTION_PREPARATION_IDENTITY_FORBIDDEN"
     assert result.request_reasons == (reason,)
+    assert model.tool_names == [
+        {
+            CATALOG_PRODUCT_SPEC.wire_name,
+            KNOWLEDGE_SEARCH_SPEC.wire_name,
+            REFUND_PREPARE_SPEC.wire_name,
+        },
+        {
+            CATALOG_PRODUCT_SPEC.wire_name,
+            KNOWLEDGE_SEARCH_SPEC.wire_name,
+            REFUND_PREPARE_SPEC.wire_name,
+        },
+    ]
+    routing_event = next(event for event in result.events if event.event_type == "ROUTING_DECISION")
+    assert routing_event.payload["toolProfile"] == "all"
     assert any(
         event.event_type == "TOOL_DENIED" and event.payload.get("tool") == REFUND_PREPARE_SPEC.name
         for event in result.events
@@ -1211,10 +1438,16 @@ def test_bounded_agent_carries_exact_denial_producer_without_model_disclosure() 
     )
     assert model.messages[0] == [
         {"role": "system", "content": SYSTEM_PROMPT},
-        {"role": "user", "content": "refund my order"},
+        {
+            "role": "user",
+            "content": "refund my order 00000000-0000-0000-0000-000000000040",
+        },
     ]
     assert model.messages[-1][0] == {"role": "system", "content": SYSTEM_PROMPT}
-    assert model.messages[-1][1] == {"role": "user", "content": "refund my order"}
+    assert model.messages[-1][1] == {
+        "role": "user",
+        "content": "refund my order 00000000-0000-0000-0000-000000000040",
+    }
     assert model.messages[-1][-2] == {
         "role": "assistant",
         "content": None,

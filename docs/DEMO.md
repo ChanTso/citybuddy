@@ -102,7 +102,8 @@ signing key is no longer published. Re-running that fixture's setup switches bac
 here, `bench/setup_bench_env.sh` and `bench/agent/setup_agent_bench.sh` there. Nothing is lost
 either way.
 
-The agent's default attempt budget is 16. A retrieval turn charges the budget once for the model
+The agent's configured attempt ceiling is 16; an exact chitchat greeting is routed with a ceiling
+of three. A retrieval turn keeps the configured ceiling and charges the budget once for the model
 call that requests the tool, twice to resolve the alias and validate the mapping, twice per query
 text for BM25 and dense recall, and once for the rerank — eight in all when the tool call carries a
 query rewrite, as this one does. The closing model call is the ninth charged attempt.

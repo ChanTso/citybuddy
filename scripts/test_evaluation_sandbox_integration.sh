@@ -3720,7 +3720,7 @@ assert_status 200 "CB-122 response-loss prepare converges through one bounded sa
   --header "X-Session-Id: $cb122_session" \
   --header 'Idempotency-Key: cb122-response-loss' \
   --header 'Content-Type: application/json' \
-  --data '{"message":"action-prepare"}'
+  --data '{"message":"action-prepare refund my order"}'
 cp "$tmp_dir/http-response.json" "$tmp_dir/cb122-prepared.json"
 jq -e '.outcome == "action_pending"' "$tmp_dir/cb122-prepared.json" >/dev/null
 cb122_prepare_trace="$(uv run python scripts/read_json_field.py \
@@ -3758,7 +3758,7 @@ assert_status 200 "complete local action closure replays before model and commer
   --header "X-Session-Id: $cb122_session" \
   --header 'Idempotency-Key: cb122-response-loss' \
   --header 'Content-Type: application/json' \
-  --data '{"message":"action-prepare"}'
+  --data '{"message":"action-prepare refund my order"}'
 cmp "$tmp_dir/cb122-prepared.json" "$tmp_dir/http-response.json"
 assert_equal "$cb122_proxy_calls_before_replay" \
   "$(curl --silent --show-error "http://127.0.0.1:$proxy_port/fixture/counts" \
@@ -3777,7 +3777,7 @@ for duplicate in 1 2; do
     --header "X-Session-Id: $cb122_session" \
     --header 'Idempotency-Key: cb122-response-loss' \
     --header 'Content-Type: application/json' \
-    --data '{"message":"action-prepare"}' \
+    --data '{"message":"action-prepare refund my order"}' \
     >"$tmp_dir/cb122-concurrent-$duplicate.status" &
   cb122_concurrent_pids[$duplicate]=$!
 done
@@ -3803,7 +3803,7 @@ assert_status 409 "changed message cannot reuse the completed action key" \
   --header "X-Session-Id: $cb122_session" \
   --header 'Idempotency-Key: cb122-response-loss' \
   --header 'Content-Type: application/json' \
-  --data '{"message":"action-prepare changed"}'
+  --data '{"message":"action-prepare refund my order changed"}'
 assert_equal "$cb122_proxy_calls_before_replay" \
   "$(curl --silent --show-error "http://127.0.0.1:$proxy_port/fixture/counts" \
     | jq -r --arg session "$cb122_session" '.["action-proxy:" + $session]')" \
@@ -3824,7 +3824,7 @@ assert_status 409 "conversation replay rejects a cross-trace ACTION_PREPARED row
   --header "X-Session-Id: $cb122_session" \
   --header 'Idempotency-Key: cb122-response-loss' \
   --header 'Content-Type: application/json' \
-  --data '{"message":"action-prepare"}'
+  --data '{"message":"action-prepare refund my order"}'
 tail -n "+$((cb122_agent_log_start + 1))" "$tmp_dir/agent.log" \
   | grep -Fq 'reason_code=ACTION_DURABLE_TRUTH_INCONSISTENT'
 cb122_agent_log_start="$(wc -l <"$tmp_dir/agent.log")"
@@ -3843,7 +3843,7 @@ assert_status 200 "conversation replay recovers after cross-trace damage is rest
   --header "X-Session-Id: $cb122_session" \
   --header 'Idempotency-Key: cb122-response-loss' \
   --header 'Content-Type: application/json' \
-  --data '{"message":"action-prepare"}'
+  --data '{"message":"action-prepare refund my order"}'
 cmp "$tmp_dir/cb122-prepared.json" "$tmp_dir/http-response.json"
 assert_cb122_action_closure_damage() {
   local label="$1"
@@ -3859,7 +3859,7 @@ assert_cb122_action_closure_damage() {
     --header "X-Session-Id: $cb122_session" \
     --header 'Idempotency-Key: cb122-response-loss' \
     --header 'Content-Type: application/json' \
-    --data '{"message":"action-prepare"}'
+    --data '{"message":"action-prepare refund my order"}'
   tail -n "+$((log_start + 1))" "$tmp_dir/agent.log" \
     | grep -Fq 'reason_code=ACTION_DURABLE_TRUTH_INCONSISTENT'
   log_start="$(wc -l <"$tmp_dir/agent.log")"
@@ -4163,7 +4163,7 @@ assert_status 200 "CB-122 restart replays the durable preparation closure" \
   --header "X-Session-Id: $cb122_session" \
   --header 'Idempotency-Key: cb122-response-loss' \
   --header 'Content-Type: application/json' \
-  --data '{"message":"action-prepare"}'
+  --data '{"message":"action-prepare refund my order"}'
 cmp "$tmp_dir/cb122-prepared.json" "$tmp_dir/http-response.json"
 assert_equal "$cb122_proxy_calls_before_replay" \
   "$(curl --silent --show-error "http://127.0.0.1:$proxy_port/fixture/counts" \
@@ -4187,7 +4187,7 @@ assert_status 503 "PendingAction reference insert failure rolls back preparation
   --header "X-Session-Id: $cb122_failed_commit_session" \
   --header 'Idempotency-Key: cb122-reference-insert-rollback' \
   --header 'Content-Type: application/json' \
-  --data '{"message":"action-prepare"}'
+  --data '{"message":"action-prepare refund my order"}'
 tail -n "+$((cb122_agent_log_start + 1))" "$tmp_dir/agent.log" \
   | grep -Fq 'reason_code=ACTION_REFERENCE_PERSISTENCE_UNAVAILABLE'
 assert_equal '0:0:FAILED' \
@@ -4223,7 +4223,7 @@ assert_status 200 "CB-122 prepares a short-lived action for deterministic expiry
   --header "X-Session-Id: $cb122_expiry_session" \
   --header 'Idempotency-Key: cb122-expiry-prepare' \
   --header 'Content-Type: application/json' \
-  --data '{"message":"action-prepare"}'
+  --data '{"message":"action-prepare refund my order"}'
 cb122_expiry_prepare_turn="$(uv run python scripts/read_json_field.py \
   "$tmp_dir/http-response.json" turnId)"
 cb122_expiry_pending_id="$(mysql_query root "$root_password" cs_db \

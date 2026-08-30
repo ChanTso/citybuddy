@@ -220,19 +220,13 @@ class AttemptBudget:
 
 @dataclass(frozen=True)
 class RoutingSignals:
-    high_risk: bool
-    private_action: bool
-    public_faq: bool
+    refund_context: bool
     chitchat: bool
-    complex_request: bool
 
     def evidence(self) -> dict[str, object]:
         return {
-            "highRisk": self.high_risk,
-            "privateAction": self.private_action,
-            "publicFaq": self.public_faq,
+            "refundContext": self.refund_context,
             "chitchat": self.chitchat,
-            "complex": self.complex_request,
         }
 
 
@@ -242,11 +236,9 @@ class RuleRouter:
     def signals(self, message: str) -> RoutingSignals:
         normalized = message.casefold()
         return RoutingSignals(
-            high_risk=any(value in normalized for value in ("refund", "cancel", "payment")),
-            private_action=any(value in normalized for value in ("my order", "refund", "cancel")),
-            public_faq=any(value in normalized for value in ("product", "catalog", "price")),
-            chitchat=normalized.strip() in {"hi", "hello", "hey"},
-            complex_request=len(message) > 240,
+            refund_context="refund" in normalized or "退款" in normalized,
+            chitchat=normalized.strip(" \t\r\n.,!?，。！？")
+            in {"hi", "hello", "hey", "你好", "您好", "嗨"},
         )
 
 
@@ -256,16 +248,20 @@ class ProviderRoute:
     provider_key: str
 
 
+ToolProfile = Literal["none", "read", "all"]
+
+
 @dataclass(frozen=True)
 class ModelPlan:
     tier: str
     routes: tuple[ProviderRoute, ...]
     reranker_route: ProviderRoute
     attempt_limit: int
+    tool_profile: ToolProfile
 
 
 class ModelRouter:
-    """Own business-tier, escalation, and budget selection."""
+    """Turn deterministic intent signals into one bounded server-owned plan."""
 
     def __init__(
         self,
@@ -282,12 +278,20 @@ class ModelRouter:
         )
 
     def plan(self, signals: RoutingSignals) -> ModelPlan:
-        del signals
+        if signals.refund_context:
+            tool_profile: ToolProfile = "all"
+        elif signals.chitchat:
+            tool_profile = "none"
+        else:
+            tool_profile = "read"
         return ModelPlan(
             tier="standard",
             routes=self._routes,
             reranker_route=self._reranker_route,
-            attempt_limit=self._attempt_limit,
+            attempt_limit=(
+                min(self._attempt_limit, 3) if signals.chitchat else self._attempt_limit
+            ),
+            tool_profile=tool_profile,
         )
 
 
@@ -834,8 +838,12 @@ class ToolAdapter:
         self._trace_sink = trace_sink or NoopTraceSink()
         self._specs = {spec.name: spec for spec in _TOOL_SPECS}
 
-    def schemas(self) -> list[dict[str, object]]:
-        return [spec.model_schema() for spec in self._specs.values()]
+    def schemas(self, plan: ModelPlan) -> list[dict[str, object]]:
+        return [
+            spec.model_schema()
+            for spec in self._specs.values()
+            if self._available_in_profile(spec, plan.tool_profile)
+        ]
 
     def execute(
         self,
@@ -917,6 +925,13 @@ class ToolAdapter:
         spec = self._specs.get(name)
         if spec is None:
             return self._deny(name, "unknown_tool", events)
+        if plan is not None and not self._available_in_profile(spec, plan.tool_profile):
+            return self._deny(
+                name,
+                "tool_not_available_for_route",
+                events,
+                operation_outcome=OperationOutcome.DENIED,
+            )
         try:
             decoded = strict_json_object(serialized_arguments.encode("utf-8"))
             arguments = spec.input_schema.model_validate(decoded)
@@ -1581,6 +1596,10 @@ class ToolAdapter:
         )
 
     @staticmethod
+    def _available_in_profile(spec: ToolSpec, profile: ToolProfile) -> bool:
+        return profile == "all" or (profile == "read" and spec.risk == "read")
+
+    @staticmethod
     def _record_retrieval_decision(decision: RetrievalDecision, events: list[AgentEvent]) -> None:
         events.append(
             AgentEvent(
@@ -1662,6 +1681,7 @@ class BoundedAgent:
                     "signals": signals.evidence(),
                     "tier": plan.tier,
                     "attemptLimit": plan.attempt_limit,
+                    "toolProfile": plan.tool_profile,
                 },
             )
         )
@@ -1673,7 +1693,9 @@ class BoundedAgent:
         retrieval_decision: RetrievalDecision | None = None
         try:
             while True:
-                reply = self._model.complete(plan, messages, self._tools.schemas(), budget, events)
+                reply = self._model.complete(
+                    plan, messages, self._tools.schemas(plan), budget, events
+                )
                 if reply.content is not None:
                     events.append(AgentEvent("AGENT_OUTCOME", {"outcome": "completed"}))
                     return AgentRunResult(
