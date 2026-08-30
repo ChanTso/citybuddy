@@ -4886,7 +4886,7 @@ assert_status 200 "agent evidence projects complete bounded durable truth" \
 cp "$tmp_dir/http-response.json" "$tmp_dir/agent-evidence.json"
 uv run python scripts/check_agent_evaluation_evidence.py "$tmp_dir/agent-evidence.json" \
   --trace "$trace_id" --session="$session_id" --outcome completed \
-  --require-event ROUTING_DECISION --require-event TOOL_LIFECYCLE \
+  --require-event CONTEXT_WINDOW --require-event ROUTING_DECISION --require-event TOOL_LIFECYCLE \
   --require-event BUDGET_CHARGED --feedback-count 1 \
   --forbid-marker cb103-private-user-text \
   --forbid-marker cb103-private-feedback-comment \

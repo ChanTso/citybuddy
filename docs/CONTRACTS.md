@@ -23,7 +23,7 @@ retrieval evidence, and evaluation-only access remain independently enforceable.
 |---|---|---|
 | `auth-service` | Java 21 / Spring Boot 3.5 | Login, RS256 user tokens, service-authenticated token exchange, OBO tokens, JWKS publication and key rotation, and evaluation-only test identities. |
 | `commerce-service` | Java 21 / Spring Boot 3.5 | Products, inventory, orders, seckill admission and ordering, mock payment, refund, CRM and FAQ truth, internal tool APIs, PendingAction and ActionReceipt truth, and evaluation-only state APIs. |
-| `agent-service` | Python 3.11 / FastAPI / Pydantic | Customer-support APIs, one ReAct agent, deterministic control signals, model policy, tool mediation, PendingAction reference and decision handling, retrieval, safety, SSE egress, authoritative support evidence, confirmation of a prepared action, and projection of the receipt returned by commerce. |
+| `agent-service` | Python 3.11 / FastAPI / Pydantic | Customer-support APIs, bounded same-session context, one ReAct agent, deterministic control signals, model policy, tool mediation, PendingAction reference and decision handling, retrieval, safety, SSE egress, authoritative support evidence, confirmation of a prepared action, and projection of the receipt returned by commerce. |
 | `knowledge-indexer` | Python 3.11 | Production RocketMQ FAQ synchronization, FAQ/product snapshot rebuilds, source-version ordering, tombstones, validation, and versioned Elasticsearch alias changes. |
 | `web` | React / TypeScript / Vite | The current demonstration surface for login, products, seckill reservation status, support chat, and the full PendingAction lifecycle including confirmation and the receipt identifier returned by the server. |
 | `litellm-proxy` boundary | OpenAI-compatible HTTP | Provider key isolation, rate limiting, same-tier provider failover, one bounded network retry, and usage/cost records when a proxy is deployed. It never makes business-tier routing decisions. Tests and the local demonstration use a deterministic compatible fake rather than a real provider. |
@@ -609,8 +609,45 @@ sequenceDiagram
 - `ToolAdapter` returns structured `deny_with_feedback` results. The single agent, constrained by
   ToolSpec and deterministic signals, handles missing slots, RAG/tool choice, clarification, and
   refusal. CityBuddy does not train or introduce a separate intent classifier.
-- Current model input remains separated into `SYSTEM`, `TOOLS`, `USER`, `UNTRUSTED RETRIEVED`, and
-  `UNTRUSTED TOOL DATA`; citations may point only to allowlisted evidence sources.
+- Current-turn task state is server owned. PendingAction state, exact confirmation/decline parsing,
+  identity, authorization, arguments, tool results, retrieval decisions and receipts are never
+  reconstructed from conversation prose. A live PendingAction continues through the fixed server
+  path without a model call.
+- Short-term context contains only completed user/assistant pairs from the same conversation,
+  support session, subject and evaluation sandbox. At reservation, the store reads at most 17
+  earlier rows by descending turn sequence, retains at most the newest 16, and excludes
+  `PROCESSING`, `FAILED`, current and cross-session turns. Overlapping different-key requests are
+  not causally ordered: each sees only earlier turns already completed at its own reservation.
+- The history lane has a 6,144 estimated-token budget. `utf8-bytes-v1` counts one estimated token
+  per UTF-8 byte plus four framing units per role message as a deterministic conservative capacity
+  estimate, not provider usage. This is an injection limit for stored history, not a claim about
+  the provider's complete context window; system text, tool schemas, the current input and in-turn
+  tool messages remain outside this lane. Up to 50% utilization is `low`; above 50% through 80% is
+  `guarded`; above 80% is `high` and evicts the oldest whole pairs toward a 70% target. If the newest
+  pair alone exceeds that target, it remains eligible only when it fits the 6,144 hard limit; a
+  pair over that limit is omitted whole. The policy never splits a pair, skips a newer pair to
+  retain an older one, summarizes text, or grows without a hard turn and token bound.
+- History is inserted as ordinary `user` and `assistant` roles between the one system message and
+  the current user message. Prior user text and prior assistant replies are both untrusted context,
+  not business truth, authorization or confirmation. Historical tool calls, tool data, retrieval
+  payloads, PendingAction data and receipts are not replayed into the prompt.
+- The window is recomputed, not a second model-authored memory store. A wrong assistant reply or
+  malicious user turn cannot mutate domain truth and is bounded out by the suffix policy; creating
+  a new support session immediately supplies an empty context window. Append-only support evidence
+  is not rewritten as a rollback, and authoritative business repair remains with the owning service.
+- Only the most recent included pair may extend the coarse refund-context routing signal into the
+  current turn; an exact current greeting still selects the no-tools profile. This preserves a
+  direct task follow-up without making any older mention a sticky tool profile. The signal affects
+  relevance and cost only: every tool request still crosses the same schema, scope, owner, session,
+  confirmation and commerce checks.
+- Current model input remains separated into `SYSTEM`, `TOOLS`, `CURRENT USER`, `UNTRUSTED SESSION
+  CONTEXT`, `UNTRUSTED RETRIEVED`, and `UNTRUSTED TOOL DATA`; citations may point only to allowlisted
+  evidence sources.
+- Every modeled turn records one content-free `CONTEXT_WINDOW` event with the policy and estimator
+  versions, budget, pressure, candidate/included/omitted counts, older-history flag and included
+  turn ids. The evaluation projection validates that selected ids are completed, earlier, ordered
+  turns under the same conversation/session/owner before exposing this metadata; it never exposes
+  the conversation text or prompt.
 - `cs_db` plus the evaluation-only evidence API is the authoritative support-evidence channel.
   Langfuse may be enabled only as an optional observability profile with no-op fallback; it may
   mirror traces but never becomes an assertion source or prompt authority. Prompt definitions stay
@@ -762,6 +799,12 @@ Everything in this section is **Retained design**, not current runtime behavior.
 
 ### 11.1 Memory and summary design
 
+The implemented recent-turn window in section 8.1 is session-scoped short-term context, not this
+retained summary or cross-session memory design. Starting a new support session reads none of the
+old session's turns. The prompt/read cap also does not claim to delete append-only support evidence;
+durable retention and erasure require a separate policy across turns, retrieval evidence, feedback,
+PendingAction references and receipts.
+
 `MemoryPacker` may combine a commerce-owned read-only CRM view, recent turns, and a summary
 protected by monotonic `summary_until_turn`. The cold summary belongs in `cs_db`, with a hot copy in
 Support Redis. One current watermark exists per session; an older asynchronous summary cannot
@@ -769,6 +812,22 @@ overwrite a newer watermark, and the cold summary remains recoverable from MySQL
 would carry owner/session, exact source-turn prefix commitment, target watermark, policy version,
 and sandbox where applicable. Monotonic CAS applies; inactive sandbox work drops/archives
 idempotently, while unavailable or indeterminate liveness remains retryable.
+
+Any future cross-session memory is limited to explicit, stable, low-risk preferences such as
+language or response style. A model inference cannot write it. A chat request would first create a
+bounded proposal showing the exact value, scope and expiry, and the user would explicitly confirm
+before activation; a direct settings edit can itself be the confirmation. Order ownership, order
+ids, amounts, payment/refund state, identity, authorization, confirmation and instructions to
+change agent rules are never eligible memory.
+
+Each eligible slot requires an owner-bound source turn, policy version, expiry and monotonically
+versioned active pointer. Update and delete use an expected version; a conflict returns the current
+value for an explicit user choice rather than last-write-wins. Delete or expiry writes a tombstone
+and immediately excludes the value from prompts, while any privacy erasure policy separately
+defines what minimal audit metadata may remain. Conflict precedence is authoritative live domain
+truth, then the current user's explicit input, then the latest confirmed memory. Evaluation memory
+would also be sandbox-bound and could not survive into another sandbox. These are entry conditions
+for a future feature, not behavior supplied by the current runtime.
 
 ### 11.2 Human handoff design
 
@@ -820,7 +879,8 @@ sandbox where applicable; duplicates are idempotent and inactive sandbox work dr
 
 ### 11.7 Explicit current non-goals
 
-The current implementation does not include MemoryPacker summaries/watermarks, the associated
+The current implementation does not include MemoryPacker summaries/watermarks, cross-session
+memory or its proposal/confirmation/update/delete/expiry lifecycle, the associated
 PII/prompt lane, handoff tickets, failure-candidate export, multimodal input, image/audio/video
 storage, a full shopping site or cart, a multi-page commerce product, a full human-agent
 workstation, multi-agent orchestration, a decomposer model, long-term vector memory, a second

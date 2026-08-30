@@ -428,6 +428,7 @@
             "type": "string",
             "enum": [
               "USER_INPUT",
+              "CONTEXT_WINDOW",
               "ROUTING_DECISION",
               "BUDGET_CHARGED",
               "CIRCUIT_OUTCOME",
@@ -448,8 +449,45 @@
           "reference": {"type": "string", "minLength": 1, "maxLength": 128},
           "attempt": {"type": "integer", "minimum": 1, "maximum": 32},
           "attemptLimit": {"type": "integer", "minimum": 1, "maximum": 32},
+          "context": {"$ref": "#/components/schemas/AgentEvaluationContext"},
           "occurredAt": {"type": "string", "format": "date-time", "readOnly": true}
         }
+      },
+      "AgentEvaluationContext": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "policyVersion",
+          "tokenEstimator",
+          "tokenBudget",
+          "tokenWatermark",
+          "candidateTokens",
+          "includedTokens",
+          "loadedTurnCount",
+          "includedTurnIds",
+          "omittedLoadedTurnCount",
+          "olderTurnsAvailable"
+        ],
+        "properties": {
+          "policyVersion": {"type": "string", "const": "session-context-v1"},
+          "tokenEstimator": {"type": "string", "const": "utf8-bytes-v1"},
+          "tokenBudget": {"type": "integer", "const": 6144},
+          "tokenWatermark": {
+            "type": "string",
+            "enum": ["low", "guarded", "high"]
+          },
+          "candidateTokens": {"type": "integer", "minimum": 0, "maximum": 272512},
+          "includedTokens": {"type": "integer", "minimum": 0, "maximum": 6144},
+          "loadedTurnCount": {"type": "integer", "minimum": 0, "maximum": 16},
+          "includedTurnIds": {
+            "type": "array",
+            "maxItems": 16,
+            "items": {"type": "string", "format": "uuid"}
+          },
+          "omittedLoadedTurnCount": {"type": "integer", "minimum": 0, "maximum": 16},
+          "olderTurnsAvailable": {"type": "boolean"}
+        },
+        "description": "Content-free record of the completed same-session turns selected for the model prompt."
       },
       "AgentEvaluationRetrieval": {
         "type": "object",

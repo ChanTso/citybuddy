@@ -28,7 +28,15 @@ from .actions import (
     validate_pending_action_resolution,
     validate_resolved_action_events,
 )
-from .agent_control import AgentEvent
+from .agent_control import (
+    EMPTY_CONVERSATION_HISTORY,
+    MAX_ASSISTANT_MESSAGE_CHARACTERS,
+    MAX_USER_MESSAGE_CHARACTERS,
+    SESSION_CONTEXT_MAX_TURNS,
+    AgentEvent,
+    ConversationHistory,
+    ConversationTurn,
+)
 from .retrieval import RetrievalDecision, RetrievalEvidence
 
 
@@ -58,6 +66,7 @@ class TurnStart:
     trace_id: str
     turn_id: str
     replay: ConversationResult | None = None
+    history: ConversationHistory = EMPTY_CONVERSATION_HISTORY
 
 
 class ConversationOwnershipError(Exception):
@@ -345,8 +354,21 @@ class MysqlConversationStore:
                             replay=result,
                         )
                     turn_sequence = int(conversation[3]) + 1
+                    history = self._load_recent_history(
+                        cursor,
+                        conversation_id=conversation_id,
+                        session_id=session_id,
+                        subject=subject,
+                        before_turn_sequence=turn_sequence,
+                    )
                     trace_id = str(uuid.uuid4())
                     turn_id = str(uuid.uuid4())
+                    start = TurnStart(
+                        conversation_id,
+                        trace_id,
+                        turn_id,
+                        history=history,
+                    )
                     cursor.execute(
                         "UPDATE support_conversation SET next_turn_sequence = %s "
                         "WHERE conversation_id = %s",
@@ -374,7 +396,7 @@ class MysqlConversationStore:
                     )
                     self._insert_event(
                         cursor,
-                        start=TurnStart(conversation_id, trace_id, turn_id),
+                        start=start,
                         session_id=session_id,
                         subject=subject,
                         sequence=1,
@@ -384,7 +406,70 @@ class MysqlConversationStore:
             except Exception:
                 connection.rollback()
                 raise
-        return TurnStart(conversation_id, trace_id, turn_id)
+        return start
+
+    @staticmethod
+    def _load_recent_history(
+        cursor: pymysql.cursors.Cursor,
+        *,
+        conversation_id: str,
+        session_id: str,
+        subject: str,
+        before_turn_sequence: int,
+    ) -> ConversationHistory:
+        cursor.execute(
+            "SELECT turn_id, turn_sequence, input_text, response_text "
+            "FROM support_turn WHERE conversation_id = %s AND session_id = %s "
+            "AND user_subject = %s AND turn_sequence < %s AND state = 'COMPLETED' "
+            "ORDER BY turn_sequence DESC LIMIT %s",
+            (
+                conversation_id,
+                session_id,
+                subject,
+                before_turn_sequence,
+                SESSION_CONTEXT_MAX_TURNS + 1,
+            ),
+        )
+        rows = cursor.fetchall()
+        if len(rows) > SESSION_CONTEXT_MAX_TURNS:
+            older_turns_available = True
+            rows = rows[:SESSION_CONTEXT_MAX_TURNS]
+        else:
+            older_turns_available = False
+        turns: list[ConversationTurn] = []
+        previous_sequence = before_turn_sequence
+        for row in rows:
+            if len(row) != 4:
+                raise ConversationIntegrityError("Durable conversation history is inconsistent")
+            turn_id, turn_sequence, user_text, assistant_text = row
+            if (
+                not isinstance(turn_id, str)
+                or type(turn_sequence) is not int
+                or not isinstance(user_text, str)
+                or not isinstance(assistant_text, str)
+                or not 1 <= len(user_text) <= MAX_USER_MESSAGE_CHARACTERS
+                or not 1 <= len(assistant_text) <= MAX_ASSISTANT_MESSAGE_CHARACTERS
+                or turn_sequence >= previous_sequence
+            ):
+                raise ConversationIntegrityError("Durable conversation history is inconsistent")
+            try:
+                canonical_turn_id = str(uuid.UUID(turn_id))
+            except (AttributeError, TypeError, ValueError) as exception:
+                raise ConversationIntegrityError(
+                    "Durable conversation history is inconsistent"
+                ) from exception
+            if canonical_turn_id != turn_id:
+                raise ConversationIntegrityError("Durable conversation history is inconsistent")
+            previous_sequence = turn_sequence
+            turns.append(
+                ConversationTurn(
+                    turn_id=turn_id,
+                    turn_sequence=turn_sequence,
+                    user_text=user_text,
+                    assistant_text=assistant_text,
+                )
+            )
+        return ConversationHistory(tuple(reversed(turns)), older_turns_available)
 
     def complete_turn(
         self,

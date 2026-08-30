@@ -65,6 +65,12 @@ requester, and had no tool that could tell it who owned one.
   explicitly non-authoritative: only a projected receipt lets a client render success, SSE tokens
   cannot produce a success state, and a deterministic action-claim lexicon exists as defense in
   depth.
+- **Bounded conversation context.** Each modeled turn can receive only the 16 most recent
+  completed user/assistant pairs from the same owned support session, under a 6,144 estimated-token
+  history budget. Whole pairs are trimmed at fixed watermarks, and content-free evidence records
+  exactly which turn ids entered the prompt. Pending actions, confirmation, authorization and live
+  commerce facts remain server-owned state rather than model memory. The policy and its limits are
+  in [the agent-control contract](docs/CONTRACTS.md#contract-agent-action-evidence).
 - **Failure convergence.** Idempotency keys, unique constraints, an inventory ledger, and
   status/version CAS make duplicate delivery, unpaid-timeout cancellation, and partial refunds
   converge to one result. The deadlocks, stale snapshots, and precision losses found while proving
@@ -77,7 +83,7 @@ requester, and had no tool that could tell it who owned one.
 |---|---|---|
 | `auth-service` | Java 21 / Spring Boot | Login, RS256 tokens, JWKS and key rotation, service-authenticated exact-scope OBO exchange |
 | `commerce-service` | Java 21 / Spring Boot | Products, inventory, orders, seckill, payment, refund, reconciliation, internal tool APIs |
-| `agent-service` | Python 3.11 / FastAPI | Support sessions, bounded ReAct agent, tool mediation, retrieval, SSE egress, durable evidence |
+| `agent-service` | Python 3.11 / FastAPI | Support sessions, bounded same-session context, ReAct agent, tool mediation, retrieval, SSE egress, durable evidence |
 | `knowledge-indexer` | Python 3.11 | FAQ/product indexing, source-version ordering, tombstones, rebuild and alias switching |
 | `web` | React / TypeScript | Small demonstration surface for the verified direct-user paths |
 
@@ -243,7 +249,7 @@ CityBuddy has no cloud deployment and no real model-provider access; the model i
 fixture, so every latency figure here excludes inference by construction.
 
 Cart, checkout, a full storefront, agent workstation, multimodal intake, PII/output-safety
-handling, and human handoff are out of scope. The payment and refund providers are mocked: a
+handling, cross-session memory, and human handoff are out of scope. The payment and refund providers are mocked: a
 committed receipt means the refund request is durably recorded and owned by commerce, not that
 money moved.
 

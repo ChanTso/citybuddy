@@ -39,6 +39,8 @@ def scenario(message: str) -> str:
         "provider-failure",
         "unsafe-action-claim",
         "action-prepare",
+        "context-seed",
+        "context-followup",
         "disconnect-slow",
         "retrieval-sufficient",
         "retrieval-insufficient",
@@ -103,6 +105,41 @@ def valid_message_tool_names(value: object) -> bool:
     return True
 
 
+def current_support_message(messages: list[object]) -> str | None:
+    if not messages or not isinstance(messages[0], dict) or messages[0].get("role") != "system":
+        return None
+    user_indexes = [
+        index
+        for index, item in enumerate(messages)
+        if isinstance(item, dict) and item.get("role") == "user"
+    ]
+    if not user_indexes:
+        return None
+    current_index = user_indexes[-1]
+    history = messages[1:current_index]
+    if len(history) % 2 != 0:
+        return None
+    for index, item in enumerate(history):
+        expected_role = "user" if index % 2 == 0 else "assistant"
+        if (
+            not isinstance(item, dict)
+            or item.get("role") != expected_role
+            or not isinstance(item.get("content"), str)
+        ):
+            return None
+    current = messages[current_index]
+    if not isinstance(current, dict) or not isinstance(current.get("content"), str):
+        return None
+    current_work = messages[current_index + 1 :]
+    if len(current_work) % 2 != 0:
+        return None
+    for index, item in enumerate(current_work):
+        expected_role = "assistant" if index % 2 == 0 else "tool"
+        if not isinstance(item, dict) or item.get("role") != expected_role:
+            return None
+    return str(current["content"])
+
+
 @app.post("/v1/chat/completions")
 async def complete(request: Request) -> JSONResponse:
     payload = await request.json()
@@ -122,16 +159,10 @@ async def complete(request: Request) -> JSONResponse:
         for item in messages
         if isinstance(item, dict) and item.get("role") == "user"
     ]
-    if len(user_messages) != 1 or not isinstance(user_messages[0], str):
-        return JSONResponse(status_code=400, content={"error": "invalid messages"})
-    selected = scenario(user_messages[0])
-    counts[f"{selected}:total"] += 1
-    counts[f"{selected}:{model}"] += 1
-    has_tool_feedback = any(
-        isinstance(item, dict) and item.get("role") == "tool" for item in messages
-    )
 
     if model == "support-reranker-standard":
+        if len(user_messages) != 1 or not isinstance(user_messages[0], str):
+            return JSONResponse(status_code=400, content={"error": "invalid rerank messages"})
         try:
             rerank_request = json.loads(user_messages[0])
         except json.JSONDecodeError:
@@ -164,6 +195,16 @@ async def complete(request: Request) -> JSONResponse:
                 scores.append({"candidate_id": candidate_id, "score": score})
         return JSONResponse(content=response_message(json.dumps({"scores": scores})))
 
+    current_message = current_support_message(messages)
+    if current_message is None:
+        return JSONResponse(status_code=400, content={"error": "invalid messages"})
+    selected = scenario(current_message)
+    counts[f"{selected}:total"] += 1
+    counts[f"{selected}:{model}"] += 1
+    has_tool_feedback = any(
+        isinstance(item, dict) and item.get("role") == "tool" for item in messages
+    )
+
     if selected == "transient-retry" and counts[f"{selected}:{model}"] == 1:
         return JSONResponse(status_code=503, content={"error": "transient"})
     if selected == "provider-failure":
@@ -173,6 +214,22 @@ async def complete(request: Request) -> JSONResponse:
         return JSONResponse(content=response_message("The bounded response completed safely."))
     if selected == "unsafe-action-claim":
         return JSONResponse(content=response_message("Your refund has been issued."))
+    if selected == "context-seed":
+        return JSONResponse(content=response_message("The session codeword is amber."))
+    if selected == "context-followup":
+        has_seed_pair = any(
+            isinstance(messages[index], dict)
+            and messages[index].get("role") == "user"
+            and "context-seed" in str(messages[index].get("content"))
+            and index + 1 < len(messages)
+            and isinstance(messages[index + 1], dict)
+            and messages[index + 1].get("role") == "assistant"
+            and messages[index + 1].get("content") == "The session codeword is amber."
+            for index in range(len(messages))
+        )
+        if not has_seed_pair:
+            return JSONResponse(status_code=400, content={"error": "missing session context"})
+        return JSONResponse(content=response_message("The session codeword is amber."))
     if selected in {"same-tier-fallback", "circuit-fail"} and model.endswith("primary"):
         return JSONResponse(status_code=503, content={"error": "transient"})
     if selected == "budget-exhaustion":
@@ -180,7 +237,7 @@ async def complete(request: Request) -> JSONResponse:
     if selected == "action-prepare" and not has_tool_feedback:
         # A caller that owns a different order names it in the message; the fixture order stays
         # the default so existing scenarios are unaffected.
-        order_match = ACTION_ORDER_PATTERN.search(user_messages[0])
+        order_match = ACTION_ORDER_PATTERN.search(current_message)
         return JSONResponse(
             content=tool_message(
                 REFUND_PREPARE_WIRE_NAME,
@@ -199,7 +256,7 @@ async def complete(request: Request) -> JSONResponse:
             )
         )
     if selected.startswith("retrieval-") and not has_tool_feedback:
-        tool_arguments: dict[str, str] = {"query": user_messages[0]}
+        tool_arguments: dict[str, str] = {"query": current_message}
         if selected == "retrieval-sufficient":
             tool_arguments["rewrite"] = "delivery guide"
         return JSONResponse(

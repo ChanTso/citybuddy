@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import uuid
 from datetime import datetime
 from pathlib import Path
 
@@ -25,9 +26,33 @@ EVENT_KEYS = {
     "reference",
     "attempt",
     "attemptLimit",
+    "context",
     "occurredAt",
 }
+CONTEXT_KEYS = {
+    "policyVersion",
+    "tokenEstimator",
+    "tokenBudget",
+    "tokenWatermark",
+    "candidateTokens",
+    "includedTokens",
+    "loadedTurnCount",
+    "includedTurnIds",
+    "omittedLoadedTurnCount",
+    "olderTurnsAvailable",
+}
 SOURCE_KEYS = {"rank", "sourceId", "chunkId", "sourceVersion", "docType"}
+
+
+def canonical_uuid(value: object) -> bool:
+    if not isinstance(value, str):
+        return False
+    try:
+        return str(uuid.UUID(value)) == value
+    except (AttributeError, TypeError, ValueError):
+        return False
+
+
 RETRIEVAL_KEYS = {
     "outcome",
     "reason",
@@ -104,6 +129,40 @@ def main() -> None:
         if event["sequence"] != expected or not isinstance(event["eventKind"], str):
             raise SystemExit("Evidence event sequence is not contiguous")
         require_rfc3339(event["occurredAt"])
+        context = event.get("context")
+        if event["eventKind"] == "CONTEXT_WINDOW":
+            if not isinstance(context, dict):
+                raise SystemExit("Context event omitted its bounded selection")
+            require_keys(context, CONTEXT_KEYS, CONTEXT_KEYS)
+            included = context["includedTurnIds"]
+            candidate_tokens = context["candidateTokens"]
+            included_tokens = context["includedTokens"]
+            loaded_turn_count = context["loadedTurnCount"]
+            omitted_turn_count = context["omittedLoadedTurnCount"]
+            if (
+                context["policyVersion"] != "session-context-v1"
+                or context["tokenEstimator"] != "utf8-bytes-v1"
+                or context["tokenBudget"] != 6144
+                or context["tokenWatermark"] not in {"low", "guarded", "high"}
+                or not isinstance(included, list)
+                or len(included) > 16
+                or len(set(included)) != len(included)
+                or any(not canonical_uuid(turn_id) for turn_id in included)
+                or type(candidate_tokens) is not int
+                or not 0 <= candidate_tokens <= 272_512
+                or type(included_tokens) is not int
+                or not 0 <= included_tokens <= 6144
+                or type(loaded_turn_count) is not int
+                or not 0 <= loaded_turn_count <= 16
+                or type(omitted_turn_count) is not int
+                or not 0 <= omitted_turn_count <= 16
+                or loaded_turn_count != len(included) + omitted_turn_count
+                or included_tokens > candidate_tokens
+                or not isinstance(context["olderTurnsAvailable"], bool)
+            ):
+                raise SystemExit("Context selection is outside its closed bounds")
+        elif context is not None:
+            raise SystemExit("Non-context event carried context selection")
         kinds.append(event["eventKind"])
     if kinds[0] != "USER_INPUT":
         raise SystemExit("Evidence omitted accepted-input boundary")

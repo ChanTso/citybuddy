@@ -49,11 +49,12 @@ def test_evaluation_evidence_schema_is_a_closed_safe_projection() -> None:
     schemas = contract()["components"]["schemas"]
     response = schemas["AgentEvaluationEvidence"]
     event = schemas["AgentEvaluationEvent"]
+    context = schemas["AgentEvaluationContext"]
     retrieval = schemas["AgentEvaluationRetrieval"]
     source = schemas["AgentEvaluationSource"]
     feedback = schemas["AgentEvaluationFeedback"]
 
-    for schema in (response, event, retrieval, source, feedback):
+    for schema in (response, event, context, retrieval, source, feedback):
         assert schema["additionalProperties"] is False
     assert set(response["properties"]) == {
         "schemaVersion",
@@ -75,8 +76,24 @@ def test_evaluation_evidence_schema_is_a_closed_safe_projection() -> None:
         "reference",
         "attempt",
         "attemptLimit",
+        "context",
         "occurredAt",
     }
+    assert set(context["properties"]) == {
+        "policyVersion",
+        "tokenEstimator",
+        "tokenBudget",
+        "tokenWatermark",
+        "candidateTokens",
+        "includedTokens",
+        "loadedTurnCount",
+        "includedTurnIds",
+        "omittedLoadedTurnCount",
+        "olderTurnsAvailable",
+    }
+    assert context["properties"]["tokenBudget"]["const"] == 6144
+    assert context["properties"]["candidateTokens"]["maximum"] == 272512
+    assert context["properties"]["includedTurnIds"]["maxItems"] == 16
     assert set(retrieval["properties"]) == {
         "outcome",
         "reason",
@@ -101,6 +118,7 @@ def test_evaluation_evidence_schema_is_a_closed_safe_projection() -> None:
         "action_expired",
     }
     assert set(event["properties"]["eventKind"]["enum"]) >= {
+        "CONTEXT_WINDOW",
         "ACTION_PREPARED",
         "ACTION_DECLINED",
         "ACTION_EXPIRED",
@@ -108,6 +126,7 @@ def test_evaluation_evidence_schema_is_a_closed_safe_projection() -> None:
     public_fields = (
         set(response["properties"])
         | set(event["properties"])
+        | set(context["properties"])
         | set(retrieval["properties"])
         | set(source["properties"])
         | set(feedback["properties"])
