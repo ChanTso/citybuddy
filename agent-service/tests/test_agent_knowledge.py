@@ -402,6 +402,7 @@ def test_tool_adapter_uses_elasticsearch_without_obo_or_caller_authority() -> No
         routes=(ProviderRoute("support-standard-primary", "primary"),),
         reranker_route=ProviderRoute("support-reranker-standard", "reranker"),
         attempt_limit=4,
+        tool_profile="read",
     )
 
     result = adapter.execute(
@@ -437,14 +438,13 @@ def test_tool_adapter_uses_elasticsearch_without_obo_or_caller_authority() -> No
         '{operation="knowledge_search",outcome="sufficient"} 1.0' in metric_payload
     )
     tool_names: set[str] = set()
-    for schema in adapter.schemas():
+    for schema in adapter.schemas(plan):
         function = schema.get("function")
         assert isinstance(function, dict)
         name = function.get("name")
         assert isinstance(name, str)
         tool_names.add(name)
     assert tool_names == {
-        "actions_refund_prepare",
         "catalog_product_get",
         "knowledge_search",
     }
@@ -541,6 +541,7 @@ def test_cache_hit_uses_server_message_and_still_runs_existing_sufficiency_path(
             routes=(ProviderRoute("support-standard-primary", "primary"),),
             reranker_route=ProviderRoute("support-reranker-standard", "reranker"),
             attempt_limit=2,
+            tool_profile="read",
         ),
         public_query="SERVER original question",
     )
@@ -619,6 +620,7 @@ def test_cache_miss_populates_only_one_sufficient_faq_from_server_message() -> N
             routes=(ProviderRoute("support-standard-primary", "primary"),),
             reranker_route=ProviderRoute("support-reranker-standard", "reranker"),
             attempt_limit=3,
+            tool_profile="read",
         ),
         public_query="server message",
     )
@@ -722,6 +724,7 @@ def test_insufficient_product_or_multi_source_result_never_populates_mapping(
             routes=(ProviderRoute("support-standard-primary", "primary"),),
             reranker_route=ProviderRoute("support-reranker-standard", "reranker"),
             attempt_limit=3,
+            tool_profile="read",
         ),
         public_query="server message",
     )

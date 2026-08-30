@@ -2065,7 +2065,7 @@ def test_action_request_persistence_phase_producers_are_exact(
                 "X-Session-Id": session_id,
                 "Idempotency-Key": f"failure-{producer}",
             },
-            json={"message": "action-prepare"},
+            json={"message": "action-prepare refund my order"},
         )
 
     assert response.status_code == 503

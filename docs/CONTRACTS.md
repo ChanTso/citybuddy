@@ -589,10 +589,20 @@ sequenceDiagram
 ### 8.1 Agent-control boundaries
 
 - Production support uses one ReAct agent. There is no multi-agent or decomposer mainline.
-- `RuleRouter` emits deterministic signals such as high risk, private action, cacheable public FAQ,
-  obvious chitchat, and complexity. It never chooses the final handling strategy.
-- `ModelRouter` is the only business policy decision-maker for model tier, escalation, and budget.
-  The model proxy may retry or fail over only inside the selected tier.
+- `RuleRouter` emits only deterministic signals for refund context and an exact chitchat greeting.
+  Refund context is coarse capability relevance, not a claim that the user wants an action and not
+  an authorization decision; policy, status, and negated refund messages intentionally remain in
+  that context. Message length, high-risk duplication, and a wording whitelist for public FAQs are
+  not treated as intent signals.
+- `ModelRouter` converts those signals into a server-owned plan. Refund context exposes all current
+  tools; exact chitchat exposes none and caps the configured attempt limit at three; every other
+  input exposes read tools. The read default keeps public retrieval available when wording or
+  published knowledge changes. The current deployment has one `standard` tier, so no signal
+  invents an unconfigured tier or provider route.
+- Tool visibility reduces what the model can request; it does not replace argument validation,
+  delegated scope, ownership checks, confirmation, or any other `ToolAdapter` boundary. A known
+  tool outside the selected profile is denied before identity or commerce I/O.
+- The model proxy may retry or fail over only inside the tier selected by the server-owned plan.
 - One shared `attempt_budget` spans model, model-proxy, HTTP, and tool attempts. Circuit breakers are
   provider-scoped, do not open before a minimum request count, and use bounded half-open probes.
   Provider fallback stays within the tier selected by `ModelRouter`.
@@ -839,7 +849,7 @@ in build files, image references, and lockfiles.
 | Reciprocal rank fusion | Server-side availability is not an undeclared deployment assumption | Implemented | Application merges separate BM25 and kNN lists deterministically; server-side RRF requires future distribution verification | [Elasticsearch RRF](https://www.elastic.co/guide/en/elasticsearch/reference/8.19/rrf.html) |
 | <a id="contract-preflight-ik"></a> IK analyzer compatibility | Elasticsearch and IK are pinned to matching patch; image installation and analyzer smoke tests pass | Resolved | Do not silently omit IK or change analyzer behavior; version changes must verify matching artifact/build | [IK analyzer repository](https://github.com/infinilabs/analysis-ik) |
 | Python 3.11, FastAPI, Pydantic, `pyproject.toml` | Pydantic v2 path and uv workspace are implemented | Implemented | Python 3.11, per-package metadata, committed shared `uv.lock`, exact locked patches | [FastAPI migration](https://fastapi.tiangolo.com/how-to/migrate-from-pydantic-v1-to-pydantic-v2/); [Pydantic](https://pydantic.dev/docs/validation/latest/get-started/install/); [uv layout](https://docs.astral.sh/uv/concepts/projects/layout/); [uv workspaces](https://docs.astral.sh/uv/concepts/workspaces/) |
-| Model-proxy compatibility and retry boundary | OpenAI-compatible calls, same-tier fallback, and bounded retry are enforced by application policy and deterministic tests | Implemented boundary | `ModelRouter` selects tier; proxy gets at most one transient/network retry and same-tier fallback; shared attempt budget forbids stacked unbounded retry | [LiteLLM Proxy](https://docs.litellm.ai/docs/simple_proxy); [fallback and retry](https://docs.litellm.ai/docs/proxy/reliability) |
+| Model-proxy compatibility and retry boundary | OpenAI-compatible calls, same-tier fallback, and bounded retry are enforced by application policy and deterministic tests | Implemented boundary | `ModelRouter` keeps the configured `standard` tier and selects signal-driven tool visibility and attempt limit; proxy gets at most one transient/network retry and same-tier fallback; shared attempt budget forbids stacked unbounded retry | [LiteLLM Proxy](https://docs.litellm.ai/docs/simple_proxy); [fallback and retry](https://docs.litellm.ai/docs/proxy/reliability) |
 | <a id="contract-preflight-compose"></a> Compose readiness and migration jobs | Health-gated dependencies and one-shot migration/grant jobs are implemented | Implemented | Stateful dependencies have meaningful health checks; migrations are explicit one-shot jobs, never API startup side effects | [Compose startup order](https://docs.docker.com/compose/how-tos/startup-order/); [Compose run](https://docs.docker.com/reference/cli/docker/compose/run/) |
 | Initialization checks and build tools | Maintained language tools and secret scanning back every invoked check | Implemented | Maven/Spotless/Checkstyle/JUnit; Ruff/mypy/pytest/uv; npm/Prettier/ESLint/TypeScript/Vitest/Vite; Gitleaks; CI targets invoke only checks backed by real files and tests | [Spotless](https://github.com/diffplug/spotless/tree/main/plugin-maven); [Checkstyle](https://maven.apache.org/plugins/maven-checkstyle-plugin/); [Maven compiler](https://maven.apache.org/plugins/maven-compiler-plugin/); [Surefire](https://maven.apache.org/surefire/maven-surefire-plugin/); [Ruff](https://docs.astral.sh/ruff/); [mypy](https://mypy.readthedocs.io/en/stable/); [pytest](https://docs.pytest.org/en/stable/); [ESLint](https://eslint.org/docs/latest/use/getting-started); [Prettier](https://prettier.io/docs/); [TypeScript](https://www.typescriptlang.org/docs/handbook/compiler-options.html); [Vitest](https://vitest.dev/guide/); [npm ci](https://docs.npmjs.com/cli/v11/commands/npm-ci/); [Gitleaks](https://github.com/gitleaks/gitleaks) |
 
@@ -863,7 +873,7 @@ relevant real integration evidence rather than relying on this prose.
 | Risk | Guardrail |
 |---|---|
 | Dependency/version drift | Exact patches and image digests live in build files/lockfiles. Markdown keeps compatibility boundary only; upgrades require real build and contract tests. |
-| Retry amplification across agent, proxy, HTTP, and MQ | One bounded attempt budget is propagated. `ModelRouter` owns tiers; model proxy gets at most one transient/network retry and same-tier fallback. Commerce side-effect retries return existing results. Confirmation re-enters commerce only from claimed reference and replays receipt; repeated request idempotency replays stored turn without commerce. |
+| Retry amplification across agent, proxy, HTTP, and MQ | One bounded attempt budget is propagated. `ModelRouter` owns the server plan and caps exact chitchat at three attempts; model proxy gets at most one transient/network retry and same-tier fallback. Commerce side-effect retries return existing results. Confirmation re-enters commerce only from claimed reference and replays receipt; repeated request idempotency replays stored turn without commerce. |
 | Redis or Elasticsearch treated as business truth | Contract tests and reconciliation compare with MySQL. User-visible order/action success requires durable MySQL state or ActionReceipt. |
 | Cross-database or cross-service leakage | Separate bootstrap/migration/runtime identities, exact grants, no cross-database joins, API-only boundaries, token-derived ownership, and private data excluded from RAG. |
 | Evaluation sandbox leakage, orphaned test identity, or late asynchronous effects | Commerce-orchestrated auth provision/revoke, opaque TTL handles, fail-closed activation/compensation, normal completion, janitor backstop, header/claim equality, ACTIVE/DEAD registry, scoped SQL, introduction-point liveness checks, and sandbox-bound callbacks. |
