@@ -289,6 +289,26 @@ def test_pending_action_reference_is_agent_owned_bounded_and_least_privilege() -
         assert set(responses) >= {"409", "502", "503"}
 
 
+def test_session_context_event_extends_the_closed_append_only_evidence_language() -> None:
+    migration = (ROOT / "infra/mysql/migrations/agent/V009__session_context_window.sql").read_text(
+        encoding="utf-8"
+    )
+
+    assert "DROP CHECK chk_support_event_sequence" in migration
+    assert "(sequence = 1 AND event_type = 'USER_INPUT')" in migration
+    assert "(sequence > 1 AND event_type <> 'USER_INPUT')" in migration
+    assert "'CONTEXT_WINDOW'" in migration
+    for event_type in (
+        "ROUTING_DECISION",
+        "RETRIEVAL_DECISION",
+        "ACTION_PREPARED",
+        "ACTION_RECEIPT",
+        "TURN_COMPLETED",
+        "TURN_FAILED",
+    ):
+        assert f"'{event_type}'" in migration
+
+
 def test_service_contracts_use_service_versions_not_retired_slice_ids() -> None:
     paths = (
         ROOT / "agent-service/openapi.json",

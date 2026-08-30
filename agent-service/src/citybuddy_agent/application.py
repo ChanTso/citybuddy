@@ -23,6 +23,7 @@ from pydantic import BaseModel, ConfigDict, Field
 from . import http_client
 from .actions import ConfirmationDecision, confirmation_decision
 from .agent_control import (
+    MAX_USER_MESSAGE_CHARACTERS,
     TOOL_BOUNDARY_FAILURE_REASONS,
     ActionConfirmer,
     AgentEvent,
@@ -338,7 +339,7 @@ class SessionResponse(BaseModel):
 class ChatRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    message: str = Field(min_length=1, max_length=4000)
+    message: str = Field(min_length=1, max_length=MAX_USER_MESSAGE_CHARACTERS)
 
 
 class CitationResponse(BaseModel):
@@ -941,6 +942,7 @@ def create_app(
                     session_id=session_id,
                     trace_id=start.trace_id,
                     turn_id=start.turn_id,
+                    history=start.history,
                 )
             else:
                 agent_result = resolved_agent.run(
@@ -950,6 +952,7 @@ def create_app(
                     session_id=session_id,
                     trace_id=start.trace_id,
                     turn_id=start.turn_id,
+                    history=start.history,
                     sandbox_id=principal.sandbox_id,
                 )
             for reason in agent_result.request_reasons:

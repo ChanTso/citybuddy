@@ -406,7 +406,7 @@ turn_id="$(uv run python scripts/read_json_field.py "$tmp_dir/first-chat.json" t
 test "$(uv run python scripts/read_json_field.py "$tmp_dir/first-chat.json" outcome)" = completed
 test "$(mysql_query agent_app "$agent_app_password" cs_db "SELECT COUNT(*) FROM support_conversation WHERE conversation_id = '$conversation_id' AND session_id = '$session_id' AND user_subject = 'user-integration'")" = 1
 test "$(mysql_query agent_app "$agent_app_password" cs_db "SELECT CONCAT(state, ':', turn_sequence) FROM support_turn WHERE turn_id = '$turn_id' AND trace_id = '$trace_id'")" = COMPLETED:1
-test "$(mysql_query agent_app "$agent_app_password" cs_db "SELECT GROUP_CONCAT(CONCAT(sequence, ':', event_type) ORDER BY sequence SEPARATOR ',') FROM support_event WHERE trace_id = '$trace_id'")" = '1:USER_INPUT,2:ROUTING_DECISION,3:BUDGET_CHARGED,4:CIRCUIT_OUTCOME,5:MODEL_OUTCOME,6:AGENT_OUTCOME,7:ASSISTANT_RESPONSE,8:TURN_COMPLETED'
+test "$(mysql_query agent_app "$agent_app_password" cs_db "SELECT GROUP_CONCAT(CONCAT(sequence, ':', event_type) ORDER BY sequence SEPARATOR ',') FROM support_event WHERE trace_id = '$trace_id'")" = '1:USER_INPUT,2:CONTEXT_WINDOW,3:ROUTING_DECISION,4:BUDGET_CHARGED,5:CIRCUIT_OUTCOME,6:MODEL_OUTCOME,7:AGENT_OUTCOME,8:ASSISTANT_RESPONSE,9:TURN_COMPLETED'
 
 assert_status 200 "same-intent durable replay" \
   --request POST "http://127.0.0.1:$agent_port/api/chat" \
@@ -415,7 +415,36 @@ assert_status 200 "same-intent durable replay" \
   --data '{"message":"Where is my order?"}'
 cmp "$tmp_dir/first-chat.json" "$tmp_dir/http-response.json"
 test "$(mysql_query agent_app "$agent_app_password" cs_db "SELECT COUNT(*) FROM support_turn WHERE session_id = '$session_id'")" = 1
-test "$(mysql_query agent_app "$agent_app_password" cs_db "SELECT COUNT(*) FROM support_event WHERE trace_id = '$trace_id'")" = 8
+test "$(mysql_query agent_app "$agent_app_password" cs_db "SELECT COUNT(*) FROM support_event WHERE trace_id = '$trace_id'")" = 9
+
+assert_status 201 "bounded-context support-session creation" \
+  --request POST "http://127.0.0.1:$agent_port/api/sessions" \
+  --header "Authorization: Bearer $direct_token" \
+  --header 'Content-Type: application/json' \
+  --data '{}'
+context_session_id="$(uv run python scripts/read_json_field.py "$tmp_dir/http-response.json" sessionId)"
+context_headers=(
+  --header "Authorization: Bearer $direct_token"
+  --header "X-Session-Id: $context_session_id"
+  --header 'Content-Type: application/json'
+)
+assert_status 200 "bounded-context seed turn" \
+  --request POST "http://127.0.0.1:$agent_port/api/chat" \
+  "${context_headers[@]}" \
+  --header 'Idempotency-Key: context-seed' \
+  --data '{"message":"context-seed remember amber for this support session"}'
+context_seed_turn="$(uv run python scripts/read_json_field.py "$tmp_dir/http-response.json" turnId)"
+test "$(uv run python scripts/read_json_field.py "$tmp_dir/http-response.json" reply)" = 'The session codeword is amber.'
+assert_status 200 "bounded-context follow-up receives prior role pair" \
+  --request POST "http://127.0.0.1:$agent_port/api/chat" \
+  "${context_headers[@]}" \
+  --header 'Idempotency-Key: context-followup' \
+  --data '{"message":"context-followup what was the session codeword?"}'
+context_followup_turn="$(uv run python scripts/read_json_field.py "$tmp_dir/http-response.json" turnId)"
+test "$(uv run python scripts/read_json_field.py "$tmp_dir/http-response.json" reply)" = 'The session codeword is amber.'
+test "$(mysql_query agent_app "$agent_app_password" cs_db "SELECT CONCAT(JSON_UNQUOTE(JSON_EXTRACT(payload_json, '$.policyVersion')), ':', JSON_EXTRACT(payload_json, '$.loadedTurnCount'), ':', JSON_UNQUOTE(JSON_EXTRACT(payload_json, '$.includedTurnIds[0]')), ':', JSON_EXTRACT(payload_json, '$.olderTurnsAvailable')) FROM support_event WHERE turn_id = '$context_followup_turn' AND event_type = 'CONTEXT_WINDOW'")" = "session-context-v1:1:$context_seed_turn:false"
+test "$(mysql_query agent_app "$agent_app_password" cs_db "SELECT LOCATE('amber', CAST(payload_json AS CHAR)) FROM support_event WHERE turn_id = '$context_followup_turn' AND event_type = 'CONTEXT_WINDOW'")" = 0
+echo "Verified bounded completed-turn context reaches the model with content-free selection evidence."
 
 assert_status 200 "filtered SSE safe text" \
   --request POST "http://127.0.0.1:$agent_port/api/chat/stream" \
@@ -699,7 +728,7 @@ for index in 2 3 4; do
 done
 test "$(mysql_query agent_app "$agent_app_password" cs_db "SELECT COUNT(*) FROM support_turn WHERE session_id = '$session_id' AND correlation_key = 'cb080-concurrent'")" = 1
 concurrent_trace="$(uv run python scripts/read_json_field.py "$tmp_dir/concurrent-1.json" traceId)"
-test "$(mysql_query agent_app "$agent_app_password" cs_db "SELECT COUNT(*) FROM support_event WHERE trace_id = '$concurrent_trace'")" = 8
+test "$(mysql_query agent_app "$agent_app_password" cs_db "SELECT COUNT(*) FROM support_event WHERE trace_id = '$concurrent_trace'")" = 9
 echo "Verified concurrent same-intent requests converge to one durable turn and sequence."
 
 assert_status 200 "real JIT OBO and commerce ToolSpec success" \

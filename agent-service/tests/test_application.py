@@ -22,10 +22,13 @@ from citybuddy_agent.actions import (
     PendingActionReference,
 )
 from citybuddy_agent.agent_control import (
+    EMPTY_CONVERSATION_HISTORY,
     AgentEvent,
     AgentRunner,
     AgentRunResult,
     AttemptBudget,
+    ConversationHistory,
+    ConversationTurn,
     ToolBoundaryFailure,
 )
 from citybuddy_agent.application import (
@@ -41,6 +44,7 @@ from citybuddy_agent.application import (
 )
 from citybuddy_agent.conversation import (
     ActionArbitrationConflictError,
+    ConversationIntegrityError,
     ConversationOwnershipError,
     ConversationResult,
     ConversationStore,
@@ -120,6 +124,7 @@ class MemoryConversationStore(ConversationStore):
         self.claims = 0
         self.confirmed_receipts: list[ActionReceiptResponse] = []
         self.calls = 0
+        self.turns: dict[str, list[ConversationTurn]] = {}
 
     def replay_turn(
         self,
@@ -186,6 +191,7 @@ class MemoryConversationStore(ConversationStore):
             conversation_id=f"server-conversation-{session_id}",
             trace_id=f"server-trace-{self.calls}",
             turn_id=f"server-turn-{self.calls}",
+            history=ConversationHistory(tuple(self.turns.get(session_id, ()))),
         )
         self.pending[key] = (message, start)
         return start
@@ -213,6 +219,15 @@ class MemoryConversationStore(ConversationStore):
             retrieval_decision.evidence if retrieval_decision is not None else (),
         )
         self.results[key] = (pending[0], result)
+        session_turns = self.turns.setdefault(key[0], [])
+        session_turns.append(
+            ConversationTurn(
+                turn_id=start.turn_id,
+                turn_sequence=len(session_turns) + 1,
+                user_text=pending[0],
+                assistant_text=response_text,
+            )
+        )
         if pending_action is not None:
             self.action_pending = PendingActionReference(
                 pending_action_id=pending_action.pending_action_id,
@@ -295,6 +310,7 @@ class MemoryAgent(AgentRunner):
     def __init__(self, *, request_reasons: tuple[str, ...] = ()) -> None:
         self.calls = 0
         self.sandbox_ids: list[str | None] = []
+        self.histories: list[ConversationHistory] = []
         self.request_reasons = request_reasons
 
     def run(
@@ -306,10 +322,12 @@ class MemoryAgent(AgentRunner):
         session_id: str,
         trace_id: str,
         turn_id: str,
+        history: ConversationHistory = EMPTY_CONVERSATION_HISTORY,
         sandbox_id: str | None = None,
     ) -> AgentRunResult:
         self.calls += 1
         self.sandbox_ids.append(sandbox_id)
+        self.histories.append(history)
         del message, direct_token, subject, session_id, trace_id, turn_id
         return AgentRunResult(
             "Bounded support response.",
@@ -353,9 +371,10 @@ class PreparedActionAgent(AgentRunner):
         session_id: str,
         trace_id: str,
         turn_id: str,
+        history: ConversationHistory = EMPTY_CONVERSATION_HISTORY,
         sandbox_id: str | None = None,
     ) -> AgentRunResult:
-        del message, direct_token, subject, session_id, trace_id, turn_id, sandbox_id
+        del message, direct_token, subject, session_id, trace_id, turn_id, history, sandbox_id
         self.calls += 1
         return AgentRunResult(
             "A refund request is ready for your explicit decision.",
@@ -392,9 +411,10 @@ class BoundaryFailingAgent(AgentRunner):
         session_id: str,
         trace_id: str,
         turn_id: str,
+        history: ConversationHistory = EMPTY_CONVERSATION_HISTORY,
         sandbox_id: str | None = None,
     ) -> AgentRunResult:
-        del message, direct_token, subject, session_id, trace_id, turn_id, sandbox_id
+        del message, direct_token, subject, session_id, trace_id, turn_id, history, sandbox_id
         raise self.failure
 
 
@@ -1392,6 +1412,131 @@ def test_chat_persists_server_owned_result_and_replays_same_intent() -> None:
     assert "order" not in first.json()["reply"].lower()
     assert len(conversations.results) == 1
     assert agent.calls == 1
+
+
+def test_chat_passes_only_completed_turns_from_the_owned_session_to_the_agent() -> None:
+    private, public_jwk = key_fixture("current-key")
+    validator = DirectJwtValidator(settings(), CountingJwksSource([public_jwk]))
+    sessions = MemorySessionStore()
+    session_id = sessions.create("user-123")
+    other_session_id = sessions.create("user-123")
+    conversations = MemoryConversationStore(sessions)
+    agent = MemoryAgent()
+    client = TestClient(
+        create_app(
+            settings(),
+            validator=validator,
+            sessions=sessions,
+            conversations=conversations,
+            agent=agent,
+        )
+    )
+    authorization = f"Bearer {direct_token(private, 'current-key')}"
+
+    first = client.post(
+        "/api/chat",
+        headers={
+            "Authorization": authorization,
+            "X-Session-Id": session_id,
+            "Idempotency-Key": "context-turn-1",
+        },
+        json={"message": "First session message"},
+    )
+    second = client.post(
+        "/api/chat",
+        headers={
+            "Authorization": authorization,
+            "X-Session-Id": session_id,
+            "Idempotency-Key": "context-turn-2",
+        },
+        json={"message": "Second session message"},
+    )
+    other = client.post(
+        "/api/chat",
+        headers={
+            "Authorization": authorization,
+            "X-Session-Id": other_session_id,
+            "Idempotency-Key": "context-other-session",
+        },
+        json={"message": "Other session message"},
+    )
+
+    assert first.status_code == second.status_code == other.status_code == 200
+    assert agent.histories[0] == ConversationHistory()
+    assert agent.histories[1].turns == (
+        ConversationTurn(
+            turn_id=first.json()["turnId"],
+            turn_sequence=1,
+            user_text="First session message",
+            assistant_text="Bounded support response.",
+        ),
+    )
+    assert agent.histories[2] == ConversationHistory()
+
+
+def test_mysql_history_snapshot_is_recent_owner_bound_and_sql_limited() -> None:
+    class HistoryCursor:
+        def __init__(self) -> None:
+            self.query = ""
+            self.parameters: tuple[object, ...] = ()
+
+        def execute(self, query: str, parameters: tuple[object, ...]) -> None:
+            self.query = query
+            self.parameters = parameters
+
+        @staticmethod
+        def fetchall() -> tuple[tuple[object, ...], ...]:
+            return tuple(
+                (
+                    f"00000000-0000-0000-0000-{sequence:012d}",
+                    sequence,
+                    f"user-{sequence}",
+                    f"assistant-{sequence}",
+                )
+                for sequence in range(20, 3, -1)
+            )
+
+    cursor = HistoryCursor()
+
+    history = MysqlConversationStore._load_recent_history(  # noqa: SLF001
+        cursor,  # type: ignore[arg-type]
+        conversation_id="conversation-1",
+        session_id="session-1",
+        subject="user-1",
+        before_turn_sequence=21,
+    )
+
+    assert [turn.turn_sequence for turn in history.turns] == list(range(5, 21))
+    assert history.older_turns_available is True
+    assert "session_id = %s" in cursor.query
+    assert "user_subject = %s" in cursor.query
+    assert "turn_sequence < %s" in cursor.query
+    assert "state = 'COMPLETED'" in cursor.query
+    assert "ORDER BY turn_sequence DESC LIMIT %s" in cursor.query
+    assert cursor.parameters == ("conversation-1", "session-1", "user-1", 21, 17)
+
+
+def test_mysql_history_snapshot_rejects_a_malformed_turn_id_as_integrity_failure() -> None:
+    class HistoryCursor:
+        @staticmethod
+        def execute(query: str, parameters: tuple[object, ...]) -> None:
+            del query, parameters
+
+        @staticmethod
+        def fetchall() -> tuple[tuple[object, ...], ...]:
+            return (("00000000-0000-0000-0000-00000000000g", 1, "user", "assistant"),)
+
+    with pytest.raises(
+        ConversationIntegrityError,
+        match="Durable conversation history is inconsistent",
+    ):
+        MysqlConversationStore._load_recent_history(  # noqa: SLF001
+            HistoryCursor(),  # type: ignore[arg-type]
+            conversation_id="conversation-1",
+            session_id="session-1",
+            subject="user-1",
+            before_turn_sequence=2,
+        )
 
 
 def test_cb122_decline_lock_compares_the_complete_reference_after_target_version(
@@ -2400,9 +2545,10 @@ def test_unexpected_agent_error_is_visible_and_marks_the_reserved_turn_failed() 
             session_id: str,
             trace_id: str,
             turn_id: str,
+            history: ConversationHistory = EMPTY_CONVERSATION_HISTORY,
             sandbox_id: str | None = None,
         ) -> AgentRunResult:
-            del message, direct_token, subject, session_id, trace_id, turn_id, sandbox_id
+            del message, direct_token, subject, session_id, trace_id, turn_id, history, sandbox_id
             raise RuntimeError("private provider configuration detail")
 
     private, public_jwk = key_fixture("current-key")
@@ -2498,9 +2644,10 @@ def test_stream_withholds_action_claim_and_private_execution_failure() -> None:
             session_id: str,
             trace_id: str,
             turn_id: str,
+            history: ConversationHistory = EMPTY_CONVERSATION_HISTORY,
             sandbox_id: str | None = None,
         ) -> AgentRunResult:
-            del message, direct_token, subject, session_id, trace_id, turn_id, sandbox_id
+            del message, direct_token, subject, session_id, trace_id, turn_id, history, sandbox_id
             if self.result is None:
                 raise RuntimeError("private provider stack and credential detail")
             return self.result
@@ -2563,9 +2710,10 @@ def test_stream_maps_bounded_non_success_outcomes_to_one_terminal_error() -> Non
             session_id: str,
             trace_id: str,
             turn_id: str,
+            history: ConversationHistory = EMPTY_CONVERSATION_HISTORY,
             sandbox_id: str | None = None,
         ) -> AgentRunResult:
-            del message, direct_token, subject, session_id, trace_id, turn_id, sandbox_id
+            del message, direct_token, subject, session_id, trace_id, turn_id, history, sandbox_id
             return AgentRunResult("private provider response", "provider_denied", tuple())
 
     private, public_jwk = key_fixture("current-key")

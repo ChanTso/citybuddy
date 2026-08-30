@@ -3,11 +3,12 @@
 from __future__ import annotations
 
 import json
+import uuid
 from datetime import UTC, datetime
 from typing import Literal, Protocol, cast
 
 import pymysql
-from pydantic import AwareDatetime, BaseModel, ConfigDict, Field
+from pydantic import AwareDatetime, BaseModel, ConfigDict, Field, ValidationError, field_validator
 
 from .actions import (
     ACTION_TURN_EVENTS_SQL,
@@ -22,7 +23,13 @@ from .actions import (
     validate_pending_action_resolution,
     validate_resolved_action_events,
 )
-from .agent_control import TOOL_BOUNDARY_FAILURE_REASONS
+from .agent_control import (
+    SESSION_CONTEXT_MAX_CANDIDATE_TOKENS,
+    SESSION_CONTEXT_MAX_TURNS,
+    SESSION_CONTEXT_POLICY_VERSION,
+    SESSION_CONTEXT_TOKEN_BUDGET,
+    TOOL_BOUNDARY_FAILURE_REASONS,
+)
 
 MAX_EVIDENCE_EVENTS = 96
 MAX_FEEDBACK_RECORDS = 8
@@ -41,6 +48,7 @@ TerminalOutcome = Literal[
 ]
 EventKind = Literal[
     "USER_INPUT",
+    "CONTEXT_WINDOW",
     "ROUTING_DECISION",
     "BUDGET_CHARGED",
     "CIRCUIT_OUTCOME",
@@ -80,6 +88,7 @@ _ACTION_EVENT_TYPES = {
 }
 _EVENT_TYPES = {
     "USER_INPUT",
+    "CONTEXT_WINDOW",
     "ROUTING_DECISION",
     "BUDGET_CHARGED",
     "CIRCUIT_OUTCOME",
@@ -125,6 +134,47 @@ class ActionEvaluationEvidenceInvalid(EvaluationEvidenceInvalid):
     """Persisted action evidence has an inconsistent durable closure."""
 
 
+class ContextWindowEvidenceResponse(BaseModel):
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    policy_version: Literal["session-context-v1"] = Field(alias="policyVersion")
+    token_estimator: Literal["utf8-bytes-v1"] = Field(alias="tokenEstimator")
+    token_budget: Literal[6144] = Field(alias="tokenBudget")
+    token_watermark: Literal["low", "guarded", "high"] = Field(alias="tokenWatermark")
+    candidate_tokens: int = Field(
+        alias="candidateTokens",
+        ge=0,
+        le=SESSION_CONTEXT_MAX_CANDIDATE_TOKENS,
+    )
+    included_tokens: int = Field(
+        alias="includedTokens",
+        ge=0,
+        le=SESSION_CONTEXT_TOKEN_BUDGET,
+    )
+    loaded_turn_count: int = Field(
+        alias="loadedTurnCount",
+        ge=0,
+        le=SESSION_CONTEXT_MAX_TURNS,
+    )
+    included_turn_ids: tuple[str, ...] = Field(
+        alias="includedTurnIds",
+        max_length=SESSION_CONTEXT_MAX_TURNS,
+    )
+    omitted_loaded_turn_count: int = Field(
+        alias="omittedLoadedTurnCount",
+        ge=0,
+        le=SESSION_CONTEXT_MAX_TURNS,
+    )
+    older_turns_available: bool = Field(alias="olderTurnsAvailable")
+
+    @field_validator("included_turn_ids")
+    @classmethod
+    def canonical_turn_ids(cls, values: tuple[str, ...]) -> tuple[str, ...]:
+        if any(str(uuid.UUID(value)) != value for value in values):
+            raise ValueError("Context turn id must be a canonical UUID")
+        return values
+
+
 class EvidenceEventResponse(BaseModel):
     model_config = ConfigDict(frozen=True)
 
@@ -134,6 +184,7 @@ class EvidenceEventResponse(BaseModel):
     reference: str | None = Field(default=None, min_length=1, max_length=128)
     attempt: int | None = Field(default=None, ge=1, le=32)
     attempt_limit: int | None = Field(default=None, serialization_alias="attemptLimit", ge=1, le=32)
+    context: ContextWindowEvidenceResponse | None = None
     occurred_at: AwareDatetime = Field(serialization_alias="occurredAt")
 
 
@@ -351,6 +402,14 @@ class MysqlEvaluationEvidenceStore:
         if terminal_outcome != "failed" and events[-1].outcome != terminal_outcome:
             raise EvaluationEvidenceInvalid
         self._validate_lifecycle(events, terminal_outcome)
+        self._validate_context_truth(
+            cursor,
+            events=events,
+            turn_id=turn_id,
+            conversation_id=conversation_id,
+            session_id=session_id,
+            subject=subject,
+        )
         self._validate_action_truth(
             cursor,
             rows=rows,
@@ -363,6 +422,52 @@ class MysqlEvaluationEvidenceStore:
             terminal_outcome=terminal_outcome,
         )
         return tuple(events)
+
+    @staticmethod
+    def _validate_context_truth(
+        cursor: pymysql.cursors.Cursor,
+        *,
+        events: list[EvidenceEventResponse],
+        turn_id: str,
+        conversation_id: str,
+        session_id: str,
+        subject: str,
+    ) -> None:
+        context_events = [event for event in events if event.event_kind == "CONTEXT_WINDOW"]
+        if len(context_events) > 1:
+            raise EvaluationEvidenceInvalid
+        if not context_events:
+            return
+        context = context_events[0].context
+        if context is None:
+            raise EvaluationEvidenceInvalid
+        included = context.included_turn_ids
+        if not included:
+            return
+        placeholders = ",".join("%s" for _ in included)
+        cursor.execute(
+            "SELECT source.turn_id, source.conversation_id, source.session_id, "
+            "source.user_subject, source.state, source.turn_sequence, current.turn_sequence "
+            "FROM support_turn source JOIN support_turn current ON current.turn_id = %s "
+            f"WHERE source.turn_id IN ({placeholders})",
+            (turn_id, *included),
+        )
+        rows = cursor.fetchall()
+        if len(rows) != len(included):
+            raise EvaluationEvidenceInvalid
+        by_id = {str(row[0]): row for row in rows}
+        previous_sequence = 0
+        for included_turn_id in included:
+            row = by_id.get(included_turn_id)
+            if (
+                row is None
+                or tuple(row[1:5]) != (conversation_id, session_id, subject, "COMPLETED")
+                or type(row[5]) is not int
+                or type(row[6]) is not int
+                or not previous_sequence < int(row[5]) < int(row[6])
+            ):
+                raise EvaluationEvidenceInvalid
+            previous_sequence = int(row[5])
 
     @staticmethod
     def _validate_lifecycle(
@@ -403,10 +508,50 @@ class MysqlEvaluationEvidenceStore:
         reference: str | None = None
         attempt: int | None = None
         attempt_limit: int | None = None
+        context: ContextWindowEvidenceResponse | None = None
         if event_type == "USER_INPUT":
             if payload.get("accepted") is not True:
                 raise EvaluationEvidenceInvalid
             outcome = "accepted"
+        elif event_type == "CONTEXT_WINDOW":
+            if (
+                not isinstance(payload.get("policyVersion"), str)
+                or not isinstance(payload.get("tokenEstimator"), str)
+                or type(payload.get("tokenBudget")) is not int
+                or not isinstance(payload.get("tokenWatermark"), str)
+                or type(payload.get("candidateTokens")) is not int
+                or type(payload.get("includedTokens")) is not int
+                or type(payload.get("loadedTurnCount")) is not int
+                or not isinstance(payload.get("includedTurnIds"), list)
+                or any(
+                    not isinstance(turn_id, str)
+                    for turn_id in cast(list[object], payload.get("includedTurnIds"))
+                )
+                or type(payload.get("omittedLoadedTurnCount")) is not int
+                or type(payload.get("olderTurnsAvailable")) is not bool
+            ):
+                raise EvaluationEvidenceInvalid
+            try:
+                context = ContextWindowEvidenceResponse.model_validate(payload)
+            except ValidationError as exception:
+                raise EvaluationEvidenceInvalid from exception
+            if (
+                context.policy_version != SESSION_CONTEXT_POLICY_VERSION
+                or context.token_budget != SESSION_CONTEXT_TOKEN_BUDGET
+                or context.loaded_turn_count
+                != len(context.included_turn_ids) + context.omitted_loaded_turn_count
+                or context.candidate_tokens < context.included_tokens
+                or len(set(context.included_turn_ids)) != len(context.included_turn_ids)
+                or any(
+                    not self._bounded_string(turn_id, 36) or len(turn_id) != 36
+                    for turn_id in context.included_turn_ids
+                )
+                or not self._valid_context_watermark(context)
+                or (context.token_watermark != "high" and context.omitted_loaded_turn_count != 0)
+            ):
+                raise EvaluationEvidenceInvalid
+            outcome = context.token_watermark
+            reference = context.policy_version
         elif event_type == "ROUTING_DECISION":
             tier = payload.get("tier")
             limit = payload.get("attemptLimit")
@@ -514,8 +659,18 @@ class MysqlEvaluationEvidenceStore:
             reference=reference,
             attempt=attempt,
             attempt_limit=attempt_limit,
+            context=context,
             occurred_at=occurred_at,
         )
+
+    @staticmethod
+    def _valid_context_watermark(context: ContextWindowEvidenceResponse) -> bool:
+        scaled = context.candidate_tokens * 100
+        if context.token_watermark == "low":
+            return scaled <= context.token_budget * 50
+        if context.token_watermark == "guarded":
+            return context.token_budget * 50 < scaled <= context.token_budget * 80
+        return scaled > context.token_budget * 80
 
     def _validate_action_truth(
         self,
