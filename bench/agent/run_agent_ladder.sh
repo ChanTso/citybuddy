@@ -7,6 +7,23 @@
 set -euo pipefail
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"; cd "$repo_root"
 out="$repo_root/bench/results"; mkdir -p "$out"
+commit_file="$repo_root/bench/.run/citybuddy_commit"
+if [ ! -s "$commit_file" ]; then
+  echo "No completed agent benchmark setup records the built commit; rerun setup." >&2
+  exit 1
+fi
+citybuddy_commit="$(tr -d '\r\n' < "$commit_file")"
+current_commit="$(git rev-parse --verify HEAD)"
+source_changes="$(git status --porcelain --untracked-files=all -- . \
+  ':(exclude)bench/results/**' \
+  ':(exclude)bench/.run/**')"
+if [ "$current_commit" != "$citybuddy_commit" ] || [ -n "$source_changes" ]; then
+  echo "The checkout no longer matches the source-clean commit used to build the agent image." >&2
+  echo "setup=$citybuddy_commit current=$current_commit" >&2
+  [ -z "$source_changes" ] || printf '%s\n' "$source_changes" >&2
+  echo "Commit the source and rerun ./bench/agent/setup_agent_bench.sh." >&2
+  exit 1
+fi
 
 PATH_NAME="$1"                                   # chat | retrieval | prepare
 # Output files are named by LABEL, not by path, so a control run against a changed setting does
@@ -21,7 +38,7 @@ GAP_SECONDS="${GAP_SECONDS:-$((GRACEFUL_STOP_SECONDS + 10))}"
 RUN_ID="${RUN_ID:-$(date -u +%H%M%S)}"
 POOL_BASE="${POOL_BASE:-0}"
 
-echo "== agent ladder '$LABEL' (path=$PATH_NAME rates=$RATES step=${STEP_SECONDS}s) =="
+echo "== agent ladder '$LABEL' (commit=$citybuddy_commit path=$PATH_NAME rates=$RATES step=${STEP_SECONDS}s) =="
 docker rm -f citybuddy-bench-k6 >/dev/null 2>&1 || true
 
 # The agent opens a fresh MySQL connection for every persistence call rather than pooling, so
@@ -58,6 +75,20 @@ if [ "$PATH_NAME" = "prepare" ]; then
   fi
 fi
 
+summary_path="$out/agent_${LABEL}_summary.json"
+points_path="$out/agent_${LABEL}_points.json"
+rm -f \
+  "$summary_path" \
+  "$summary_path.tmp" \
+  "$points_path" \
+  "$out/agent_${LABEL}_console.txt" \
+  "$out/agent_${LABEL}_cpu.txt" \
+  "$out/agent_${LABEL}_cpu_errors.txt" \
+  "$out/agent_${LABEL}_cpu_errors.txt.tmp" \
+  "$out/agent_${LABEL}_cpu_by_step.txt" \
+  "$out/agent_${LABEL}_mysql.txt" \
+  "$out/agent_${LABEL}_steps.txt"
+
 docker run --detach --name citybuddy-bench-k6 \
   --network "container:citybuddy-bench-net" \
   --volume "$repo_root/bench/agent/k6:/scripts:ro" \
@@ -70,10 +101,12 @@ docker run --detach --name citybuddy-bench-k6 \
   --entrypoint k6 grafana/k6:latest \
   run --summary-export="/out/agent_${LABEL}_summary.json" \
       --out "json=/out/agent_${LABEL}_points.json" \
+      --tag "citybuddy_commit=$citybuddy_commit" \
       /scripts/agent_paths.js >/dev/null
 
 run_started="$(date -u +%s)"
-: > "$out/agent_${LABEL}_cpu.txt"
+printf 'citybuddy_commit=%s\n' "$citybuddy_commit" > "$out/agent_${LABEL}_cpu.txt"
+: > "$out/agent_${LABEL}_cpu_errors.txt"
 sampled=(citybuddy-bench-k6 citybuddy-bench-agent citybuddy-bench-model citybuddy-bench-commerce
          citybuddy-mysql-1 citybuddy-elasticsearch-1)
 while [ "$(docker inspect -f '{{.State.Running}}' citybuddy-bench-k6 2>/dev/null)" = "true" ]; do
@@ -83,17 +116,46 @@ while [ "$(docker inspect -f '{{.State.Running}}' citybuddy-bench-k6 2>/dev/null
 done
 
 # Kept only when docker stats actually complained; an empty file is noise in the evidence set.
-[ -s "$out/agent_${LABEL}_cpu_errors.txt" ] || rm -f "$out/agent_${LABEL}_cpu_errors.txt"
+if [ -s "$out/agent_${LABEL}_cpu_errors.txt" ]; then
+  {
+    printf 'citybuddy_commit=%s\n' "$citybuddy_commit"
+    cat "$out/agent_${LABEL}_cpu_errors.txt"
+  } > "$out/agent_${LABEL}_cpu_errors.txt.tmp"
+  mv "$out/agent_${LABEL}_cpu_errors.txt.tmp" "$out/agent_${LABEL}_cpu_errors.txt"
+else
+  rm -f "$out/agent_${LABEL}_cpu_errors.txt"
+fi
 
-docker logs citybuddy-bench-k6 > "$out/agent_${LABEL}_console.txt" 2>&1
+{
+  printf 'citybuddy_commit=%s\n' "$citybuddy_commit"
+  docker logs citybuddy-bench-k6
+} > "$out/agent_${LABEL}_console.txt" 2>&1
 
 # A k6 iteration that throws does not by itself fail the run, and a k6 that dies during init
 # leaves the sampling loop with nothing to sample, so both would otherwise produce a results file
 # that reads clean. The exit code is the one signal that covers each, and it is checked here.
 k6_status="$(docker inspect -f '{{.State.ExitCode}}' citybuddy-bench-k6)"
+if [ -f "$summary_path" ]; then
+  uv run python - "$summary_path" "$citybuddy_commit" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+path = Path(sys.argv[1])
+document = json.loads(path.read_text(encoding="utf-8"))
+document["citybuddyCommit"] = sys.argv[2]
+temporary = path.with_suffix(path.suffix + ".tmp")
+temporary.write_text(json.dumps(document, indent=4) + "\n", encoding="utf-8")
+temporary.replace(path)
+PY
+fi
 if [ "$k6_status" -ne 0 ]; then
   echo "k6 exited $k6_status; the results for '$LABEL' are not a measurement." >&2
   tail -30 "$out/agent_${LABEL}_console.txt" >&2
+  exit 1
+fi
+if [ ! -f "$summary_path" ]; then
+  echo "k6 exited successfully without a summary; the results are incomplete." >&2
   exit 1
 fi
 
@@ -108,6 +170,7 @@ done
 # nothing about what serving the load costs at a rate the system actually holds. Each step's own
 # window is reported instead, derived from the schedule k6 was given.
 {
+  echo "citybuddy_commit=$citybuddy_commit"
   printf '%-8s %-19s %10s %10s %10s\n' step window agent_min agent_med agent_max
   index=0
   for rate in ${RATES//,/ }; do
@@ -130,6 +193,7 @@ done
   done
 } | tee "$out/agent_${LABEL}_cpu_by_step.txt"
 {
+  echo "citybuddy_commit=$citybuddy_commit"
   echo "connections opened during the run: $(( $(counter Connections) - connections_before ))"
   rejected_after="$(counter Connection_errors_max_connections)"
   echo "attempts rejected at max_connections: $(( rejected_after - rejected_before ))"
@@ -143,6 +207,8 @@ cat "$out/agent_${LABEL}_mysql.txt"
 echo "-- iterations k6 could not issue or could not finish --"
 grep -E 'dropped_iterations|interrupted iterations' "$out/agent_${LABEL}_console.txt" | tail -2
 echo "-- per-step statistics --"
-uv run python bench/agent/analyze_agent_ladder.py \
-  "$out/agent_${LABEL}_points.json" "$LABEL" "$STEP_SECONDS" "$RATES" \
-  | tee "$out/agent_${LABEL}_steps.txt"
+{
+  echo "citybuddy_commit=$citybuddy_commit"
+  uv run python bench/agent/analyze_agent_ladder.py \
+    "$out/agent_${LABEL}_points.json" "$LABEL" "$STEP_SECONDS" "$RATES"
+} | tee "$out/agent_${LABEL}_steps.txt"

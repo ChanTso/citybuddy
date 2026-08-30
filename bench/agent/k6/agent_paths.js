@@ -31,7 +31,8 @@ const outcomes = new Counter('agent_outcomes');
 const exhausted = new Counter('pool_exhausted');
 
 // The fixture model picks its behaviour from the message text.
-//   chat       no keyword, so the fixture answers directly: one model call and nothing else.
+//   chat       the current router supplies the read-only schemas, then the fixture answers
+//              directly without a tool call.
 //   retrieval  alias resolution, mapping validation, BM25 and dense retrieval, rerank, then the
 //              closing model call.
 //   prepare    a refund preparation tool call, which exchanges an on-behalf-of token and writes a

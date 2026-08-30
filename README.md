@@ -185,13 +185,16 @@ npm --prefix web ci && cp web/.env.example web/.env.local && npm --prefix web ru
 
 Local three-path latency for the support agent, with inference held at zero so what remains is the
 platform's own orchestration cost. The highest step where nothing was shed, one process on one
-machine:
+machine. Repository history reconstructs their executable boundary as
+`6acf856716ff0b926bb147c0e1d99614a8d9e9c8`. The artifacts predate the rule that records the
+tested SHA inside each result file, so this is a historical boundary rather than run-captured
+provenance.
 
-| Path | Rate | p99 |
+| Path | Historical result | Status after PR #107 |
 |---|---|---|
-| Plain chat | 75 req/s | 31 ms |
-| Knowledge retrieval | 60 req/s | 689 ms |
-| Refund preparation | 15 req/s | 424 ms |
+| Plain chat | 75 req/s, p99 31 ms | The input now selects the smaller `read` tool profile; this historical all-tools path no longer exists, and the current path has not been measured. |
+| Knowledge retrieval | 60 req/s, p99 689 ms | The input still selects `refund_context` and the all-tools workload; not re-run. |
+| Refund preparation | 15 req/s, p99 424 ms | The input still selects `refund_context` and the all-tools workload; not re-run. |
 
 The first measurement found most of the agent's CPU going on work it threw away — a fresh TLS
 context per outbound request. Method, raw output, the profile before and after, and what is still

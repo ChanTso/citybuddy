@@ -9,6 +9,20 @@ The first measurement found that most of the agent's CPU went on work it threw a
 document now records that measurement, the change it led to, and the paired re-measurement that
 says what the change was worth.
 
+## Version boundary
+
+Repository history reconstructs the paired baseline boundary as
+`272eecdfb79b73811bc6fff677360a0d79a07991` and the post-client-reuse boundary as
+`6acf856716ff0b926bb147c0e1d99614a8d9e9c8`. The artifacts were committed immediately after the
+passes but do not contain those SHAs, so they cannot independently prove the checkout that
+produced them.
+
+PR #107 later introduced route-specific tool profiles. The retrieval and preparation inputs both
+contain `refund` and still select `refund_context` with all tools. The chat input, `hello, can you
+tell me about delivery times`, now selects the smaller `read` profile. Every chat number and CPU
+reading in this document therefore describes the earlier all-tools-schema path, not the current
+read-profile path. No post-#107 ladder is reported here.
+
 ## What is and is not being measured
 
 The model provider is [`scripts/fake_litellm_server.py`](../../scripts/fake_litellm_server.py),
@@ -184,8 +198,9 @@ the extension ladder shed 8 of 2001, and a third run served it clean at p99 40.5
 peak. The honest reading is 75 req/s clean and 100 req/s marginal, not "serves 100".
 
 That third run is also a check on the after column itself. The cookie-discarding transport in §3
-was added after these ladders had been taken, so the chat ladder was run again against the merged
-code (`../results/agent_chat_recheck_after_steps.txt`): p99 19.1 ms at 50 req/s against 20.2,
+was added after these ladders had been taken, so the chat ladder was run again against the source
+snapshot recorded in `3a3d6b0946565281bcb1c6de8c25944cb46d7887`
+(`../results/agent_chat_recheck_after_steps.txt`): p99 19.1 ms at 50 req/s against 20.2,
 27.3 ms at 75 against 31.3, and every step clean. **Only the chat ladder was re-run.** The
 retrieval and preparation columns, every CPU table in §2, all six profiles in §3 and the
 connection figures in §4 were taken against the code as it stood before that transport was added.
@@ -572,13 +587,15 @@ exceed the ladder's `sum(rate x step_seconds) + 20 per step`.
 
 `LABEL` names the output files, so a run against changed code or a changed setting does not
 overwrite the baseline it is meant to be compared with. Both the ladder runner and the profiler
-take it.
+take it. Setup records the full commit used to build the agent image. The runner and profiler
+require the same source-clean checkout and write that SHA into every result they produce.
 
 ### The paired ladders
 
-Each pass is three setups and three ladders. Run the baseline pass from the commit before
-[`http_client.py`](../../agent-service/src/citybuddy_agent/http_client.py) exists and the other
-from the commit after it, back to back on an idle host, and give them different labels:
+Each pass is three setups and three ladders. Run the baseline pass from
+`272eecdfb79b73811bc6fff677360a0d79a07991` and the post-client-reuse pass from
+`6acf856716ff0b926bb147c0e1d99614a8d9e9c8`, back to back on an idle host, and give them
+different labels:
 
 ```bash
 AGENT_BENCH_USERS=6000 ./bench/agent/setup_agent_bench.sh
