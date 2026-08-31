@@ -115,10 +115,11 @@ for (const rate of RATES) {
     'agent_nonserved_iterations',
     'agent_http_5xx',
     'agent_http_errors',
-    'dropped_iterations',
   ]) {
     thresholds[`${metric}{rate:${rate}}`] = ['count >= 0'];
   }
+  // A dropped iteration never enters turn(), so only k6's automatic scenario tag attributes it.
+  thresholds[`dropped_iterations{scenario:rate_${rate}}`] = ['count >= 0'];
   thresholds[`http_req_duration{rate:${rate}}`] = ['max >= 0'];
 }
 

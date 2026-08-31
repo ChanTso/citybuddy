@@ -1,0 +1,324 @@
+{
+    "root_group": {
+        "checks": {},
+        "name": "",
+        "path": "",
+        "id": "d41d8cd98f00b204e9800998ecf8427e",
+        "groups": {}
+    },
+    "metrics": {
+        "data_received": {
+            "count": 5057248,
+            "rate": 25283.23754057726
+        },
+        "http_req_tls_handshaking": {
+            "count": 6752,
+            "med": 0,
+            "p(95)": 0,
+            "p(99)": 0,
+            "max": 0
+        },
+        "agent_finished_iterations": {
+            "count": 6752,
+            "rate": 33.7559913759376
+        },
+        "agent_outcomes": {
+            "count": 6752,
+            "rate": 33.7559913759376
+        },
+        "agent_http_5xx": {
+            "count": 0,
+            "rate": 0
+        },
+        "dropped_iterations{rate:60}": {
+            "count": 0,
+            "rate": 0,
+            "thresholds": {
+                "count >= 0": false
+            }
+        },
+        "http_req_blocked": {
+            "p(99)": 0.12854067,
+            "max": 16.271708,
+            "count": 6752,
+            "med": 0.002917,
+            "p(95)": 0.07347689999999998
+        },
+        "agent_http_5xx{rate:90}": {
+            "count": 0,
+            "rate": 0,
+            "thresholds": {
+                "count >= 0": false
+            }
+        },
+        "http_req_connecting": {
+            "count": 6752,
+            "med": 0,
+            "p(95)": 0.05041645,
+            "p(99)": 0.09433133999999999,
+            "max": 16.243208
+        },
+        "iterations": {
+            "count": 6752,
+            "rate": 33.7559913759376
+        },
+        "agent_http_errors": {
+            "count": 0,
+            "rate": 0
+        },
+        "agent_finished_iterations{rate:75}": {
+            "count": 2250,
+            "rate": 11.248664187775413,
+            "thresholds": {
+                "count >= 0": false
+            }
+        },
+        "http_req_receiving": {
+            "max": 1.992375,
+            "count": 6752,
+            "med": 0.039875,
+            "p(95)": 0.22876059999999995,
+            "p(99)": 0.69871858
+        },
+        "dropped_iterations{rate:75}": {
+            "count": 0,
+            "rate": 0,
+            "thresholds": {
+                "count >= 0": false
+            }
+        },
+        "agent_started_iterations{rate:60}": {
+            "count": 1801,
+            "rate": 9.003930756526008,
+            "thresholds": {
+                "count >= 0": false
+            }
+        },
+        "agent_nonserved_iterations": {
+            "count": 0,
+            "rate": 0
+        },
+        "agent_served_iterations": {
+            "count": 6752,
+            "rate": 33.7559913759376
+        },
+        "agent_http_5xx{rate:60}": {
+            "rate": 0,
+            "count": 0,
+            "thresholds": {
+                "count >= 0": false
+            }
+        },
+        "agent_nonserved_iterations{rate:75}": {
+            "rate": 0,
+            "count": 0,
+            "thresholds": {
+                "count >= 0": false
+            }
+        },
+        "agent_http_errors{rate:90}": {
+            "count": 0,
+            "rate": 0,
+            "thresholds": {
+                "count >= 0": false
+            }
+        },
+        "http_req_sending": {
+            "count": 6752,
+            "med": 0.011,
+            "p(95)": 0.026625,
+            "p(99)": 0.04937083999999998,
+            "max": 0.791709
+        },
+        "agent_served_iterations{rate:90}": {
+            "rate": 13.503396431636174,
+            "count": 2701,
+            "thresholds": {
+                "count >= 0": false
+            }
+        },
+        "dropped_iterations{rate:90}": {
+            "count": 0,
+            "rate": 0,
+            "thresholds": {
+                "count >= 0": false
+            }
+        },
+        "agent_started_iterations{rate:75}": {
+            "count": 2250,
+            "rate": 11.248664187775413,
+            "thresholds": {
+                "count >= 0": false
+            }
+        },
+        "pool_exhausted": {
+            "count": 0,
+            "rate": 0,
+            "thresholds": {
+                "count == 0": false
+            }
+        },
+        "http_req_waiting": {
+            "med": 14.3783545,
+            "p(95)": 52.20932034999997,
+            "p(99)": 133.77519574999997,
+            "max": 288.281834,
+            "count": 6752
+        },
+        "iteration_duration": {
+            "p(95)": 52.73437269999999,
+            "p(99)": 134.14616432999998,
+            "max": 289.182251,
+            "count": 6752,
+            "med": 14.6215625
+        },
+        "agent_served_iterations{rate:75}": {
+            "count": 2250,
+            "rate": 11.248664187775413,
+            "thresholds": {
+                "count >= 0": false
+            }
+        },
+        "agent_http_errors{rate:75}": {
+            "count": 0,
+            "rate": 0,
+            "thresholds": {
+                "count >= 0": false
+            }
+        },
+        "agent_started_iterations{rate:90}": {
+            "count": 2701,
+            "rate": 13.503396431636174,
+            "thresholds": {
+                "count >= 0": false
+            }
+        },
+        "http_req_duration{expected_response:true}": {
+            "max": 288.989417,
+            "count": 6752,
+            "med": 14.4396045,
+            "p(95)": 52.448500299999985,
+            "p(99)": 133.86635365999996
+        },
+        "agent_http_errors{rate:60}": {
+            "count": 0,
+            "rate": 0,
+            "thresholds": {
+                "count >= 0": false
+            }
+        },
+        "http_req_duration{rate:60}": {
+            "count": 1801,
+            "med": 14.904209,
+            "p(95)": 51.599417,
+            "p(99)": 108.991834,
+            "max": 166.162042,
+            "thresholds": {
+                "max >= 0": false
+            }
+        },
+        "http_req_failed": {
+            "passes": 0,
+            "fails": 6752,
+            "value": 0
+        },
+        "vus_max": {
+            "value": 180,
+            "min": 180,
+            "max": 180
+        },
+        "agent_http_5xx{rate:75}": {
+            "rate": 0,
+            "count": 0,
+            "thresholds": {
+                "count >= 0": false
+            }
+        },
+        "agent_nonserved_iterations{rate:60}": {
+            "count": 0,
+            "rate": 0,
+            "thresholds": {
+                "count >= 0": false
+            }
+        },
+        "agent_finished_iterations{rate:60}": {
+            "count": 1801,
+            "rate": 9.003930756526008,
+            "thresholds": {
+                "count >= 0": false
+            }
+        },
+        "agent_started_iterations": {
+            "count": 6752,
+            "rate": 33.7559913759376
+        },
+        "http_req_duration{rate:75}": {
+            "count": 2250,
+            "med": 13.0049375,
+            "p(95)": 48.67448574999996,
+            "p(99)": 214.78125499999996,
+            "max": 288.989417,
+            "thresholds": {
+                "max >= 0": false
+            }
+        },
+        "vus": {
+            "min": 0,
+            "max": 15,
+            "value": 5
+        },
+        "http_reqs": {
+            "count": 6752,
+            "rate": 33.7559913759376
+        },
+        "data_sent": {
+            "count": 8570500,
+            "rate": 42847.41174281297
+        },
+        "agent_finished_iterations{rate:90}": {
+            "count": 2701,
+            "rate": 13.503396431636174,
+            "thresholds": {
+                "count >= 0": false
+            }
+        },
+        "http_req_duration{rate:90}": {
+            "count": 2701,
+            "med": 15.032333,
+            "p(95)": 55.105583,
+            "p(99)": 115.410958,
+            "max": 195.470542,
+            "thresholds": {
+                "max >= 0": false
+            }
+        },
+        "http_req_duration": {
+            "max": 288.989417,
+            "count": 6752,
+            "med": 14.4396045,
+            "p(95)": 52.448500299999985,
+            "p(99)": 133.86635365999996
+        },
+        "dropped_iterations": {
+            "count": 0,
+            "rate": 0
+        },
+        "agent_nonserved_iterations{rate:90}": {
+            "count": 0,
+            "rate": 0,
+            "thresholds": {
+                "count >= 0": false
+            }
+        },
+        "agent_served_iterations{rate:60}": {
+            "count": 1801,
+            "rate": 9.003930756526008,
+            "thresholds": {
+                "count >= 0": false
+            }
+        }
+    },
+    "citybuddyCommit": "cdbe1cbd40d6463270aa5652151f8330bc38773f",
+    "sutCommit": "cdbe1cbd40d6463270aa5652151f8330bc38773f",
+    "benchmarkHarnessCommit": "cdbe1cbd40d6463270aa5652151f8330bc38773f"
+}

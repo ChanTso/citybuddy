@@ -18,6 +18,28 @@ def counter(summary: dict[str, Any], name: str, rate: int) -> int:
     return int(metric_values(summary, f"{name}{{rate:{rate}}}")["count"])
 
 
+def dropped_by_rate(summary: dict[str, Any], rates: list[int]) -> dict[int, int]:
+    try:
+        aggregate = int(metric_values(summary, "dropped_iterations")["count"])
+        dropped = {
+            rate: int(
+                metric_values(summary, f"dropped_iterations{{scenario:rate_{rate}}}")[
+                    "count"
+                ]
+            )
+            for rate in rates
+        }
+    except KeyError as error:
+        raise ValueError(f"missing dropped-iteration metric: {error.args[0]}") from error
+    attributed = sum(dropped.values())
+    if attributed != aggregate:
+        raise ValueError(
+            "dropped_iterations aggregate "
+            f"{aggregate} does not match scenario-tagged total {attributed}"
+        )
+    return dropped
+
+
 def render(value: object) -> str:
     return "none" if value is None else f"{float(str(value)):.1f}"
 
@@ -34,18 +56,19 @@ def main() -> None:
     if args.step_seconds < 1:
         raise ValueError("Step duration must be positive")
 
+    rates = [int(value) for value in args.rates.split(",")]
     summary = json.loads(args.summary.read_text(encoding="utf-8"))
+    dropped = dropped_by_rate(summary, rates)
     print(f"\n=== {args.label} ({args.step_seconds}s steps) ===")
     print(
         "rate nominal_offered started finished served nonserved dropped interrupted 5xx errors "
         "finished/s p50_ms p95_ms p99_ms max_ms"
     )
-    for rate in (int(value) for value in args.rates.split(",")):
+    for rate in rates:
         started = counter(summary, "agent_started_iterations", rate)
         finished = counter(summary, "agent_finished_iterations", rate)
         served = counter(summary, "agent_served_iterations", rate)
         nonserved = counter(summary, "agent_nonserved_iterations", rate)
-        dropped = counter(summary, "dropped_iterations", rate)
         status_5xx = counter(summary, "agent_http_5xx", rate)
         errors = counter(summary, "agent_http_errors", rate)
         latency = metric_values(summary, f"http_req_duration{{rate:{rate}}}")
@@ -61,7 +84,7 @@ def main() -> None:
             finished,
             served,
             nonserved,
-            dropped,
+            dropped[rate],
             started - finished,
             status_5xx,
             errors,

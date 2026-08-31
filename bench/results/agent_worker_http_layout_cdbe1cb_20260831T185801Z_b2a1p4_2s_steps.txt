@@ -1,0 +1,9 @@
+citybuddy_commit=cdbe1cbd40d6463270aa5652151f8330bc38773f
+sut_commit=cdbe1cbd40d6463270aa5652151f8330bc38773f
+benchmark_harness_commit=cdbe1cbd40d6463270aa5652151f8330bc38773f
+
+=== worker_http_layout_cdbe1cb_20260831T185801Z_b2a1p4_2s (30s steps) ===
+rate nominal_offered started finished served nonserved dropped interrupted 5xx errors finished/s p50_ms p95_ms p99_ms max_ms
+60 1800 1801 1801 1801 0 0 0 0 0 60.03 14.9 51.6 109.0 166.2
+75 2250 2250 2250 2250 0 0 0 0 0 75.00 13.0 48.7 214.8 289.0
+90 2700 2701 2701 2701 0 0 0 0 0 90.03 15.0 55.1 115.4 195.5

@@ -1,0 +1,9 @@
+citybuddy_commit=cdbe1cbd40d6463270aa5652151f8330bc38773f
+sut_commit=cdbe1cbd40d6463270aa5652151f8330bc38773f
+benchmark_harness_commit=cdbe1cbd40d6463270aa5652151f8330bc38773f
+boundary=restored
+observed_at_utc=2026-08-31T19:29:20Z
+mysql_container_id=a3f4e187199749884f468194141c963053be1dd030a611fadd48a00d593a764a
+mysql_host_port=61357
+Variable_name	Value
+max_connections	151
