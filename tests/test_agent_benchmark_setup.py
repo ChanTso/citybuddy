@@ -12,6 +12,7 @@ import pytest
 
 REPOSITORY = Path(__file__).resolve().parents[1]
 SETUP = REPOSITORY / "bench/agent/setup_agent_bench.sh"
+SETUP_GATE = REPOSITORY / "bench/agent/setup_environment_gate.sh"
 DOCKERFILE = REPOSITORY / "bench/agent/Dockerfile"
 
 
@@ -160,6 +161,15 @@ def test_agent_image_context_contains_only_tracked_commit_sources(tmp_path: Path
     assert "RUN uv sync --locked --no-dev --all-packages" in DOCKERFILE.read_text(encoding="utf-8")
 
 
+@pytest.mark.parametrize("script", (SETUP, SETUP_GATE))
+def test_worker_liveness_rejects_unschedulable_process_states(script: Path) -> None:
+    source = script.read_text(encoding="utf-8")
+
+    assert 'rsplit(")", 1)[1].split()[0]' in source
+    assert "R | S | D) ;;" in source
+    assert "schedulable" in source
+
+
 def _write_executable(path: Path, source: str) -> None:
     path.write_text(textwrap.dedent(source).lstrip(), encoding="utf-8")
     path.chmod(0o755)
@@ -235,6 +245,9 @@ def _prepare_cleanup_counterexample(tmp_path: Path) -> tuple[Path, dict[str, str
         #!/bin/sh
         case "$*" in
           *"SELECT version"*) printf '001\\n' ;;
+          *"SHOW GLOBAL VARIABLES LIKE 'max_connections'"*)
+            printf 'Variable_name\\tValue\\nmax_connections\\t151\\n'
+            ;;
         esac
         """,
     )
@@ -278,6 +291,16 @@ def _prepare_cleanup_counterexample(tmp_path: Path) -> tuple[Path, dict[str, str
               *eclipse-temurin*) printf '%s' '{java_image_id}' ;;
               *alpine:3.20*) printf '%s' '{net_image_id}' ;;
               *mysql:8.4.10*) printf '%s' '{mysql_image_id}' ;;
+              *) exit 1 ;;
+            esac
+            ;;
+          info)
+            case "$*" in
+              *ServerVersion*) printf '29.5.3\\n' ;;
+              *Architecture*) printf 'aarch64\\n' ;;
+              *NCPU*) printf '8\\n' ;;
+              *MemTotal*) printf '14638391296\\n' ;;
+              *Driver*) printf 'overlayfs\\n' ;;
               *) exit 1 ;;
             esac
             ;;

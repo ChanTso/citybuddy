@@ -21,6 +21,18 @@ cd "$repo_root"
 # them. Size this past the total iteration count of the longest ladder to be run.
 AGENT_BENCH_USERS="${AGENT_BENCH_USERS:-6000}"
 AGENT_ATTEMPT_BUDGET="${AGENT_ATTEMPT_BUDGET:-16}"
+
+trim_ascii_whitespace() {
+  local value="$1"
+  value="${value#"${value%%[!$' \t\r\n']*}"}"
+  value="${value%"${value##*[!$' \t\r\n']}"}"
+  printf '%s' "$value"
+}
+
+AGENT_WORKERS="$(trim_ascii_whitespace "${AGENT_WORKERS:-}")"
+AGENT_HTTP_CLIENT_LAYOUT="$(trim_ascii_whitespace "${AGENT_HTTP_CLIENT_LAYOUT:-}")"
+[ -n "$AGENT_WORKERS" ] || AGENT_WORKERS=1
+[ -n "$AGENT_HTTP_CLIENT_LAYOUT" ] || AGENT_HTTP_CLIENT_LAYOUT=shared
 run_dir="$repo_root/bench/.run"
 mkdir -p "$run_dir"
 commit_file="$run_dir/citybuddy_commit"
@@ -104,8 +116,14 @@ trap 'exit 143' TERM
 rm -f -- "$environment_file" "$legacy_boundary_file" "$commit_file"
 setup_started_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 if [[ ! "$AGENT_BENCH_USERS" =~ ^[1-9][0-9]*$ ]] \
-  || [[ ! "$AGENT_ATTEMPT_BUDGET" =~ ^[1-9][0-9]*$ ]]; then
-  echo "AGENT_BENCH_USERS and AGENT_ATTEMPT_BUDGET must be positive integers." >&2
+  || [[ ! "$AGENT_ATTEMPT_BUDGET" =~ ^[1-9][0-9]*$ ]] \
+  || [[ ! "$AGENT_WORKERS" =~ ^[1-9][0-9]*$ ]]; then
+  echo "AGENT_BENCH_USERS, AGENT_ATTEMPT_BUDGET and AGENT_WORKERS must be ASCII positive integers." >&2
+  exit 2
+fi
+if [ "$AGENT_HTTP_CLIENT_LAYOUT" != shared ] \
+  && [ "$AGENT_HTTP_CLIENT_LAYOUT" != per-authority ]; then
+  echo "AGENT_HTTP_CLIENT_LAYOUT must be shared or per-authority." >&2
   exit 2
 fi
 
@@ -223,6 +241,64 @@ container_restart_count() {
   printf '%s\n' "$restart_count"
 }
 
+container_environment_value() {
+  local container="$1" variable="$2"
+  docker inspect "$container" | jq -r --arg prefix "$variable=" '
+    [.[0].Config.Env[] | select(startswith($prefix))]
+    | if length == 1 then .[0][($prefix | length):]
+      else error("missing or repeated container environment variable") end'
+}
+
+agent_server_pids_from_logs() {
+  docker logs citybuddy-bench-agent 2>&1 \
+    | sed -nE 's/.*Started server process \[([0-9]+)\].*/\1/p' \
+    | sort -n -u
+}
+
+agent_server_pid_occurrence_count() {
+  docker logs citybuddy-bench-agent 2>&1 \
+    | sed -nE 's/.*Started server process \[([0-9]+)\].*/\1/p' \
+    | awk 'NF {count++} END {print count + 0}'
+}
+
+verify_agent_worker_processes() {
+  local expected_csv="$1" expected_count="$2" actual_csv pid worker_state
+  local actual_count=0 occurrence_count
+  actual_csv="$(agent_server_pids_from_logs | paste -sd, -)"
+  if [ "$actual_csv" != "$expected_csv" ]; then
+    echo "The agent worker PID set changed or an extra server process was logged." >&2
+    return 1
+  fi
+  IFS=, read -r -a actual_pids <<< "$actual_csv"
+  for pid in "${actual_pids[@]}"; do
+    [ -n "$pid" ] || continue
+    actual_count=$((actual_count + 1))
+    if [[ ! "$pid" =~ ^[1-9][0-9]*$ ]]; then
+      echo "Agent worker PID $pid is not alive in /proc." >&2
+      return 1
+    fi
+    worker_state="$(docker exec citybuddy-bench-agent python -c \
+      'from pathlib import Path; import sys; print(Path(sys.argv[1]).read_text().rsplit(")", 1)[1].split()[0])' \
+      "/proc/$pid/stat" 2>/dev/null || true)"
+    case "$worker_state" in
+      R | S | D) ;;
+      *)
+        echo "Agent worker PID $pid is not schedulable (state=${worker_state:-missing})." >&2
+        return 1
+        ;;
+    esac
+  done
+  if [ "$actual_count" -ne "$expected_count" ]; then
+    echo "Observed $actual_count agent workers; expected $expected_count." >&2
+    return 1
+  fi
+  occurrence_count="$(agent_server_pid_occurrence_count)"
+  if [ "$occurrence_count" -ne "$expected_count" ]; then
+    echo "Agent logged $occurrence_count server-process starts; expected exactly $expected_count." >&2
+    return 1
+  fi
+}
+
 resolve_image_id() {
   local image_ref="$1" image_id
   if ! image_id="$(docker image inspect --format '{{.Id}}' "$image_ref" 2>/dev/null)"; then
@@ -320,6 +396,32 @@ if [ "$mysql_actual_configured_image" != "$mysql_configured_image" ] \
   exit 1
 fi
 mysql_port="$(docker port "$mysql_container_id" 3306/tcp | cut -d: -f2)"
+mysql_max_connections_raw="$(MYSQL_PWD="$root_pw" mysql --protocol=TCP -h 127.0.0.1 \
+  -P "$mysql_port" -u root --batch --raw \
+  -e "SHOW GLOBAL VARIABLES LIKE 'max_connections'")"
+mysql_max_connections="$(printf '%s\n' "$mysql_max_connections_raw" \
+  | awk -F '\t' '$1 == "max_connections" {print $2}')"
+if [[ ! "$mysql_max_connections" =~ ^[1-9][0-9]*$ ]]; then
+  echo "Cannot record MySQL max_connections from its authoritative global variable." >&2
+  exit 1
+fi
+
+host_architecture="$(uname -m)"
+host_kernel="$(uname -srv)"
+host_model="$(sysctl -n hw.model 2>/dev/null || printf 'unknown')"
+host_cpu_count="$(sysctl -n hw.ncpu 2>/dev/null || getconf _NPROCESSORS_ONLN)"
+host_memory_bytes="$(sysctl -n hw.memsize 2>/dev/null || printf 'unknown')"
+docker_server_version="$(docker info --format '{{.ServerVersion}}')"
+docker_architecture="$(docker info --format '{{.Architecture}}')"
+docker_cpu_count="$(docker info --format '{{.NCPU}}')"
+docker_memory_bytes="$(docker info --format '{{.MemTotal}}')"
+docker_storage_driver="$(docker info --format '{{.Driver}}')"
+if [[ ! "$host_cpu_count" =~ ^[1-9][0-9]*$ ]] \
+  || [[ ! "$docker_cpu_count" =~ ^[1-9][0-9]*$ ]] \
+  || [[ ! "$docker_memory_bytes" =~ ^[1-9][0-9]*$ ]]; then
+  echo "Cannot record the benchmark host and Docker hardware boundary." >&2
+  exit 1
+fi
 
 auth_jar="$repo_root/auth-service/target/auth-service-0.0.1-SNAPSHOT.jar"
 commerce_jar="$repo_root/commerce-service/target/commerce-service-0.0.1-SNAPSHOT.jar"
@@ -621,10 +723,40 @@ agent_container_id="$(docker run --detach --name citybuddy-bench-agent \
   --env MYSQL_AGENT_APP_PASSWORD="$agent_pw" \
   --env CITYBUDDY_METRICS_ENABLED=true \
   --env CITYBUDDY_TRACE_EXPORT_URL= \
+  --env AGENT_WORKERS="$AGENT_WORKERS" \
+  --env AGENT_HTTP_CLIENT_LAYOUT="$AGENT_HTTP_CLIENT_LAYOUT" \
   --env AGENT_ATTEMPT_BUDGET="$AGENT_ATTEMPT_BUDGET" \
   "$agent_image_id")"
 agent_started_at="$(container_started_at citybuddy-bench-agent)"
 agent_restart_count="$(container_restart_count citybuddy-bench-agent)"
+
+agent_worker_pids_csv=""
+for _ in $(seq 1 120); do
+  agent_worker_pids_csv="$(agent_server_pids_from_logs | paste -sd, -)"
+  observed_worker_count=0
+  if [ -n "$agent_worker_pids_csv" ]; then
+    IFS=, read -r -a observed_worker_pids <<< "$agent_worker_pids_csv"
+    observed_worker_count="${#observed_worker_pids[@]}"
+  fi
+  if [ "$observed_worker_count" -eq "$AGENT_WORKERS" ]; then
+    break
+  fi
+  if [ "$observed_worker_count" -gt "$AGENT_WORKERS" ]; then
+    echo "Agent logged $observed_worker_count server processes; expected $AGENT_WORKERS." >&2
+    exit 1
+  fi
+  if [ "$(docker inspect -f '{{.State.Running}}' citybuddy-bench-agent)" != true ]; then
+    docker logs --tail 40 citybuddy-bench-agent
+    exit 1
+  fi
+  sleep 1
+done
+if [ "${observed_worker_count:-0}" -ne "$AGENT_WORKERS" ]; then
+  echo "Timed out waiting for $AGENT_WORKERS agent server processes." >&2
+  docker logs --tail 40 citybuddy-bench-agent >&2
+  exit 1
+fi
+verify_agent_worker_processes "$agent_worker_pids_csv" "$AGENT_WORKERS"
 
 # Probed from inside the namespace for the same reason the generator runs there. wget exits
 # non-zero on the 405 that proves the route is live, so its status is discarded and the answer
@@ -641,6 +773,7 @@ until agent_answers; do
   fi
   sleep 1
 done
+verify_agent_worker_processes "$agent_worker_pids_csv" "$AGENT_WORKERS"
 echo "agent-service ready inside the bench namespace"
 
 echo "== minting tokens, paying one order and opening one session for $AGENT_BENCH_USERS users =="
@@ -715,6 +848,45 @@ verify_setup_container citybuddy-bench-model "$model_container_id" \
   "$model_container_image_id" "$model_started_at" "$model_restart_count"
 verify_setup_container citybuddy-bench-agent "$agent_container_id" \
   "$agent_container_image_id" "$agent_started_at" "$agent_restart_count"
+verify_agent_worker_processes "$agent_worker_pids_csv" "$AGENT_WORKERS"
+
+actual_agent_workers="$(container_environment_value citybuddy-bench-agent AGENT_WORKERS)"
+actual_http_client_layout="$(container_environment_value \
+  citybuddy-bench-agent AGENT_HTTP_CLIENT_LAYOUT)"
+actual_trace_export_url="$(container_environment_value \
+  citybuddy-bench-agent CITYBUDDY_TRACE_EXPORT_URL)"
+actual_model_proxy_url="$(container_environment_value \
+  citybuddy-bench-agent AGENT_MODEL_PROXY_URL)"
+actual_identity_jwks_url="$(container_environment_value \
+  citybuddy-bench-agent IDENTITY_JWKS_URL)"
+actual_identity_exchange_url="$(container_environment_value \
+  citybuddy-bench-agent IDENTITY_EXCHANGE_URL)"
+actual_commerce_tools_url="$(container_environment_value \
+  citybuddy-bench-agent AGENT_COMMERCE_TOOLS_URL)"
+actual_commerce_liveness_url="$(container_environment_value \
+  citybuddy-bench-agent AGENT_COMMERCE_LIVENESS_URL)"
+actual_elasticsearch_url="$(container_environment_value \
+  citybuddy-bench-agent AGENT_ELASTICSEARCH_URL)"
+if [ "$actual_agent_workers" != "$AGENT_WORKERS" ] \
+  || [ "$actual_http_client_layout" != "$AGENT_HTTP_CLIENT_LAYOUT" ] \
+  || [ -n "$actual_trace_export_url" ] \
+  || [ "$actual_model_proxy_url" != http://127.0.0.1:8000 ] \
+  || [ "$actual_identity_jwks_url" != http://citybuddy-bench-auth:8080/auth/jwks ] \
+  || [ "$actual_identity_exchange_url" != http://citybuddy-bench-auth:8080/auth/token/exchange ] \
+  || [ "$actual_commerce_tools_url" != http://citybuddy-bench-commerce:8080 ] \
+  || [ "$actual_commerce_liveness_url" != http://citybuddy-bench-commerce:8080 ] \
+  || [ "$actual_elasticsearch_url" != http://citybuddy-bench-elasticsearch:9200 ]; then
+  echo "The agent container environment does not match the requested benchmark treatment." >&2
+  exit 1
+fi
+
+current_mysql_max_connections="$(MYSQL_PWD="$root_pw" mysql --protocol=TCP -h 127.0.0.1 \
+  -P "$mysql_port" -u root --batch --skip-column-names \
+  -e "SHOW GLOBAL VARIABLES LIKE 'max_connections'" | awk '{print $2}')"
+if [ "$current_mysql_max_connections" != "$mysql_max_connections" ]; then
+  echo "MySQL max_connections changed while the fixture was being built." >&2
+  exit 1
+fi
 
 setup_completed_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 environment_tmp="$(mktemp "$run_dir/.agent_setup_environment.XXXXXX")"
@@ -766,7 +938,28 @@ uv run python - \
   "$auth_migration_version" \
   "$commerce_migration_version" \
   "$agent_migration_version" \
-  "$knowledge_bootstrap_file" <<'PY'
+  "$knowledge_bootstrap_file" \
+  "$AGENT_WORKERS" \
+  "$AGENT_HTTP_CLIENT_LAYOUT" \
+  "$agent_worker_pids_csv" \
+  "$mysql_max_connections" \
+  "$actual_trace_export_url" \
+  "$actual_model_proxy_url" \
+  "$actual_identity_jwks_url" \
+  "$actual_identity_exchange_url" \
+  "$actual_commerce_tools_url" \
+  "$actual_commerce_liveness_url" \
+  "$actual_elasticsearch_url" \
+  "$host_architecture" \
+  "$host_kernel" \
+  "$host_model" \
+  "$host_cpu_count" \
+  "$host_memory_bytes" \
+  "$docker_server_version" \
+  "$docker_architecture" \
+  "$docker_cpu_count" \
+  "$docker_memory_bytes" \
+  "$docker_storage_driver" <<'PY'
 from __future__ import annotations
 
 import json
@@ -820,6 +1013,27 @@ from pathlib import Path
     commerce_migration_version,
     agent_migration_version,
     knowledge_bootstrap_name,
+    requested_workers,
+    http_client_layout,
+    worker_pids_csv,
+    mysql_max_connections,
+    trace_export_url,
+    model_proxy_url,
+    identity_jwks_url,
+    identity_exchange_url,
+    commerce_tools_url,
+    commerce_liveness_url,
+    elasticsearch_url,
+    host_architecture,
+    host_kernel,
+    host_model,
+    host_cpu_count,
+    host_memory_bytes,
+    docker_server_version,
+    docker_architecture,
+    docker_cpu_count,
+    docker_memory_bytes,
+    docker_storage_driver,
 ) = sys.argv[1:]
 
 
@@ -843,12 +1057,33 @@ def container(
 
 environment = {
     "citybuddyCommit": commit,
+    "sutCommit": commit,
+    "benchmarkHarnessCommit": commit,
     "setupNonce": setup_nonce,
     "configuration": {
         "agentAttemptBudget": int(attempt_budget),
         "agentBenchUsers": int(users),
+        "requestedWorkers": int(requested_workers),
+        "observedWorkerCount": len(worker_pids_csv.split(",")),
+        "observedWorkerPids": [int(value) for value in worker_pids_csv.split(",")],
+        "observedWorkerStartLogOccurrences": int(requested_workers),
+        "httpClientLayout": http_client_layout,
         "metricsEnabled": True,
-        "traceExportUrl": "",
+        "traceExportUrl": trace_export_url,
+        "outboundEndpoints": {
+            "modelProxyUrl": model_proxy_url,
+            "identityJwksUrl": identity_jwks_url,
+            "identityExchangeUrl": identity_exchange_url,
+            "commerceToolsUrl": commerce_tools_url,
+            "commerceLivenessUrl": commerce_liveness_url,
+            "elasticsearchUrl": elasticsearch_url,
+        },
+        "outboundOrigins": {
+            "model": "http://127.0.0.1:8000",
+            "auth": "http://citybuddy-bench-auth:8080",
+            "commerce": "http://citybuddy-bench-commerce:8080",
+            "elasticsearch": "http://citybuddy-bench-elasticsearch:9200",
+        },
     },
     "containers": {
         "citybuddy-bench-agent": container(
@@ -876,7 +1111,23 @@ environment = {
             net_container_id, net_image_id, net_started_at, net_restart_count
         ),
     },
-    "formatVersion": "citybuddy-agent-setup-environment-v1",
+    "formatVersion": "citybuddy-agent-setup-environment-v2",
+    "hardware": {
+        "host": {
+            "architecture": host_architecture,
+            "kernel": host_kernel,
+            "model": host_model,
+            "cpuCount": int(host_cpu_count),
+            "memoryBytes": int(host_memory_bytes) if host_memory_bytes.isdigit() else None,
+        },
+        "docker": {
+            "serverVersion": docker_server_version,
+            "architecture": docker_architecture,
+            "allocatedCpus": int(docker_cpu_count),
+            "allocatedMemoryBytes": int(docker_memory_bytes),
+            "storageDriver": docker_storage_driver,
+        },
+    },
     "java": {
         "authService": {
             "artifact": "auth-service/target/auth-service-0.0.1-SNAPSHOT.jar",
@@ -897,6 +1148,7 @@ environment = {
     },
     "knowledgeBootstrapRawJson": Path(knowledge_bootstrap_name).read_text(encoding="utf-8"),
     "mysql": {
+        "maxConnections": int(mysql_max_connections),
         "agent": {"latestVersion": agent_migration_version},
         "auth": {"latestVersion": auth_migration_version},
         "commerce": {"latestVersion": commerce_migration_version},

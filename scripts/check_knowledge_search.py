@@ -10,6 +10,7 @@ from typing import Any, cast
 from urllib.parse import quote
 
 import httpx
+from citybuddy_agent import http_client
 from citybuddy_agent.agent_control import (
     AgentEvent,
     AttemptBudget,
@@ -138,6 +139,21 @@ def main() -> None:
     parser.add_argument("--elasticsearch-url", required=True)
     args = parser.parse_args()
     base_url = str(args.elasticsearch_url).rstrip("/")
+    clients = http_client.HttpClients(
+        "shared",
+        (base_url, "http://127.0.0.1:9", "http://commerce-must-not-be-used"),
+    )
+    http_client.install(clients)
+    try:
+        run(base_url)
+    finally:
+        try:
+            clients.close()
+        finally:
+            http_client.uninstall(clients)
+
+
+def run(base_url: str) -> None:
     client = ElasticsearchKnowledgeSearch(base_url)
 
     alias_payload = object_payload(api(base_url, "GET", f"/_alias/{ALIAS}"))

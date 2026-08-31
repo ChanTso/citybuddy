@@ -50,6 +50,14 @@ const BASE = __ENV.BASE_URL || 'http://127.0.0.1:8001';
 const pool = new SharedArray('pool', () => JSON.parse(open(__ENV.POOL_FILE)));
 
 const outcomes = new Counter('agent_outcomes');
+// k6 exposes interrupted iterations only as a run total. This tagged counter is emitted before
+// any pool lookup or HTTP work so started minus finished closes the same outcome per rate.
+const startedIterations = new Counter('agent_started_iterations');
+const finishedIterations = new Counter('agent_finished_iterations');
+const servedIterations = new Counter('agent_served_iterations');
+const nonservedIterations = new Counter('agent_nonserved_iterations');
+const http5xx = new Counter('agent_http_5xx');
+const httpErrors = new Counter('agent_http_errors');
 // Reusing a pool entry would change which path is measured rather than merely add noise, so the
 // run has to fail on it. A thrown iteration alone does not fail a k6 run — without a threshold k6
 // still exits 0 — so exhaustion is counted and the count is thresholded at zero.
@@ -96,17 +104,34 @@ for (const rate of RATES) {
   start += STEP_SECONDS + GAP_SECONDS;
 }
 
+const thresholds = {
+  pool_exhausted: [{ threshold: 'count == 0', abortOnFail: true }],
+};
+for (const rate of RATES) {
+  for (const metric of [
+    'agent_started_iterations',
+    'agent_finished_iterations',
+    'agent_served_iterations',
+    'agent_nonserved_iterations',
+    'agent_http_5xx',
+    'agent_http_errors',
+    'dropped_iterations',
+  ]) {
+    thresholds[`${metric}{rate:${rate}}`] = ['count >= 0'];
+  }
+  thresholds[`http_req_duration{rate:${rate}}`] = ['max >= 0'];
+}
+
 export const options = {
   scenarios,
   discardResponseBodies: false,
-  summaryTrendStats: ['avg', 'min', 'med', 'p(90)', 'p(95)', 'p(99)', 'max'],
-  thresholds: {
-    pool_exhausted: [{ threshold: 'count == 0', abortOnFail: true }],
-  },
+  summaryTrendStats: ['count', 'med', 'p(95)', 'p(99)', 'max'],
+  thresholds,
 };
 
 export function turn() {
   const rate = exec.scenario.name.replace('rate_', '');
+  startedIterations.add(1, { rate: rate, path: PATH_NAME });
   const index = Number(__ENV.POOL_OFFSET) + exec.scenario.iterationInTest;
   if (index >= pool.length) {
     exhausted.add(1);
@@ -133,9 +158,22 @@ export function turn() {
       },
     },
   );
+  finishedIterations.add(1, { rate: rate, path: PATH_NAME });
+  if (res.status >= 500 && res.status <= 599) {
+    http5xx.add(1, { rate: rate, path: PATH_NAME });
+  }
+  if (res.status < 200 || res.status >= 400) {
+    httpErrors.add(1, { rate: rate, path: PATH_NAME });
+  }
 
   let outcome;
   try { outcome = (res.json() || {}).outcome || `HTTP_${res.status}`; }
   catch (e) { outcome = `HTTP_${res.status}`; }
   outcomes.add(1, { outcome: String(outcome), rate: rate, path: PATH_NAME });
+  const servedOutcome = PATH_NAME === 'prepare' ? 'action_pending' : 'completed';
+  if (outcome === servedOutcome) {
+    servedIterations.add(1, { rate: rate, path: PATH_NAME });
+  } else {
+    nonservedIterations.add(1, { rate: rate, path: PATH_NAME });
+  }
 }

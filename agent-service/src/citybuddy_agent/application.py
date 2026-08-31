@@ -7,7 +7,7 @@ import secrets
 import time
 import uuid
 from base64 import b64decode
-from collections.abc import AsyncIterator, Mapping
+from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime
 from typing import Any, Literal, Protocol
@@ -156,6 +156,7 @@ class AgentSettings(BaseModel):
     jwks_cache_seconds: int = 60
     metrics_enabled: bool = False
     trace_export_url: str = ""
+    http_client_layout: http_client.HttpClientLayout = "shared"
 
 
 class DirectPrincipal(BaseModel):
@@ -483,13 +484,76 @@ def create_app(
     metrics_runtime: MetricsRuntime | None = None,
     trace_sink: TraceSink | None = None,
 ) -> FastAPI:
-    """Construct the app, enabling identity routes only with complete runtime configuration."""
+    """Construct one worker's app and prebuild all of its outbound HTTP clients."""
     resolved = settings or AgentSettings()
-    resolved_metrics_runtime = metrics_runtime or create_metrics_runtime(resolved.metrics_enabled)
-    resolved_metrics = SafeCityBuddyMetrics(resolved_metrics_runtime.recorder)
-    resolved_trace_sink = trace_sink or create_trace_sink(
-        resolved.trace_export_url, resolved_metrics
+    http_clients = http_client.HttpClients(
+        resolved.http_client_layout,
+        (
+            resolved.model_proxy_url,
+            resolved.jwks_url,
+            resolved.auth_exchange_url,
+            resolved.commerce_tools_url,
+            resolved.commerce_liveness_url,
+            resolved.elasticsearch_url,
+            resolved.trace_export_url,
+        ),
     )
+    resolved_trace_sink: TraceSink | None = None
+    try:
+        resolved_metrics_runtime = metrics_runtime or create_metrics_runtime(
+            resolved.metrics_enabled
+        )
+        resolved_metrics = SafeCityBuddyMetrics(resolved_metrics_runtime.recorder)
+        resolved_trace_sink = trace_sink or create_trace_sink(
+            resolved.trace_export_url,
+            resolved_metrics,
+            http_clients=http_clients,
+        )
+        return _create_app(
+            resolved,
+            validator=validator,
+            sessions=sessions,
+            conversations=conversations,
+            agent=agent,
+            confirmer=confirmer,
+            feedback=feedback,
+            evidence=evidence,
+            liveness=liveness,
+            metrics_runtime=resolved_metrics_runtime,
+            metrics=resolved_metrics,
+            trace_sink=resolved_trace_sink,
+            http_clients=http_clients,
+        )
+    except BaseException:
+        try:
+            if resolved_trace_sink is not None:
+                resolved_trace_sink.close()
+        finally:
+            http_clients.close()
+        raise
+
+
+def _create_app(
+    settings: AgentSettings,
+    *,
+    validator: DirectJwtValidator | None,
+    sessions: SessionStore | None,
+    conversations: ConversationStore | None,
+    agent: AgentRunner | None,
+    confirmer: ActionConfirmer | None,
+    feedback: FeedbackStore | None,
+    evidence: EvaluationEvidenceStore | None,
+    liveness: SandboxLiveness | None,
+    metrics_runtime: MetricsRuntime,
+    metrics: SafeCityBuddyMetrics,
+    trace_sink: TraceSink,
+    http_clients: http_client.HttpClients,
+) -> FastAPI:
+    """Construct the app, enabling identity routes only with complete runtime configuration."""
+    resolved = settings
+    resolved_metrics_runtime = metrics_runtime
+    resolved_metrics = metrics
+    resolved_trace_sink = trace_sink
 
     @asynccontextmanager
     async def lifespan(application: FastAPI) -> AsyncIterator[None]:
@@ -497,7 +561,10 @@ def create_app(
         try:
             yield
         finally:
-            resolved_trace_sink.close()
+            try:
+                resolved_trace_sink.close()
+            finally:
+                http_clients.close()
 
     app = FastAPI(
         title=resolved.service_name,
@@ -507,6 +574,14 @@ def create_app(
         lifespan=lifespan,
     )
     app.state.settings = resolved
+
+    @app.middleware("http")
+    async def bind_http_clients(
+        request: Request,
+        call_next: Callable[[Request], Awaitable[Response]],
+    ) -> Response:
+        with http_client.use(http_clients):
+            return await call_next(request)
 
     if resolved.metrics_enabled:
 

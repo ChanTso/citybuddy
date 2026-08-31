@@ -756,14 +756,27 @@ bounded model fallback and reranker retry policy can raise a successful rewrite 
 physical attempts, so setting the default to the bare minimum of 9 would still turn an ordinary
 transient response into budget exhaustion.
 
-## What to measure next
+## Frozen worker × outbound-client experiment
 
-The historical profiles leave Agent-local interpreter/client contention unresolved. The current
-ladders sample the dedicated benchmark Elasticsearch dependency, but this result includes neither
-a CPU profile nor a worker-count experiment. A controlled worker-count experiment could test
-whether the historical ~1.4-agent-core plateau moves with the number of uvicorn processes; it
-cannot be attributed to the process before that result exists. Client ownership would have to vary
-separately to distinguish the shared HTTP pool mutex from interpreter contention.
+The next measurement varies worker count and outbound-client ownership independently. The harness
+is frozen here; no result is claimed until the fixed schedule below has completed from one
+committed, source-clean SHA.
+
+`AGENT_WORKERS` defaults to `1` when unset or blank and otherwise accepts only an ASCII positive
+integer. `AGENT_HTTP_CLIENT_LAYOUT` defaults to `shared` when unset or blank and otherwise accepts
+exactly `shared` or `per-authority`. Setup passes both resolved values explicitly into the agent
+container. `shared` means one client per worker. `per-authority` means one client per worker for
+each normalized scheme, host and effective port. Model, Auth, Commerce and Elasticsearch are the
+four configured origins; an empty trace export URL creates no exporter thread, queue or network,
+although ordinary observation-envelope CPU remains.
+
+Each setup records the requested values, the actual container environment and the worker PIDs
+from Uvicorn's `Started server process [PID]` log entries. The pre/post gates require the same
+unique PID set, exactly one start-log occurrence per requested worker and every PID alive in
+`/proc` with a runnable or sleeping `R`, `S` or `D` state; stopped, zombie and missing workers are
+rejected. They also check the source/SUT/harness SHA, setup nonce, images, JARs, endpoints, empty
+trace exporter, MySQL `max_connections`, core container identities and restart counts. Metrics are
+per-worker registries; one worker's metrics endpoint is not aggregate multi-worker evidence.
 
 ## Reproducing
 
@@ -872,10 +885,105 @@ RATES=5,10,15,20,30 STEP_SECONDS=30 GRACEFUL_STOP_SECONDS=45 GAP_SECONDS=55 \
 POOL_BASE=0 ./bench/agent/run_agent_ladder.sh prepare
 ```
 
-Successful publication writes the summary, console, CPU, CPU-error, CPU-by-step, MySQL, step,
-workload-contract and setup-environment files under `bench/results/agent_<label>_*`. The tagged
-`*_points.json` stream is retained locally but ignored because of its size. An invalid or
-interrupted run remains under ignored `bench/.run/agent-ladder.*` staging and is not a result.
+The SHA-injected k6 summary JSON is the primary per-rate raw HTTP evidence. The analyzer is only a
+small summary calculator: it prints one row per rate with nominal, started, finished, served,
+nonserved, dropped, interrupted, 5xx, errors, finished/s, p50, p95, p99 and max. It writes no result
+file and does not interpret CPU, workload SQL or MySQL evidence. An invalid or interrupted run
+remains under ignored `bench/.run/agent-ladder.*` staging and is not a result.
+
+### Worker × outbound-client formal run
+
+Confirm that the host is quiet and send or record the exact execution list before each formal
+phase. Freeze the implementation and harness in one commit first; both phases reject a dirty
+source tree. The raw setup, k6, CPU and database evidence carries the measured full commit.
+The orchestrator rechecks the same clean HEAD before and after base setup, every agent setup and
+ladder, and final publication. It holds every raw cell bundle in ignored outer staging until the
+phase is complete; a checkout switch rolls back a publication already in progress, so the same
+experiment ID can be rerun without complete-looking leftovers.
+
+Baseline and factorial are separate publications. Each publishes its raw cell bundles, then
+publishes `bench/results/agent_${EXPERIMENT_ID}_${PHASE}_experiment.txt` last as the completion
+marker. This simple descriptor records the full commit, fixed design and environment, and the
+numbers of any retried blocks. It contains no achieved measurements and no artifact inventory.
+
+Run the four default baselines first. This phase performs `BENCH_USERS=10000` base setup, requires
+the untouched MySQL `max_connections` value to be exactly 151, and uses a fresh setup before each
+path with `AGENT_WORKERS` and `AGENT_HTTP_CLIENT_LAYOUT` unset. The observed treatment must resolve
+to one worker and the shared layout.
+
+```bash
+./bench/agent/run_worker_http_layout.sh baseline
+```
+
+The fixed baseline order and pools are greeting at 25/50/75/100/125 requests/s for 20 seconds
+(8,000 users), chat/read at 10/25/50/75/100 for 20 seconds (6,000 users), retrieval at
+40/50/60/75/90 for 30 seconds (10,000 users), and prepare at 5/10/15/20/30 for 30 seconds (3,000
+users). Inspect these results before proceeding. If a clean step's p99 has an unexplained large
+regression that is not an error/outcome-mix change, diagnose it before running the factorial.
+The formal workflow deliberately uses separate `baseline` and `factorial` invocations; `all` is
+available for harness development but is not the formal command.
+
+After that inspection, reconfirm that the host is quiet and run the factorial from the same
+commit:
+
+```bash
+./bench/agent/run_worker_http_layout.sh factorial
+```
+
+The factorial uses retrieval at 60/75/90 requests/s for 30 seconds, 7,000 users, attempt budget
+16, 45 seconds graceful stop, 55 seconds between rate windows and pool base zero. It raises MySQL
+`max_connections` from the observed original 151 to 1,000, verifies 1,000 at every setup and
+pre/post gate, and restores and verifies 151 on normal exit or HUP/INT/TERM. Labeled raw before and
+after MySQL `SHOW` output is the primary database evidence; reporting reads it directly rather
+than relying on parsed fields or a generated confound verdict.
+
+The four treatments are `1S` (one/shared), `1PA` (one/per-authority), `2S` (two/shared) and `2PA`
+(two/per-authority). Randomization is `none`, `randomSeed` is null, and the schedule is the fixed
+four-block Williams-balanced order:
+
+| Block | Fixed order |
+|---:|:---|
+| 1 | 1S, 1PA, 2S, 2PA |
+| 2 | 1PA, 2PA, 1S, 2S |
+| 3 | 2PA, 2S, 1PA, 1S |
+| 4 | 2S, 1S, 2PA, 1PA |
+
+Every cell receives a fresh setup. If one cell is operationally invalid, its block is excluded and
+the entire block is rerun once with new labels. A second operational failure stops the experiment.
+Completed cells from an excluded attempt remain raw evidence. Every cell filename includes the
+label segment `b<block>a<attempt>p<position>_<treatment-lower>`; for example, a retry changes
+`b1a1p1_1s` to `b1a2p1_1s`. This keeps both attempts distinct, while the phase descriptor records
+only the retried block numbers.
+
+Operational invalidity is limited to a source/config/worker mismatch; abnormal k6 or runner exit,
+including pool exhaustion; absent or uncalculable k6 summary output; fixture exhaustion; CPU
+sampler errors; non-empty trace export; failure to hold or restore the required MySQL boundary; or
+a core container/worker replacement. Dropped or interrupted
+iterations, HTTP errors, 5xx, FAILED or PROCESSING turns and the served/nonserved mix are treatment
+outcomes: they are published and do not cause a rerun.
+
+The SHA-injected k6 summary JSON remains the primary per-rate HTTP evidence for every cell. The
+small analyzer prints nominal, started, finished, served, nonserved, dropped, interrupted, 5xx,
+errors, finished/s, p50, p95, p99 and max for each rate. Raw CPU samples are the primary CPU
+evidence, raw workload-contract SQL is the primary business-correctness evidence, and the labeled
+raw before/after MySQL `SHOW` captures are the primary database evidence. The analyzer does not
+parse or reproduce those models.
+
+There is no generated factorial aggregate or Markdown report. After publication, reporting is
+manual: inspect the raw evidence, transcribe the per-cell rows, and calculate the planned
+within-block contrasts `1PA-1S`, `2PA-2S`, `2S-1S`, `2PA-1PA` and
+`(2PA-2S)-(1PA-1S)`, followed by each contrast's four-block median and range. Latency differences
+should be emphasized only when the served/nonserved mix, drops, 5xx and HTTP-error counts are
+comparable, with the raw workload SQL consulted for business correctness.
+
+This is an end-to-end client-layout effect on one local host with the deterministic fake model and
+fixed retrieval fixture, not a production-capacity claim. A per-authority improvement supports a
+contribution from cross-origin shared-client/pool topology but does not prove a mutex cause. A
+worker improvement supports a remaining process-local bottleneck and is consistent with, but does
+not prove, a GIL cause: worker count also changes process count, total AnyIO thread capacity and
+per-worker cache, circuit and metrics state. A null per-authority result does not exclude an
+httpcore mutex within each authority-specific pool, and no distinguishable effect is a valid
+conclusion.
 
 ### Historical paired ladders
 

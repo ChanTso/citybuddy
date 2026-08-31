@@ -4,6 +4,7 @@ import argparse
 import os
 from pathlib import Path
 
+from citybuddy_agent import http_client
 from citybuddy_agent.application import (
     AgentSettings,
     DirectJwtValidator,
@@ -40,12 +41,20 @@ def main() -> None:
     )
     token = required("DIRECT_TOKEN")
     session_id = required("SUPPORT_SESSION_ID")
-    validator = DirectJwtValidator(settings, HttpJwksSource(settings.jwks_url))
-    principal = validator.validate(token)
-    obo = OboClient(settings, MysqlSessionStore(settings)).exchange(
-        token, principal.subject, session_id, "catalog:read"
-    )
-    args.output.write_text(obo, encoding="utf-8")
+    clients = http_client.HttpClients("shared", (settings.jwks_url, settings.auth_exchange_url))
+    http_client.install(clients)
+    try:
+        validator = DirectJwtValidator(settings, HttpJwksSource(settings.jwks_url))
+        principal = validator.validate(token)
+        obo = OboClient(settings, MysqlSessionStore(settings)).exchange(
+            token, principal.subject, session_id, "catalog:read"
+        )
+        args.output.write_text(obo, encoding="utf-8")
+    finally:
+        try:
+            clients.close()
+        finally:
+            http_client.uninstall(clients)
 
 
 if __name__ == "__main__":
