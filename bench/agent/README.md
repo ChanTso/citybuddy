@@ -42,9 +42,9 @@ budget. The values above reflect the fixture's default budget of 16. The four wo
 message, attempt ceiling, visible schemas, model calls, retrieval and commerce work. Their latency
 cannot be compared to attribute memory SQL or tool-schema cost. The workload-contract SQL artifact
 checks the expected route and zero loaded/included history for completed turns after the measured
-window; it is neither a performance result nor a business grader. Defining this contract does not
-make the current baseline ready to run: the separately scoped runtime and provenance prerequisites
-remain incomplete.
+window; it is neither a performance result nor a business grader. Setup and the runner now enforce
+the runtime and provenance prerequisites, but no current four-selector baseline has been run or
+reported.
 
 ## What is and is not being measured
 
@@ -64,7 +64,7 @@ the platform's own cost.
 | Docker Desktop | 14 GB / 8 CPU allocation |
 | Agent | `agent-service` as a container, single uvicorn process, sync endpoints on the AnyIO worker pool |
 | Dependencies | MySQL 8, Elasticsearch 8 + IK, `auth-service` and `commerce-service` as containers |
-| Generator | k6, `grafana/k6:latest` at run time, inside the agent's network namespace |
+| Generator | k6 inside the agent's network namespace; these historical runs recorded `grafana/k6:latest`, so their exact generator digest is unavailable |
 
 ## Method
 
@@ -620,23 +620,31 @@ refuses to overwrite an existing label; choose a fresh label for every run. Both
 and the profiler take it. Setup first removes any previous completed environment, builds the agent
 image from a scoped archive of the captured commit, builds the current auth and commerce JARs,
 applies all three canonical migration streams, and bootstraps an isolated, tmpfs-backed
-Elasticsearch node. Bootstrap failure stops setup and its raw JSON response is retained.
+Elasticsearch node. The bootstrap runs from that immutable agent/indexer image over the benchmark
+Docker network, so ignored host bytecode and editable installs cannot affect it. Bootstrap failure
+stops setup and its raw JSON response is retained.
 
 Every setup has a new nonce. Its persistent `citybuddy-bench-*` containers carry immutable nonce
 and full-commit labels. Setup publishes `bench/.run/agent_setup_environment.json` atomically, then
 publishes `bench/.run/citybuddy_commit` last as the completion marker. The compact environment
 record contains the nonce and commit, setup time window, fixture size, attempt/metrics/trace
-configuration, container and immutable image IDs and labels, Auth/Commerce host and mounted JAR
-SHA-256 values and Java runtimes, successful canonical migration commands with their latest
+configuration, container and immutable image IDs, labels, start times and restart counts,
+Auth/Commerce host and mounted JAR SHA-256 values and Java runtimes, the measured MySQL container's
+identity and Compose image reference, successful canonical migration commands with their latest
 database versions, and the raw knowledge bootstrap output. It does not reconstruct migration,
 mapping or corpus truth.
 
-Before starting load, the runner and profiler copy that record to the result `LABEL`, then directly
-check the source-clean HEAD, completion marker, live record, container IDs and labels, and mounted
-JAR hashes. They repeat the check after the run, so a same-name container or setup replacement makes
-the run invalid. A later setup may replace `bench/.run`, while existing results retain their own
-setup record. Failed or interrupted setup removes only containers carrying that attempt's nonce and
-commit labels and leaves ordinary Compose services and data untouched.
+Before starting load, the runner and profiler copy that record into a unique ignored staging
+directory, then directly check the source-clean HEAD, completion marker, live record, container
+IDs, image IDs, labels, start times, restart counts, the MySQL boundary, and mounted JAR hashes.
+They repeat the check after the run. A replacement or restart therefore makes the run invalid, and
+no files are published under `bench/results` until the workload and postcondition both succeed.
+Each ladder console records the digest-pinned k6 reference, actual image ID and version. A later
+setup may replace `bench/.run`, while published results retain their own setup record. Failed or
+interrupted setup cleanup removes only containers carrying that attempt's nonce and commit labels;
+it does not delete ordinary Compose containers or volumes. Migrations, fixture resets, permission
+updates and service-identity writes can precede a later failure and are not rolled back, so setup
+must be rerun before any workload.
 
 ### The paired ladders
 

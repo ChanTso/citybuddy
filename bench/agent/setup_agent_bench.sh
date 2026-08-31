@@ -43,6 +43,7 @@ cleanup_setup() {
   trap - EXIT
   if [ "$setup_complete" != true ] && [ "$containers_may_exist" = true ]; then
     for name in citybuddy-bench-pool citybuddy-bench-k6 citybuddy-bench-profile-load \
+      citybuddy-bench-indexer \
       citybuddy-bench-agent citybuddy-bench-model citybuddy-bench-net \
       citybuddy-bench-commerce citybuddy-bench-auth citybuddy-bench-elasticsearch; do
       if ids="$(docker ps -aq \
@@ -136,7 +137,6 @@ auth_migration_pw="$(read_value MYSQL_AUTH_MIGRATION_PASSWORD)"
 commerce_migration_pw="$(read_value MYSQL_COMMERCE_MIGRATION_PASSWORD)"
 agent_migration_pw="$(read_value MYSQL_AGENT_MIGRATION_PASSWORD)"
 
-mysql_port="$(docker port citybuddy-mysql-1 3306/tcp | cut -d: -f2)"
 sql() { MYSQL_PWD="$2" mysql --protocol=TCP -h 127.0.0.1 -P "$mysql_port" -u "$1" -D "$3" --batch --skip-column-names -e "$4"; }
 
 migration_query() {
@@ -203,6 +203,26 @@ container_image_id() {
   printf '%s\n' "$image_id"
 }
 
+container_started_at() {
+  local container="$1" started_at
+  started_at="$(docker inspect --format '{{.State.StartedAt}}' "$container")"
+  if [ -z "$started_at" ]; then
+    echo "Missing StartedAt for $container." >&2
+    return 1
+  fi
+  printf '%s\n' "$started_at"
+}
+
+container_restart_count() {
+  local container="$1" restart_count
+  restart_count="$(docker inspect --format '{{.RestartCount}}' "$container")"
+  if [[ ! "$restart_count" =~ ^[0-9]+$ ]]; then
+    echo "Invalid restart count for $container." >&2
+    return 1
+  fi
+  printf '%s\n' "$restart_count"
+}
+
 resolve_image_id() {
   local image_ref="$1" image_id
   if ! image_id="$(docker image inspect --format '{{.Id}}' "$image_ref" 2>/dev/null)"; then
@@ -235,7 +255,9 @@ java_runtime_version() {
 
 verify_setup_container() {
   local name="$1" expected_id="$2" expected_image_id="$3"
+  local expected_started_at="$4" expected_restart_count="$5"
   local actual_id actual_image_id actual_nonce actual_commit running
+  local actual_started_at actual_restart_count
   actual_id="$(docker inspect --format '{{.Id}}' "$name")"
   actual_image_id="$(container_image_id "$name")"
   actual_nonce="$(docker inspect --format \
@@ -243,13 +265,61 @@ verify_setup_container() {
   actual_commit="$(docker inspect --format \
     '{{ index .Config.Labels "citybuddy.bench.citybuddy-commit" }}' "$name")"
   running="$(docker inspect --format '{{.State.Running}}' "$name")"
+  actual_started_at="$(container_started_at "$name")"
+  actual_restart_count="$(container_restart_count "$name")"
   if [ "$actual_id" != "$expected_id" ] || [ "$actual_image_id" != "$expected_image_id" ] \
+    || [ "$actual_started_at" != "$expected_started_at" ] \
+    || [ "$actual_restart_count" != "$expected_restart_count" ] \
     || [ "$actual_nonce" != "$setup_nonce" ] \
     || [ "$actual_commit" != "$citybuddy_commit" ] || [ "$running" != true ]; then
     echo "Setup-owned container identity changed for $name." >&2
     return 1
   fi
 }
+
+verify_mysql_container() {
+  local actual_id actual_image_id actual_configured_image actual_started_at actual_restart_count
+  local running current_compose_image
+  actual_id="$(docker inspect --format '{{.Id}}' citybuddy-mysql-1)"
+  actual_image_id="$(container_image_id citybuddy-mysql-1)"
+  actual_configured_image="$(docker inspect --format '{{.Config.Image}}' citybuddy-mysql-1)"
+  actual_started_at="$(container_started_at citybuddy-mysql-1)"
+  actual_restart_count="$(container_restart_count citybuddy-mysql-1)"
+  running="$(docker inspect --format '{{.State.Running}}' citybuddy-mysql-1)"
+  current_compose_image="$("${compose_command[@]}" config --format json \
+    | jq -er '.services.mysql.image | select(type == "string" and length > 0)')"
+  if [ "$actual_id" != "$mysql_container_id" ] \
+    || [ "$actual_image_id" != "$mysql_image_id" ] \
+    || [ "$actual_configured_image" != "$mysql_configured_image" ] \
+    || [ "$current_compose_image" != "$mysql_configured_image" ] \
+    || [ "$actual_started_at" != "$mysql_started_at" ] \
+    || [ "$actual_restart_count" != "$mysql_restart_count" ] \
+    || [ "$running" != true ]; then
+    echo "The measured MySQL container changed while the fixture was being built." >&2
+    return 1
+  fi
+}
+
+compose_command=(docker compose --project-name citybuddy --env-file .env --file compose.yaml)
+mysql_container_id="$(docker inspect --format '{{.Id}}' citybuddy-mysql-1)"
+if [[ ! "$mysql_container_id" =~ ^[0-9a-f]{64}$ ]]; then
+  echo "Invalid MySQL container ID." >&2
+  exit 1
+fi
+mysql_image_id="$(container_image_id citybuddy-mysql-1)"
+mysql_configured_image="$("${compose_command[@]}" config --format json \
+  | jq -er '.services.mysql.image | select(type == "string" and length > 0)')"
+mysql_actual_configured_image="$(docker inspect --format '{{.Config.Image}}' citybuddy-mysql-1)"
+mysql_resolved_image_id="$(resolve_image_id "$mysql_configured_image")"
+mysql_started_at="$(container_started_at citybuddy-mysql-1)"
+mysql_restart_count="$(container_restart_count citybuddy-mysql-1)"
+if [ "$mysql_actual_configured_image" != "$mysql_configured_image" ] \
+  || [ "$mysql_resolved_image_id" != "$mysql_image_id" ] \
+  || [ "$(docker inspect --format '{{.State.Running}}' citybuddy-mysql-1)" != true ]; then
+  echo "The running MySQL container does not match the Compose image boundary." >&2
+  exit 1
+fi
+mysql_port="$(docker port "$mysql_container_id" 3306/tcp | cut -d: -f2)"
 
 auth_jar="$repo_root/auth-service/target/auth-service-0.0.1-SNAPSHOT.jar"
 commerce_jar="$repo_root/commerce-service/target/commerce-service-0.0.1-SNAPSHOT.jar"
@@ -298,7 +368,8 @@ echo "== stopping the previous bench services =="
 # passed, leaving retrieval decisions behind that block the support_turn delete.
 docker rm -f citybuddy-bench-k6 citybuddy-bench-agent citybuddy-bench-model citybuddy-bench-net \
   citybuddy-bench-auth citybuddy-bench-commerce citybuddy-bench-pool \
-  citybuddy-bench-profile-load citybuddy-bench-elasticsearch >/dev/null 2>&1 || true
+  citybuddy-bench-profile-load citybuddy-bench-indexer \
+  citybuddy-bench-elasticsearch >/dev/null 2>&1 || true
 
 echo "== applying and validating the current MySQL migration streams =="
 mysql_setup_make=(make "ENV_FILE=.env" "COMPOSE_PROJECT_NAME=citybuddy")
@@ -357,6 +428,8 @@ es_container_id="$(docker run --detach --name citybuddy-bench-elasticsearch \
   --env xpack.ml.enabled=false \
   --env 'ES_JAVA_OPTS=-Xms512m -Xmx512m' \
   "$elasticsearch_image_id")"
+es_started_at="$(container_started_at citybuddy-bench-elasticsearch)"
+es_restart_count="$(container_restart_count citybuddy-bench-elasticsearch)"
 es_binding="$(docker port citybuddy-bench-elasticsearch 9200/tcp)"
 es_port="${es_binding##*:}"
 if [[ ! "$es_port" =~ ^[0-9]+$ ]]; then
@@ -376,9 +449,15 @@ done
 
 echo "== bootstrapping the benchmark knowledge corpus =="
 # The indexer owns corpus and mapping validation. Its raw response is retained without a second
-# implementation of those rules in the benchmark harness.
-uv run citybuddy-indexer bootstrap \
-  --elasticsearch-url "http://127.0.0.1:$es_port" \
+# implementation of those rules in the benchmark harness. It runs from the commit-only image, so
+# ignored host bytecode and editable-install state cannot change the bootstrap.
+docker run --rm --name citybuddy-bench-indexer \
+  --label "$setup_nonce_label=$setup_nonce" \
+  --label "$citybuddy_commit_label=$citybuddy_commit" \
+  --network citybuddy_default \
+  --entrypoint /opt/citybuddy/.venv/bin/python \
+  "$agent_image_id" -m citybuddy_indexer bootstrap \
+  --elasticsearch-url http://citybuddy-bench-elasticsearch:9200 \
   --index knowledge_docs_v1 --alias knowledge_docs_read > "$knowledge_bootstrap_file"
 
 echo "== starting auth-service =="
@@ -405,6 +484,8 @@ auth_container_id="$(docker run --detach --name citybuddy-bench-auth \
   --citybuddy.identity.current-public-key-path=/opt/citybuddy/bench-public.pem \
   --citybuddy.identity.exchange-scopes[0]=catalog:read \
   --citybuddy.identity.exchange-scopes[1]=refund:create)"
+auth_started_at="$(container_started_at citybuddy-bench-auth)"
+auth_restart_count="$(container_restart_count citybuddy-bench-auth)"
 
 until curl -sf http://127.0.0.1:18080/auth/jwks >/dev/null 2>&1; do
   if [ "$(docker inspect -f '{{.State.Running}}' citybuddy-bench-auth)" != "true" ]; then
@@ -475,6 +556,8 @@ commerce_container_id="$(docker run --detach --name citybuddy-bench-commerce \
   --citybuddy.actions.lock-wait-timeout-seconds=1 \
   --citybuddy.actions.maximum-observation-attempts=2 \
   --citybuddy.actions.observation-backoff=25ms)"
+commerce_started_at="$(container_started_at citybuddy-bench-commerce)"
+commerce_restart_count="$(container_restart_count citybuddy-bench-commerce)"
 
 until [ "$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:18081/api/products)" != "000" ]; do
   if [ "$(docker inspect -f '{{.State.Running}}' citybuddy-bench-commerce)" != "true" ]; then
@@ -500,6 +583,8 @@ net_container_id="$(docker run --detach --name citybuddy-bench-net \
   --label "$citybuddy_commit_label=$citybuddy_commit" \
   --network citybuddy_default \
   "$net_image_id" sleep infinity)"
+net_started_at="$(container_started_at citybuddy-bench-net)"
+net_restart_count="$(container_restart_count citybuddy-bench-net)"
 
 model_container_id="$(docker run --detach --name citybuddy-bench-model \
   --label "$setup_nonce_label=$setup_nonce" \
@@ -508,6 +593,8 @@ model_container_id="$(docker run --detach --name citybuddy-bench-model \
   --volume "$repo_root/scripts/fake_litellm_server.py:/opt/fake.py:ro" \
   --entrypoint /opt/citybuddy/.venv/bin/python \
   "$agent_image_id" /opt/fake.py --port 8000)"
+model_started_at="$(container_started_at citybuddy-bench-model)"
+model_restart_count="$(container_restart_count citybuddy-bench-model)"
 
 agent_container_id="$(docker run --detach --name citybuddy-bench-agent \
   --label "$setup_nonce_label=$setup_nonce" \
@@ -536,6 +623,8 @@ agent_container_id="$(docker run --detach --name citybuddy-bench-agent \
   --env CITYBUDDY_TRACE_EXPORT_URL= \
   --env AGENT_ATTEMPT_BUDGET="$AGENT_ATTEMPT_BUDGET" \
   "$agent_image_id")"
+agent_started_at="$(container_started_at citybuddy-bench-agent)"
+agent_restart_count="$(container_restart_count citybuddy-bench-agent)"
 
 # Probed from inside the namespace for the same reason the generator runs there. wget exits
 # non-zero on the 405 that proves the route is live, so its status is discarded and the answer
@@ -613,12 +702,19 @@ if [ "$es_container_image_id" != "$elasticsearch_image_id" ] \
   echo "A setup container does not use the immutable image built for this checkout." >&2
   exit 1
 fi
-verify_setup_container citybuddy-bench-elasticsearch "$es_container_id" "$es_container_image_id"
-verify_setup_container citybuddy-bench-auth "$auth_container_id" "$auth_container_image_id"
-verify_setup_container citybuddy-bench-commerce "$commerce_container_id" "$commerce_container_image_id"
-verify_setup_container citybuddy-bench-net "$net_container_id" "$net_container_image_id"
-verify_setup_container citybuddy-bench-model "$model_container_id" "$model_container_image_id"
-verify_setup_container citybuddy-bench-agent "$agent_container_id" "$agent_container_image_id"
+verify_mysql_container
+verify_setup_container citybuddy-bench-elasticsearch "$es_container_id" \
+  "$es_container_image_id" "$es_started_at" "$es_restart_count"
+verify_setup_container citybuddy-bench-auth "$auth_container_id" \
+  "$auth_container_image_id" "$auth_started_at" "$auth_restart_count"
+verify_setup_container citybuddy-bench-commerce "$commerce_container_id" \
+  "$commerce_container_image_id" "$commerce_started_at" "$commerce_restart_count"
+verify_setup_container citybuddy-bench-net "$net_container_id" \
+  "$net_container_image_id" "$net_started_at" "$net_restart_count"
+verify_setup_container citybuddy-bench-model "$model_container_id" \
+  "$model_container_image_id" "$model_started_at" "$model_restart_count"
+verify_setup_container citybuddy-bench-agent "$agent_container_id" \
+  "$agent_container_image_id" "$agent_started_at" "$agent_restart_count"
 
 setup_completed_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 environment_tmp="$(mktemp "$run_dir/.agent_setup_environment.XXXXXX")"
@@ -640,16 +736,33 @@ uv run python - \
   "$commerce_java_runtime" \
   "$es_container_id" \
   "$es_container_image_id" \
+  "$es_started_at" \
+  "$es_restart_count" \
   "$auth_container_id" \
   "$auth_container_image_id" \
+  "$auth_started_at" \
+  "$auth_restart_count" \
   "$commerce_container_id" \
   "$commerce_container_image_id" \
+  "$commerce_started_at" \
+  "$commerce_restart_count" \
   "$net_container_id" \
   "$net_container_image_id" \
+  "$net_started_at" \
+  "$net_restart_count" \
   "$model_container_id" \
   "$model_container_image_id" \
+  "$model_started_at" \
+  "$model_restart_count" \
   "$agent_container_id" \
   "$agent_container_image_id" \
+  "$agent_started_at" \
+  "$agent_restart_count" \
+  "$mysql_container_id" \
+  "$mysql_image_id" \
+  "$mysql_configured_image" \
+  "$mysql_started_at" \
+  "$mysql_restart_count" \
   "$auth_migration_version" \
   "$commerce_migration_version" \
   "$agent_migration_version" \
@@ -676,16 +789,33 @@ from pathlib import Path
     commerce_runtime,
     elasticsearch_container_id,
     elasticsearch_image_id,
+    elasticsearch_started_at,
+    elasticsearch_restart_count,
     auth_container_id,
     auth_image_id,
+    auth_started_at,
+    auth_restart_count,
     commerce_container_id,
     commerce_image_id,
+    commerce_started_at,
+    commerce_restart_count,
     net_container_id,
     net_image_id,
+    net_started_at,
+    net_restart_count,
     model_container_id,
     model_image_id,
+    model_started_at,
+    model_restart_count,
     agent_container_id,
     agent_image_id,
+    agent_started_at,
+    agent_restart_count,
+    mysql_container_id,
+    mysql_image_id,
+    mysql_configured_image,
+    mysql_started_at,
+    mysql_restart_count,
     auth_migration_version,
     commerce_migration_version,
     agent_migration_version,
@@ -699,8 +829,16 @@ label_values = {
 }
 
 
-def container(container_id: str, image_id: str) -> dict[str, object]:
-    return {"id": container_id, "imageId": image_id, "labels": label_values}
+def container(
+    container_id: str, image_id: str, started_at: str, restart_count: str
+) -> dict[str, object]:
+    return {
+        "id": container_id,
+        "imageId": image_id,
+        "labels": label_values,
+        "restartCount": int(restart_count),
+        "startedAt": started_at,
+    }
 
 
 environment = {
@@ -713,14 +851,30 @@ environment = {
         "traceExportUrl": "",
     },
     "containers": {
-        "citybuddy-bench-agent": container(agent_container_id, agent_image_id),
-        "citybuddy-bench-auth": container(auth_container_id, auth_image_id),
-        "citybuddy-bench-commerce": container(commerce_container_id, commerce_image_id),
-        "citybuddy-bench-elasticsearch": container(
-            elasticsearch_container_id, elasticsearch_image_id
+        "citybuddy-bench-agent": container(
+            agent_container_id, agent_image_id, agent_started_at, agent_restart_count
         ),
-        "citybuddy-bench-model": container(model_container_id, model_image_id),
-        "citybuddy-bench-net": container(net_container_id, net_image_id),
+        "citybuddy-bench-auth": container(
+            auth_container_id, auth_image_id, auth_started_at, auth_restart_count
+        ),
+        "citybuddy-bench-commerce": container(
+            commerce_container_id,
+            commerce_image_id,
+            commerce_started_at,
+            commerce_restart_count,
+        ),
+        "citybuddy-bench-elasticsearch": container(
+            elasticsearch_container_id,
+            elasticsearch_image_id,
+            elasticsearch_started_at,
+            elasticsearch_restart_count,
+        ),
+        "citybuddy-bench-model": container(
+            model_container_id, model_image_id, model_started_at, model_restart_count
+        ),
+        "citybuddy-bench-net": container(
+            net_container_id, net_image_id, net_started_at, net_restart_count
+        ),
     },
     "formatVersion": "citybuddy-agent-setup-environment-v1",
     "java": {
@@ -746,6 +900,13 @@ environment = {
         "agent": {"latestVersion": agent_migration_version},
         "auth": {"latestVersion": auth_migration_version},
         "commerce": {"latestVersion": commerce_migration_version},
+        "container": {
+            "configuredImage": mysql_configured_image,
+            "id": mysql_container_id,
+            "imageId": mysql_image_id,
+            "restartCount": int(mysql_restart_count),
+            "startedAt": mysql_started_at,
+        },
     },
     "migrationCommands": [
         {"command": "make ENV_FILE=.env COMPOSE_PROJECT_NAME=citybuddy grant-access", "status": "succeeded"},

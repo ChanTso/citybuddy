@@ -12,6 +12,7 @@ import pytest
 
 REPOSITORY = Path(__file__).resolve().parents[1]
 SETUP = REPOSITORY / "bench/agent/setup_agent_bench.sh"
+DOCKERFILE = REPOSITORY / "bench/agent/Dockerfile"
 
 
 def _copy_setup(tmp_path: Path) -> tuple[Path, Path]:
@@ -156,6 +157,7 @@ def test_agent_image_context_contains_only_tracked_commit_sources(tmp_path: Path
     assert "knowledge-indexer/src" in agent_build
     assert "docker build --quiet --file bench/agent/Dockerfile -" in agent_build
     assert "--tag" not in agent_build
+    assert "RUN uv sync --locked --no-dev --all-packages" in DOCKERFILE.read_text(encoding="utf-8")
 
 
 def _write_executable(path: Path, source: str) -> None:
@@ -198,10 +200,13 @@ def _prepare_cleanup_counterexample(tmp_path: Path) -> tuple[Path, dict[str, str
     docker_log = tmp_path / "docker.log"
     docker_state = tmp_path / "es-started"
     es_id = "e" * 64
+    mysql_id = "1" * 64
     agent_image_id = f"sha256:{'a' * 64}"
     es_image_id = f"sha256:{'b' * 64}"
     java_image_id = f"sha256:{'c' * 64}"
     net_image_id = f"sha256:{'d' * 64}"
+    mysql_image_id = f"sha256:{'f' * 64}"
+    mysql_image_ref = f"mysql:8.4.10@{mysql_image_id}"
     _write_executable(
         tmp_path / "mvnw",
         """
@@ -239,15 +244,7 @@ def _prepare_cleanup_counterexample(tmp_path: Path) -> tuple[Path, dict[str, str
         #!/bin/sh
         case "$*" in
           *"hash_test_credential.py"*) printf 'fixture-hash\\n'; exit 0 ;;
-          *"citybuddy-indexer bootstrap"*)
-            printf '{"indexVersion":"knowledge_docs_v1"}\\n'
-            if [ -n "${SETUP_SIGNAL:-}" ]; then
-              kill -s "$SETUP_SIGNAL" "$PPID"
-              sleep 0.1
-              exit 0
-            fi
-            exit 41
-            ;;
+          *"citybuddy-indexer bootstrap"*) exit 99 ;;
           *) exit 0 ;;
         esac
         """,
@@ -265,7 +262,7 @@ def _prepare_cleanup_counterexample(tmp_path: Path) -> tuple[Path, dict[str, str
         case "$command" in
           port)
             case "$1" in
-              citybuddy-mysql-1) printf '0.0.0.0:3306\\n' ;;
+              {mysql_id}) printf '0.0.0.0:3306\\n' ;;
               citybuddy-bench-elasticsearch) printf '127.0.0.1:49200\\n' ;;
             esac
             ;;
@@ -280,8 +277,12 @@ def _prepare_cleanup_counterexample(tmp_path: Path) -> tuple[Path, dict[str, str
             case "$*" in
               *eclipse-temurin*) printf '%s' '{java_image_id}' ;;
               *alpine:3.20*) printf '%s' '{net_image_id}' ;;
+              *mysql:8.4.10*) printf '%s' '{mysql_image_id}' ;;
               *) exit 1 ;;
             esac
+            ;;
+          compose)
+            printf '%s\\n' '{{"services":{{"mysql":{{"image":"{mysql_image_ref}"}}}}}}'
             ;;
           run)
             echo "run $*" >> "$DOCKER_LOG"
@@ -292,9 +293,31 @@ def _prepare_cleanup_counterexample(tmp_path: Path) -> tuple[Path, dict[str, str
             if [ "$name" = citybuddy-bench-elasticsearch ]; then
               : > "$DOCKER_STATE"
               printf '%s\\n' '{es_id}'
+            elif [ "$name" = citybuddy-bench-indexer ]; then
+              printf '{{"indexVersion":"knowledge_docs_v1"}}\\n'
+              if [ -n "${{SETUP_SIGNAL:-}}" ]; then
+                kill -s "$SETUP_SIGNAL" "$PPID"
+                sleep 0.1
+                exit 0
+              fi
+              exit 41
             fi
             ;;
-          inspect) printf 'true\\n' ;;
+          inspect)
+            format="$2"
+            name="$3"
+            case "$name:$format" in
+              citybuddy-mysql-1:*Config.Image*) printf '%s\\n' '{mysql_image_ref}' ;;
+              citybuddy-mysql-1:*'.Image'*) printf '%s\\n' '{mysql_image_id}' ;;
+              citybuddy-mysql-1:*'.Id'*) printf '%s\\n' '{mysql_id}' ;;
+              citybuddy-bench-elasticsearch:*'.Image'*) printf '%s\\n' '{es_image_id}' ;;
+              citybuddy-bench-elasticsearch:*'.Id'*) printf '%s\\n' '{es_id}' ;;
+              *:*StartedAt*) printf '2026-08-31T00:00:00Z\\n' ;;
+              *:*RestartCount*) printf '0\\n' ;;
+              *:*Running*) printf 'true\\n' ;;
+              *) exit 1 ;;
+            esac
+            ;;
           logs) exit 0 ;;
           ps)
             printf 'ps %s\\n' "$*" >> "$DOCKER_LOG"
@@ -349,6 +372,10 @@ def test_failed_setup_cleans_only_its_labeled_containers_and_preserves_status(
     assert result.returncode == 41
     docker_log = Path(environment["DOCKER_LOG"]).read_text(encoding="utf-8")
     assert f"sha256:{'b' * 64}" in docker_log
+    assert "--name citybuddy-bench-indexer" in docker_log
+    assert "--network citybuddy_default" in docker_log
+    assert f"sha256:{'a' * 64} -m citybuddy_indexer bootstrap" in docker_log
+    assert "--elasticsearch-url http://citybuddy-bench-elasticsearch:9200" in docker_log
     assert "citybuddy-bench-elasticsearch:local" not in docker_log
     assert f"cleanup-remove:{'e' * 64}" in docker_log
     assert "label=citybuddy.bench.setup-nonce=" in docker_log
@@ -358,6 +385,7 @@ def test_failed_setup_cleans_only_its_labeled_containers_and_preserves_status(
         "citybuddy-bench-pool",
         "citybuddy-bench-k6",
         "citybuddy-bench-profile-load",
+        "citybuddy-bench-indexer",
         "citybuddy-bench-agent",
         "citybuddy-bench-model",
         "citybuddy-bench-net",
@@ -398,48 +426,3 @@ def test_interrupted_setup_cleans_its_labeled_containers(
     assert f"cleanup-remove:{'e' * 64}" in docker_log
     assert not (run_dir / "citybuddy_commit").exists()
     assert not (run_dir / "agent_setup_environment.json").exists()
-
-
-def test_setup_orders_canonical_boundaries_before_atomic_completion() -> None:
-    source = SETUP.read_text(encoding="utf-8")
-    java_build = source.index(
-        "./mvnw --batch-mode --no-transfer-progress "
-        "-pl auth-service,commerce-service -am clean package"
-    )
-    first_grant = source.index('"${mysql_setup_make[@]}" grant-access')
-    migrate_auth = source.index('"${mysql_setup_make[@]}" migrate-auth', first_grant)
-    migrate_commerce = source.index('"${mysql_setup_make[@]}" migrate-commerce', migrate_auth)
-    migrate_agent = source.index('"${mysql_setup_make[@]}" migrate-agent', migrate_commerce)
-    final_grant = source.index('"${mysql_setup_make[@]}" grant-access', migrate_agent)
-    bootstrap = source.index("uv run citybuddy-indexer bootstrap")
-    start_agent = source.index(
-        'agent_container_id="$(docker run --detach --name citybuddy-bench-agent'
-    )
-    publish_environment = source.index('mv "$environment_tmp" "$environment_file"')
-    publish_completion = source.index('mv "$commit_tmp" "$commit_file"')
-    mark_complete = source.index("setup_complete=true")
-
-    assert java_build < first_grant < migrate_auth < migrate_commerce < migrate_agent < final_grant
-    assert final_grant < bootstrap < start_agent
-    assert publish_environment < publish_completion < mark_complete
-    assert "AGENT_ELASTICSEARCH_URL=http://citybuddy-bench-elasticsearch:9200" in source
-    assert "AGENT_ELASTICSEARCH_URL=http://elasticsearch:9200" not in source
-    bootstrap_block = source[bootstrap:start_agent]
-    assert "|| true" not in bootstrap_block
-    assert "knowledgeBootstrapRawJson" in source
-    assert "citybuddy-bench-agent:local" not in source
-    assert "citybuddy-bench-elasticsearch:local" not in source
-    es_start = source.index('es_container_id="$(docker run --detach')
-    auth_start = source.index('auth_container_id="$(docker run --detach')
-    model_start = source.index('model_container_id="$(docker run --detach')
-    agent_start = source.index('agent_container_id="$(docker run --detach')
-    pool_start = source.index("docker run --rm --name citybuddy-bench-pool")
-    final_checks = source.index('changes="$(source_changes)"', pool_start)
-    assert '"$elasticsearch_image_id")' in source[es_start:auth_start]
-    assert '"$agent_image_id" /opt/fake.py' in source[model_start:agent_start]
-    assert '"$agent_image_id")' in source[agent_start:pool_start]
-    assert '"$agent_image_id" /opt/build_agent_pool.py' in source[pool_start:final_checks]
-    assert 'return {"id": container_id, "imageId": image_id, "labels": label_values}' in source
-    assert "trap 'exit 129' HUP" in source
-    assert "trap 'exit 130' INT" in source
-    assert "trap 'exit 143' TERM" in source

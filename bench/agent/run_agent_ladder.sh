@@ -24,7 +24,9 @@ esac
 
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"; cd "$repo_root"
 out="$repo_root/bench/results"
+run_dir="$repo_root/bench/.run"
 live_setup_environment="$repo_root/bench/.run/agent_setup_environment.json"
+K6_IMAGE_REFERENCE="grafana/k6@sha256:5221b620a4f874faff6e32ba597aa667c058391fe4898b1c6f6377f062c6cdec"
 # shellcheck source=bench/agent/setup_environment_gate.sh
 source "$repo_root/bench/agent/setup_environment_gate.sh"
 
@@ -42,41 +44,57 @@ POOL_BASE="${POOL_BASE:-0}"
 correlation_boundary="$RUN_ID-$PATH_NAME-"
 correlation_boundary_hex="$(printf '%s' "$correlation_boundary" | od -An -v -tx1 | tr -d ' \n')"
 
-summary_path="$out/agent_${LABEL}_summary.json"
-points_path="$out/agent_${LABEL}_points.json"
-console_path="$out/agent_${LABEL}_console.txt"
-cpu_path="$out/agent_${LABEL}_cpu.txt"
-cpu_errors_path="$out/agent_${LABEL}_cpu_errors.txt"
-cpu_by_step_path="$out/agent_${LABEL}_cpu_by_step.txt"
-mysql_path="$out/agent_${LABEL}_mysql.txt"
-steps_path="$out/agent_${LABEL}_steps.txt"
-workload_contract_path="$out/agent_${LABEL}_workload_contract.tsv"
-setup_environment_path="$out/agent_${LABEL}_setup_environment.json"
-target_paths=(
-  "$summary_path"
-  "$summary_path.tmp"
-  "$points_path"
-  "$console_path"
-  "$cpu_path"
-  "$cpu_errors_path"
-  "$cpu_errors_path.tmp"
-  "$cpu_by_step_path"
-  "$mysql_path"
-  "$steps_path"
-  "$workload_contract_path"
-  "$setup_environment_path"
-  "$setup_environment_path.tmp"
+summary_name="agent_${LABEL}_summary.json"
+points_name="agent_${LABEL}_points.json"
+console_name="agent_${LABEL}_console.txt"
+cpu_name="agent_${LABEL}_cpu.txt"
+cpu_errors_name="agent_${LABEL}_cpu_errors.txt"
+cpu_by_step_name="agent_${LABEL}_cpu_by_step.txt"
+mysql_name="agent_${LABEL}_mysql.txt"
+steps_name="agent_${LABEL}_steps.txt"
+workload_contract_name="agent_${LABEL}_workload_contract.tsv"
+setup_environment_name="agent_${LABEL}_setup_environment.json"
+result_names=(
+  "$summary_name"
+  "$points_name"
+  "$console_name"
+  "$cpu_name"
+  "$cpu_errors_name"
+  "$cpu_by_step_name"
+  "$mysql_name"
+  "$steps_name"
+  "$workload_contract_name"
 )
-for target_path in "${target_paths[@]}"; do
+for name in "${result_names[@]}" "$setup_environment_name"; do
+  target_path="$out/$name"
   if [ -e "$target_path" ]; then
     echo "Refusing to overwrite existing agent benchmark output: $target_path" >&2
     exit 1
   fi
 done
-mkdir -p "$out"
+mkdir -p "$run_dir"
+staging_dir="$(mktemp -d "$run_dir/agent-ladder.XXXXXX")"
+result_published=false
+report_unpublished_result() {
+  local status=$?
+  if [ "$result_published" != true ]; then
+    echo "Unpublished ladder diagnostics remain in $staging_dir" >&2
+  fi
+  exit "$status"
+}
+trap report_unpublished_result EXIT
+summary_path="$staging_dir/$summary_name"
+points_path="$staging_dir/$points_name"
+console_path="$staging_dir/$console_name"
+cpu_path="$staging_dir/$cpu_name"
+cpu_errors_path="$staging_dir/$cpu_errors_name"
+cpu_by_step_path="$staging_dir/$cpu_by_step_name"
+mysql_path="$staging_dir/$mysql_name"
+steps_path="$staging_dir/$steps_name"
+workload_contract_path="$staging_dir/$workload_contract_name"
+setup_environment_path="$staging_dir/$setup_environment_name"
 
-cp "$live_setup_environment" "$setup_environment_path.tmp"
-mv "$setup_environment_path.tmp" "$setup_environment_path"
+cp "$live_setup_environment" "$setup_environment_path"
 verify_agent_setup_environment "$setup_environment_path" "before ladder"
 citybuddy_commit="$(agent_setup_json_string "$setup_environment_path" '.citybuddyCommit')"
 setup_nonce="$(agent_setup_json_string "$setup_environment_path" '.setupNonce')"
@@ -88,7 +106,8 @@ docker rm -f citybuddy-bench-k6 >/dev/null 2>&1 || true
 # connection churn is a first-class cost of a turn and the limit is a candidate ceiling. Counters
 # are read either side of the run and reported as a delta.
 root_pw="$(grep -E '^MYSQL_BOOTSTRAP_PASSWORD=' .env | head -1 | cut -d= -f2-)"
-mysql_port="$(docker port citybuddy-mysql-1 3306/tcp | cut -d: -f2)"
+mysql_container_id="$(agent_setup_json_string "$setup_environment_path" '.mysql.container.id')"
+mysql_port="$(docker port "$mysql_container_id" 3306/tcp | cut -d: -f2)"
 counter() {
   MYSQL_PWD="$root_pw" mysql --protocol=TCP -h 127.0.0.1 -P "$mysql_port" -u root \
     --batch --skip-column-names -e \
@@ -118,24 +137,31 @@ if [ "$PATH_NAME" = "prepare" ]; then
   fi
 fi
 
+k6_version="$(docker run --rm --entrypoint k6 "$K6_IMAGE_REFERENCE" version)"
+k6_image_id="$(docker image inspect --format '{{.Id}}' "$K6_IMAGE_REFERENCE")"
+if [[ ! "$k6_image_id" =~ ^sha256:[0-9a-f]{64}$ ]] || [ -z "$k6_version" ]; then
+  echo "Cannot resolve the pinned k6 image boundary." >&2
+  exit 1
+fi
 k6_container_id="$(docker run --detach --name citybuddy-bench-k6 \
   --label "citybuddy.bench.setup-nonce=$setup_nonce" \
   --label "citybuddy.bench.citybuddy-commit=$citybuddy_commit" \
   --network "container:citybuddy-bench-net" \
   --volume "$repo_root/bench/agent/k6:/scripts:ro" \
   --volume "$repo_root/bench/.run:/run-data:ro" \
-  --volume "$out:/out" \
+  --volume "$staging_dir:/out" \
   --env POOL_FILE=/run-data/agent_pool.json \
   --env PATH_NAME="$PATH_NAME" --env RUN_ID="$RUN_ID" --env POOL_BASE="$POOL_BASE" \
   --env RATES="$RATES" --env STEP_SECONDS="$STEP_SECONDS" \
   --env GRACEFUL_STOP_SECONDS="$GRACEFUL_STOP_SECONDS" --env GAP_SECONDS="$GAP_SECONDS" \
-  --entrypoint k6 grafana/k6:latest \
-  run --summary-export="/out/agent_${LABEL}_summary.json" \
-      --out "json=/out/agent_${LABEL}_points.json" \
+  --entrypoint k6 "$k6_image_id" \
+  run --summary-export="/out/$summary_name" \
+      --out "json=/out/$points_name" \
       --tag "citybuddy_commit=$citybuddy_commit" \
       --tag "setup_nonce=$setup_nonce" \
       /scripts/agent_paths.js)"
 if [ "$(docker inspect --format '{{.Id}}' "$k6_container_id")" != "$k6_container_id" ] \
+  || [ "$(docker inspect --format '{{.Image}}' "$k6_container_id")" != "$k6_image_id" ] \
   || [ "$(docker inspect --format \
     '{{ index .Config.Labels "citybuddy.bench.setup-nonce" }}' "$k6_container_id")" \
     != "$setup_nonce" ] \
@@ -156,7 +182,7 @@ sampled_targets=(
   "$(jq -er '.containers["citybuddy-bench-agent"].id' "$setup_environment_path")"
   "$(jq -er '.containers["citybuddy-bench-model"].id' "$setup_environment_path")"
   "$(jq -er '.containers["citybuddy-bench-commerce"].id' "$setup_environment_path")"
-  citybuddy-mysql-1
+  "$mysql_container_id"
   "$(jq -er '.containers["citybuddy-bench-elasticsearch"].id' "$setup_environment_path")"
 )
 while [ "$(docker inspect -f '{{.State.Running}}' "$k6_container_id" 2>/dev/null)" = "true" ]; do
@@ -174,6 +200,9 @@ mv "$cpu_errors_path.tmp" "$cpu_errors_path"
 
 {
   printf 'citybuddy_commit=%s\n' "$citybuddy_commit"
+  printf 'k6_image_reference=%s\n' "$K6_IMAGE_REFERENCE"
+  printf 'k6_image_id=%s\n' "$k6_image_id"
+  printf 'k6_version=%s\n' "$k6_version"
   docker logs "$k6_container_id"
 } > "$console_path" 2>&1
 
@@ -363,4 +392,7 @@ echo "-- per-step statistics --"
   uv run python bench/agent/analyze_agent_ladder.py \
     "$points_path" "$LABEL" "$STEP_SECONDS" "$RATES"
 } | tee "$steps_path"
-verify_agent_setup_environment "$setup_environment_path" "after ladder"
+publish_agent_results "$setup_environment_path" "after ladder" "$staging_dir" "$out" \
+  "$setup_environment_name" "${result_names[@]}"
+result_published=true
+trap - EXIT

@@ -42,7 +42,8 @@ verify_agent_setup_environment() {
   local commit_marker="$repo_root/bench/.run/citybuddy_commit"
   local expected_format expected_commit expected_nonce live_format live_commit live_nonce
   local current_commit source_changes name expected_id expected_image_id live_id live_image_id
-  local actual_id actual_image_id running
+  local expected_started_at expected_restart_count live_started_at live_restart_count
+  local actual_id actual_image_id actual_started_at actual_restart_count running
   local expected_nonce_label expected_commit_label live_nonce_label live_commit_label
   local actual_nonce_label actual_commit_label
 
@@ -88,18 +89,30 @@ verify_agent_setup_environment() {
       '.containers[$name].imageId
        | select(type == "string" and test("^sha256:[0-9a-f]{64}$"))' \
       "$expected_record")"
+    expected_started_at="$(jq -er --arg name "$name" \
+      '.containers[$name].startedAt | select(type == "string" and length > 0)' \
+      "$expected_record")"
+    expected_restart_count="$(jq -er --arg name "$name" \
+      '.containers[$name].restartCount
+       | select(type == "number" and . >= 0 and floor == .) | tostring' \
+      "$expected_record")"
     expected_nonce_label="$(jq -er --arg name "$name" \
       '.containers[$name].labels["citybuddy.bench.setup-nonce"]' "$expected_record")"
     expected_commit_label="$(jq -er --arg name "$name" \
       '.containers[$name].labels["citybuddy.bench.citybuddy-commit"]' "$expected_record")"
     live_id="$(jq -er --arg name "$name" '.containers[$name].id' "$live_record")"
     live_image_id="$(jq -er --arg name "$name" '.containers[$name].imageId' "$live_record")"
+    live_started_at="$(jq -er --arg name "$name" '.containers[$name].startedAt' "$live_record")"
+    live_restart_count="$(jq -er --arg name "$name" \
+      '.containers[$name].restartCount | tostring' "$live_record")"
     live_nonce_label="$(jq -er --arg name "$name" \
       '.containers[$name].labels["citybuddy.bench.setup-nonce"]' "$live_record")"
     live_commit_label="$(jq -er --arg name "$name" \
       '.containers[$name].labels["citybuddy.bench.citybuddy-commit"]' "$live_record")"
     actual_id="$(docker inspect --format '{{.Id}}' "$name")"
     actual_image_id="$(docker inspect --format '{{.Image}}' "$name")"
+    actual_started_at="$(docker inspect --format '{{.State.StartedAt}}' "$name")"
+    actual_restart_count="$(docker inspect --format '{{.RestartCount}}' "$name")"
     running="$(docker inspect --format '{{.State.Running}}' "$name")"
     actual_nonce_label="$(docker inspect --format \
       '{{ index .Config.Labels "citybuddy.bench.setup-nonce" }}' "$name")"
@@ -109,10 +122,14 @@ verify_agent_setup_environment() {
       || [ "$expected_commit_label" != "$expected_commit" ] \
       || [ "$live_id" != "$expected_id" ] \
       || [ "$live_image_id" != "$expected_image_id" ] \
+      || [ "$live_started_at" != "$expected_started_at" ] \
+      || [ "$live_restart_count" != "$expected_restart_count" ] \
       || [ "$live_nonce_label" != "$expected_nonce" ] \
       || [ "$live_commit_label" != "$expected_commit" ] \
       || [ "$actual_id" != "$expected_id" ] \
       || [ "$actual_image_id" != "$expected_image_id" ] \
+      || [ "$actual_started_at" != "$expected_started_at" ] \
+      || [ "$actual_restart_count" != "$expected_restart_count" ] \
       || [ "$running" != true ] \
       || [ "$actual_nonce_label" != "$expected_nonce" ] \
       || [ "$actual_commit_label" != "$expected_commit" ]; then
@@ -120,6 +137,59 @@ verify_agent_setup_environment() {
       return 1
     fi
   done
+
+  local expected_mysql_id expected_mysql_image expected_mysql_configured_image
+  local expected_mysql_started_at expected_mysql_restart_count
+  local live_mysql_id live_mysql_image live_mysql_configured_image
+  local live_mysql_started_at live_mysql_restart_count
+  local actual_mysql_id actual_mysql_image actual_mysql_configured_image
+  local actual_mysql_started_at actual_mysql_restart_count actual_mysql_running
+  local compose_mysql_image
+  expected_mysql_id="$(jq -er \
+    '.mysql.container.id | select(type == "string" and test("^[0-9a-f]{64}$"))' \
+    "$expected_record")"
+  expected_mysql_image="$(jq -er \
+    '.mysql.container.imageId
+     | select(type == "string" and test("^sha256:[0-9a-f]{64}$"))' \
+    "$expected_record")"
+  expected_mysql_configured_image="$(agent_setup_json_string \
+    "$expected_record" '.mysql.container.configuredImage')"
+  expected_mysql_started_at="$(agent_setup_json_string \
+    "$expected_record" '.mysql.container.startedAt')"
+  expected_mysql_restart_count="$(jq -er \
+    '.mysql.container.restartCount
+     | select(type == "number" and . >= 0 and floor == .) | tostring' \
+    "$expected_record")"
+  live_mysql_id="$(agent_setup_json_string "$live_record" '.mysql.container.id')"
+  live_mysql_image="$(agent_setup_json_string "$live_record" '.mysql.container.imageId')"
+  live_mysql_configured_image="$(agent_setup_json_string \
+    "$live_record" '.mysql.container.configuredImage')"
+  live_mysql_started_at="$(agent_setup_json_string "$live_record" '.mysql.container.startedAt')"
+  live_mysql_restart_count="$(jq -er '.mysql.container.restartCount | tostring' "$live_record")"
+  actual_mysql_id="$(docker inspect --format '{{.Id}}' citybuddy-mysql-1)"
+  actual_mysql_image="$(docker inspect --format '{{.Image}}' citybuddy-mysql-1)"
+  actual_mysql_configured_image="$(docker inspect --format '{{.Config.Image}}' citybuddy-mysql-1)"
+  actual_mysql_started_at="$(docker inspect --format '{{.State.StartedAt}}' citybuddy-mysql-1)"
+  actual_mysql_restart_count="$(docker inspect --format '{{.RestartCount}}' citybuddy-mysql-1)"
+  actual_mysql_running="$(docker inspect --format '{{.State.Running}}' citybuddy-mysql-1)"
+  compose_mysql_image="$(docker compose --project-name citybuddy --env-file .env \
+    --file compose.yaml config --format json \
+    | jq -er '.services.mysql.image | select(type == "string" and length > 0)')"
+  if [ "$live_mysql_id" != "$expected_mysql_id" ] \
+    || [ "$live_mysql_image" != "$expected_mysql_image" ] \
+    || [ "$live_mysql_configured_image" != "$expected_mysql_configured_image" ] \
+    || [ "$live_mysql_started_at" != "$expected_mysql_started_at" ] \
+    || [ "$live_mysql_restart_count" != "$expected_mysql_restart_count" ] \
+    || [ "$actual_mysql_id" != "$expected_mysql_id" ] \
+    || [ "$actual_mysql_image" != "$expected_mysql_image" ] \
+    || [ "$actual_mysql_configured_image" != "$expected_mysql_configured_image" ] \
+    || [ "$actual_mysql_started_at" != "$expected_mysql_started_at" ] \
+    || [ "$actual_mysql_restart_count" != "$expected_mysql_restart_count" ] \
+    || [ "$actual_mysql_running" != true ] \
+    || [ "$compose_mysql_image" != "$expected_mysql_configured_image" ]; then
+    echo "Agent setup environment gate failed ($phase): the MySQL boundary changed." >&2
+    return 1
+  fi
 
   local auth_host="$repo_root/auth-service/target/auth-service-0.0.1-SNAPSHOT.jar"
   local commerce_host="$repo_root/commerce-service/target/commerce-service-0.0.1-SNAPSHOT.jar"
@@ -148,4 +218,42 @@ verify_agent_setup_environment() {
     echo "Agent setup environment gate failed ($phase): a mounted JAR boundary changed." >&2
     return 1
   fi
+}
+
+publish_agent_results() {
+  local expected_record="$1" phase="$2" staging_dir="$3" results_dir="$4"
+  local completion_name="$5" name moved_name
+  shift 5
+  local -a result_names=("$@") moved_names=()
+
+  for name in "${result_names[@]}" "$completion_name"; do
+    if [ ! -f "$staging_dir/$name" ]; then
+      echo "Agent result publication failed: missing staged file $name." >&2
+      return 1
+    fi
+    if [ -e "$results_dir/$name" ]; then
+      echo "Agent result publication refused to overwrite $results_dir/$name." >&2
+      return 1
+    fi
+  done
+
+  verify_agent_setup_environment "$expected_record" "$phase" || return
+  mkdir -p "$results_dir"
+  for name in "${result_names[@]}"; do
+    if mv "$staging_dir/$name" "$results_dir/$name"; then
+      moved_names+=("$name")
+    else
+      for moved_name in "${moved_names[@]}"; do
+        mv "$results_dir/$moved_name" "$staging_dir/$moved_name" || true
+      done
+      return 1
+    fi
+  done
+  if ! mv "$staging_dir/$completion_name" "$results_dir/$completion_name"; then
+    for moved_name in "${moved_names[@]}"; do
+      mv "$results_dir/$moved_name" "$staging_dir/$moved_name" || true
+    done
+    return 1
+  fi
+  rmdir "$staging_dir"
 }

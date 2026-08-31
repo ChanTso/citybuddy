@@ -109,5 +109,21 @@ def test_agent_and_cpu_sampling_use_the_same_dedicated_elasticsearch() -> None:
     assert container == "citybuddy-bench-elasticsearch"
     assert f'.containers["{container}"].id' in sampled_targets
     assert container in sampled_names
+    assert '"$mysql_container_id"' in sampled_targets
+    assert "citybuddy-mysql-1" not in sampled_targets
     assert "citybuddy-elasticsearch-1" not in sampled_targets
     assert "citybuddy-elasticsearch-1" not in sampled_names
+
+
+def test_agent_ladder_uses_and_records_a_digest_pinned_k6_image() -> None:
+    runner = LADDER_RUNNER.read_text(encoding="utf-8")
+    pinned = re.search(
+        r'^K6_IMAGE_REFERENCE="grafana/k6@sha256:([0-9a-f]{64})"$', runner, re.MULTILINE
+    )
+
+    assert pinned is not None
+    assert "grafana/k6:latest" not in runner
+    assert '--entrypoint k6 "$k6_image_id"' in runner
+    assert "k6_image_reference=%s" in runner
+    assert "k6_image_id=%s" in runner
+    assert "k6_version=%s" in runner

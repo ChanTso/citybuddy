@@ -9,7 +9,8 @@
 # only permits the attach and does not otherwise change how the service runs.
 set -euo pipefail
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"; cd "$repo_root"
-out="$repo_root/bench/results"; mkdir -p "$out"
+out="$repo_root/bench/results"
+run_dir="$repo_root/bench/.run"
 live_setup_environment="$repo_root/bench/.run/agent_setup_environment.json"
 # shellcheck source=bench/agent/setup_environment_gate.sh
 source "$repo_root/bench/agent/setup_environment_gate.sh"
@@ -30,16 +31,29 @@ case "$PATH_NAME" in
   *)         message='hello, can you tell me about delivery times';             default_requests=4000 ;;
 esac
 REQUESTS="${REQUESTS:-$default_requests}"
-profile_path="$out/agent_pyspy_${LABEL}_c${CONCURRENCY}.txt"
-setup_environment_path="$out/agent_pyspy_${LABEL}_c${CONCURRENCY}_setup_environment.json"
-for target_path in "$profile_path" "$setup_environment_path" "$setup_environment_path.tmp"; do
+profile_name="agent_pyspy_${LABEL}_c${CONCURRENCY}.txt"
+setup_environment_name="agent_pyspy_${LABEL}_c${CONCURRENCY}_setup_environment.json"
+for name in "$profile_name" "$setup_environment_name"; do
+  target_path="$out/$name"
   if [ -e "$target_path" ]; then
     echo "Refusing to overwrite existing agent profile output: $target_path" >&2
     exit 1
   fi
 done
-cp "$live_setup_environment" "$setup_environment_path.tmp"
-mv "$setup_environment_path.tmp" "$setup_environment_path"
+mkdir -p "$run_dir"
+staging_dir="$(mktemp -d "$run_dir/agent-profile.XXXXXX")"
+result_published=false
+report_unpublished_result() {
+  local status=$?
+  if [ "$result_published" != true ]; then
+    echo "Unpublished profile diagnostics remain in $staging_dir" >&2
+  fi
+  exit "$status"
+}
+trap report_unpublished_result EXIT
+profile_path="$staging_dir/$profile_name"
+setup_environment_path="$staging_dir/$setup_environment_name"
+cp "$live_setup_environment" "$setup_environment_path"
 verify_agent_setup_environment "$setup_environment_path" "before profile"
 citybuddy_commit="$(agent_setup_json_string "$setup_environment_path" '.citybuddyCommit')"
 setup_nonce="$(agent_setup_json_string "$setup_environment_path" '.setupNonce')"
@@ -121,4 +135,7 @@ with open(path, encoding="utf-8", errors="replace") as handle:
 share = 100 * matched / total if total else 0
 print(f"{name:<11} {matched:>8} of {total:>8} samples in ssl.create_default_context = {share:.1f}%")
 TALLY
-verify_agent_setup_environment "$setup_environment_path" "after profile"
+publish_agent_results "$setup_environment_path" "after profile" "$staging_dir" "$out" \
+  "$setup_environment_name" "$profile_name"
+result_published=true
+trap - EXIT
