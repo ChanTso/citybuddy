@@ -43,6 +43,10 @@ mv "$setup_environment_path.tmp" "$setup_environment_path"
 verify_agent_setup_environment "$setup_environment_path" "before profile"
 citybuddy_commit="$(agent_setup_json_string "$setup_environment_path" '.citybuddyCommit')"
 setup_nonce="$(agent_setup_json_string "$setup_environment_path" '.setupNonce')"
+agent_image_id="$(jq -er \
+  '.containers["citybuddy-bench-agent"].imageId
+   | select(type == "string" and test("^sha256:[0-9a-f]{64}$"))' \
+  "$setup_environment_path")"
 
 docker rm -f citybuddy-bench-profile-load >/dev/null 2>&1 || true
 profile_load_id="$(docker run --detach --rm --name citybuddy-bench-profile-load \
@@ -52,8 +56,9 @@ profile_load_id="$(docker run --detach --rm --name citybuddy-bench-profile-load 
   --volume "$repo_root/bench/agent/drive_concurrency.py:/opt/drive.py:ro" \
   --volume "$repo_root/bench/.run:/run-data:ro" \
   --entrypoint /opt/citybuddy/.venv/bin/python \
-  citybuddy-bench-agent:local /opt/drive.py "$message" "$CONCURRENCY" "$REQUESTS")"
+  "$agent_image_id" /opt/drive.py "$message" "$CONCURRENCY" "$REQUESTS")"
 if [ "$(docker inspect --format '{{.Id}}' "$profile_load_id")" != "$profile_load_id" ] \
+  || [ "$(docker inspect --format '{{.Image}}' "$profile_load_id")" != "$agent_image_id" ] \
   || [ "$(docker inspect --format \
     '{{ index .Config.Labels "citybuddy.bench.setup-nonce" }}' "$profile_load_id")" \
     != "$setup_nonce" ] \

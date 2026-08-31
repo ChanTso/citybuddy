@@ -188,6 +188,31 @@ container_sha256() {
   printf '%s\n' "$digest"
 }
 
+validate_image_id() {
+  local image_id="$1" boundary="$2"
+  if [[ ! "$image_id" =~ ^sha256:[0-9a-f]{64}$ ]]; then
+    echo "Invalid immutable image ID at $boundary." >&2
+    return 1
+  fi
+}
+
+container_image_id() {
+  local container="$1" image_id
+  image_id="$(docker inspect --format '{{.Image}}' "$container")"
+  validate_image_id "$image_id" "$container"
+  printf '%s\n' "$image_id"
+}
+
+resolve_image_id() {
+  local image_ref="$1" image_id
+  if ! image_id="$(docker image inspect --format '{{.Id}}' "$image_ref" 2>/dev/null)"; then
+    docker pull "$image_ref" >/dev/null
+    image_id="$(docker image inspect --format '{{.Id}}' "$image_ref")"
+  fi
+  validate_image_id "$image_id" "$image_ref"
+  printf '%s\n' "$image_id"
+}
+
 java_runtime_version() {
   local container="$1" output_file="$2" settings line version="" count=0
   settings="$(docker exec "$container" java -XshowSettings:properties -version 2>&1)"
@@ -209,14 +234,17 @@ java_runtime_version() {
 }
 
 verify_setup_container() {
-  local name="$1" expected_id="$2" actual_id actual_nonce actual_commit running
+  local name="$1" expected_id="$2" expected_image_id="$3"
+  local actual_id actual_image_id actual_nonce actual_commit running
   actual_id="$(docker inspect --format '{{.Id}}' "$name")"
+  actual_image_id="$(container_image_id "$name")"
   actual_nonce="$(docker inspect --format \
     '{{ index .Config.Labels "citybuddy.bench.setup-nonce" }}' "$name")"
   actual_commit="$(docker inspect --format \
     '{{ index .Config.Labels "citybuddy.bench.citybuddy-commit" }}' "$name")"
   running="$(docker inspect --format '{{.State.Running}}' "$name")"
-  if [ "$actual_id" != "$expected_id" ] || [ "$actual_nonce" != "$setup_nonce" ] \
+  if [ "$actual_id" != "$expected_id" ] || [ "$actual_image_id" != "$expected_image_id" ] \
+    || [ "$actual_nonce" != "$setup_nonce" ] \
     || [ "$actual_commit" != "$citybuddy_commit" ] || [ "$running" != true ]; then
     echo "Setup-owned container identity changed for $name." >&2
     return 1
@@ -234,7 +262,7 @@ auth_jar_sha256="$(sha256_file "$auth_jar")"
 commerce_jar_sha256="$(sha256_file "$commerce_jar")"
 
 echo "== building the agent and dedicated benchmark Elasticsearch images =="
-git archive --format=tar "$citybuddy_commit" -- \
+agent_image_id="$(git archive --format=tar "$citybuddy_commit" -- \
   bench/agent/Dockerfile \
   pyproject.toml \
   uv.lock \
@@ -242,10 +270,14 @@ git archive --format=tar "$citybuddy_commit" -- \
   agent-service/src \
   knowledge-indexer/pyproject.toml \
   knowledge-indexer/src \
-  | docker build --quiet --file bench/agent/Dockerfile \
-      --tag citybuddy-bench-agent:local - >/dev/null
-docker build --quiet --file infra/elasticsearch/Dockerfile \
-  --tag citybuddy-bench-elasticsearch:local infra/elasticsearch >/dev/null
+  | docker build --quiet --file bench/agent/Dockerfile -)"
+elasticsearch_image_id="$(docker build --quiet --file infra/elasticsearch/Dockerfile \
+  infra/elasticsearch)"
+validate_image_id "$agent_image_id" "agent image build"
+validate_image_id "$elasticsearch_image_id" "Elasticsearch image build"
+java_runtime_image_id="$(resolve_image_id \
+  eclipse-temurin:21.0.8_9-jre-noble@sha256:20e7f7288e1c18eebe8f06a442c9f7183342d9b022d3b9a9677cae2b558ddddd)"
+net_image_id="$(resolve_image_id alpine:3.20)"
 
 # Reused across runs so a rerun does not invalidate tokens already minted for a live agent.
 agent_secret_file="$run_dir/agent_service_secret"
@@ -324,7 +356,7 @@ es_container_id="$(docker run --detach --name citybuddy-bench-elasticsearch \
   --env xpack.security.enabled=false \
   --env xpack.ml.enabled=false \
   --env 'ES_JAVA_OPTS=-Xms512m -Xmx512m' \
-  citybuddy-bench-elasticsearch:local)"
+  "$elasticsearch_image_id")"
 es_binding="$(docker port citybuddy-bench-elasticsearch 9200/tcp)"
 es_port="${es_binding##*:}"
 if [[ ! "$es_port" =~ ^[0-9]+$ ]]; then
@@ -359,7 +391,7 @@ auth_container_id="$(docker run --detach --name citybuddy-bench-auth \
   --volume "$run_dir/bench-private.pem:/opt/citybuddy/bench-private.pem:ro" \
   --volume "$run_dir/bench-public.pem:/opt/citybuddy/bench-public.pem:ro" \
   --env SPRING_DATASOURCE_PASSWORD="$auth_pw" \
-  eclipse-temurin:21.0.8_9-jre-noble@sha256:20e7f7288e1c18eebe8f06a442c9f7183342d9b022d3b9a9677cae2b558ddddd \
+  "$java_runtime_image_id" \
   java -jar /opt/citybuddy/auth.jar \
   --server.port=8080 \
   --spring.datasource.url='jdbc:mysql://mysql:3306/commerce_db?useSSL=false&allowPublicKeyRetrieval=true' \
@@ -397,7 +429,7 @@ commerce_container_id="$(docker run --detach --name citybuddy-bench-commerce \
   --cpus 4 \
   --volume "$commerce_jar:/opt/citybuddy/commerce.jar:ro" \
   --env SPRING_DATASOURCE_PASSWORD="$commerce_pw" \
-  eclipse-temurin:21.0.8_9-jre-noble@sha256:20e7f7288e1c18eebe8f06a442c9f7183342d9b022d3b9a9677cae2b558ddddd \
+  "$java_runtime_image_id" \
   java -XX:MaxRAMPercentage=70 -jar /opt/citybuddy/commerce.jar \
   --server.port=8080 \
   --spring.datasource.url='jdbc:mysql://mysql:3306/commerce_db?useSSL=false&allowPublicKeyRetrieval=true' \
@@ -467,7 +499,7 @@ net_container_id="$(docker run --detach --name citybuddy-bench-net \
   --label "$setup_nonce_label=$setup_nonce" \
   --label "$citybuddy_commit_label=$citybuddy_commit" \
   --network citybuddy_default \
-  alpine:3.20 sleep infinity)"
+  "$net_image_id" sleep infinity)"
 
 model_container_id="$(docker run --detach --name citybuddy-bench-model \
   --label "$setup_nonce_label=$setup_nonce" \
@@ -475,7 +507,7 @@ model_container_id="$(docker run --detach --name citybuddy-bench-model \
   --network "container:citybuddy-bench-net" \
   --volume "$repo_root/scripts/fake_litellm_server.py:/opt/fake.py:ro" \
   --entrypoint /opt/citybuddy/.venv/bin/python \
-  citybuddy-bench-agent:local /opt/fake.py --port 8000)"
+  "$agent_image_id" /opt/fake.py --port 8000)"
 
 agent_container_id="$(docker run --detach --name citybuddy-bench-agent \
   --label "$setup_nonce_label=$setup_nonce" \
@@ -503,7 +535,7 @@ agent_container_id="$(docker run --detach --name citybuddy-bench-agent \
   --env CITYBUDDY_METRICS_ENABLED=true \
   --env CITYBUDDY_TRACE_EXPORT_URL= \
   --env AGENT_ATTEMPT_BUDGET="$AGENT_ATTEMPT_BUDGET" \
-  citybuddy-bench-agent:local)"
+  "$agent_image_id")"
 
 # Probed from inside the namespace for the same reason the generator runs there. wget exits
 # non-zero on the 405 that proves the route is live, so its status is discarded and the answer
@@ -534,7 +566,7 @@ docker run --rm --name citybuddy-bench-pool \
   --volume "$repo_root/bench/agent/build_agent_pool.py:/opt/build_agent_pool.py:ro" \
   --volume "$run_dir:/run-data" \
   --entrypoint /opt/citybuddy/.venv/bin/python \
-  citybuddy-bench-agent:local /opt/build_agent_pool.py \
+  "$agent_image_id" /opt/build_agent_pool.py \
   --users "$AGENT_BENCH_USERS" \
   --password "$bench_password" \
   --auth-url http://citybuddy-bench-auth:8080 \
@@ -566,12 +598,27 @@ if [ "$commerce_final_host_sha256" != "$commerce_jar_sha256" ] \
   exit 1
 fi
 
-verify_setup_container citybuddy-bench-elasticsearch "$es_container_id"
-verify_setup_container citybuddy-bench-auth "$auth_container_id"
-verify_setup_container citybuddy-bench-commerce "$commerce_container_id"
-verify_setup_container citybuddy-bench-net "$net_container_id"
-verify_setup_container citybuddy-bench-model "$model_container_id"
-verify_setup_container citybuddy-bench-agent "$agent_container_id"
+es_container_image_id="$(container_image_id citybuddy-bench-elasticsearch)"
+auth_container_image_id="$(container_image_id citybuddy-bench-auth)"
+commerce_container_image_id="$(container_image_id citybuddy-bench-commerce)"
+net_container_image_id="$(container_image_id citybuddy-bench-net)"
+model_container_image_id="$(container_image_id citybuddy-bench-model)"
+agent_container_image_id="$(container_image_id citybuddy-bench-agent)"
+if [ "$es_container_image_id" != "$elasticsearch_image_id" ] \
+  || [ "$auth_container_image_id" != "$java_runtime_image_id" ] \
+  || [ "$commerce_container_image_id" != "$java_runtime_image_id" ] \
+  || [ "$net_container_image_id" != "$net_image_id" ] \
+  || [ "$model_container_image_id" != "$agent_image_id" ] \
+  || [ "$agent_container_image_id" != "$agent_image_id" ]; then
+  echo "A setup container does not use the immutable image built for this checkout." >&2
+  exit 1
+fi
+verify_setup_container citybuddy-bench-elasticsearch "$es_container_id" "$es_container_image_id"
+verify_setup_container citybuddy-bench-auth "$auth_container_id" "$auth_container_image_id"
+verify_setup_container citybuddy-bench-commerce "$commerce_container_id" "$commerce_container_image_id"
+verify_setup_container citybuddy-bench-net "$net_container_id" "$net_container_image_id"
+verify_setup_container citybuddy-bench-model "$model_container_id" "$model_container_image_id"
+verify_setup_container citybuddy-bench-agent "$agent_container_id" "$agent_container_image_id"
 
 setup_completed_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 environment_tmp="$(mktemp "$run_dir/.agent_setup_environment.XXXXXX")"
@@ -592,11 +639,17 @@ uv run python - \
   "$commerce_mounted_jar_sha256" \
   "$commerce_java_runtime" \
   "$es_container_id" \
+  "$es_container_image_id" \
   "$auth_container_id" \
+  "$auth_container_image_id" \
   "$commerce_container_id" \
+  "$commerce_container_image_id" \
   "$net_container_id" \
+  "$net_container_image_id" \
   "$model_container_id" \
+  "$model_container_image_id" \
   "$agent_container_id" \
+  "$agent_container_image_id" \
   "$auth_migration_version" \
   "$commerce_migration_version" \
   "$agent_migration_version" \
@@ -622,11 +675,17 @@ from pathlib import Path
     commerce_mounted_sha,
     commerce_runtime,
     elasticsearch_container_id,
+    elasticsearch_image_id,
     auth_container_id,
+    auth_image_id,
     commerce_container_id,
+    commerce_image_id,
     net_container_id,
+    net_image_id,
     model_container_id,
+    model_image_id,
     agent_container_id,
+    agent_image_id,
     auth_migration_version,
     commerce_migration_version,
     agent_migration_version,
@@ -640,8 +699,8 @@ label_values = {
 }
 
 
-def container(container_id: str) -> dict[str, object]:
-    return {"id": container_id, "labels": label_values}
+def container(container_id: str, image_id: str) -> dict[str, object]:
+    return {"id": container_id, "imageId": image_id, "labels": label_values}
 
 
 environment = {
@@ -654,12 +713,14 @@ environment = {
         "traceExportUrl": "",
     },
     "containers": {
-        "citybuddy-bench-agent": container(agent_container_id),
-        "citybuddy-bench-auth": container(auth_container_id),
-        "citybuddy-bench-commerce": container(commerce_container_id),
-        "citybuddy-bench-elasticsearch": container(elasticsearch_container_id),
-        "citybuddy-bench-model": container(model_container_id),
-        "citybuddy-bench-net": container(net_container_id),
+        "citybuddy-bench-agent": container(agent_container_id, agent_image_id),
+        "citybuddy-bench-auth": container(auth_container_id, auth_image_id),
+        "citybuddy-bench-commerce": container(commerce_container_id, commerce_image_id),
+        "citybuddy-bench-elasticsearch": container(
+            elasticsearch_container_id, elasticsearch_image_id
+        ),
+        "citybuddy-bench-model": container(model_container_id, model_image_id),
+        "citybuddy-bench-net": container(net_container_id, net_image_id),
     },
     "formatVersion": "citybuddy-agent-setup-environment-v1",
     "java": {

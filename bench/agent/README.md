@@ -626,9 +626,10 @@ Every setup has a new nonce. Its persistent `citybuddy-bench-*` containers carry
 and full-commit labels. Setup publishes `bench/.run/agent_setup_environment.json` atomically, then
 publishes `bench/.run/citybuddy_commit` last as the completion marker. The compact environment
 record contains the nonce and commit, setup time window, fixture size, attempt/metrics/trace
-configuration, container IDs and labels, Auth/Commerce host and mounted JAR SHA-256 values and Java
-runtimes, successful canonical migration commands with their latest database versions, and the raw
-knowledge bootstrap output. It does not reconstruct migration, mapping or corpus truth.
+configuration, container and immutable image IDs and labels, Auth/Commerce host and mounted JAR
+SHA-256 values and Java runtimes, successful canonical migration commands with their latest
+database versions, and the raw knowledge bootstrap output. It does not reconstruct migration,
+mapping or corpus truth.
 
 Before starting load, the runner and profiler copy that record to the result `LABEL`, then directly
 check the source-clean HEAD, completion marker, live record, container IDs and labels, and mounted

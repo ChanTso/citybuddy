@@ -67,6 +67,7 @@ def _prepare_gate(tmp_path: Path) -> tuple[Path, Path, dict[str, str], Path, Pat
         "citybuddy-bench-agent",
     ]
     ids = {name: str(index) * 64 for index, name in enumerate(names, start=1)}
+    image_ids = {name: f"sha256:{str(index) * 64}" for index, name in enumerate(names, start=1)}
     labels = {
         "citybuddy.bench.citybuddy-commit": commit,
         "citybuddy.bench.setup-nonce": nonce,
@@ -74,7 +75,8 @@ def _prepare_gate(tmp_path: Path) -> tuple[Path, Path, dict[str, str], Path, Pat
     record = {
         "citybuddyCommit": commit,
         "containers": {
-            name: {"id": container_id, "labels": labels} for name, container_id in ids.items()
+            name: {"id": container_id, "imageId": image_ids[name], "labels": labels}
+            for name, container_id in ids.items()
         },
         "formatVersion": "citybuddy-agent-setup-environment-v1",
         "java": {
@@ -124,6 +126,18 @@ def _prepare_gate(tmp_path: Path) -> tuple[Path, Path, dict[str, str], Path, Pat
                 esac
                 ;;
               '{{{{.State.Running}}}}') printf 'true\\n' ;;
+              '{{{{.Image}}}}')
+                case "$name" in
+                  citybuddy-bench-elasticsearch) printf '%s\\n' '{image_ids[names[0]]}' ;;
+                  citybuddy-bench-auth) printf '%s\\n' '{image_ids[names[1]]}' ;;
+                  citybuddy-bench-commerce) printf '%s\\n' '{image_ids[names[2]]}' ;;
+                  citybuddy-bench-net) printf '%s\\n' '{image_ids[names[3]]}' ;;
+                  citybuddy-bench-model) printf '%s\\n' '{image_ids[names[4]]}' ;;
+                  citybuddy-bench-agent)
+                    printf '%s\\n' "${{REPLACED_AGENT_IMAGE:-{image_ids[names[5]]}}}"
+                    ;;
+                esac
+                ;;
               *setup-nonce*) printf '%s\\n' '{nonce}' ;;
               *citybuddy-commit*) printf '%s\\n' '{commit}' ;;
               *) exit 2 ;;
@@ -176,6 +190,7 @@ def _run_gate(
     [
         ("live_nonce", "the live setup record changed"),
         ("container_id", "container identity changed for citybuddy-bench-agent"),
+        ("container_image", "container identity changed for citybuddy-bench-agent"),
         ("host_jar", "a mounted JAR boundary changed"),
         ("mounted_jar", "a mounted JAR boundary changed"),
     ],
@@ -193,6 +208,8 @@ def test_runtime_gate_rejects_replaced_setup_or_jar(
         live_record.write_text(json.dumps(document) + "\n", encoding="utf-8")
     elif counterexample == "container_id":
         environment["REPLACED_AGENT_ID"] = "f" * 64
+    elif counterexample == "container_image":
+        environment["REPLACED_AGENT_IMAGE"] = f"sha256:{'f' * 64}"
     elif counterexample == "host_jar":
         auth_jar.write_bytes(b"changed-auth-jar")
     else:
@@ -229,4 +246,8 @@ def test_ladder_and_profile_gate_the_saved_setup_before_and_after_load() -> None
         'verify_agent_setup_environment "$setup_environment_path" "after profile"'
     )
     assert profile_snapshot < profile_pre < profile_load < profile_post
+    profile_load_block = profile[profile_load:profile_post]
+    assert '"$agent_image_id" /opt/drive.py' in profile_load_block
+    assert "citybuddy-bench-agent:local" not in profile_load_block
+    assert "'{{.Image}}'" in profile_load_block
     assert 'rm -f "$profile_path"' not in profile

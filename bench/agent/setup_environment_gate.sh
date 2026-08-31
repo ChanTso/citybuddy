@@ -41,7 +41,8 @@ verify_agent_setup_environment() {
   local live_record="$repo_root/bench/.run/agent_setup_environment.json"
   local commit_marker="$repo_root/bench/.run/citybuddy_commit"
   local expected_format expected_commit expected_nonce live_format live_commit live_nonce
-  local current_commit source_changes name expected_id live_id actual_id running
+  local current_commit source_changes name expected_id expected_image_id live_id live_image_id
+  local actual_id actual_image_id running
   local expected_nonce_label expected_commit_label live_nonce_label live_commit_label
   local actual_nonce_label actual_commit_label
 
@@ -83,16 +84,22 @@ verify_agent_setup_environment() {
     expected_id="$(jq -er --arg name "$name" \
       '.containers[$name].id | select(type == "string" and test("^[0-9a-f]{64}$"))' \
       "$expected_record")"
+    expected_image_id="$(jq -er --arg name "$name" \
+      '.containers[$name].imageId
+       | select(type == "string" and test("^sha256:[0-9a-f]{64}$"))' \
+      "$expected_record")"
     expected_nonce_label="$(jq -er --arg name "$name" \
       '.containers[$name].labels["citybuddy.bench.setup-nonce"]' "$expected_record")"
     expected_commit_label="$(jq -er --arg name "$name" \
       '.containers[$name].labels["citybuddy.bench.citybuddy-commit"]' "$expected_record")"
     live_id="$(jq -er --arg name "$name" '.containers[$name].id' "$live_record")"
+    live_image_id="$(jq -er --arg name "$name" '.containers[$name].imageId' "$live_record")"
     live_nonce_label="$(jq -er --arg name "$name" \
       '.containers[$name].labels["citybuddy.bench.setup-nonce"]' "$live_record")"
     live_commit_label="$(jq -er --arg name "$name" \
       '.containers[$name].labels["citybuddy.bench.citybuddy-commit"]' "$live_record")"
     actual_id="$(docker inspect --format '{{.Id}}' "$name")"
+    actual_image_id="$(docker inspect --format '{{.Image}}' "$name")"
     running="$(docker inspect --format '{{.State.Running}}' "$name")"
     actual_nonce_label="$(docker inspect --format \
       '{{ index .Config.Labels "citybuddy.bench.setup-nonce" }}' "$name")"
@@ -101,9 +108,11 @@ verify_agent_setup_environment() {
     if [ "$expected_nonce_label" != "$expected_nonce" ] \
       || [ "$expected_commit_label" != "$expected_commit" ] \
       || [ "$live_id" != "$expected_id" ] \
+      || [ "$live_image_id" != "$expected_image_id" ] \
       || [ "$live_nonce_label" != "$expected_nonce" ] \
       || [ "$live_commit_label" != "$expected_commit" ] \
       || [ "$actual_id" != "$expected_id" ] \
+      || [ "$actual_image_id" != "$expected_image_id" ] \
       || [ "$running" != true ] \
       || [ "$actual_nonce_label" != "$expected_nonce" ] \
       || [ "$actual_commit_label" != "$expected_commit" ]; then

@@ -154,8 +154,8 @@ def test_agent_image_context_contains_only_tracked_commit_sources(tmp_path: Path
     agent_build = setup_source[archive_start:agent_build_end]
     assert "agent-service/src" in agent_build
     assert "knowledge-indexer/src" in agent_build
-    assert "--tag citybuddy-bench-agent:local -" in agent_build
-    assert "--tag citybuddy-bench-agent:local ." not in agent_build
+    assert "docker build --quiet --file bench/agent/Dockerfile -" in agent_build
+    assert "--tag" not in agent_build
 
 
 def _write_executable(path: Path, source: str) -> None:
@@ -198,6 +198,10 @@ def _prepare_cleanup_counterexample(tmp_path: Path) -> tuple[Path, dict[str, str
     docker_log = tmp_path / "docker.log"
     docker_state = tmp_path / "es-started"
     es_id = "e" * 64
+    agent_image_id = f"sha256:{'a' * 64}"
+    es_image_id = f"sha256:{'b' * 64}"
+    java_image_id = f"sha256:{'c' * 64}"
+    net_image_id = f"sha256:{'d' * 64}"
     _write_executable(
         tmp_path / "mvnw",
         """
@@ -265,8 +269,22 @@ def _prepare_cleanup_counterexample(tmp_path: Path) -> tuple[Path, dict[str, str
               citybuddy-bench-elasticsearch) printf '127.0.0.1:49200\\n' ;;
             esac
             ;;
-          build) exit 0 ;;
+          build)
+            case "$*" in
+              *bench/agent/Dockerfile*) printf '%s' '{agent_image_id}' ;;
+              *infra/elasticsearch/Dockerfile*) printf '%s' '{es_image_id}' ;;
+              *) exit 1 ;;
+            esac
+            ;;
+          image)
+            case "$*" in
+              *eclipse-temurin*) printf '%s' '{java_image_id}' ;;
+              *alpine:3.20*) printf '%s' '{net_image_id}' ;;
+              *) exit 1 ;;
+            esac
+            ;;
           run)
+            echo "run $*" >> "$DOCKER_LOG"
             name=""
             while [ "$#" -gt 0 ]; do
               if [ "$1" = --name ]; then name="$2"; shift 2; else shift; fi
@@ -330,6 +348,8 @@ def test_failed_setup_cleans_only_its_labeled_containers_and_preserves_status(
 
     assert result.returncode == 41
     docker_log = Path(environment["DOCKER_LOG"]).read_text(encoding="utf-8")
+    assert f"sha256:{'b' * 64}" in docker_log
+    assert "citybuddy-bench-elasticsearch:local" not in docker_log
     assert f"cleanup-remove:{'e' * 64}" in docker_log
     assert "label=citybuddy.bench.setup-nonce=" in docker_log
     assert f"label=citybuddy.bench.citybuddy-commit={'a' * 40}" in docker_log
@@ -407,6 +427,19 @@ def test_setup_orders_canonical_boundaries_before_atomic_completion() -> None:
     bootstrap_block = source[bootstrap:start_agent]
     assert "|| true" not in bootstrap_block
     assert "knowledgeBootstrapRawJson" in source
+    assert "citybuddy-bench-agent:local" not in source
+    assert "citybuddy-bench-elasticsearch:local" not in source
+    es_start = source.index('es_container_id="$(docker run --detach')
+    auth_start = source.index('auth_container_id="$(docker run --detach')
+    model_start = source.index('model_container_id="$(docker run --detach')
+    agent_start = source.index('agent_container_id="$(docker run --detach')
+    pool_start = source.index("docker run --rm --name citybuddy-bench-pool")
+    final_checks = source.index('changes="$(source_changes)"', pool_start)
+    assert '"$elasticsearch_image_id")' in source[es_start:auth_start]
+    assert '"$agent_image_id" /opt/fake.py' in source[model_start:agent_start]
+    assert '"$agent_image_id")' in source[agent_start:pool_start]
+    assert '"$agent_image_id" /opt/build_agent_pool.py' in source[pool_start:final_checks]
+    assert 'return {"id": container_id, "imageId": image_id, "labels": label_values}' in source
     assert "trap 'exit 129' HUP" in source
     assert "trap 'exit 130' INT" in source
     assert "trap 'exit 143' TERM" in source
