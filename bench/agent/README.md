@@ -1,9 +1,10 @@
-# Agent three-path latency
+# Agent workload latency
 
-Local measurement of the three paths a CityBuddy support turn can take: a plain answer, an answer
-grounded in retrieved knowledge, and a refund preparation that writes a durable pending action.
-Every number here was produced by the scripts in this directory against the real local topology,
-and the raw tool output is in `../results/`.
+This document preserves the historical three-path measurement of a plain answer, an answer grounded
+in retrieved knowledge, and a refund preparation that writes a durable pending action. The current
+harness defines four workload selectors, including a separate bare greeting. Every measured result
+reported here was produced by the scripts in this directory against the real local topology, and
+the raw tool output is in `../results/`; no current four-selector result is reported here.
 
 The first measurement found that most of the agent's CPU went on work it threw away. This
 document now records that measurement, the change it led to, and the paired re-measurement that
@@ -22,6 +23,28 @@ contain `refund` and still select `refund_context` with all tools. The chat inpu
 tell me about delivery times`, now selects the smaller `read` profile. Every chat number and CPU
 reading in this document therefore describes the earlier all-tools-schema path, not the current
 read-profile path. No post-#107 ladder is reported here.
+
+## Current four-workload contract
+
+Future results from the current harness are a **post-memory, empty-history, first-turn end-to-end
+workload baseline**. `chat` remains the historical selector name, but now carries the delivery/read
+workload; there is no renamed selector or compatibility alias.
+
+| Selector | Exact message | Expected tool profile | Attempt ceiling under the default fixture | Work performed |
+|---|---|---|---:|---|
+| `greeting` | `hello` | `none` | 3 | Direct fixture answer with no tool schemas. |
+| `chat` | `hello, can you tell me about delivery times` | `read` | 16 | Read schemas are visible; the fixture answers directly without a tool call. |
+| `retrieval` | `retrieval-sufficient what does the refund policy cover` | `all` | 16 | Knowledge retrieval, reranking, and a closing model call. |
+| `prepare` | `action-prepare refund my order <owned-order-id>` | `all` | 16 | OBO exchange and commerce preparation of a durable `PendingAction`. |
+
+The greeting ceiling is `min(AGENT_ATTEMPT_BUDGET, 3)`; the other selectors use the configured
+budget. The values above reflect the fixture's default budget of 16. The four workloads differ in
+message, attempt ceiling, visible schemas, model calls, retrieval and commerce work. Their latency
+cannot be compared to attribute memory SQL or tool-schema cost. The workload-contract SQL artifact
+checks the expected route and zero loaded/included history for completed turns after the measured
+window; it is neither a performance result nor a business grader. Defining this contract does not
+make the current baseline ready to run: the separately scoped runtime and provenance prerequisites
+remain incomplete.
 
 ## What is and is not being measured
 
@@ -585,10 +608,11 @@ the prepare ladder refuses to start if the fixture still holds prepared actions,
 otherwise measure the clarification path and still report a clean run. `AGENT_BENCH_USERS` must
 exceed the ladder's `sum(rate x step_seconds) + 20 per step`.
 
-`LABEL` names the output files, so a run against changed code or a changed setting does not
-overwrite the baseline it is meant to be compared with. Both the ladder runner and the profiler
-take it. Setup records the full commit used to build the agent image. The runner and profiler
-require the same source-clean checkout and write that SHA into every result they produce.
+`LABEL` names the output files. The ladder runner requires every target file to be absent and
+refuses to overwrite an existing label; choose a fresh label for every run. Both the ladder runner
+and the profiler take it. Setup records the full commit used to build the agent image. The runner
+and profiler require the same source-clean checkout and write that SHA into every result they
+produce.
 
 ### The paired ladders
 
@@ -602,7 +626,7 @@ AGENT_BENCH_USERS=6000 ./bench/agent/setup_agent_bench.sh
 ```
 
 ```bash
-LABEL=chat_after RATES=10,25,50,75,100 STEP_SECONDS=20 ./bench/agent/run_agent_ladder.sh chat
+LABEL=chat_reproduction_$(date -u +%Y%m%dT%H%M%SZ) RATES=10,25,50,75,100 STEP_SECONDS=20 ./bench/agent/run_agent_ladder.sh chat
 ```
 
 ```bash
@@ -610,7 +634,7 @@ AGENT_BENCH_USERS=2500 ./bench/agent/setup_agent_bench.sh
 ```
 
 ```bash
-LABEL=retrieval_after RATES=2,5,8,10,12 STEP_SECONDS=30 ./bench/agent/run_agent_ladder.sh retrieval
+LABEL=retrieval_reproduction_$(date -u +%Y%m%dT%H%M%SZ) RATES=2,5,8,10,12 STEP_SECONDS=30 ./bench/agent/run_agent_ladder.sh retrieval
 ```
 
 ```bash
@@ -618,7 +642,7 @@ AGENT_BENCH_USERS=3000 ./bench/agent/setup_agent_bench.sh
 ```
 
 ```bash
-LABEL=prepare_after RATES=5,10,15,20,30 STEP_SECONDS=30 ./bench/agent/run_agent_ladder.sh prepare
+LABEL=prepare_reproduction_$(date -u +%Y%m%dT%H%M%SZ) RATES=5,10,15,20,30 STEP_SECONDS=30 ./bench/agent/run_agent_ladder.sh prepare
 ```
 
 The runner prints the per-step table and writes it to `bench/results/agent_<label>_steps.txt`.
@@ -633,7 +657,7 @@ AGENT_BENCH_USERS=12500 ./bench/agent/setup_agent_bench.sh
 ```
 
 ```bash
-LABEL=chat_ext_after RATES=100,110,120,130,150 STEP_SECONDS=20 ./bench/agent/run_agent_ladder.sh chat
+LABEL=chat_extension_$(date -u +%Y%m%dT%H%M%SZ) RATES=100,110,120,130,150 STEP_SECONDS=20 ./bench/agent/run_agent_ladder.sh chat
 ```
 
 ```bash
@@ -641,7 +665,7 @@ AGENT_BENCH_USERS=11800 ./bench/agent/setup_agent_bench.sh
 ```
 
 ```bash
-LABEL=retrieval_ext2_after RATES=50,60,75,90,110 STEP_SECONDS=30 ./bench/agent/run_agent_ladder.sh retrieval
+LABEL=retrieval_extension_$(date -u +%Y%m%dT%H%M%SZ) RATES=50,60,75,90,110 STEP_SECONDS=30 ./bench/agent/run_agent_ladder.sh retrieval
 ```
 
 ### The CPU attribution
