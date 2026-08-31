@@ -610,9 +610,16 @@ exceed the ladder's `sum(rate x step_seconds) + 20 per step`.
 
 `LABEL` names the output files. The ladder runner requires every target file to be absent and
 refuses to overwrite an existing label; choose a fresh label for every run. Both the ladder runner
-and the profiler take it. Setup records the full commit used to build the agent image. The runner
-and profiler require the same source-clean checkout and write that SHA into every result they
-produce.
+and the profiler take it. Setup first removes any previous completed boundary, then builds the
+current auth and commerce JARs, applies all three canonical migration streams, and creates the
+knowledge fixture in an isolated, tmpfs-backed Elasticsearch container. A completed setup uses
+atomic renames to publish `bench/.run/agent_setup_boundary.json` first and the compatibility
+`bench/.run/citybuddy_commit` gate last. The boundary records the full source commit, actual host
+and mounted JAR hashes, Java runtime versions, every migration version and checksum, and the exact
+knowledge alias, mapping and corpus. Raw MySQL rows and Elasticsearch JSON remain beside it under
+the ignored `bench/.run/` directory. A failed setup leaves neither completed marker usable. The
+runner and profiler require the same source-clean checkout and write that SHA into every result
+they produce.
 
 ### The paired ladders
 
