@@ -65,3 +65,19 @@ def test_successful_postcondition_publishes_complete_result_bundle(tmp_path: Pat
     assert not staging.exists()
     assert (results / "measurements.txt").read_text(encoding="utf-8") == "numbers\n"
     assert (results / "environment.json").read_text(encoding="utf-8") == "{}\n"
+
+
+def test_publication_refuses_an_existing_target_without_moving_staged_files(
+    tmp_path: Path,
+) -> None:
+    staging, results = _stage(tmp_path)
+    results.mkdir()
+    (results / "measurements.txt").write_text("existing\n", encoding="utf-8")
+
+    result = _publish(staging, results, 0)
+
+    assert result.returncode != 0
+    assert "refused to overwrite" in result.stderr
+    assert (results / "measurements.txt").read_text(encoding="utf-8") == "existing\n"
+    assert (staging / "measurements.txt").read_text(encoding="utf-8") == "numbers\n"
+    assert (staging / "environment.json").read_text(encoding="utf-8") == "{}\n"

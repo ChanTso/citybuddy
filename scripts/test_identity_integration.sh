@@ -207,6 +207,154 @@ DROP TABLE eval_sandbox;
 make ENV_FILE="$env_file" COMPOSE_PROJECT_NAME="$project" migrate-commerce migrate-agent
 make ENV_FILE="$env_file" COMPOSE_PROJECT_NAME="$project" grant-access
 
+mysql_query agent_app "$agent_app_password" cs_db "
+INSERT INTO support_session (session_id, user_subject, sandbox_id) VALUES
+  ('warm-history-empty-session', 'bench-user-9000', NULL),
+  ('warm-history-one-short-session', 'bench-user-9001', NULL),
+  ('warm-history-max-count-session', 'bench-user-9002', NULL),
+  ('warm-history-high-pressure-session', 'bench-user-9003', NULL);
+INSERT INTO support_conversation (
+  conversation_id, session_id, user_subject, state, next_turn_sequence
+) VALUES
+  ('00000000-0000-0000-0000-000000009000', 'warm-history-empty-session',
+   'bench-user-9000', 'ACTIVE', 0),
+  ('00000000-0000-0000-0000-000000009001', 'warm-history-one-short-session',
+   'bench-user-9001', 'ACTIVE', 0),
+  ('00000000-0000-0000-0000-000000009002', 'warm-history-max-count-session',
+   'bench-user-9002', 'ACTIVE', 0),
+  ('00000000-0000-0000-0000-000000009003', 'warm-history-high-pressure-session',
+   'bench-user-9003', 'ACTIVE', 0);
+"
+
+warm_history_commit="$(git rev-parse --verify HEAD)"
+warm_history_nonce=0123456789abcdef0123456789abcdef
+for warm_history_case in empty one-short max-count high-pressure; do
+  warm_history_pool="$tmp_dir/warm-history-$warm_history_case-pool.json"
+  warm_history_output="$tmp_dir/warm-history-$warm_history_case-fixture.json"
+  printf '[{"sessionId":"warm-history-%s-session"}]\n' "$warm_history_case" \
+    > "$warm_history_pool"
+  uv run python bench/agent/build_warm_history_fixture.py \
+    --case "$warm_history_case" \
+    --sessions 1 \
+    --pool "$warm_history_pool" \
+    --mysql-host 127.0.0.1 \
+    --mysql-port "$MYSQL_PORT" \
+    --mysql-password "$agent_app_password" \
+    --citybuddy-commit "$warm_history_commit" \
+    --setup-nonce "$warm_history_nonce" \
+    --out "$warm_history_output"
+done
+
+WARM_HISTORY_MYSQL_PORT="$MYSQL_PORT" \
+WARM_HISTORY_MYSQL_PASSWORD="$agent_app_password" \
+WARM_HISTORY_FIXTURE_DIR="$tmp_dir" \
+uv run python - <<'PY'
+import json
+import os
+from pathlib import Path
+
+import pymysql
+
+from citybuddy_agent.agent_control import (
+    ModelRouter,
+    ProviderRoute,
+    RuleRouter,
+    SessionContextPolicy,
+)
+from citybuddy_agent.conversation import MysqlConversationStore
+
+delivery_message = "hello, can you tell me about delivery times"
+boundaries = {
+    "empty": ("warm-history-empty-session", 0, [], False, "low", 0),
+    "one-short": ("warm-history-one-short-session", 1, [1], False, "low", 1),
+    "max-count": (
+        "warm-history-max-count-session",
+        17,
+        list(range(2, 18)),
+        True,
+        "low",
+        16,
+    ),
+    "high-pressure": (
+        "warm-history-high-pressure-session",
+        17,
+        list(range(2, 18)),
+        True,
+        "high",
+        1,
+    ),
+}
+connection = pymysql.connect(
+    host="127.0.0.1",
+    port=int(os.environ["WARM_HISTORY_MYSQL_PORT"]),
+    user="agent_app",
+    password=os.environ["WARM_HISTORY_MYSQL_PASSWORD"],
+    database="cs_db",
+    autocommit=False,
+)
+try:
+    with connection.cursor() as cursor:
+        for case_name, boundary in boundaries.items():
+            session_id, persisted, sequences, older, pressure, included = boundary
+            cursor.execute(
+                "SELECT conversation_id, user_subject, next_turn_sequence "
+                "FROM support_conversation WHERE session_id = %s",
+                (session_id,),
+            )
+            conversation_id, subject, next_sequence = cursor.fetchone()
+            assert next_sequence == persisted
+            history = MysqlConversationStore._load_recent_history(  # noqa: SLF001
+                cursor,
+                conversation_id=conversation_id,
+                session_id=session_id,
+                subject=subject,
+                before_turn_sequence=persisted + 1,
+            )
+            assert [turn.turn_sequence for turn in history.turns] == sequences
+            assert history.older_turns_available is older
+            window = SessionContextPolicy().select(history)
+            assert window.pressure == pressure
+            assert len(window.turns) == included
+            assert [turn.turn_sequence for turn in window.turns] == sequences[-included:]
+            prior = ()
+            if window.turns:
+                prior = (window.turns[-1].user_text, window.turns[-1].assistant_text)
+            plan = ModelRouter((ProviderRoute("primary", "fixture"),), 16).plan(
+                RuleRouter().signals(delivery_message, prior)
+            )
+            assert plan.tool_profile == "read"
+
+            fixture = json.loads(
+                (
+                    Path(os.environ["WARM_HISTORY_FIXTURE_DIR"])
+                    / f"warm-history-{case_name}-fixture.json"
+                ).read_text(encoding="utf-8")
+            )
+            assert fixture["case"] == case_name
+            assert fixture["history"]["persistedTurnCount"] == persisted
+            assert fixture["history"]["loadedTurnCount"] == len(sequences)
+            assert fixture["history"]["includedTurnCount"] == included
+finally:
+    connection.close()
+PY
+
+test "$(mysql_query agent_app "$agent_app_password" cs_db \
+  "SELECT GROUP_CONCAT(CONCAT(user_subject, ':', turn_count)
+                       ORDER BY user_subject SEPARATOR ',')
+     FROM (
+       SELECT user_subject, COUNT(*) AS turn_count
+         FROM support_turn
+        WHERE user_subject LIKE 'bench-user-900%'
+        GROUP BY user_subject
+     ) fixture_counts")" = \
+  'bench-user-9001:1,bench-user-9002:17,bench-user-9003:17'
+mysql_query root "$bootstrap_password" cs_db "
+DELETE FROM support_turn WHERE user_subject LIKE 'bench-user-900%';
+DELETE FROM support_conversation WHERE user_subject LIKE 'bench-user-900%';
+DELETE FROM support_session WHERE user_subject LIKE 'bench-user-900%';
+"
+echo "Verified warm-history fixture against the real MySQL loader and context policy."
+
 mysql_query auth_app "$auth_app_password" commerce_db "
 INSERT INTO auth_user_principal (principal_id, subject, login_identifier, state, permissions) VALUES
   ('00000000-0000-0000-0000-000000000020', 'user-integration', 'integration-user', 'ACTIVE', 'support:session:create support:chat'),

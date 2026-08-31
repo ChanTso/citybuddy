@@ -51,6 +51,49 @@ completed preparation turns with `all`; every one has zero loaded and included h
 preparation boundary also contains 12 failed overload turns, recorded separately from those
 completed contracts.
 
+## Warm-history comparison harness
+
+The separate warm-history harness holds the current request fixed at `hello, can you tell me about
+delivery times` and requires the `read` tool profile for every completed turn. It is designed to
+measure the **end-to-end increment from non-empty history** on that fixed delivery/read path against
+the `empty` control. That increment includes the MySQL history read and row decoding, durable-history
+validation, token estimation and whole-pair trimming, prompt construction, and request
+serialization. It cannot be attributed to prompt packing alone or to the history SQL query alone.
+
+The deterministic cases are:
+
+| Case | Persisted completed history | Bounded candidate/load boundary | Expected context behaviour |
+|---|---:|---|---|
+| `empty` | 0 pairs | 0 candidates, 0 loaded | Empty control. |
+| `one-short` | 1 short neutral pair | 1 candidate, 1 loaded | The pair remains included. |
+| `max-count` | 17 short neutral pairs | 17 candidates, newest 16 loaded | `olderTurnsAvailable=true`; all 16 loaded pairs remain included. |
+| `high-pressure` | 17 long neutral pairs | 17 candidates, newest 16 loaded | `olderTurnsAvailable=true`; the existing high-watermark policy trims oldest whole pairs. |
+
+`build_warm_history_fixture.py` constructs the selected history before the measured window. It does
+not issue warm-up chat requests. `k6/warm_history.js` then uses one fixed-arrival-rate scenario and
+one fresh pool entry per iteration, so each measured session receives exactly one formal request.
+Setup, including history construction, is excluded from the run window.
+
+Start from a fresh completed base setup, then provide the case, rate per second, duration in seconds,
+and a fresh output label explicitly:
+
+```bash
+./bench/agent/setup_agent_bench.sh
+./bench/agent/run_warm_history.sh CASE RATE DURATION LABEL
+```
+
+The runner accepts only `empty`, `one-short`, `max-count`, or `high-pressure`, refuses an existing
+output label, and drives `summarize_warm_history.py` only after k6 and the workload contract succeed.
+The future result bundle records the full CityBuddy commit, case, persisted/candidate/loaded/included
+counts, `olderTurnsAvailable`, token estimate and budget, watermark and trimming evidence, final tool
+profile, UTC setup/run windows, and nominal/completed/dropped/error counts. It uses the same
+source-clean, setup nonce, container/image/JAR, completion-marker, pre/post runtime gate, staging, and
+publication boundaries as the four-path runner. A failed or interrupted run remains unpublished in
+ignored `bench/.run/` staging, and no existing result is overwritten.
+
+This change adds only the reproducible fixture and runner. It reports and publishes no warm-history
+performance result.
+
 ## What is and is not being measured
 
 The model provider is [`scripts/fake_litellm_server.py`](../../scripts/fake_litellm_server.py),
