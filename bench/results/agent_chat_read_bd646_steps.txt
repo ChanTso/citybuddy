@@ -1,0 +1,17 @@
+citybuddy_commit=bd646937d0c7f45c107ce2283a244d1b4fc8d952
+
+=== chat_read_bd646 (step 20s) ===
+ target  offered  measured  served/s    p50 ms    p95 ms    p99 ms    max ms
+----------------------------------------------------------------------------
+     10      200       200      10.0      12.8      19.7      20.9      21.9
+     25      500       501      25.1       9.4      13.7      18.1      33.7
+     50     1000      1000      50.0       7.3      14.2      23.1      71.7
+     75     1500      1500      75.0       5.9      13.8      20.2      34.0
+    100     2000      2000     100.0       5.6      15.7      27.6      47.4
+
+outcomes by step (every class, none elided):
+    10: completed=200
+    25: completed=501
+    50: completed=1000
+    75: completed=1500
+   100: completed=2000

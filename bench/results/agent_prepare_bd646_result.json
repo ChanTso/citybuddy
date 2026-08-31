@@ -1,0 +1,197 @@
+{
+  "formatVersion": "citybuddy-agent-path-result-v1",
+  "citybuddyCommit": "bd646937d0c7f45c107ce2283a244d1b4fc8d952",
+  "label": "prepare_bd646",
+  "path": "prepare",
+  "randomization": "none",
+  "sequencePosition": 4,
+  "hardware": {
+    "host": {
+      "modelIdentifier": "Mac16,1",
+      "chip": "Apple M4",
+      "cpuCores": {
+        "total": 10,
+        "performance": 4,
+        "efficiency": 6
+      },
+      "memoryBytes": 25769803776,
+      "architecture": "arm64",
+      "operatingSystem": "macOS 26.5 (25F71)"
+    },
+    "docker": {
+      "product": "Docker Desktop",
+      "serverVersion": "29.5.3",
+      "allocatedCpus": 8,
+      "allocatedMemoryBytes": 14638391296,
+      "architecture": "aarch64",
+      "storageDriver": "overlayfs"
+    }
+  },
+  "fixture": {
+    "setupEnvironmentArtifact": "bench/results/agent_prepare_bd646_setup_environment.json",
+    "setupNonce": "9a8d1efa2fa5c4add472504873c7d492",
+    "poolEntry": "one bearer token, one paid owned order and one fresh support session per iteration",
+    "model": "deterministic fake LiteLLM fixture",
+    "knowledge": {
+      "alias": "knowledge_docs_read",
+      "documentCount": 4,
+      "indexVersion": "knowledge_docs_v1",
+      "storage": "isolated tmpfs-backed Elasticsearch node"
+    },
+    "setupSideEffects": [
+      "signing-key metadata",
+      "canonical auth, commerce and agent migrations",
+      "fixture resets and support permission grants",
+      "agent-service identity registration"
+    ],
+    "setupCleanupBoundary": "failed-attempt cleanup removes only nonce-and-commit-labelled benchmark containers; ordinary Compose containers and volumes are not deleted"
+  },
+  "configuration": {
+    "runId": "bd646-prepare",
+    "arrivalModel": "constant-arrival-rate",
+    "baseBenchUsers": 10000,
+    "agentBenchUsers": 3000,
+    "agentAttemptBudget": 16,
+    "effectiveAttemptCeiling": 16,
+    "metricsEnabled": true,
+    "traceExportUrl": "",
+    "ratesPerSecond": [5, 10, 15, 20, 30],
+    "stepSeconds": 30,
+    "gracefulStopSeconds": 45,
+    "gapSeconds": 55,
+    "poolBase": 0,
+    "k6ImageReference": "grafana/k6@sha256:5221b620a4f874faff6e32ba597aa667c058391fe4898b1c6f6377f062c6cdec",
+    "k6Version": "k6 v2.2.0 (commit/00a9a1b7f5, go1.26.5, linux/arm64)"
+  },
+  "setupWindowUtc": {
+    "startedAt": "2026-08-31T10:57:08Z",
+    "completedAt": "2026-08-31T10:58:31Z"
+  },
+  "runWindowUtc": {
+    "startedAt": "2026-08-31T11:01:43Z",
+    "completedAt": "2026-08-31T11:08:39Z"
+  },
+  "observedRequestWindowUtc": {
+    "first": "2026-08-31T11:01:52.215992673Z",
+    "last": "2026-08-31T11:08:06.125204888Z",
+    "boundary": "first and last tagged http_req_duration Point timestamps"
+  },
+  "workload": {
+    "selector": "prepare",
+    "exactMessageTemplate": "action-prepare refund my order <owned-order-id>",
+    "expectedToolProfile": "all",
+    "emptyHistory": true,
+    "successOutcome": "action_pending"
+  },
+  "routeContextEvidence": {
+    "artifact": "bench/results/agent_prepare_bd646_workload_contract.tsv",
+    "boundaryTurns": 2288,
+    "completedTurns": 2276,
+    "failedTurns": 12,
+    "processingTurns": 0,
+    "matchingProfileTurns": 2276,
+    "emptyHistoryTurns": 2276,
+    "routingEvents": 2276,
+    "contextEvents": 2276,
+    "actualToolProfiles": ["all"],
+    "loadedTurnCounts": [0],
+    "includedTurnCounts": [0],
+    "contractStatus": "pass",
+    "evidenceRole": "workload contract only, not a performance or business grader"
+  },
+  "countEvidence": {
+    "localPointStream": "bench/results/agent_prepare_bd646_points.json (ignored by the repository and retained locally through summary and review)",
+    "nominalOffered": "ratePerSecond multiplied by durationSeconds",
+    "completed": "tagged Point metric iterations",
+    "k6Dropped": "tagged Point metric dropped_iterations, using rate or scenario tag",
+    "httpErrors": "tagged Point metric http_req_failed",
+    "outcomeCounts": "tagged Point metric agent_outcomes",
+    "interrupted": "the final k6 console line reports zero interrupted iterations for the whole run; the point stream exposes no interrupted-iterations metric, so every non-negative per-step count is zero"
+  },
+  "totals": {
+    "nominalOffered": 2400,
+    "completed": 2288,
+    "k6Dropped": 115,
+    "interrupted": 0,
+    "httpErrors": 12,
+    "outcomeCounts": {"action_pending": 2276, "HTTP_503": 12}
+  },
+  "steps": [
+    {
+      "ratePerSecond": 5,
+      "durationSeconds": 30,
+      "nominalOffered": 150,
+      "completed": 151,
+      "k6Dropped": 0,
+      "interrupted": 0,
+      "httpErrors": 0,
+      "outcomeCounts": {"action_pending": 151},
+      "latencyMs": {"p50": 254.3, "p95": 266.2, "p99": 277.0, "max": 320.9},
+      "observedWindowUtc": {"first": "2026-08-31T11:01:52.215992673Z", "last": "2026-08-31T11:02:22.150677048Z"}
+    },
+    {
+      "ratePerSecond": 10,
+      "durationSeconds": 30,
+      "nominalOffered": 300,
+      "completed": 300,
+      "k6Dropped": 0,
+      "interrupted": 0,
+      "httpErrors": 0,
+      "outcomeCounts": {"action_pending": 300},
+      "latencyMs": {"p50": 257.4, "p95": 280.9, "p99": 292.2, "max": 309.8},
+      "observedWindowUtc": {"first": "2026-08-31T11:03:17.186322337Z", "last": "2026-08-31T11:03:47.059421795Z"}
+    },
+    {
+      "ratePerSecond": 15,
+      "durationSeconds": 30,
+      "nominalOffered": 450,
+      "completed": 451,
+      "k6Dropped": 0,
+      "interrupted": 0,
+      "httpErrors": 0,
+      "outcomeCounts": {"action_pending": 451},
+      "latencyMs": {"p50": 265.7, "p95": 308.3, "p99": 340.3, "max": 357.5},
+      "observedWindowUtc": {"first": "2026-08-31T11:04:42.154388376Z", "last": "2026-08-31T11:05:12.144638293Z"}
+    },
+    {
+      "ratePerSecond": 20,
+      "durationSeconds": 30,
+      "nominalOffered": 600,
+      "completed": 601,
+      "k6Dropped": 0,
+      "interrupted": 0,
+      "httpErrors": 0,
+      "outcomeCounts": {"action_pending": 601},
+      "latencyMs": {"p50": 313.6, "p95": 423.3, "p99": 553.1, "max": 659.0},
+      "observedWindowUtc": {"first": "2026-08-31T11:06:07.200917222Z", "last": "2026-08-31T11:06:37.159025138Z"}
+    },
+    {
+      "ratePerSecond": 30,
+      "durationSeconds": 30,
+      "nominalOffered": 900,
+      "completed": 785,
+      "k6Dropped": 115,
+      "interrupted": 0,
+      "httpErrors": 12,
+      "outcomeCounts": {"action_pending": 773, "HTTP_503": 12},
+      "latencyMs": {"p50": 4769.4, "p95": 7277.1, "p99": 7822.7, "max": 8207.3},
+      "observedWindowUtc": {"first": "2026-08-31T11:07:32.462443928Z", "last": "2026-08-31T11:08:06.125204888Z"}
+    }
+  ],
+  "observedBoundary": {
+    "ratePerSecond": 30,
+    "description": "the highest step shed 115 iterations and returned 12 HTTP 503 responses; it is not a clean or served-rate claim",
+    "attributionLimit": "the committed benchmark artifacts record the HTTP 503 responses but do not isolate or attribute their internal cause"
+  },
+  "rawArtifacts": [
+    "bench/results/agent_prepare_bd646_summary.json",
+    "bench/results/agent_prepare_bd646_console.txt",
+    "bench/results/agent_prepare_bd646_cpu.txt",
+    "bench/results/agent_prepare_bd646_cpu_errors.txt",
+    "bench/results/agent_prepare_bd646_cpu_by_step.txt",
+    "bench/results/agent_prepare_bd646_mysql.txt",
+    "bench/results/agent_prepare_bd646_steps.txt",
+    "bench/results/agent_prepare_bd646_workload_contract.tsv",
+    "bench/results/agent_prepare_bd646_setup_environment.json"
+  ]
+}

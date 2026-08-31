@@ -1,0 +1,191 @@
+{
+  "formatVersion": "citybuddy-agent-path-result-v1",
+  "citybuddyCommit": "bd646937d0c7f45c107ce2283a244d1b4fc8d952",
+  "label": "greeting_bd646",
+  "path": "greeting",
+  "randomization": "none",
+  "sequencePosition": 1,
+  "hardware": {
+    "host": {
+      "modelIdentifier": "Mac16,1",
+      "chip": "Apple M4",
+      "cpuCores": {
+        "total": 10,
+        "performance": 4,
+        "efficiency": 6
+      },
+      "memoryBytes": 25769803776,
+      "architecture": "arm64",
+      "operatingSystem": "macOS 26.5 (25F71)"
+    },
+    "docker": {
+      "product": "Docker Desktop",
+      "serverVersion": "29.5.3",
+      "allocatedCpus": 8,
+      "allocatedMemoryBytes": 14638391296,
+      "architecture": "aarch64",
+      "storageDriver": "overlayfs"
+    }
+  },
+  "fixture": {
+    "setupEnvironmentArtifact": "bench/results/agent_greeting_bd646_setup_environment.json",
+    "setupNonce": "1bcd16e5c4722450eaaf0d2493610cfb",
+    "poolEntry": "one bearer token, one paid owned order and one fresh support session per iteration",
+    "model": "deterministic fake LiteLLM fixture",
+    "knowledge": {
+      "alias": "knowledge_docs_read",
+      "documentCount": 4,
+      "indexVersion": "knowledge_docs_v1",
+      "storage": "isolated tmpfs-backed Elasticsearch node"
+    },
+    "setupSideEffects": [
+      "signing-key metadata",
+      "canonical auth, commerce and agent migrations",
+      "fixture resets and support permission grants",
+      "agent-service identity registration"
+    ],
+    "setupCleanupBoundary": "failed-attempt cleanup removes only nonce-and-commit-labelled benchmark containers; ordinary Compose containers and volumes are not deleted"
+  },
+  "configuration": {
+    "runId": "bd646-greeting",
+    "arrivalModel": "constant-arrival-rate",
+    "baseBenchUsers": 10000,
+    "agentBenchUsers": 8000,
+    "agentAttemptBudget": 16,
+    "effectiveAttemptCeiling": 3,
+    "metricsEnabled": true,
+    "traceExportUrl": "",
+    "ratesPerSecond": [25, 50, 75, 100, 125],
+    "stepSeconds": 20,
+    "gracefulStopSeconds": 45,
+    "gapSeconds": 55,
+    "poolBase": 0,
+    "k6ImageReference": "grafana/k6@sha256:5221b620a4f874faff6e32ba597aa667c058391fe4898b1c6f6377f062c6cdec",
+    "k6Version": "k6 v2.2.0 (commit/00a9a1b7f5, go1.26.5, linux/arm64)"
+  },
+  "setupWindowUtc": {
+    "startedAt": "2026-08-31T10:24:43Z",
+    "completedAt": "2026-08-31T10:26:27Z"
+  },
+  "runWindowUtc": {
+    "startedAt": "2026-08-31T10:28:39Z",
+    "completedAt": "2026-08-31T10:34:25Z"
+  },
+  "observedRequestWindowUtc": {
+    "first": "2026-08-31T10:28:53.76379634Z",
+    "last": "2026-08-31T10:34:13.746335419Z",
+    "boundary": "first and last tagged http_req_duration Point timestamps"
+  },
+  "workload": {
+    "selector": "greeting",
+    "exactMessage": "hello",
+    "expectedToolProfile": "none",
+    "emptyHistory": true
+  },
+  "routeContextEvidence": {
+    "artifact": "bench/results/agent_greeting_bd646_workload_contract.tsv",
+    "boundaryTurns": 7502,
+    "completedTurns": 7502,
+    "failedTurns": 0,
+    "processingTurns": 0,
+    "matchingProfileTurns": 7502,
+    "emptyHistoryTurns": 7502,
+    "routingEvents": 7502,
+    "contextEvents": 7502,
+    "actualToolProfiles": ["none"],
+    "loadedTurnCounts": [0],
+    "includedTurnCounts": [0],
+    "contractStatus": "pass",
+    "evidenceRole": "workload contract only, not a performance or business grader"
+  },
+  "countEvidence": {
+    "localPointStream": "bench/results/agent_greeting_bd646_points.json (ignored by the repository and retained locally through summary and review)",
+    "nominalOffered": "ratePerSecond multiplied by durationSeconds",
+    "completed": "tagged Point metric iterations",
+    "k6Dropped": "tagged Point metric dropped_iterations, using rate or scenario tag",
+    "httpErrors": "tagged Point metric http_req_failed",
+    "outcomeCounts": "tagged Point metric agent_outcomes",
+    "interrupted": "the final k6 console line reports zero interrupted iterations for the whole run; the point stream exposes no interrupted-iterations metric, so every non-negative per-step count is zero"
+  },
+  "totals": {
+    "nominalOffered": 7500,
+    "completed": 7502,
+    "k6Dropped": 0,
+    "interrupted": 0,
+    "httpErrors": 0,
+    "outcomeCounts": {"completed": 7502}
+  },
+  "steps": [
+    {
+      "ratePerSecond": 25,
+      "durationSeconds": 20,
+      "nominalOffered": 500,
+      "completed": 500,
+      "k6Dropped": 0,
+      "interrupted": 0,
+      "httpErrors": 0,
+      "outcomeCounts": {"completed": 500},
+      "latencyMs": {"p50": 9.3, "p95": 15.5, "p99": 19.2, "max": 22.4},
+      "observedWindowUtc": {"first": "2026-08-31T10:28:53.76379634Z", "last": "2026-08-31T10:29:13.714528877Z"}
+    },
+    {
+      "ratePerSecond": 50,
+      "durationSeconds": 20,
+      "nominalOffered": 1000,
+      "completed": 1000,
+      "k6Dropped": 0,
+      "interrupted": 0,
+      "httpErrors": 0,
+      "outcomeCounts": {"completed": 1000},
+      "latencyMs": {"p50": 7.1, "p95": 13.2, "p99": 18.7, "max": 29.8},
+      "observedWindowUtc": {"first": "2026-08-31T10:30:08.761053875Z", "last": "2026-08-31T10:30:28.732423301Z"}
+    },
+    {
+      "ratePerSecond": 75,
+      "durationSeconds": 20,
+      "nominalOffered": 1500,
+      "completed": 1501,
+      "k6Dropped": 0,
+      "interrupted": 0,
+      "httpErrors": 0,
+      "outcomeCounts": {"completed": 1501},
+      "latencyMs": {"p50": 6.0, "p95": 13.1, "p99": 21.4, "max": 28.9},
+      "observedWindowUtc": {"first": "2026-08-31T10:31:23.758330882Z", "last": "2026-08-31T10:31:43.747652377Z"}
+    },
+    {
+      "ratePerSecond": 100,
+      "durationSeconds": 20,
+      "nominalOffered": 2000,
+      "completed": 2000,
+      "k6Dropped": 0,
+      "interrupted": 0,
+      "httpErrors": 0,
+      "outcomeCounts": {"completed": 2000},
+      "latencyMs": {"p50": 6.1, "p95": 20.3, "p99": 64.4, "max": 117.2},
+      "observedWindowUtc": {"first": "2026-08-31T10:32:38.760773Z", "last": "2026-08-31T10:32:58.737653759Z"}
+    },
+    {
+      "ratePerSecond": 125,
+      "durationSeconds": 20,
+      "nominalOffered": 2500,
+      "completed": 2501,
+      "k6Dropped": 0,
+      "interrupted": 0,
+      "httpErrors": 0,
+      "outcomeCounts": {"completed": 2501},
+      "latencyMs": {"p50": 5.8, "p95": 32.1, "p99": 96.9, "max": 130.5},
+      "observedWindowUtc": {"first": "2026-08-31T10:33:53.771302799Z", "last": "2026-08-31T10:34:13.746335419Z"}
+    }
+  ],
+  "rawArtifacts": [
+    "bench/results/agent_greeting_bd646_summary.json",
+    "bench/results/agent_greeting_bd646_console.txt",
+    "bench/results/agent_greeting_bd646_cpu.txt",
+    "bench/results/agent_greeting_bd646_cpu_errors.txt",
+    "bench/results/agent_greeting_bd646_cpu_by_step.txt",
+    "bench/results/agent_greeting_bd646_mysql.txt",
+    "bench/results/agent_greeting_bd646_steps.txt",
+    "bench/results/agent_greeting_bd646_workload_contract.tsv",
+    "bench/results/agent_greeting_bd646_setup_environment.json"
+  ]
+}

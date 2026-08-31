@@ -1,0 +1,17 @@
+citybuddy_commit=bd646937d0c7f45c107ce2283a244d1b4fc8d952
+
+=== prepare_bd646 (step 30s) ===
+ target  offered  measured  served/s    p50 ms    p95 ms    p99 ms    max ms
+----------------------------------------------------------------------------
+      5      150       151       5.0     254.3     266.2     277.0     320.9
+     10      300       300      10.0     257.4     280.9     292.2     309.8
+     15      450       451      15.0     265.7     308.3     340.3     357.5
+     20      600       601      20.0     313.6     423.3     553.1     659.0
+     30      900       785      26.2    4769.4    7277.1    7822.7    8207.3
+
+outcomes by step (every class, none elided):
+     5: action_pending=151
+    10: action_pending=300
+    15: action_pending=451
+    20: action_pending=601
+    30: HTTP_503=12, action_pending=773

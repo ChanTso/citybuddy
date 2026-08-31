@@ -1,10 +1,10 @@
 # Agent workload latency
 
-This document preserves the historical three-path measurement of a plain answer, an answer grounded
-in retrieved knowledge, and a refund preparation that writes a durable pending action. The current
-harness defines four workload selectors, including a separate bare greeting. Every measured result
-reported here was produced by the scripts in this directory against the real local topology, and
-the raw tool output is in `../results/`; no current four-selector result is reported here.
+This document reports the current four-path empty-history baseline at
+`bd646937d0c7f45c107ce2283a244d1b4fc8d952` and preserves the historical three-path measurement of
+a plain answer, an answer grounded in retrieved knowledge, and a refund preparation that writes a
+durable pending action. Every measured result reported here was produced by the scripts in this
+directory against the real local topology, and the raw tool output is in `../results/`.
 
 The first measurement found that most of the agent's CPU went on work it threw away. This
 document now records that measurement, the change it led to, and the paired re-measurement that
@@ -12,23 +12,25 @@ says what the change was worth.
 
 ## Version boundary
 
-Repository history reconstructs the paired baseline boundary as
+Every current raw and result artifact records the measured full commit
+`bd646937d0c7f45c107ce2283a244d1b4fc8d952`. Repository history reconstructs the earlier paired
+baseline boundary as
 `272eecdfb79b73811bc6fff677360a0d79a07991` and the post-client-reuse boundary as
 `6acf856716ff0b926bb147c0e1d99614a8d9e9c8`. The artifacts were committed immediately after the
 passes but do not contain those SHAs, so they cannot independently prove the checkout that
 produced them.
 
 PR #107 later introduced route-specific tool profiles. The retrieval and preparation inputs both
-contain `refund` and still select `refund_context` with all tools. The chat input, `hello, can you
-tell me about delivery times`, now selects the smaller `read` profile. Every chat number and CPU
-reading in this document therefore describes the earlier all-tools-schema path, not the current
-read-profile path. No post-#107 ladder is reported here.
+contain `refund` and select the `all` profile. The delivery input, `hello, can you tell me about
+delivery times`, selects the smaller `read` profile. The historical chat numbers and CPU readings
+below describe the earlier all-tools-schema path; the current subsection separately measures the
+delivery/read path.
 
 ## Current four-workload contract
 
-Future results from the current harness are a **post-memory, empty-history, first-turn end-to-end
-workload baseline**. `chat` remains the historical selector name, but now carries the delivery/read
-workload; there is no renamed selector or compatibility alias.
+The baseline reported below is a **post-memory, empty-history, first-turn end-to-end workload
+baseline**. `chat` remains the historical selector name, but now carries the delivery/read workload;
+there is no renamed selector or compatibility alias.
 
 | Selector | Exact message | Expected tool profile | Attempt ceiling under the default fixture | Work performed |
 |---|---|---|---:|---|
@@ -43,8 +45,11 @@ message, attempt ceiling, visible schemas, model calls, retrieval and commerce w
 cannot be compared to attribute memory SQL or tool-schema cost. The workload-contract SQL artifact
 checks the expected route and zero loaded/included history for completed turns after the measured
 window; it is neither a performance result nor a business grader. Setup and the runner now enforce
-the runtime and provenance prerequisites, but no current four-selector baseline has been run or
-reported.
+the runtime and provenance prerequisites. The current contracts cover 7,502 completed greeting
+turns with `none`, 5,201 delivery turns with `read`, 8,905 retrieval turns with `all`, and 2,276
+completed preparation turns with `all`; every one has zero loaded and included history. The
+preparation boundary also contains 12 failed overload turns, recorded separately from those
+completed contracts.
 
 ## What is and is not being measured
 
@@ -60,11 +65,14 @@ the platform's own cost.
 
 | | |
 |---|---|
+| Current source | `bd646937d0c7f45c107ce2283a244d1b4fc8d952`, measured 2026-08-31 UTC |
 | Host | MacBook Pro M4, 10 cores, 24 GB |
-| Docker Desktop | 14 GB / 8 CPU allocation |
+| Docker Desktop | 13.6 GiB / 8 CPU allocation, aarch64, server 29.5.3 |
 | Agent | `agent-service` as a container, single uvicorn process, sync endpoints on the AnyIO worker pool |
 | Dependencies | MySQL 8, Elasticsearch 8 + IK, `auth-service` and `commerce-service` as containers |
-| Generator | k6 inside the agent's network namespace; these historical runs recorded `grafana/k6:latest`, so their exact generator digest is unavailable |
+| Model | Deterministic fake LiteLLM fixture; inference time held at zero |
+| Current generator | k6 v2.2.0, linux/arm64, pinned as `grafana/k6@sha256:5221b620a4f874faff6e32ba597aa667c058391fe4898b1c6f6377f062c6cdec` |
+| Historical generator | k6 inside the agent's network namespace; the old runs recorded `grafana/k6:latest`, so their exact digest is unavailable |
 
 ## Method
 
@@ -122,6 +130,36 @@ service's shape.
    overstates the improvement.
 
 ## Results
+
+### Current four-path baseline at bd646937
+
+The four ladders ran in the fixed order greeting, delivery chat, retrieval, preparation with
+`randomization=none`. Each began from its own completed setup on an otherwise idle host. A clean
+step has zero k6-dropped iterations and zero HTTP errors; it is the highest step tested clean in
+this first ladder, not a sustainable-throughput or capacity claim.
+
+| Workload | Profile and ladder | Highest tested clean step | First observed load boundary | Evidence |
+|---|---|---|---|---|
+| Bare greeting | `none`; 25/50/75/100/125 req/s for 20 s | 125 req/s: 2,500 nominally offered, 2,501 completed, p99 96.9 ms | None in the tested range | [result](../results/agent_greeting_bd646_result.json), [steps](../results/agent_greeting_bd646_steps.txt), [console](../results/agent_greeting_bd646_console.txt), [summary](../results/agent_greeting_bd646_summary.json), [route/context](../results/agent_greeting_bd646_workload_contract.tsv), [setup](../results/agent_greeting_bd646_setup_environment.json) |
+| Delivery chat | `read`; 10/25/50/75/100 req/s for 20 s | 100 req/s: 2,000 offered/completed, p99 27.6 ms | None in the tested range | [result](../results/agent_chat_read_bd646_result.json), [steps](../results/agent_chat_read_bd646_steps.txt), [console](../results/agent_chat_read_bd646_console.txt), [summary](../results/agent_chat_read_bd646_summary.json), [route/context](../results/agent_chat_read_bd646_workload_contract.tsv), [setup](../results/agent_chat_read_bd646_setup_environment.json) |
+| Knowledge retrieval | `all`; 40/50/60/75/90 req/s for 30 s | 60 req/s: 1,800 nominally offered, 1,801 completed, p99 243.0 ms | 75 req/s: 2,123 completed, 128 dropped, zero HTTP errors, p99 4,183.8 ms | [result](../results/agent_retrieval_bd646_result.json), [steps](../results/agent_retrieval_bd646_steps.txt), [console](../results/agent_retrieval_bd646_console.txt), [summary](../results/agent_retrieval_bd646_summary.json), [route/context](../results/agent_retrieval_bd646_workload_contract.tsv), [setup](../results/agent_retrieval_bd646_setup_environment.json) |
+| Owned-order refund preparation | `all`; 5/10/15/20/30 req/s for 30 s | 20 req/s: 600 nominally offered, 601 `action_pending`, p99 553.1 ms | 30 req/s: 785 completed requests, of which 773 reached `action_pending` and 12 returned HTTP 503; 115 were dropped; p99 7,822.7 ms | [result](../results/agent_prepare_bd646_result.json), [steps](../results/agent_prepare_bd646_steps.txt), [console](../results/agent_prepare_bd646_console.txt), [summary](../results/agent_prepare_bd646_summary.json), [route/context](../results/agent_prepare_bd646_workload_contract.tsv), [setup](../results/agent_prepare_bd646_setup_environment.json) |
+
+Nominal offered is configured `rate x duration`; k6 can emit one iteration on a scenario boundary,
+so it is not reconstructed from completed and dropped counts. Completed, per-rate dropped, HTTP
+error and outcome counts in each result record come from the locally retained tagged point stream.
+k6 emits no interruption point metric; all four consoles finish with zero interrupted iterations,
+which makes every non-negative per-step interruption count zero. Percentiles include every
+completed HTTP request, including a rejection.
+
+The route/context contracts show `none`/`read`/`all`/`all`, with `loadedTurnCount=0` and zero
+included turns for every completed turn. Preparation's 12 failed turns exactly match its 12 HTTP
+503 responses. The committed bundle does not isolate or attribute their internal cause. Each
+bundle prefix also includes raw CPU, CPU-error, CPU-by-step and MySQL files. The large
+`*_points.json` streams remain ignored and local through result construction and review.
+
+The numbered subsections below preserve the earlier paired client-reuse analysis; they do not
+describe the current route-profile baseline.
 
 ### 1. What each path serves, before and after
 
@@ -591,12 +629,12 @@ transient response into budget exhaustion.
 
 ## What to measure next
 
-The historical data leave Agent-local interpreter/client contention and the unobserved dedicated
-Elasticsearch dependency unresolved. A controlled worker-count experiment that samples the
-dedicated benchmark ES can test whether the ~1.4-agent-core plateau moves with the number of
-uvicorn processes; it cannot be attributed to the process before that result exists. Client
-ownership must be varied separately if the experiment is also meant to distinguish the shared
-HTTP pool mutex from interpreter contention.
+The historical profiles leave Agent-local interpreter/client contention unresolved. The current
+ladders sample the dedicated benchmark Elasticsearch dependency, but this result includes neither
+a CPU profile nor a worker-count experiment. A controlled worker-count experiment could test
+whether the historical ~1.4-agent-core plateau moves with the number of uvicorn processes; it
+cannot be attributed to the process before that result exists. Client ownership would have to vary
+separately to distinguish the shared HTTP pool mutex from interpreter contention.
 
 ## Reproducing
 
@@ -605,10 +643,24 @@ make init-local && make up
 ```
 
 ```bash
-BENCH_USERS=25000 ./bench/setup_bench_env.sh
+BENCH_USERS=10000 ./bench/setup_bench_env.sh
 ```
 
-The agent fixture reuses the users, product and signing key that script creates.
+`setup_bench_env.sh` is state-mutating setup, not measured work. It generates a new local RSA
+signing key, replaces the `auth_signing_key_metadata` contents with the sole `bench-current` row,
+replaces the `bench-user-*` principals and credentials, recreates the benchmark product and
+activities and their Redis projections, creates or updates the benchmark RocketMQ topics and
+groups, and replaces the named benchmark Auth/Commerce containers. It does not delete ordinary
+Compose volumes.
+
+Before every agent ladder, `setup_agent_bench.sh` reruns grants and all three canonical migration
+streams; resets Commerce and Agent rows belonging to `bench-user-*`; updates the selected users'
+support permissions; deletes and recreates the shared `agent-service` service identity; rebuilds
+the JAR/image boundary; and replaces the named `citybuddy-bench-*` containers, including the
+isolated tmpfs-backed Elasticsearch node. These effects are not limited to benchmark-user rows:
+migrations, signing-key metadata from the shared setup and the service identity are shared local
+state. A failure does not roll back migrations, fixture resets, permission changes or the
+service-identity write.
 
 Rerun the setup before each ladder — it rebuilds the fixture and restarts the bench services, and
 the prepare ladder refuses to start if the fixture still holds prepared actions, because it would
@@ -646,7 +698,64 @@ it does not delete ordinary Compose containers or volumes. Migrations, fixture r
 updates and service-identity writes can precede a later failure and are not rolled back, so setup
 must be rerun before any workload.
 
-### The paired ladders
+### Current four-path ladders
+
+Run the following setup/ladder pairs in order on a quiet host. Every ladder needs a fresh setup,
+fresh `LABEL`, and clean source checkout at the commit being measured.
+
+```bash
+AGENT_BENCH_USERS=8000 AGENT_ATTEMPT_BUDGET=16 ./bench/agent/setup_agent_bench.sh
+```
+
+```bash
+LABEL=greeting_reproduction_$(date -u +%Y%m%dT%H%M%SZ) RUN_ID=greeting-reproduction \
+RATES=25,50,75,100,125 STEP_SECONDS=20 GRACEFUL_STOP_SECONDS=45 GAP_SECONDS=55 \
+POOL_BASE=0 ./bench/agent/run_agent_ladder.sh greeting
+```
+
+```bash
+AGENT_BENCH_USERS=6000 AGENT_ATTEMPT_BUDGET=16 ./bench/agent/setup_agent_bench.sh
+```
+
+```bash
+LABEL=chat_read_reproduction_$(date -u +%Y%m%dT%H%M%SZ) RUN_ID=chat-read-reproduction \
+RATES=10,25,50,75,100 STEP_SECONDS=20 GRACEFUL_STOP_SECONDS=45 GAP_SECONDS=55 \
+POOL_BASE=0 ./bench/agent/run_agent_ladder.sh chat
+```
+
+```bash
+AGENT_BENCH_USERS=10000 AGENT_ATTEMPT_BUDGET=16 ./bench/agent/setup_agent_bench.sh
+```
+
+```bash
+LABEL=retrieval_reproduction_$(date -u +%Y%m%dT%H%M%SZ) RUN_ID=retrieval-reproduction \
+RATES=40,50,60,75,90 STEP_SECONDS=30 GRACEFUL_STOP_SECONDS=45 GAP_SECONDS=55 \
+POOL_BASE=0 ./bench/agent/run_agent_ladder.sh retrieval
+```
+
+```bash
+AGENT_BENCH_USERS=3000 AGENT_ATTEMPT_BUDGET=16 ./bench/agent/setup_agent_bench.sh
+```
+
+```bash
+LABEL=prepare_reproduction_$(date -u +%Y%m%dT%H%M%SZ) RUN_ID=prepare-reproduction \
+RATES=5,10,15,20,30 STEP_SECONDS=30 GRACEFUL_STOP_SECONDS=45 GAP_SECONDS=55 \
+POOL_BASE=0 ./bench/agent/run_agent_ladder.sh prepare
+```
+
+Successful publication writes the summary, console, CPU, CPU-error, CPU-by-step, MySQL, step,
+workload-contract and setup-environment files under `bench/results/agent_<label>_*`. The tagged
+`*_points.json` stream is retained locally but ignored because of its size. An invalid or
+interrupted run remains under ignored `bench/.run/agent-ladder.*` staging and is not a result.
+
+### Historical paired ladders
+
+The historical paired and extension commands used a larger shared base pool. Rebuild that base
+fixture before reproducing those sections:
+
+```bash
+BENCH_USERS=25000 ./bench/setup_bench_env.sh
+```
 
 Each pass is three setups and three ladders. Run the baseline pass from
 `272eecdfb79b73811bc6fff677360a0d79a07991` and the post-client-reuse pass from
@@ -679,7 +788,7 @@ LABEL=prepare_reproduction_$(date -u +%Y%m%dT%H%M%SZ) RATES=5,10,15,20,30 STEP_S
 
 The runner prints the per-step table and writes it to `bench/results/agent_<label>_steps.txt`.
 
-### The extension ladders
+### Historical extension ladders
 
 After the change both chat and retrieval run off the top of the range above, so the knee comes
 from ladders that start where those stop:
@@ -700,7 +809,7 @@ AGENT_BENCH_USERS=11800 ./bench/agent/setup_agent_bench.sh
 LABEL=retrieval_extension_$(date -u +%Y%m%dT%H%M%SZ) RATES=50,60,75,90,110 STEP_SECONDS=30 ./bench/agent/run_agent_ladder.sh retrieval
 ```
 
-### The CPU attribution
+### Historical CPU attribution
 
 This is a separate script, because it drives a fixed concurrency rather than a fixed arrival
 rate. Each profile needs its own fixture: the driver takes pool entries from index 0, so a second
