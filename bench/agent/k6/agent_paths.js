@@ -3,9 +3,34 @@ import exec from 'k6/execution';
 import { Counter } from 'k6/metrics';
 import { SharedArray } from 'k6/data';
 
-// One ladder per path. Mixing the three in one run would make each step's percentile a blend of
-// three different amounts of work, so the path is fixed for a run and named by PATH_NAME.
-const PATH_NAME = __ENV.PATH_NAME || 'chat';
+// One ladder per workload. Mixing them in one run would make each step's percentile a blend of
+// different amounts of work, so the selector is fixed for a run and named by PATH_NAME.
+const WORKLOADS = Object.freeze({
+  greeting: Object.freeze({
+    message: () => 'hello',
+    expectedToolProfile: 'none',
+  }),
+  chat: Object.freeze({
+    message: () => 'hello, can you tell me about delivery times',
+    expectedToolProfile: 'read',
+  }),
+  retrieval: Object.freeze({
+    message: () => 'retrieval-sufficient what does the refund policy cover',
+    expectedToolProfile: 'all',
+  }),
+  prepare: Object.freeze({
+    message: (entry) => `action-prepare refund my order ${entry.orderId}`,
+    expectedToolProfile: 'all',
+  }),
+});
+const PATH_NAME = __ENV.PATH_NAME;
+if (!PATH_NAME) {
+  throw new Error('PATH_NAME is required; expected greeting, chat, retrieval, or prepare');
+}
+if (!Object.prototype.hasOwnProperty.call(WORKLOADS, PATH_NAME)) {
+  throw new Error(`unknown PATH_NAME '${PATH_NAME}'; expected greeting, chat, retrieval, or prepare`);
+}
+const WORKLOAD = WORKLOADS[PATH_NAME];
 const RATES = (__ENV.RATES || '10,20,40,80,160').split(',').map(Number);
 const STEP_SECONDS = Number(__ENV.STEP_SECONDS || 20);
 // A step that collapses keeps completing requests well past its own window, and k6 lets those
@@ -14,7 +39,7 @@ const STEP_SECONDS = Number(__ENV.STEP_SECONDS || 20);
 const GRACEFUL_STOP_SECONDS = Number(__ENV.GRACEFUL_STOP_SECONDS || 45);
 const GAP_SECONDS = Number(__ENV.GAP_SECONDS || GRACEFUL_STOP_SECONDS + 10);
 const RUN_ID = __ENV.RUN_ID || 'run';
-// Each path takes a disjoint region of the pool, so running all three over one fixture still
+// Each path takes a disjoint region of the pool, so running all four over one fixture still
 // gives every iteration its own user, order and session.
 const POOL_BASE = Number(__ENV.POOL_BASE || 0);
 const BASE = __ENV.BASE_URL || 'http://127.0.0.1:8001';
@@ -30,23 +55,18 @@ const outcomes = new Counter('agent_outcomes');
 // still exits 0 — so exhaustion is counted and the count is thresholded at zero.
 const exhausted = new Counter('pool_exhausted');
 
-// The fixture model picks its behaviour from the message text.
+// The fixture model picks its behaviour from the selected workload's message text.
+//   greeting   no tool schemas, then one direct fixture answer.
 //   chat       the current router supplies the read-only schemas, then the fixture answers
 //              directly without a tool call.
-//   retrieval  alias resolution, mapping validation, BM25 and dense retrieval, rerank, then the
-//              closing model call.
-//   prepare    a refund preparation tool call, which exchanges an on-behalf-of token and writes a
-//              PendingAction through commerce.
+//   retrieval  all schemas, alias resolution, mapping validation, BM25 and dense retrieval,
+//              rerank, then the closing model call.
+//   prepare    all schemas and a refund preparation tool call, which exchanges an on-behalf-of
+//              token and writes a PendingAction through commerce.
 function message(entry) {
-  if (PATH_NAME === 'retrieval') {
-    return 'retrieval-sufficient what does the refund policy cover';
-  }
-  if (PATH_NAME === 'prepare') {
-    // The order id travels in the message so the fixture prepares against an order this user
-    // actually owns; a foreign order is rejected as ACTION_PREPARATION_TARGET_NOT_FOUND.
-    return `action-prepare refund my order ${entry.orderId}`;
-  }
-  return 'hello, can you tell me about delivery times';
+  // The prepare selector interpolates this pool entry's owned order id; the other selectors ignore
+  // the entry. A foreign order would be rejected as ACTION_PREPARATION_TARGET_NOT_FOUND.
+  return WORKLOAD.message(entry);
 }
 
 // Each step gets a disjoint slice of the pool, so no user, order or session is ever used twice.
@@ -106,7 +126,11 @@ export function turn() {
         // of doing the work, which would measure the replay path rather than the path named.
         'Idempotency-Key': `${RUN_ID}-${PATH_NAME}-${exec.scenario.name}-${exec.scenario.iterationInTest}`,
       },
-      tags: { rate: rate, path: PATH_NAME },
+      tags: {
+        rate: rate,
+        path: PATH_NAME,
+        expected_tool_profile: WORKLOAD.expectedToolProfile,
+      },
     },
   );
 
