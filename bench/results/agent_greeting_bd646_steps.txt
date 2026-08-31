@@ -1,0 +1,17 @@
+citybuddy_commit=bd646937d0c7f45c107ce2283a244d1b4fc8d952
+
+=== greeting_bd646 (step 20s) ===
+ target  offered  measured  served/s    p50 ms    p95 ms    p99 ms    max ms
+----------------------------------------------------------------------------
+     25      500       500      25.0       9.3      15.5      19.2      22.4
+     50     1000      1000      50.0       7.1      13.2      18.7      29.8
+     75     1500      1501      75.0       6.0      13.1      21.4      28.9
+    100     2000      2000     100.0       6.1      20.3      64.4     117.2
+    125     2500      2501     125.0       5.8      32.1      96.9     130.5
+
+outcomes by step (every class, none elided):
+    25: completed=500
+    50: completed=1000
+    75: completed=1501
+   100: completed=2000
+   125: completed=2501

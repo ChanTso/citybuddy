@@ -1,0 +1,17 @@
+citybuddy_commit=bd646937d0c7f45c107ce2283a244d1b4fc8d952
+
+=== retrieval_bd646 (step 30s) ===
+ target  offered  measured  served/s    p50 ms    p95 ms    p99 ms    max ms
+----------------------------------------------------------------------------
+     40     1200      1201      40.0      14.9      30.4      48.8     188.0
+     50     1500      1501      50.0      12.5      30.3      49.1      78.0
+     60     1800      1801      60.0      13.6     163.7     243.0     351.9
+     75     2250      2123      70.8    2808.2    4051.8    4183.8    4301.9
+     90     2700      2279      76.0    5613.4    8695.5    8939.7    9174.7
+
+outcomes by step (every class, none elided):
+    40: completed=1201
+    50: completed=1501
+    60: completed=1801
+    75: completed=2123
+    90: completed=2279

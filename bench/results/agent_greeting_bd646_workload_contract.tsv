@@ -1,0 +1,8 @@
+citybuddy_commit=bd646937d0c7f45c107ce2283a244d1b4fc8d952
+correlation_boundary=bd646-greeting-greeting-
+path=greeting
+expected_tool_profile=none
+evidence_role=workload_contract_only_not_performance_or_business_grader
+boundary_turns	completed_turns	failed_turns	processing_turns	matching_profile_turns	empty_history_turns	routing_events	context_events	actual_tool_profiles	loaded_turn_counts	included_turn_counts
+7502	7502	0	0	7502	7502	7502	7502	none	0	0
+contract_status=pass

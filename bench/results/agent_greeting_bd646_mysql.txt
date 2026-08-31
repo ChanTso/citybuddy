@@ -1,0 +1,5 @@
+citybuddy_commit=bd646937d0c7f45c107ce2283a244d1b4fc8d952
+connections opened during the run: 37672
+attempts rejected at max_connections: 0
+peak concurrent connections since FLUSH STATUS: 111
+max_connections limit: 151

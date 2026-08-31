@@ -189,23 +189,30 @@ npm --prefix web ci && cp web/.env.example web/.env.local && npm --prefix web ru
 
 ## Measured performance
 
-Local three-path latency for the support agent, with inference held at zero so what remains is the
-platform's own orchestration cost. The highest step where nothing was shed, one process on one
-machine. Repository history reconstructs their executable boundary as
-`6acf856716ff0b926bb147c0e1d99614a8d9e9c8`. The artifacts predate the rule that records the
-tested SHA inside each result file, so this is a historical boundary rather than run-captured
-provenance.
+Local post-memory, empty-history, first-turn latency for the four support-agent workloads at
+`bd646937d0c7f45c107ce2283a244d1b4fc8d952`. The deterministic model fixture holds inference at
+zero, so the numbers cover CityBuddy orchestration only. Each workload used a fresh fixture on an
+otherwise idle MacBook Pro M4 host (10 cores, 24 GiB; Docker Desktop: 8 CPUs, 13.6 GiB), one agent
+process, and a fixed, non-randomized run order. The table reports the highest tested step with zero
+dropped iterations and zero HTTP errors; it is a single local first ladder, not a capacity claim.
 
-| Path | Historical result | Status after PR #107 |
-|---|---|---|
-| Plain chat | 75 req/s, p99 31 ms | The input now selects the smaller `read` tool profile; this historical all-tools path no longer exists, and the current path has not been measured. |
-| Knowledge retrieval | 60 req/s, p99 689 ms | The input still selects `refund_context` and the all-tools workload; not re-run. |
-| Refund preparation | 15 req/s, p99 424 ms | The input still selects `refund_context` and the all-tools workload; not re-run. |
+| Workload | Tool profile | Highest tested clean step | First observed load boundary |
+|---|---|---|---|
+| [Bare greeting](bench/results/agent_greeting_bd646_result.json) | `none` | 125 req/s for 20 s: 2,500 nominally offered, 2,501 completed, p99 96.9 ms | None in the tested 25–125 req/s range. |
+| [Delivery chat](bench/results/agent_chat_read_bd646_result.json) | `read` | 100 req/s for 20 s: 2,000 offered/completed, p99 27.6 ms | None in the tested 10–100 req/s range. |
+| [Knowledge retrieval](bench/results/agent_retrieval_bd646_result.json) | `all` | 60 req/s for 30 s: 1,800 nominally offered, 1,801 completed, p99 243.0 ms | At 75 req/s, 2,123 completed, 128 were dropped, and p99 reached 4.18 s; no HTTP errors. |
+| [Owned-order refund preparation](bench/results/agent_prepare_bd646_result.json) | `all` | 20 req/s for 30 s: 600 nominally offered, 601 reached `action_pending`, p99 553.1 ms | At 30 req/s, 773 reached `action_pending`, 115 were dropped, 12 returned HTTP 503, and p99 reached 7.82 s. |
 
-The first measurement found most of the agent's CPU going on work it threw away — a fresh TLS
-context per outbound request. Method, raw output, the profile before and after, and what is still
-unexplained are in [bench/agent/README.md](bench/agent/README.md). The seckill admission
-measurement is in [bench/README.md](bench/README.md).
+k6 may emit one iteration at a scenario time boundary, so a completed count can exceed nominal
+`rate x duration` by one. Latency percentiles include every completed HTTP request, including an
+error response. Route/context evidence shows `none`/`read`/`all`/`all`; every completed turn had
+`loadedTurnCount=0` and zero included turns. The [method and raw bundles](bench/agent/README.md#current-four-path-baseline-at-bd646937)
+record the exact fixture, configuration, UTC windows and count boundaries.
+
+The earlier paired measurement found most of the agent's CPU going on work it threw away — a fresh
+TLS context per outbound request. Its raw output, profiles and remaining unknowns are retained in
+[bench/agent/README.md](bench/agent/README.md). The seckill admission measurement is in
+[bench/README.md](bench/README.md).
 
 ## Verification
 
