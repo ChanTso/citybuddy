@@ -1,0 +1,118 @@
+{
+  "baseSetupWindowUtc": {
+    "completedAt": "2026-08-31T14:53:45Z",
+    "startedAt": "2026-08-31T14:52:45Z"
+  },
+  "case": "max-count",
+  "citybuddyCommit": "65bb40e7c04bbdcc0b4be22531bb16040af49274",
+  "configuration": {
+    "arrivalModel": "constant-arrival-rate",
+    "durationSeconds": 120,
+    "gracefulStopSeconds": 45,
+    "k6ImageId": "sha256:5221b620a4f874faff6e32ba597aa667c058391fe4898b1c6f6377f062c6cdec",
+    "k6ImageReference": "grafana/k6@sha256:5221b620a4f874faff6e32ba597aa667c058391fe4898b1c6f6377f062c6cdec",
+    "k6Version": "k6 v2.2.0 (commit/00a9a1b7f5, go1.26.5, linux/arm64)",
+    "ratePerSecond": 10,
+    "targetSessionCount": 1220
+  },
+  "counts": {
+    "completed": 1201,
+    "completedTurns": 1201,
+    "failedTurns": 0,
+    "httpErrors": 0,
+    "k6Dropped": 0,
+    "nominalOffered": 1200,
+    "processingTurns": 0
+  },
+  "fixtureSetupWindowUtc": {
+    "completedAt": "2026-08-31T14:54:41.530184Z",
+    "startedAt": "2026-08-31T14:54:39.512458Z"
+  },
+  "formatVersion": "citybuddy-agent-warm-history-result-v1",
+  "history": {
+    "candidateTokens": 768,
+    "candidateTurnCount": 17,
+    "includedTokens": 768,
+    "includedTurnCount": 16,
+    "loadedTurnCount": 16,
+    "olderTurnsAvailable": true,
+    "omittedLoadedTurnCount": 0,
+    "persistedTurnCount": 17,
+    "tokenBudget": 6144,
+    "tokenEstimator": "utf8-bytes-v1",
+    "tokenWatermark": "low",
+    "trimAction": "none",
+    "trimmed": false
+  },
+  "label": "b4p3_max-count",
+  "rawArtifacts": [
+    "bench/results/agent_warm_history_b4p3_max-count_summary.json",
+    "bench/results/agent_warm_history_b4p3_max-count_console.txt",
+    "bench/results/agent_warm_history_b4p3_max-count_points.json",
+    "bench/results/agent_warm_history_b4p3_max-count_contract.tsv",
+    "bench/results/agent_warm_history_b4p3_max-count_fixture.json",
+    "bench/results/agent_warm_history_b4p3_max-count_setup_environment.json"
+  ],
+  "routeContextEvidence": {
+    "actualToolProfiles": [
+      "read"
+    ],
+    "artifact": "bench/results/agent_warm_history_b4p3_max-count_contract.tsv",
+    "boundary_turns": 1201,
+    "candidateTokens": [
+      768
+    ],
+    "candidateTurnCounts": [
+      17
+    ],
+    "completed_turns": 1201,
+    "context_events": 1201,
+    "contractStatus": "pass",
+    "distinct_sessions": 1201,
+    "evidenceRole": "workload and context contract only, not performance attribution",
+    "failed_turns": 0,
+    "includedTokens": [
+      768
+    ],
+    "includedTurnCounts": [
+      16
+    ],
+    "loadedTurnCounts": [
+      16
+    ],
+    "matching_context_turns": 1201,
+    "matching_profile_turns": 1201,
+    "max_requests_per_session": 1,
+    "olderTurnsAvailable": [
+      true
+    ],
+    "omittedLoadedTurnCounts": [
+      0
+    ],
+    "persistedTurnCounts": [
+      17
+    ],
+    "processing_turns": 0,
+    "routing_events": 1201,
+    "tokenBudgets": [
+      6144
+    ],
+    "tokenWatermarks": [
+      "low"
+    ]
+  },
+  "runWindowUtc": {
+    "completedAt": "2026-08-31T14:56:44.08041696Z",
+    "startedAt": "2026-08-31T14:54:42.018634375Z"
+  },
+  "setupNonce": "83815e42a62fd8376229b7b3ca886d3e",
+  "setupWindowUtc": {
+    "completedAt": "2026-08-31T14:54:41.530184Z",
+    "startedAt": "2026-08-31T14:52:45Z"
+  },
+  "workload": {
+    "exactMessage": "hello, can you tell me about delivery times",
+    "expectedToolProfile": "read",
+    "formalRequestsPerSession": 1
+  }
+}

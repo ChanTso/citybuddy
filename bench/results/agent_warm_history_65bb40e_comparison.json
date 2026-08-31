@@ -1,0 +1,2236 @@
+{
+  "formatVersion": "citybuddy-agent-warm-history-comparison-v1",
+  "citybuddyCommit": "65bb40e7c04bbdcc0b4be22531bb16040af49274",
+  "label": "warm_history_65bb40e",
+  "design": {
+    "comparisonBoundary": "fixed read path, fixture-warm state, single-host local topology end-to-end increment from non-empty history",
+    "randomization": "none",
+    "scheduleDesign": "fixed four-block Williams-balanced order",
+    "blocks": 4,
+    "workload": {
+      "exactMessage": "hello, can you tell me about delivery times",
+      "expectedToolProfile": "read",
+      "formalRequestsPerSession": 1
+    },
+    "configuration": {
+      "arrivalModel": "constant-arrival-rate",
+      "ratePerSecond": 10,
+      "durationSeconds": 120,
+      "nominalOfferedPerRun": 1200,
+      "targetSessionCount": 1220,
+      "agentBenchUsers": 1300,
+      "agentAttemptBudget": 16,
+      "gracefulStopSeconds": 45,
+      "k6ImageReference": "grafana/k6@sha256:5221b620a4f874faff6e32ba597aa667c058391fe4898b1c6f6377f062c6cdec",
+      "k6Version": "k6 v2.2.0 (commit/00a9a1b7f5, go1.26.5, linux/arm64)"
+    },
+    "schedule": [
+      {
+        "block": 1,
+        "cases": [
+          "empty",
+          "one-short",
+          "high-pressure",
+          "max-count"
+        ],
+        "labels": [
+          "b1p1_empty",
+          "b1p2_one-short",
+          "b1p3_high-pressure",
+          "b1p4_max-count"
+        ]
+      },
+      {
+        "block": 2,
+        "cases": [
+          "one-short",
+          "max-count",
+          "empty",
+          "high-pressure"
+        ],
+        "labels": [
+          "b2p1_one-short",
+          "b2p2_max-count",
+          "b2p3_empty",
+          "b2p4_high-pressure"
+        ]
+      },
+      {
+        "block": 3,
+        "cases": [
+          "max-count",
+          "high-pressure",
+          "one-short",
+          "empty"
+        ],
+        "labels": [
+          "b3p1_max-count",
+          "b3p2_high-pressure",
+          "b3p3_one-short",
+          "b3p4_empty"
+        ]
+      },
+      {
+        "block": 4,
+        "cases": [
+          "high-pressure",
+          "empty",
+          "max-count",
+          "one-short"
+        ],
+        "labels": [
+          "b4p1_high-pressure",
+          "b4p2_empty",
+          "b4p3_max-count",
+          "b4p4_one-short"
+        ]
+      }
+    ]
+  },
+  "hardware": {
+    "host": {
+      "modelIdentifier": "Mac16,1",
+      "chip": "Apple M4",
+      "cpuCores": {
+        "total": 10,
+        "performance": 4,
+        "efficiency": 6
+      },
+      "memoryBytes": 25769803776,
+      "architecture": "arm64",
+      "operatingSystem": "macOS 26.5 (25F71)"
+    },
+    "docker": {
+      "product": "Docker Desktop",
+      "serverVersion": "29.5.3",
+      "allocatedCpus": 8,
+      "allocatedMemoryBytes": 14638391296,
+      "architecture": "aarch64",
+      "storageDriver": "overlayfs"
+    }
+  },
+  "experimentWindowUtc": {
+    "startedAt": "2026-08-31T13:41:19Z",
+    "completedAt": "2026-08-31T15:01:38.261247554Z"
+  },
+  "measurementBoundary": {
+    "included": "MySQL history read and row decoding, durable-history validation, token estimation and whole-pair trimming, prompt construction, and request serialization on the fixed delivery/read path",
+    "excluded": "fixture construction, base setup, host quiet checks, and model inference; the deterministic fake LiteLLM fixture answers immediately",
+    "loadStatement": "10 requests/second is the measurement load, not a capacity claim"
+  },
+  "acceptanceGate": {
+    "status": "pass",
+    "runCount": 16,
+    "criteria": "each run has zero k6 dropped iterations, HTTP errors, failed turns and processing turns; iteration, boundary, completion, distinct-session, profile, context and routing counts agree; one formal request per session; fixture context arrays and source/runtime/setup identities match the frozen contract",
+    "identityBoundary": "every run was rebuilt from the same CityBuddy source commit and independently verifies its source/nonce labels plus equality of that run's host and mounted JAR hashes; binary and image hashes are not asserted to be identical across runs",
+    "totals": {
+      "nominalOffered": 19200,
+      "iterations": 19211,
+      "httpRequests": 19211,
+      "completed": 19211,
+      "k6Dropped": 0,
+      "httpErrors": 0,
+      "completedTurns": 19211,
+      "failedTurns": 0,
+      "processingTurns": 0
+    }
+  },
+  "runs": [
+    {
+      "block": 1,
+      "position": 1,
+      "label": "b1p1_empty",
+      "case": "empty",
+      "artifacts": {
+        "result": "bench/results/agent_warm_history_b1p1_empty_result.json",
+        "summary": "bench/results/agent_warm_history_b1p1_empty_summary.json",
+        "console": "bench/results/agent_warm_history_b1p1_empty_console.txt",
+        "contract": "bench/results/agent_warm_history_b1p1_empty_contract.tsv",
+        "fixture": "bench/results/agent_warm_history_b1p1_empty_fixture.json",
+        "setupEnvironment": "bench/results/agent_warm_history_b1p1_empty_setup_environment.json",
+        "localPointStream": "bench/results/agent_warm_history_b1p1_empty_points.json (ignored; retained locally through summary and review)"
+      },
+      "setupNonce": "b34ea972f624d0aa8f4a9bbe7802a364",
+      "baseSetupWindowUtc": {
+        "completedAt": "2026-08-31T13:42:21Z",
+        "startedAt": "2026-08-31T13:41:19Z"
+      },
+      "setupWindowUtc": {
+        "completedAt": "2026-08-31T13:44:24.043234Z",
+        "startedAt": "2026-08-31T13:41:19Z"
+      },
+      "fixtureSetupWindowUtc": {
+        "completedAt": "2026-08-31T13:44:24.043234Z",
+        "startedAt": "2026-08-31T13:44:23.665979Z"
+      },
+      "runWindowUtc": {
+        "completedAt": "2026-08-31T13:46:26.483225882Z",
+        "startedAt": "2026-08-31T13:44:24.503511215Z"
+      },
+      "latencyMs": {
+        "p50": 14.108,
+        "p95": 19.861792,
+        "p99": 23.503542,
+        "max": 54.699542
+      },
+      "counts": {
+        "iterations": 1201,
+        "httpRequests": 1201,
+        "completed": 1201,
+        "completedTurns": 1201,
+        "failedTurns": 0,
+        "httpErrors": 0,
+        "k6Dropped": 0,
+        "nominalOffered": 1200,
+        "processingTurns": 0
+      },
+      "history": {
+        "candidateTokens": 0,
+        "candidateTurnCount": 0,
+        "includedTokens": 0,
+        "includedTurnCount": 0,
+        "loadedTurnCount": 0,
+        "olderTurnsAvailable": false,
+        "omittedLoadedTurnCount": 0,
+        "persistedTurnCount": 0,
+        "tokenBudget": 6144,
+        "tokenEstimator": "utf8-bytes-v1",
+        "tokenWatermark": "low",
+        "trimAction": "none",
+        "trimmed": false
+      },
+      "routeContextEvidence": {
+        "actualToolProfiles": [
+          "read"
+        ],
+        "artifact": "bench/results/agent_warm_history_b1p1_empty_contract.tsv",
+        "boundary_turns": 1201,
+        "candidateTokens": [
+          0
+        ],
+        "candidateTurnCounts": [
+          0
+        ],
+        "completed_turns": 1201,
+        "context_events": 1201,
+        "contractStatus": "pass",
+        "distinct_sessions": 1201,
+        "evidenceRole": "workload and context contract only, not performance attribution",
+        "failed_turns": 0,
+        "includedTokens": [
+          0
+        ],
+        "includedTurnCounts": [
+          0
+        ],
+        "loadedTurnCounts": [
+          0
+        ],
+        "matching_context_turns": 1201,
+        "matching_profile_turns": 1201,
+        "max_requests_per_session": 1,
+        "olderTurnsAvailable": [
+          false
+        ],
+        "omittedLoadedTurnCounts": [
+          0
+        ],
+        "persistedTurnCounts": [
+          0
+        ],
+        "processing_turns": 0,
+        "routing_events": 1201,
+        "tokenBudgets": [
+          6144
+        ],
+        "tokenWatermarks": [
+          "low"
+        ]
+      }
+    },
+    {
+      "block": 1,
+      "position": 2,
+      "label": "b1p2_one-short",
+      "case": "one-short",
+      "artifacts": {
+        "result": "bench/results/agent_warm_history_b1p2_one-short_result.json",
+        "summary": "bench/results/agent_warm_history_b1p2_one-short_summary.json",
+        "console": "bench/results/agent_warm_history_b1p2_one-short_console.txt",
+        "contract": "bench/results/agent_warm_history_b1p2_one-short_contract.tsv",
+        "fixture": "bench/results/agent_warm_history_b1p2_one-short_fixture.json",
+        "setupEnvironment": "bench/results/agent_warm_history_b1p2_one-short_setup_environment.json",
+        "localPointStream": "bench/results/agent_warm_history_b1p2_one-short_points.json (ignored; retained locally through summary and review)"
+      },
+      "setupNonce": "0d7b1a7962efd1abf4c8dd0984da8c43",
+      "baseSetupWindowUtc": {
+        "completedAt": "2026-08-31T13:50:52Z",
+        "startedAt": "2026-08-31T13:49:35Z"
+      },
+      "setupWindowUtc": {
+        "completedAt": "2026-08-31T13:51:47.328742Z",
+        "startedAt": "2026-08-31T13:49:35Z"
+      },
+      "fixtureSetupWindowUtc": {
+        "completedAt": "2026-08-31T13:51:47.328742Z",
+        "startedAt": "2026-08-31T13:51:46.957050Z"
+      },
+      "runWindowUtc": {
+        "completedAt": "2026-08-31T13:53:50.922406797Z",
+        "startedAt": "2026-08-31T13:51:47.818811795Z"
+      },
+      "latencyMs": {
+        "p50": 14.099709,
+        "p95": 20.983584,
+        "p99": 24.525334,
+        "max": 41.55625
+      },
+      "counts": {
+        "iterations": 1201,
+        "httpRequests": 1201,
+        "completed": 1201,
+        "completedTurns": 1201,
+        "failedTurns": 0,
+        "httpErrors": 0,
+        "k6Dropped": 0,
+        "nominalOffered": 1200,
+        "processingTurns": 0
+      },
+      "history": {
+        "candidateTokens": 48,
+        "candidateTurnCount": 1,
+        "includedTokens": 48,
+        "includedTurnCount": 1,
+        "loadedTurnCount": 1,
+        "olderTurnsAvailable": false,
+        "omittedLoadedTurnCount": 0,
+        "persistedTurnCount": 1,
+        "tokenBudget": 6144,
+        "tokenEstimator": "utf8-bytes-v1",
+        "tokenWatermark": "low",
+        "trimAction": "none",
+        "trimmed": false
+      },
+      "routeContextEvidence": {
+        "actualToolProfiles": [
+          "read"
+        ],
+        "artifact": "bench/results/agent_warm_history_b1p2_one-short_contract.tsv",
+        "boundary_turns": 1201,
+        "candidateTokens": [
+          48
+        ],
+        "candidateTurnCounts": [
+          1
+        ],
+        "completed_turns": 1201,
+        "context_events": 1201,
+        "contractStatus": "pass",
+        "distinct_sessions": 1201,
+        "evidenceRole": "workload and context contract only, not performance attribution",
+        "failed_turns": 0,
+        "includedTokens": [
+          48
+        ],
+        "includedTurnCounts": [
+          1
+        ],
+        "loadedTurnCounts": [
+          1
+        ],
+        "matching_context_turns": 1201,
+        "matching_profile_turns": 1201,
+        "max_requests_per_session": 1,
+        "olderTurnsAvailable": [
+          false
+        ],
+        "omittedLoadedTurnCounts": [
+          0
+        ],
+        "persistedTurnCounts": [
+          1
+        ],
+        "processing_turns": 0,
+        "routing_events": 1201,
+        "tokenBudgets": [
+          6144
+        ],
+        "tokenWatermarks": [
+          "low"
+        ]
+      }
+    },
+    {
+      "block": 1,
+      "position": 3,
+      "label": "b1p3_high-pressure",
+      "case": "high-pressure",
+      "artifacts": {
+        "result": "bench/results/agent_warm_history_b1p3_high-pressure_result.json",
+        "summary": "bench/results/agent_warm_history_b1p3_high-pressure_summary.json",
+        "console": "bench/results/agent_warm_history_b1p3_high-pressure_console.txt",
+        "contract": "bench/results/agent_warm_history_b1p3_high-pressure_contract.tsv",
+        "fixture": "bench/results/agent_warm_history_b1p3_high-pressure_fixture.json",
+        "setupEnvironment": "bench/results/agent_warm_history_b1p3_high-pressure_setup_environment.json",
+        "localPointStream": "bench/results/agent_warm_history_b1p3_high-pressure_points.json (ignored; retained locally through summary and review)"
+      },
+      "setupNonce": "ed6c76c60d839a511e2152e5d9ffa859",
+      "baseSetupWindowUtc": {
+        "completedAt": "2026-08-31T13:55:20Z",
+        "startedAt": "2026-08-31T13:54:04Z"
+      },
+      "setupWindowUtc": {
+        "completedAt": "2026-08-31T13:58:34.521693Z",
+        "startedAt": "2026-08-31T13:54:04Z"
+      },
+      "fixtureSetupWindowUtc": {
+        "completedAt": "2026-08-31T13:58:34.521693Z",
+        "startedAt": "2026-08-31T13:58:30.944550Z"
+      },
+      "runWindowUtc": {
+        "completedAt": "2026-08-31T14:00:37.071048721Z",
+        "startedAt": "2026-08-31T13:58:35.044480803Z"
+      },
+      "latencyMs": {
+        "p50": 15.767396,
+        "p95": 22.0658899,
+        "p99": 30.522164499999995,
+        "max": 53.8555
+      },
+      "counts": {
+        "iterations": 1200,
+        "httpRequests": 1200,
+        "completed": 1200,
+        "completedTurns": 1200,
+        "failedTurns": 0,
+        "httpErrors": 0,
+        "k6Dropped": 0,
+        "nominalOffered": 1200,
+        "processingTurns": 0
+      },
+      "history": {
+        "candidateTokens": 68224,
+        "candidateTurnCount": 17,
+        "includedTokens": 4264,
+        "includedTurnCount": 1,
+        "loadedTurnCount": 16,
+        "olderTurnsAvailable": true,
+        "omittedLoadedTurnCount": 15,
+        "persistedTurnCount": 17,
+        "tokenBudget": 6144,
+        "tokenEstimator": "utf8-bytes-v1",
+        "tokenWatermark": "high",
+        "trimAction": "omit-oldest-whole-turns",
+        "trimmed": true
+      },
+      "routeContextEvidence": {
+        "actualToolProfiles": [
+          "read"
+        ],
+        "artifact": "bench/results/agent_warm_history_b1p3_high-pressure_contract.tsv",
+        "boundary_turns": 1200,
+        "candidateTokens": [
+          68224
+        ],
+        "candidateTurnCounts": [
+          17
+        ],
+        "completed_turns": 1200,
+        "context_events": 1200,
+        "contractStatus": "pass",
+        "distinct_sessions": 1200,
+        "evidenceRole": "workload and context contract only, not performance attribution",
+        "failed_turns": 0,
+        "includedTokens": [
+          4264
+        ],
+        "includedTurnCounts": [
+          1
+        ],
+        "loadedTurnCounts": [
+          16
+        ],
+        "matching_context_turns": 1200,
+        "matching_profile_turns": 1200,
+        "max_requests_per_session": 1,
+        "olderTurnsAvailable": [
+          true
+        ],
+        "omittedLoadedTurnCounts": [
+          15
+        ],
+        "persistedTurnCounts": [
+          17
+        ],
+        "processing_turns": 0,
+        "routing_events": 1200,
+        "tokenBudgets": [
+          6144
+        ],
+        "tokenWatermarks": [
+          "high"
+        ]
+      }
+    },
+    {
+      "block": 1,
+      "position": 4,
+      "label": "b1p4_max-count",
+      "case": "max-count",
+      "artifacts": {
+        "result": "bench/results/agent_warm_history_b1p4_max-count_result.json",
+        "summary": "bench/results/agent_warm_history_b1p4_max-count_summary.json",
+        "console": "bench/results/agent_warm_history_b1p4_max-count_console.txt",
+        "contract": "bench/results/agent_warm_history_b1p4_max-count_contract.tsv",
+        "fixture": "bench/results/agent_warm_history_b1p4_max-count_fixture.json",
+        "setupEnvironment": "bench/results/agent_warm_history_b1p4_max-count_setup_environment.json",
+        "localPointStream": "bench/results/agent_warm_history_b1p4_max-count_points.json (ignored; retained locally through summary and review)"
+      },
+      "setupNonce": "d8c643a375eb55e437aa8b2fc063a181",
+      "baseSetupWindowUtc": {
+        "completedAt": "2026-08-31T14:01:51Z",
+        "startedAt": "2026-08-31T14:00:53Z"
+      },
+      "setupWindowUtc": {
+        "completedAt": "2026-08-31T14:02:45.077863Z",
+        "startedAt": "2026-08-31T14:00:53Z"
+      },
+      "fixtureSetupWindowUtc": {
+        "completedAt": "2026-08-31T14:02:45.077863Z",
+        "startedAt": "2026-08-31T14:02:43.141457Z"
+      },
+      "runWindowUtc": {
+        "completedAt": "2026-08-31T14:04:46.686349169Z",
+        "startedAt": "2026-08-31T14:02:45.610742127Z"
+      },
+      "latencyMs": {
+        "p50": 13.3137505,
+        "p95": 20.61835,
+        "p99": 23.579168160000002,
+        "max": 49.976625
+      },
+      "counts": {
+        "iterations": 1200,
+        "httpRequests": 1200,
+        "completed": 1200,
+        "completedTurns": 1200,
+        "failedTurns": 0,
+        "httpErrors": 0,
+        "k6Dropped": 0,
+        "nominalOffered": 1200,
+        "processingTurns": 0
+      },
+      "history": {
+        "candidateTokens": 768,
+        "candidateTurnCount": 17,
+        "includedTokens": 768,
+        "includedTurnCount": 16,
+        "loadedTurnCount": 16,
+        "olderTurnsAvailable": true,
+        "omittedLoadedTurnCount": 0,
+        "persistedTurnCount": 17,
+        "tokenBudget": 6144,
+        "tokenEstimator": "utf8-bytes-v1",
+        "tokenWatermark": "low",
+        "trimAction": "none",
+        "trimmed": false
+      },
+      "routeContextEvidence": {
+        "actualToolProfiles": [
+          "read"
+        ],
+        "artifact": "bench/results/agent_warm_history_b1p4_max-count_contract.tsv",
+        "boundary_turns": 1200,
+        "candidateTokens": [
+          768
+        ],
+        "candidateTurnCounts": [
+          17
+        ],
+        "completed_turns": 1200,
+        "context_events": 1200,
+        "contractStatus": "pass",
+        "distinct_sessions": 1200,
+        "evidenceRole": "workload and context contract only, not performance attribution",
+        "failed_turns": 0,
+        "includedTokens": [
+          768
+        ],
+        "includedTurnCounts": [
+          16
+        ],
+        "loadedTurnCounts": [
+          16
+        ],
+        "matching_context_turns": 1200,
+        "matching_profile_turns": 1200,
+        "max_requests_per_session": 1,
+        "olderTurnsAvailable": [
+          true
+        ],
+        "omittedLoadedTurnCounts": [
+          0
+        ],
+        "persistedTurnCounts": [
+          17
+        ],
+        "processing_turns": 0,
+        "routing_events": 1200,
+        "tokenBudgets": [
+          6144
+        ],
+        "tokenWatermarks": [
+          "low"
+        ]
+      }
+    },
+    {
+      "block": 2,
+      "position": 1,
+      "label": "b2p1_one-short",
+      "case": "one-short",
+      "artifacts": {
+        "result": "bench/results/agent_warm_history_b2p1_one-short_result.json",
+        "summary": "bench/results/agent_warm_history_b2p1_one-short_summary.json",
+        "console": "bench/results/agent_warm_history_b2p1_one-short_console.txt",
+        "contract": "bench/results/agent_warm_history_b2p1_one-short_contract.tsv",
+        "fixture": "bench/results/agent_warm_history_b2p1_one-short_fixture.json",
+        "setupEnvironment": "bench/results/agent_warm_history_b2p1_one-short_setup_environment.json",
+        "localPointStream": "bench/results/agent_warm_history_b2p1_one-short_points.json (ignored; retained locally through summary and review)"
+      },
+      "setupNonce": "3f079d052da2eec027983f84802ecce3",
+      "baseSetupWindowUtc": {
+        "completedAt": "2026-08-31T14:06:00Z",
+        "startedAt": "2026-08-31T14:05:02Z"
+      },
+      "setupWindowUtc": {
+        "completedAt": "2026-08-31T14:06:55.940994Z",
+        "startedAt": "2026-08-31T14:05:02Z"
+      },
+      "fixtureSetupWindowUtc": {
+        "completedAt": "2026-08-31T14:06:55.940994Z",
+        "startedAt": "2026-08-31T14:06:55.592207Z"
+      },
+      "runWindowUtc": {
+        "completedAt": "2026-08-31T14:08:58.328425883Z",
+        "startedAt": "2026-08-31T14:06:56.415043424Z"
+      },
+      "latencyMs": {
+        "p50": 12.9774375,
+        "p95": 20.54264165,
+        "p99": 24.202281909999993,
+        "max": 36.507042
+      },
+      "counts": {
+        "iterations": 1200,
+        "httpRequests": 1200,
+        "completed": 1200,
+        "completedTurns": 1200,
+        "failedTurns": 0,
+        "httpErrors": 0,
+        "k6Dropped": 0,
+        "nominalOffered": 1200,
+        "processingTurns": 0
+      },
+      "history": {
+        "candidateTokens": 48,
+        "candidateTurnCount": 1,
+        "includedTokens": 48,
+        "includedTurnCount": 1,
+        "loadedTurnCount": 1,
+        "olderTurnsAvailable": false,
+        "omittedLoadedTurnCount": 0,
+        "persistedTurnCount": 1,
+        "tokenBudget": 6144,
+        "tokenEstimator": "utf8-bytes-v1",
+        "tokenWatermark": "low",
+        "trimAction": "none",
+        "trimmed": false
+      },
+      "routeContextEvidence": {
+        "actualToolProfiles": [
+          "read"
+        ],
+        "artifact": "bench/results/agent_warm_history_b2p1_one-short_contract.tsv",
+        "boundary_turns": 1200,
+        "candidateTokens": [
+          48
+        ],
+        "candidateTurnCounts": [
+          1
+        ],
+        "completed_turns": 1200,
+        "context_events": 1200,
+        "contractStatus": "pass",
+        "distinct_sessions": 1200,
+        "evidenceRole": "workload and context contract only, not performance attribution",
+        "failed_turns": 0,
+        "includedTokens": [
+          48
+        ],
+        "includedTurnCounts": [
+          1
+        ],
+        "loadedTurnCounts": [
+          1
+        ],
+        "matching_context_turns": 1200,
+        "matching_profile_turns": 1200,
+        "max_requests_per_session": 1,
+        "olderTurnsAvailable": [
+          false
+        ],
+        "omittedLoadedTurnCounts": [
+          0
+        ],
+        "persistedTurnCounts": [
+          1
+        ],
+        "processing_turns": 0,
+        "routing_events": 1200,
+        "tokenBudgets": [
+          6144
+        ],
+        "tokenWatermarks": [
+          "low"
+        ]
+      }
+    },
+    {
+      "block": 2,
+      "position": 2,
+      "label": "b2p2_max-count",
+      "case": "max-count",
+      "artifacts": {
+        "result": "bench/results/agent_warm_history_b2p2_max-count_result.json",
+        "summary": "bench/results/agent_warm_history_b2p2_max-count_summary.json",
+        "console": "bench/results/agent_warm_history_b2p2_max-count_console.txt",
+        "contract": "bench/results/agent_warm_history_b2p2_max-count_contract.tsv",
+        "fixture": "bench/results/agent_warm_history_b2p2_max-count_fixture.json",
+        "setupEnvironment": "bench/results/agent_warm_history_b2p2_max-count_setup_environment.json",
+        "localPointStream": "bench/results/agent_warm_history_b2p2_max-count_points.json (ignored; retained locally through summary and review)"
+      },
+      "setupNonce": "074454d156f7456f06f01102f98be587",
+      "baseSetupWindowUtc": {
+        "completedAt": "2026-08-31T14:10:09Z",
+        "startedAt": "2026-08-31T14:09:13Z"
+      },
+      "setupWindowUtc": {
+        "completedAt": "2026-08-31T14:11:04.846644Z",
+        "startedAt": "2026-08-31T14:09:13Z"
+      },
+      "fixtureSetupWindowUtc": {
+        "completedAt": "2026-08-31T14:11:04.846644Z",
+        "startedAt": "2026-08-31T14:11:02.869201Z"
+      },
+      "runWindowUtc": {
+        "completedAt": "2026-08-31T14:13:06.439792679Z",
+        "startedAt": "2026-08-31T14:11:05.322137595Z"
+      },
+      "latencyMs": {
+        "p50": 13.510479,
+        "p95": 21.0239521,
+        "p99": 24.55561541999999,
+        "max": 36.227333
+      },
+      "counts": {
+        "iterations": 1200,
+        "httpRequests": 1200,
+        "completed": 1200,
+        "completedTurns": 1200,
+        "failedTurns": 0,
+        "httpErrors": 0,
+        "k6Dropped": 0,
+        "nominalOffered": 1200,
+        "processingTurns": 0
+      },
+      "history": {
+        "candidateTokens": 768,
+        "candidateTurnCount": 17,
+        "includedTokens": 768,
+        "includedTurnCount": 16,
+        "loadedTurnCount": 16,
+        "olderTurnsAvailable": true,
+        "omittedLoadedTurnCount": 0,
+        "persistedTurnCount": 17,
+        "tokenBudget": 6144,
+        "tokenEstimator": "utf8-bytes-v1",
+        "tokenWatermark": "low",
+        "trimAction": "none",
+        "trimmed": false
+      },
+      "routeContextEvidence": {
+        "actualToolProfiles": [
+          "read"
+        ],
+        "artifact": "bench/results/agent_warm_history_b2p2_max-count_contract.tsv",
+        "boundary_turns": 1200,
+        "candidateTokens": [
+          768
+        ],
+        "candidateTurnCounts": [
+          17
+        ],
+        "completed_turns": 1200,
+        "context_events": 1200,
+        "contractStatus": "pass",
+        "distinct_sessions": 1200,
+        "evidenceRole": "workload and context contract only, not performance attribution",
+        "failed_turns": 0,
+        "includedTokens": [
+          768
+        ],
+        "includedTurnCounts": [
+          16
+        ],
+        "loadedTurnCounts": [
+          16
+        ],
+        "matching_context_turns": 1200,
+        "matching_profile_turns": 1200,
+        "max_requests_per_session": 1,
+        "olderTurnsAvailable": [
+          true
+        ],
+        "omittedLoadedTurnCounts": [
+          0
+        ],
+        "persistedTurnCounts": [
+          17
+        ],
+        "processing_turns": 0,
+        "routing_events": 1200,
+        "tokenBudgets": [
+          6144
+        ],
+        "tokenWatermarks": [
+          "low"
+        ]
+      }
+    },
+    {
+      "block": 2,
+      "position": 3,
+      "label": "b2p3_empty",
+      "case": "empty",
+      "artifacts": {
+        "result": "bench/results/agent_warm_history_b2p3_empty_result.json",
+        "summary": "bench/results/agent_warm_history_b2p3_empty_summary.json",
+        "console": "bench/results/agent_warm_history_b2p3_empty_console.txt",
+        "contract": "bench/results/agent_warm_history_b2p3_empty_contract.tsv",
+        "fixture": "bench/results/agent_warm_history_b2p3_empty_fixture.json",
+        "setupEnvironment": "bench/results/agent_warm_history_b2p3_empty_setup_environment.json",
+        "localPointStream": "bench/results/agent_warm_history_b2p3_empty_points.json (ignored; retained locally through summary and review)"
+      },
+      "setupNonce": "ecc9158daef4db9675025713fae33fc2",
+      "baseSetupWindowUtc": {
+        "completedAt": "2026-08-31T14:14:12Z",
+        "startedAt": "2026-08-31T14:13:19Z"
+      },
+      "setupWindowUtc": {
+        "completedAt": "2026-08-31T14:17:07.013622Z",
+        "startedAt": "2026-08-31T14:13:19Z"
+      },
+      "fixtureSetupWindowUtc": {
+        "completedAt": "2026-08-31T14:17:07.013622Z",
+        "startedAt": "2026-08-31T14:17:06.748823Z"
+      },
+      "runWindowUtc": {
+        "completedAt": "2026-08-31T14:19:09.564463097Z",
+        "startedAt": "2026-08-31T14:17:07.459677721Z"
+      },
+      "latencyMs": {
+        "p50": 14.377708,
+        "p95": 20.111625,
+        "p99": 24.69575,
+        "max": 55.164333
+      },
+      "counts": {
+        "iterations": 1201,
+        "httpRequests": 1201,
+        "completed": 1201,
+        "completedTurns": 1201,
+        "failedTurns": 0,
+        "httpErrors": 0,
+        "k6Dropped": 0,
+        "nominalOffered": 1200,
+        "processingTurns": 0
+      },
+      "history": {
+        "candidateTokens": 0,
+        "candidateTurnCount": 0,
+        "includedTokens": 0,
+        "includedTurnCount": 0,
+        "loadedTurnCount": 0,
+        "olderTurnsAvailable": false,
+        "omittedLoadedTurnCount": 0,
+        "persistedTurnCount": 0,
+        "tokenBudget": 6144,
+        "tokenEstimator": "utf8-bytes-v1",
+        "tokenWatermark": "low",
+        "trimAction": "none",
+        "trimmed": false
+      },
+      "routeContextEvidence": {
+        "actualToolProfiles": [
+          "read"
+        ],
+        "artifact": "bench/results/agent_warm_history_b2p3_empty_contract.tsv",
+        "boundary_turns": 1201,
+        "candidateTokens": [
+          0
+        ],
+        "candidateTurnCounts": [
+          0
+        ],
+        "completed_turns": 1201,
+        "context_events": 1201,
+        "contractStatus": "pass",
+        "distinct_sessions": 1201,
+        "evidenceRole": "workload and context contract only, not performance attribution",
+        "failed_turns": 0,
+        "includedTokens": [
+          0
+        ],
+        "includedTurnCounts": [
+          0
+        ],
+        "loadedTurnCounts": [
+          0
+        ],
+        "matching_context_turns": 1201,
+        "matching_profile_turns": 1201,
+        "max_requests_per_session": 1,
+        "olderTurnsAvailable": [
+          false
+        ],
+        "omittedLoadedTurnCounts": [
+          0
+        ],
+        "persistedTurnCounts": [
+          0
+        ],
+        "processing_turns": 0,
+        "routing_events": 1201,
+        "tokenBudgets": [
+          6144
+        ],
+        "tokenWatermarks": [
+          "low"
+        ]
+      }
+    },
+    {
+      "block": 2,
+      "position": 4,
+      "label": "b2p4_high-pressure",
+      "case": "high-pressure",
+      "artifacts": {
+        "result": "bench/results/agent_warm_history_b2p4_high-pressure_result.json",
+        "summary": "bench/results/agent_warm_history_b2p4_high-pressure_summary.json",
+        "console": "bench/results/agent_warm_history_b2p4_high-pressure_console.txt",
+        "contract": "bench/results/agent_warm_history_b2p4_high-pressure_contract.tsv",
+        "fixture": "bench/results/agent_warm_history_b2p4_high-pressure_fixture.json",
+        "setupEnvironment": "bench/results/agent_warm_history_b2p4_high-pressure_setup_environment.json",
+        "localPointStream": "bench/results/agent_warm_history_b2p4_high-pressure_points.json (ignored; retained locally through summary and review)"
+      },
+      "setupNonce": "8888c0541f3655e0f1d677cadbb14d18",
+      "baseSetupWindowUtc": {
+        "completedAt": "2026-08-31T14:20:26Z",
+        "startedAt": "2026-08-31T14:19:24Z"
+      },
+      "setupWindowUtc": {
+        "completedAt": "2026-08-31T14:21:25.733398Z",
+        "startedAt": "2026-08-31T14:19:24Z"
+      },
+      "fixtureSetupWindowUtc": {
+        "completedAt": "2026-08-31T14:21:25.733398Z",
+        "startedAt": "2026-08-31T14:21:22.217850Z"
+      },
+      "runWindowUtc": {
+        "completedAt": "2026-08-31T14:23:28.2598313Z",
+        "startedAt": "2026-08-31T14:21:26.225256382Z"
+      },
+      "latencyMs": {
+        "p50": 14.81175,
+        "p95": 21.068542,
+        "p99": 27.367417,
+        "max": 57.987375
+      },
+      "counts": {
+        "iterations": 1201,
+        "httpRequests": 1201,
+        "completed": 1201,
+        "completedTurns": 1201,
+        "failedTurns": 0,
+        "httpErrors": 0,
+        "k6Dropped": 0,
+        "nominalOffered": 1200,
+        "processingTurns": 0
+      },
+      "history": {
+        "candidateTokens": 68224,
+        "candidateTurnCount": 17,
+        "includedTokens": 4264,
+        "includedTurnCount": 1,
+        "loadedTurnCount": 16,
+        "olderTurnsAvailable": true,
+        "omittedLoadedTurnCount": 15,
+        "persistedTurnCount": 17,
+        "tokenBudget": 6144,
+        "tokenEstimator": "utf8-bytes-v1",
+        "tokenWatermark": "high",
+        "trimAction": "omit-oldest-whole-turns",
+        "trimmed": true
+      },
+      "routeContextEvidence": {
+        "actualToolProfiles": [
+          "read"
+        ],
+        "artifact": "bench/results/agent_warm_history_b2p4_high-pressure_contract.tsv",
+        "boundary_turns": 1201,
+        "candidateTokens": [
+          68224
+        ],
+        "candidateTurnCounts": [
+          17
+        ],
+        "completed_turns": 1201,
+        "context_events": 1201,
+        "contractStatus": "pass",
+        "distinct_sessions": 1201,
+        "evidenceRole": "workload and context contract only, not performance attribution",
+        "failed_turns": 0,
+        "includedTokens": [
+          4264
+        ],
+        "includedTurnCounts": [
+          1
+        ],
+        "loadedTurnCounts": [
+          16
+        ],
+        "matching_context_turns": 1201,
+        "matching_profile_turns": 1201,
+        "max_requests_per_session": 1,
+        "olderTurnsAvailable": [
+          true
+        ],
+        "omittedLoadedTurnCounts": [
+          15
+        ],
+        "persistedTurnCounts": [
+          17
+        ],
+        "processing_turns": 0,
+        "routing_events": 1201,
+        "tokenBudgets": [
+          6144
+        ],
+        "tokenWatermarks": [
+          "high"
+        ]
+      }
+    },
+    {
+      "block": 3,
+      "position": 1,
+      "label": "b3p1_max-count",
+      "case": "max-count",
+      "artifacts": {
+        "result": "bench/results/agent_warm_history_b3p1_max-count_result.json",
+        "summary": "bench/results/agent_warm_history_b3p1_max-count_summary.json",
+        "console": "bench/results/agent_warm_history_b3p1_max-count_console.txt",
+        "contract": "bench/results/agent_warm_history_b3p1_max-count_contract.tsv",
+        "fixture": "bench/results/agent_warm_history_b3p1_max-count_fixture.json",
+        "setupEnvironment": "bench/results/agent_warm_history_b3p1_max-count_setup_environment.json",
+        "localPointStream": "bench/results/agent_warm_history_b3p1_max-count_points.json (ignored; retained locally through summary and review)"
+      },
+      "setupNonce": "9639b2752a5b0d7341ac38a59efe3b6b",
+      "baseSetupWindowUtc": {
+        "completedAt": "2026-08-31T14:24:50Z",
+        "startedAt": "2026-08-31T14:23:45Z"
+      },
+      "setupWindowUtc": {
+        "completedAt": "2026-08-31T14:25:50.794826Z",
+        "startedAt": "2026-08-31T14:23:45Z"
+      },
+      "fixtureSetupWindowUtc": {
+        "completedAt": "2026-08-31T14:25:50.794826Z",
+        "startedAt": "2026-08-31T14:25:48.983799Z"
+      },
+      "runWindowUtc": {
+        "completedAt": "2026-08-31T14:27:54.379286673Z",
+        "startedAt": "2026-08-31T14:25:51.27752338Z"
+      },
+      "latencyMs": {
+        "p50": 13.912417,
+        "p95": 20.7205,
+        "p99": 24.73375,
+        "max": 39.669875
+      },
+      "counts": {
+        "iterations": 1201,
+        "httpRequests": 1201,
+        "completed": 1201,
+        "completedTurns": 1201,
+        "failedTurns": 0,
+        "httpErrors": 0,
+        "k6Dropped": 0,
+        "nominalOffered": 1200,
+        "processingTurns": 0
+      },
+      "history": {
+        "candidateTokens": 768,
+        "candidateTurnCount": 17,
+        "includedTokens": 768,
+        "includedTurnCount": 16,
+        "loadedTurnCount": 16,
+        "olderTurnsAvailable": true,
+        "omittedLoadedTurnCount": 0,
+        "persistedTurnCount": 17,
+        "tokenBudget": 6144,
+        "tokenEstimator": "utf8-bytes-v1",
+        "tokenWatermark": "low",
+        "trimAction": "none",
+        "trimmed": false
+      },
+      "routeContextEvidence": {
+        "actualToolProfiles": [
+          "read"
+        ],
+        "artifact": "bench/results/agent_warm_history_b3p1_max-count_contract.tsv",
+        "boundary_turns": 1201,
+        "candidateTokens": [
+          768
+        ],
+        "candidateTurnCounts": [
+          17
+        ],
+        "completed_turns": 1201,
+        "context_events": 1201,
+        "contractStatus": "pass",
+        "distinct_sessions": 1201,
+        "evidenceRole": "workload and context contract only, not performance attribution",
+        "failed_turns": 0,
+        "includedTokens": [
+          768
+        ],
+        "includedTurnCounts": [
+          16
+        ],
+        "loadedTurnCounts": [
+          16
+        ],
+        "matching_context_turns": 1201,
+        "matching_profile_turns": 1201,
+        "max_requests_per_session": 1,
+        "olderTurnsAvailable": [
+          true
+        ],
+        "omittedLoadedTurnCounts": [
+          0
+        ],
+        "persistedTurnCounts": [
+          17
+        ],
+        "processing_turns": 0,
+        "routing_events": 1201,
+        "tokenBudgets": [
+          6144
+        ],
+        "tokenWatermarks": [
+          "low"
+        ]
+      }
+    },
+    {
+      "block": 3,
+      "position": 2,
+      "label": "b3p2_high-pressure",
+      "case": "high-pressure",
+      "artifacts": {
+        "result": "bench/results/agent_warm_history_b3p2_high-pressure_result.json",
+        "summary": "bench/results/agent_warm_history_b3p2_high-pressure_summary.json",
+        "console": "bench/results/agent_warm_history_b3p2_high-pressure_console.txt",
+        "contract": "bench/results/agent_warm_history_b3p2_high-pressure_contract.tsv",
+        "fixture": "bench/results/agent_warm_history_b3p2_high-pressure_fixture.json",
+        "setupEnvironment": "bench/results/agent_warm_history_b3p2_high-pressure_setup_environment.json",
+        "localPointStream": "bench/results/agent_warm_history_b3p2_high-pressure_points.json (ignored; retained locally through summary and review)"
+      },
+      "setupNonce": "9873c59bb20bb14fd4b21af035258e76",
+      "baseSetupWindowUtc": {
+        "completedAt": "2026-08-31T14:29:06Z",
+        "startedAt": "2026-08-31T14:28:10Z"
+      },
+      "setupWindowUtc": {
+        "completedAt": "2026-08-31T14:31:05.969839Z",
+        "startedAt": "2026-08-31T14:28:10Z"
+      },
+      "fixtureSetupWindowUtc": {
+        "completedAt": "2026-08-31T14:31:05.969839Z",
+        "startedAt": "2026-08-31T14:31:02.684138Z"
+      },
+      "runWindowUtc": {
+        "completedAt": "2026-08-31T14:33:09.568637264Z",
+        "startedAt": "2026-08-31T14:31:06.491097512Z"
+      },
+      "latencyMs": {
+        "p50": 15.143437500000001,
+        "p95": 21.91871635,
+        "p99": 27.741876159999993,
+        "max": 45.91275
+      },
+      "counts": {
+        "iterations": 1200,
+        "httpRequests": 1200,
+        "completed": 1200,
+        "completedTurns": 1200,
+        "failedTurns": 0,
+        "httpErrors": 0,
+        "k6Dropped": 0,
+        "nominalOffered": 1200,
+        "processingTurns": 0
+      },
+      "history": {
+        "candidateTokens": 68224,
+        "candidateTurnCount": 17,
+        "includedTokens": 4264,
+        "includedTurnCount": 1,
+        "loadedTurnCount": 16,
+        "olderTurnsAvailable": true,
+        "omittedLoadedTurnCount": 15,
+        "persistedTurnCount": 17,
+        "tokenBudget": 6144,
+        "tokenEstimator": "utf8-bytes-v1",
+        "tokenWatermark": "high",
+        "trimAction": "omit-oldest-whole-turns",
+        "trimmed": true
+      },
+      "routeContextEvidence": {
+        "actualToolProfiles": [
+          "read"
+        ],
+        "artifact": "bench/results/agent_warm_history_b3p2_high-pressure_contract.tsv",
+        "boundary_turns": 1200,
+        "candidateTokens": [
+          68224
+        ],
+        "candidateTurnCounts": [
+          17
+        ],
+        "completed_turns": 1200,
+        "context_events": 1200,
+        "contractStatus": "pass",
+        "distinct_sessions": 1200,
+        "evidenceRole": "workload and context contract only, not performance attribution",
+        "failed_turns": 0,
+        "includedTokens": [
+          4264
+        ],
+        "includedTurnCounts": [
+          1
+        ],
+        "loadedTurnCounts": [
+          16
+        ],
+        "matching_context_turns": 1200,
+        "matching_profile_turns": 1200,
+        "max_requests_per_session": 1,
+        "olderTurnsAvailable": [
+          true
+        ],
+        "omittedLoadedTurnCounts": [
+          15
+        ],
+        "persistedTurnCounts": [
+          17
+        ],
+        "processing_turns": 0,
+        "routing_events": 1200,
+        "tokenBudgets": [
+          6144
+        ],
+        "tokenWatermarks": [
+          "high"
+        ]
+      }
+    },
+    {
+      "block": 3,
+      "position": 3,
+      "label": "b3p3_one-short",
+      "case": "one-short",
+      "artifacts": {
+        "result": "bench/results/agent_warm_history_b3p3_one-short_result.json",
+        "summary": "bench/results/agent_warm_history_b3p3_one-short_summary.json",
+        "console": "bench/results/agent_warm_history_b3p3_one-short_console.txt",
+        "contract": "bench/results/agent_warm_history_b3p3_one-short_contract.tsv",
+        "fixture": "bench/results/agent_warm_history_b3p3_one-short_fixture.json",
+        "setupEnvironment": "bench/results/agent_warm_history_b3p3_one-short_setup_environment.json",
+        "localPointStream": "bench/results/agent_warm_history_b3p3_one-short_points.json (ignored; retained locally through summary and review)"
+      },
+      "setupNonce": "f3984a5094c847779ca355107d22a135",
+      "baseSetupWindowUtc": {
+        "completedAt": "2026-08-31T14:34:27Z",
+        "startedAt": "2026-08-31T14:33:25Z"
+      },
+      "setupWindowUtc": {
+        "completedAt": "2026-08-31T14:36:08.403823Z",
+        "startedAt": "2026-08-31T14:33:25Z"
+      },
+      "fixtureSetupWindowUtc": {
+        "completedAt": "2026-08-31T14:36:08.403823Z",
+        "startedAt": "2026-08-31T14:36:07.958119Z"
+      },
+      "runWindowUtc": {
+        "completedAt": "2026-08-31T14:38:11.96464675Z",
+        "startedAt": "2026-08-31T14:36:08.867706513Z"
+      },
+      "latencyMs": {
+        "p50": 14.292208,
+        "p95": 20.495375,
+        "p99": 24.219708,
+        "max": 36.977084
+      },
+      "counts": {
+        "iterations": 1201,
+        "httpRequests": 1201,
+        "completed": 1201,
+        "completedTurns": 1201,
+        "failedTurns": 0,
+        "httpErrors": 0,
+        "k6Dropped": 0,
+        "nominalOffered": 1200,
+        "processingTurns": 0
+      },
+      "history": {
+        "candidateTokens": 48,
+        "candidateTurnCount": 1,
+        "includedTokens": 48,
+        "includedTurnCount": 1,
+        "loadedTurnCount": 1,
+        "olderTurnsAvailable": false,
+        "omittedLoadedTurnCount": 0,
+        "persistedTurnCount": 1,
+        "tokenBudget": 6144,
+        "tokenEstimator": "utf8-bytes-v1",
+        "tokenWatermark": "low",
+        "trimAction": "none",
+        "trimmed": false
+      },
+      "routeContextEvidence": {
+        "actualToolProfiles": [
+          "read"
+        ],
+        "artifact": "bench/results/agent_warm_history_b3p3_one-short_contract.tsv",
+        "boundary_turns": 1201,
+        "candidateTokens": [
+          48
+        ],
+        "candidateTurnCounts": [
+          1
+        ],
+        "completed_turns": 1201,
+        "context_events": 1201,
+        "contractStatus": "pass",
+        "distinct_sessions": 1201,
+        "evidenceRole": "workload and context contract only, not performance attribution",
+        "failed_turns": 0,
+        "includedTokens": [
+          48
+        ],
+        "includedTurnCounts": [
+          1
+        ],
+        "loadedTurnCounts": [
+          1
+        ],
+        "matching_context_turns": 1201,
+        "matching_profile_turns": 1201,
+        "max_requests_per_session": 1,
+        "olderTurnsAvailable": [
+          false
+        ],
+        "omittedLoadedTurnCounts": [
+          0
+        ],
+        "persistedTurnCounts": [
+          1
+        ],
+        "processing_turns": 0,
+        "routing_events": 1201,
+        "tokenBudgets": [
+          6144
+        ],
+        "tokenWatermarks": [
+          "low"
+        ]
+      }
+    },
+    {
+      "block": 3,
+      "position": 4,
+      "label": "b3p4_empty",
+      "case": "empty",
+      "artifacts": {
+        "result": "bench/results/agent_warm_history_b3p4_empty_result.json",
+        "summary": "bench/results/agent_warm_history_b3p4_empty_summary.json",
+        "console": "bench/results/agent_warm_history_b3p4_empty_console.txt",
+        "contract": "bench/results/agent_warm_history_b3p4_empty_contract.tsv",
+        "fixture": "bench/results/agent_warm_history_b3p4_empty_fixture.json",
+        "setupEnvironment": "bench/results/agent_warm_history_b3p4_empty_setup_environment.json",
+        "localPointStream": "bench/results/agent_warm_history_b3p4_empty_points.json (ignored; retained locally through summary and review)"
+      },
+      "setupNonce": "351c56a0df82893361f8dc9fc2bdbd87",
+      "baseSetupWindowUtc": {
+        "completedAt": "2026-08-31T14:39:28Z",
+        "startedAt": "2026-08-31T14:38:24Z"
+      },
+      "setupWindowUtc": {
+        "completedAt": "2026-08-31T14:40:30.291382Z",
+        "startedAt": "2026-08-31T14:38:24Z"
+      },
+      "fixtureSetupWindowUtc": {
+        "completedAt": "2026-08-31T14:40:30.291382Z",
+        "startedAt": "2026-08-31T14:40:30.044181Z"
+      },
+      "runWindowUtc": {
+        "completedAt": "2026-08-31T14:42:33.862577927Z",
+        "startedAt": "2026-08-31T14:40:30.769480468Z"
+      },
+      "latencyMs": {
+        "p50": 13.339208,
+        "p95": 19.8875,
+        "p99": 23.503458,
+        "max": 38.868292
+      },
+      "counts": {
+        "iterations": 1201,
+        "httpRequests": 1201,
+        "completed": 1201,
+        "completedTurns": 1201,
+        "failedTurns": 0,
+        "httpErrors": 0,
+        "k6Dropped": 0,
+        "nominalOffered": 1200,
+        "processingTurns": 0
+      },
+      "history": {
+        "candidateTokens": 0,
+        "candidateTurnCount": 0,
+        "includedTokens": 0,
+        "includedTurnCount": 0,
+        "loadedTurnCount": 0,
+        "olderTurnsAvailable": false,
+        "omittedLoadedTurnCount": 0,
+        "persistedTurnCount": 0,
+        "tokenBudget": 6144,
+        "tokenEstimator": "utf8-bytes-v1",
+        "tokenWatermark": "low",
+        "trimAction": "none",
+        "trimmed": false
+      },
+      "routeContextEvidence": {
+        "actualToolProfiles": [
+          "read"
+        ],
+        "artifact": "bench/results/agent_warm_history_b3p4_empty_contract.tsv",
+        "boundary_turns": 1201,
+        "candidateTokens": [
+          0
+        ],
+        "candidateTurnCounts": [
+          0
+        ],
+        "completed_turns": 1201,
+        "context_events": 1201,
+        "contractStatus": "pass",
+        "distinct_sessions": 1201,
+        "evidenceRole": "workload and context contract only, not performance attribution",
+        "failed_turns": 0,
+        "includedTokens": [
+          0
+        ],
+        "includedTurnCounts": [
+          0
+        ],
+        "loadedTurnCounts": [
+          0
+        ],
+        "matching_context_turns": 1201,
+        "matching_profile_turns": 1201,
+        "max_requests_per_session": 1,
+        "olderTurnsAvailable": [
+          false
+        ],
+        "omittedLoadedTurnCounts": [
+          0
+        ],
+        "persistedTurnCounts": [
+          0
+        ],
+        "processing_turns": 0,
+        "routing_events": 1201,
+        "tokenBudgets": [
+          6144
+        ],
+        "tokenWatermarks": [
+          "low"
+        ]
+      }
+    },
+    {
+      "block": 4,
+      "position": 1,
+      "label": "b4p1_high-pressure",
+      "case": "high-pressure",
+      "artifacts": {
+        "result": "bench/results/agent_warm_history_b4p1_high-pressure_result.json",
+        "summary": "bench/results/agent_warm_history_b4p1_high-pressure_summary.json",
+        "console": "bench/results/agent_warm_history_b4p1_high-pressure_console.txt",
+        "contract": "bench/results/agent_warm_history_b4p1_high-pressure_contract.tsv",
+        "fixture": "bench/results/agent_warm_history_b4p1_high-pressure_fixture.json",
+        "setupEnvironment": "bench/results/agent_warm_history_b4p1_high-pressure_setup_environment.json",
+        "localPointStream": "bench/results/agent_warm_history_b4p1_high-pressure_points.json (ignored; retained locally through summary and review)"
+      },
+      "setupNonce": "70377b057f185c8878d5c007ecc5d78a",
+      "baseSetupWindowUtc": {
+        "completedAt": "2026-08-31T14:43:43Z",
+        "startedAt": "2026-08-31T14:42:49Z"
+      },
+      "setupWindowUtc": {
+        "completedAt": "2026-08-31T14:44:39.866825Z",
+        "startedAt": "2026-08-31T14:42:49Z"
+      },
+      "fixtureSetupWindowUtc": {
+        "completedAt": "2026-08-31T14:44:39.866825Z",
+        "startedAt": "2026-08-31T14:44:36.877898Z"
+      },
+      "runWindowUtc": {
+        "completedAt": "2026-08-31T14:46:42.412173042Z",
+        "startedAt": "2026-08-31T14:44:40.427490708Z"
+      },
+      "latencyMs": {
+        "p50": 15.4305,
+        "p95": 21.830167,
+        "p99": 26.66575,
+        "max": 59.781542
+      },
+      "counts": {
+        "iterations": 1201,
+        "httpRequests": 1201,
+        "completed": 1201,
+        "completedTurns": 1201,
+        "failedTurns": 0,
+        "httpErrors": 0,
+        "k6Dropped": 0,
+        "nominalOffered": 1200,
+        "processingTurns": 0
+      },
+      "history": {
+        "candidateTokens": 68224,
+        "candidateTurnCount": 17,
+        "includedTokens": 4264,
+        "includedTurnCount": 1,
+        "loadedTurnCount": 16,
+        "olderTurnsAvailable": true,
+        "omittedLoadedTurnCount": 15,
+        "persistedTurnCount": 17,
+        "tokenBudget": 6144,
+        "tokenEstimator": "utf8-bytes-v1",
+        "tokenWatermark": "high",
+        "trimAction": "omit-oldest-whole-turns",
+        "trimmed": true
+      },
+      "routeContextEvidence": {
+        "actualToolProfiles": [
+          "read"
+        ],
+        "artifact": "bench/results/agent_warm_history_b4p1_high-pressure_contract.tsv",
+        "boundary_turns": 1201,
+        "candidateTokens": [
+          68224
+        ],
+        "candidateTurnCounts": [
+          17
+        ],
+        "completed_turns": 1201,
+        "context_events": 1201,
+        "contractStatus": "pass",
+        "distinct_sessions": 1201,
+        "evidenceRole": "workload and context contract only, not performance attribution",
+        "failed_turns": 0,
+        "includedTokens": [
+          4264
+        ],
+        "includedTurnCounts": [
+          1
+        ],
+        "loadedTurnCounts": [
+          16
+        ],
+        "matching_context_turns": 1201,
+        "matching_profile_turns": 1201,
+        "max_requests_per_session": 1,
+        "olderTurnsAvailable": [
+          true
+        ],
+        "omittedLoadedTurnCounts": [
+          15
+        ],
+        "persistedTurnCounts": [
+          17
+        ],
+        "processing_turns": 0,
+        "routing_events": 1201,
+        "tokenBudgets": [
+          6144
+        ],
+        "tokenWatermarks": [
+          "high"
+        ]
+      }
+    },
+    {
+      "block": 4,
+      "position": 2,
+      "label": "b4p2_empty",
+      "case": "empty",
+      "artifacts": {
+        "result": "bench/results/agent_warm_history_b4p2_empty_result.json",
+        "summary": "bench/results/agent_warm_history_b4p2_empty_summary.json",
+        "console": "bench/results/agent_warm_history_b4p2_empty_console.txt",
+        "contract": "bench/results/agent_warm_history_b4p2_empty_contract.tsv",
+        "fixture": "bench/results/agent_warm_history_b4p2_empty_fixture.json",
+        "setupEnvironment": "bench/results/agent_warm_history_b4p2_empty_setup_environment.json",
+        "localPointStream": "bench/results/agent_warm_history_b4p2_empty_points.json (ignored; retained locally through summary and review)"
+      },
+      "setupNonce": "e8b2aeb85bc8f765fc8fbd037eb55df1",
+      "baseSetupWindowUtc": {
+        "completedAt": "2026-08-31T14:48:04Z",
+        "startedAt": "2026-08-31T14:47:08Z"
+      },
+      "setupWindowUtc": {
+        "completedAt": "2026-08-31T14:50:27.980313Z",
+        "startedAt": "2026-08-31T14:47:08Z"
+      },
+      "fixtureSetupWindowUtc": {
+        "completedAt": "2026-08-31T14:50:27.980313Z",
+        "startedAt": "2026-08-31T14:50:27.641823Z"
+      },
+      "runWindowUtc": {
+        "completedAt": "2026-08-31T14:52:30.623589384Z",
+        "startedAt": "2026-08-31T14:50:28.487611258Z"
+      },
+      "latencyMs": {
+        "p50": 13.666958,
+        "p95": 20.925208,
+        "p99": 24.357875,
+        "max": 38.753375
+      },
+      "counts": {
+        "iterations": 1201,
+        "httpRequests": 1201,
+        "completed": 1201,
+        "completedTurns": 1201,
+        "failedTurns": 0,
+        "httpErrors": 0,
+        "k6Dropped": 0,
+        "nominalOffered": 1200,
+        "processingTurns": 0
+      },
+      "history": {
+        "candidateTokens": 0,
+        "candidateTurnCount": 0,
+        "includedTokens": 0,
+        "includedTurnCount": 0,
+        "loadedTurnCount": 0,
+        "olderTurnsAvailable": false,
+        "omittedLoadedTurnCount": 0,
+        "persistedTurnCount": 0,
+        "tokenBudget": 6144,
+        "tokenEstimator": "utf8-bytes-v1",
+        "tokenWatermark": "low",
+        "trimAction": "none",
+        "trimmed": false
+      },
+      "routeContextEvidence": {
+        "actualToolProfiles": [
+          "read"
+        ],
+        "artifact": "bench/results/agent_warm_history_b4p2_empty_contract.tsv",
+        "boundary_turns": 1201,
+        "candidateTokens": [
+          0
+        ],
+        "candidateTurnCounts": [
+          0
+        ],
+        "completed_turns": 1201,
+        "context_events": 1201,
+        "contractStatus": "pass",
+        "distinct_sessions": 1201,
+        "evidenceRole": "workload and context contract only, not performance attribution",
+        "failed_turns": 0,
+        "includedTokens": [
+          0
+        ],
+        "includedTurnCounts": [
+          0
+        ],
+        "loadedTurnCounts": [
+          0
+        ],
+        "matching_context_turns": 1201,
+        "matching_profile_turns": 1201,
+        "max_requests_per_session": 1,
+        "olderTurnsAvailable": [
+          false
+        ],
+        "omittedLoadedTurnCounts": [
+          0
+        ],
+        "persistedTurnCounts": [
+          0
+        ],
+        "processing_turns": 0,
+        "routing_events": 1201,
+        "tokenBudgets": [
+          6144
+        ],
+        "tokenWatermarks": [
+          "low"
+        ]
+      }
+    },
+    {
+      "block": 4,
+      "position": 3,
+      "label": "b4p3_max-count",
+      "case": "max-count",
+      "artifacts": {
+        "result": "bench/results/agent_warm_history_b4p3_max-count_result.json",
+        "summary": "bench/results/agent_warm_history_b4p3_max-count_summary.json",
+        "console": "bench/results/agent_warm_history_b4p3_max-count_console.txt",
+        "contract": "bench/results/agent_warm_history_b4p3_max-count_contract.tsv",
+        "fixture": "bench/results/agent_warm_history_b4p3_max-count_fixture.json",
+        "setupEnvironment": "bench/results/agent_warm_history_b4p3_max-count_setup_environment.json",
+        "localPointStream": "bench/results/agent_warm_history_b4p3_max-count_points.json (ignored; retained locally through summary and review)"
+      },
+      "setupNonce": "83815e42a62fd8376229b7b3ca886d3e",
+      "baseSetupWindowUtc": {
+        "completedAt": "2026-08-31T14:53:45Z",
+        "startedAt": "2026-08-31T14:52:45Z"
+      },
+      "setupWindowUtc": {
+        "completedAt": "2026-08-31T14:54:41.530184Z",
+        "startedAt": "2026-08-31T14:52:45Z"
+      },
+      "fixtureSetupWindowUtc": {
+        "completedAt": "2026-08-31T14:54:41.530184Z",
+        "startedAt": "2026-08-31T14:54:39.512458Z"
+      },
+      "runWindowUtc": {
+        "completedAt": "2026-08-31T14:56:44.08041696Z",
+        "startedAt": "2026-08-31T14:54:42.018634375Z"
+      },
+      "latencyMs": {
+        "p50": 13.950084,
+        "p95": 20.519708,
+        "p99": 24.409208,
+        "max": 36.973833
+      },
+      "counts": {
+        "iterations": 1201,
+        "httpRequests": 1201,
+        "completed": 1201,
+        "completedTurns": 1201,
+        "failedTurns": 0,
+        "httpErrors": 0,
+        "k6Dropped": 0,
+        "nominalOffered": 1200,
+        "processingTurns": 0
+      },
+      "history": {
+        "candidateTokens": 768,
+        "candidateTurnCount": 17,
+        "includedTokens": 768,
+        "includedTurnCount": 16,
+        "loadedTurnCount": 16,
+        "olderTurnsAvailable": true,
+        "omittedLoadedTurnCount": 0,
+        "persistedTurnCount": 17,
+        "tokenBudget": 6144,
+        "tokenEstimator": "utf8-bytes-v1",
+        "tokenWatermark": "low",
+        "trimAction": "none",
+        "trimmed": false
+      },
+      "routeContextEvidence": {
+        "actualToolProfiles": [
+          "read"
+        ],
+        "artifact": "bench/results/agent_warm_history_b4p3_max-count_contract.tsv",
+        "boundary_turns": 1201,
+        "candidateTokens": [
+          768
+        ],
+        "candidateTurnCounts": [
+          17
+        ],
+        "completed_turns": 1201,
+        "context_events": 1201,
+        "contractStatus": "pass",
+        "distinct_sessions": 1201,
+        "evidenceRole": "workload and context contract only, not performance attribution",
+        "failed_turns": 0,
+        "includedTokens": [
+          768
+        ],
+        "includedTurnCounts": [
+          16
+        ],
+        "loadedTurnCounts": [
+          16
+        ],
+        "matching_context_turns": 1201,
+        "matching_profile_turns": 1201,
+        "max_requests_per_session": 1,
+        "olderTurnsAvailable": [
+          true
+        ],
+        "omittedLoadedTurnCounts": [
+          0
+        ],
+        "persistedTurnCounts": [
+          17
+        ],
+        "processing_turns": 0,
+        "routing_events": 1201,
+        "tokenBudgets": [
+          6144
+        ],
+        "tokenWatermarks": [
+          "low"
+        ]
+      }
+    },
+    {
+      "block": 4,
+      "position": 4,
+      "label": "b4p4_one-short",
+      "case": "one-short",
+      "artifacts": {
+        "result": "bench/results/agent_warm_history_b4p4_one-short_result.json",
+        "summary": "bench/results/agent_warm_history_b4p4_one-short_summary.json",
+        "console": "bench/results/agent_warm_history_b4p4_one-short_console.txt",
+        "contract": "bench/results/agent_warm_history_b4p4_one-short_contract.tsv",
+        "fixture": "bench/results/agent_warm_history_b4p4_one-short_fixture.json",
+        "setupEnvironment": "bench/results/agent_warm_history_b4p4_one-short_setup_environment.json",
+        "localPointStream": "bench/results/agent_warm_history_b4p4_one-short_points.json (ignored; retained locally through summary and review)"
+      },
+      "setupNonce": "e73852e4be5e37c6c4a34c71dedc4d56",
+      "baseSetupWindowUtc": {
+        "completedAt": "2026-08-31T14:57:56Z",
+        "startedAt": "2026-08-31T14:56:56Z"
+      },
+      "setupWindowUtc": {
+        "completedAt": "2026-08-31T14:59:35.770753Z",
+        "startedAt": "2026-08-31T14:56:56Z"
+      },
+      "fixtureSetupWindowUtc": {
+        "completedAt": "2026-08-31T14:59:35.770753Z",
+        "startedAt": "2026-08-31T14:59:35.396319Z"
+      },
+      "runWindowUtc": {
+        "completedAt": "2026-08-31T15:01:38.261247554Z",
+        "startedAt": "2026-08-31T14:59:36.262875679Z"
+      },
+      "latencyMs": {
+        "p50": 13.645958,
+        "p95": 19.893625,
+        "p99": 24.539167,
+        "max": 37.3
+      },
+      "counts": {
+        "iterations": 1201,
+        "httpRequests": 1201,
+        "completed": 1201,
+        "completedTurns": 1201,
+        "failedTurns": 0,
+        "httpErrors": 0,
+        "k6Dropped": 0,
+        "nominalOffered": 1200,
+        "processingTurns": 0
+      },
+      "history": {
+        "candidateTokens": 48,
+        "candidateTurnCount": 1,
+        "includedTokens": 48,
+        "includedTurnCount": 1,
+        "loadedTurnCount": 1,
+        "olderTurnsAvailable": false,
+        "omittedLoadedTurnCount": 0,
+        "persistedTurnCount": 1,
+        "tokenBudget": 6144,
+        "tokenEstimator": "utf8-bytes-v1",
+        "tokenWatermark": "low",
+        "trimAction": "none",
+        "trimmed": false
+      },
+      "routeContextEvidence": {
+        "actualToolProfiles": [
+          "read"
+        ],
+        "artifact": "bench/results/agent_warm_history_b4p4_one-short_contract.tsv",
+        "boundary_turns": 1201,
+        "candidateTokens": [
+          48
+        ],
+        "candidateTurnCounts": [
+          1
+        ],
+        "completed_turns": 1201,
+        "context_events": 1201,
+        "contractStatus": "pass",
+        "distinct_sessions": 1201,
+        "evidenceRole": "workload and context contract only, not performance attribution",
+        "failed_turns": 0,
+        "includedTokens": [
+          48
+        ],
+        "includedTurnCounts": [
+          1
+        ],
+        "loadedTurnCounts": [
+          1
+        ],
+        "matching_context_turns": 1201,
+        "matching_profile_turns": 1201,
+        "max_requests_per_session": 1,
+        "olderTurnsAvailable": [
+          false
+        ],
+        "omittedLoadedTurnCounts": [
+          0
+        ],
+        "persistedTurnCounts": [
+          1
+        ],
+        "processing_turns": 0,
+        "routing_events": 1201,
+        "tokenBudgets": [
+          6144
+        ],
+        "tokenWatermarks": [
+          "low"
+        ]
+      }
+    }
+  ],
+  "deltaDefinition": "within each block, case latency minus that block's empty latency; positive values are slower than empty",
+  "deltaPrecisionDecimalPlaces": 6,
+  "blockRelativeDeltaMs": [
+    {
+      "block": 1,
+      "baselineCase": "empty",
+      "baselineLabel": "b1p1_empty",
+      "comparisons": {
+        "one-short": {
+          "label": "b1p2_one-short",
+          "latencyMs": {
+            "p50": -0.008291,
+            "p95": 1.121792,
+            "p99": 1.021792,
+            "max": -13.143292
+          }
+        },
+        "max-count": {
+          "label": "b1p4_max-count",
+          "latencyMs": {
+            "p50": -0.79425,
+            "p95": 0.756558,
+            "p99": 0.075626,
+            "max": -4.722917
+          }
+        },
+        "high-pressure": {
+          "label": "b1p3_high-pressure",
+          "latencyMs": {
+            "p50": 1.659396,
+            "p95": 2.204098,
+            "p99": 7.018622,
+            "max": -0.844042
+          }
+        }
+      }
+    },
+    {
+      "block": 2,
+      "baselineCase": "empty",
+      "baselineLabel": "b2p3_empty",
+      "comparisons": {
+        "one-short": {
+          "label": "b2p1_one-short",
+          "latencyMs": {
+            "p50": -1.40027,
+            "p95": 0.431017,
+            "p99": -0.493468,
+            "max": -18.657291
+          }
+        },
+        "max-count": {
+          "label": "b2p2_max-count",
+          "latencyMs": {
+            "p50": -0.867229,
+            "p95": 0.912327,
+            "p99": -0.140135,
+            "max": -18.937
+          }
+        },
+        "high-pressure": {
+          "label": "b2p4_high-pressure",
+          "latencyMs": {
+            "p50": 0.434042,
+            "p95": 0.956917,
+            "p99": 2.671667,
+            "max": 2.823042
+          }
+        }
+      }
+    },
+    {
+      "block": 3,
+      "baselineCase": "empty",
+      "baselineLabel": "b3p4_empty",
+      "comparisons": {
+        "one-short": {
+          "label": "b3p3_one-short",
+          "latencyMs": {
+            "p50": 0.953,
+            "p95": 0.607875,
+            "p99": 0.71625,
+            "max": -1.891208
+          }
+        },
+        "max-count": {
+          "label": "b3p1_max-count",
+          "latencyMs": {
+            "p50": 0.573209,
+            "p95": 0.833,
+            "p99": 1.230292,
+            "max": 0.801583
+          }
+        },
+        "high-pressure": {
+          "label": "b3p2_high-pressure",
+          "latencyMs": {
+            "p50": 1.80423,
+            "p95": 2.031216,
+            "p99": 4.238418,
+            "max": 7.044458
+          }
+        }
+      }
+    },
+    {
+      "block": 4,
+      "baselineCase": "empty",
+      "baselineLabel": "b4p2_empty",
+      "comparisons": {
+        "one-short": {
+          "label": "b4p4_one-short",
+          "latencyMs": {
+            "p50": -0.021,
+            "p95": -1.031583,
+            "p99": 0.181292,
+            "max": -1.453375
+          }
+        },
+        "max-count": {
+          "label": "b4p3_max-count",
+          "latencyMs": {
+            "p50": 0.283126,
+            "p95": -0.4055,
+            "p99": 0.051333,
+            "max": -1.779542
+          }
+        },
+        "high-pressure": {
+          "label": "b4p1_high-pressure",
+          "latencyMs": {
+            "p50": 1.763542,
+            "p95": 0.904959,
+            "p99": 2.307875,
+            "max": 21.028167
+          }
+        }
+      }
+    }
+  ],
+  "relativeDeltaSummaryMs": {
+    "one-short": {
+      "p50": {
+        "blockValues": [
+          -0.008291,
+          -1.40027,
+          0.953,
+          -0.021
+        ],
+        "median": -0.014645,
+        "range": {
+          "min": -1.40027,
+          "max": 0.953
+        }
+      },
+      "p95": {
+        "blockValues": [
+          1.121792,
+          0.431017,
+          0.607875,
+          -1.031583
+        ],
+        "median": 0.519446,
+        "range": {
+          "min": -1.031583,
+          "max": 1.121792
+        }
+      },
+      "p99": {
+        "blockValues": [
+          1.021792,
+          -0.493468,
+          0.71625,
+          0.181292
+        ],
+        "median": 0.448771,
+        "range": {
+          "min": -0.493468,
+          "max": 1.021792
+        }
+      },
+      "max": {
+        "blockValues": [
+          -13.143292,
+          -18.657291,
+          -1.891208,
+          -1.453375
+        ],
+        "median": -7.51725,
+        "range": {
+          "min": -18.657291,
+          "max": -1.453375
+        }
+      }
+    },
+    "max-count": {
+      "p50": {
+        "blockValues": [
+          -0.79425,
+          -0.867229,
+          0.573209,
+          0.283126
+        ],
+        "median": -0.255562,
+        "range": {
+          "min": -0.867229,
+          "max": 0.573209
+        }
+      },
+      "p95": {
+        "blockValues": [
+          0.756558,
+          0.912327,
+          0.833,
+          -0.4055
+        ],
+        "median": 0.794779,
+        "range": {
+          "min": -0.4055,
+          "max": 0.912327
+        }
+      },
+      "p99": {
+        "blockValues": [
+          0.075626,
+          -0.140135,
+          1.230292,
+          0.051333
+        ],
+        "median": 0.06348,
+        "range": {
+          "min": -0.140135,
+          "max": 1.230292
+        }
+      },
+      "max": {
+        "blockValues": [
+          -4.722917,
+          -18.937,
+          0.801583,
+          -1.779542
+        ],
+        "median": -3.251229,
+        "range": {
+          "min": -18.937,
+          "max": 0.801583
+        }
+      }
+    },
+    "high-pressure": {
+      "p50": {
+        "blockValues": [
+          1.659396,
+          0.434042,
+          1.80423,
+          1.763542
+        ],
+        "median": 1.711469,
+        "range": {
+          "min": 0.434042,
+          "max": 1.80423
+        }
+      },
+      "p95": {
+        "blockValues": [
+          2.204098,
+          0.956917,
+          2.031216,
+          0.904959
+        ],
+        "median": 1.494067,
+        "range": {
+          "min": 0.904959,
+          "max": 2.204098
+        }
+      },
+      "p99": {
+        "blockValues": [
+          7.018622,
+          2.671667,
+          4.238418,
+          2.307875
+        ],
+        "median": 3.455043,
+        "range": {
+          "min": 2.307875,
+          "max": 7.018622
+        }
+      },
+      "max": {
+        "blockValues": [
+          -0.844042,
+          2.823042,
+          7.044458,
+          21.028167
+        ],
+        "median": 4.93375,
+        "range": {
+          "min": -0.844042,
+          "max": 21.028167
+        }
+      }
+    }
+  }
+}

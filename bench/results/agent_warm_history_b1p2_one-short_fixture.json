@@ -1,0 +1,33 @@
+{
+  "formatVersion": "citybuddy-agent-warm-history-fixture-v1",
+  "citybuddyCommit": "65bb40e7c04bbdcc0b4be22531bb16040af49274",
+  "setupNonce": "0d7b1a7962efd1abf4c8dd0984da8c43",
+  "case": "one-short",
+  "fixtureSetupWindowUtc": {
+    "startedAt": "2026-08-31T13:51:46.957050Z",
+    "completedAt": "2026-08-31T13:51:47.328742Z"
+  },
+  "targetSessionCount": 1220,
+  "history": {
+    "persistedTurnCount": 1,
+    "candidateTurnCount": 1,
+    "loadedTurnCount": 1,
+    "includedTurnCount": 1,
+    "olderTurnsAvailable": false,
+    "tokenEstimator": "utf8-bytes-v1",
+    "tokenBudget": 6144,
+    "tokenWatermark": "low",
+    "candidateTokens": 48,
+    "includedTokens": 48,
+    "omittedLoadedTurnCount": 0,
+    "trimAction": "none"
+  },
+  "sessionBoundary": {
+    "count": 1220,
+    "distinctCount": 1220,
+    "minimumPersistedTurnCount": 1,
+    "maximumPersistedTurnCount": 1,
+    "firstTurnSequence": 1,
+    "lastTurnSequence": 1
+  }
+}
