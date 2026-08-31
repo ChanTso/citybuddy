@@ -56,12 +56,32 @@ publication_dir="$staging_dir/publication"
 mkdir "$publication_dir"
 experiment_started_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 root_pw="$(grep -E '^MYSQL_BOOTSTRAP_PASSWORD=' .env | head -1 | cut -d= -f2-)"
-mysql_container_id="$(docker inspect --format '{{.Id}}' citybuddy-mysql-1)"
-mysql_port="$(docker port "$mysql_container_id" 3306/tcp | cut -d: -f2)"
 
-mysql_raw() {
+resolved_mysql_container_id=""
+resolved_mysql_port=""
+resolve_mysql_boundary() {
+  resolved_mysql_container_id="$(docker inspect --format '{{.Id}}' citybuddy-mysql-1)"
+  if [[ ! "$resolved_mysql_container_id" =~ ^[0-9a-f]{64}$ ]]; then
+    echo "Cannot resolve the current MySQL container." >&2
+    return 1
+  fi
+  resolved_mysql_port="$(docker port "$resolved_mysql_container_id" 3306/tcp \
+    | awk -F: 'NR == 1 {print $NF}')"
+  if [[ ! "$resolved_mysql_port" =~ ^[1-9][0-9]*$ ]]; then
+    echo "Cannot resolve the current MySQL host port." >&2
+    return 1
+  fi
+}
+
+mysql_raw_at_port() {
+  local mysql_port="$1"
   MYSQL_PWD="$root_pw" mysql --protocol=TCP -h 127.0.0.1 -P "$mysql_port" -u root \
     --batch --raw -e "SHOW GLOBAL VARIABLES LIKE 'max_connections'"
+}
+
+mysql_raw() {
+  resolve_mysql_boundary || return 1
+  mysql_raw_at_port "$resolved_mysql_port"
 }
 
 mysql_value() {
@@ -69,21 +89,28 @@ mysql_value() {
 }
 
 write_mysql_raw() {
-  local path="$1" boundary="$2"
+  local path="$1" boundary="$2" mysql_container_id mysql_port
+  resolve_mysql_boundary || return 1
+  mysql_container_id="$resolved_mysql_container_id"
+  mysql_port="$resolved_mysql_port"
   {
     printf 'citybuddy_commit=%s\n' "$measured_sha"
     printf 'sut_commit=%s\n' "$measured_sha"
     printf 'benchmark_harness_commit=%s\n' "$measured_sha"
     printf 'boundary=%s\n' "$boundary"
     printf 'observed_at_utc=%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-    mysql_raw
+    printf 'mysql_container_id=%s\n' "$mysql_container_id"
+    printf 'mysql_host_port=%s\n' "$mysql_port"
+    mysql_raw_at_port "$mysql_port"
   } > "$path"
 }
 
 set_mysql_max_connections() {
-  local value="$1"
+  local value="$1" mysql_port
+  resolve_mysql_boundary || return 1
+  mysql_port="$resolved_mysql_port"
   MYSQL_PWD="$root_pw" mysql --protocol=TCP -h 127.0.0.1 -P "$mysql_port" -u root \
-    -e "SET GLOBAL max_connections = $value"
+    -e "SET GLOBAL max_connections = $value" || return 1
   [ "$(mysql_value)" = "$value" ]
 }
 
@@ -227,6 +254,10 @@ run_baseline() {
     ./bench/agent/setup_agent_bench.sh; then
     return 1
   fi
+  if [ "$(mysql_value)" != 151 ]; then
+    echo "Default baseline $path setup changed MySQL max_connections from 151." >&2
+    return 1
+  fi
   verify_measured_checkout || return 1
   if ! env \
     AGENT_RESULTS_DIR="$publication_dir" \
@@ -268,6 +299,10 @@ run_factorial_cell() {
     ./bench/agent/setup_agent_bench.sh; then
     return 1
   fi
+  if [ "$(mysql_value)" != 1000 ]; then
+    echo "Factorial cell $block/$position setup changed MySQL max_connections from 1000." >&2
+    return 1
+  fi
   verify_measured_checkout || return 1
   if ! LABEL="$label" RUN_ID="$label" RATES='60,75,90' STEP_SECONDS=30 \
     AGENT_RESULTS_DIR="$publication_dir" \
@@ -303,6 +338,10 @@ if [ "$PHASE" = factorial ] || [ "$PHASE" = all ]; then
     fi
     echo "Factorial block $block was operationally invalid; rerunning the complete block once." >&2
     retry_blocks+=("$block")
+    if ! set_mysql_max_connections 1000; then
+      echo "Cannot re-establish MySQL max_connections=1000 for the block retry." >&2
+      exit 1
+    fi
     if ! run_factorial_block "$block" 2 "${block_orders[$((block - 1))]}"; then
       echo "Factorial block $block was operationally invalid on its one full retry." >&2
       exit 1

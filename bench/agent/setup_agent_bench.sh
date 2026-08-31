@@ -377,34 +377,6 @@ verify_mysql_container() {
 }
 
 compose_command=(docker compose --project-name citybuddy --env-file .env --file compose.yaml)
-mysql_container_id="$(docker inspect --format '{{.Id}}' citybuddy-mysql-1)"
-if [[ ! "$mysql_container_id" =~ ^[0-9a-f]{64}$ ]]; then
-  echo "Invalid MySQL container ID." >&2
-  exit 1
-fi
-mysql_image_id="$(container_image_id citybuddy-mysql-1)"
-mysql_configured_image="$("${compose_command[@]}" config --format json \
-  | jq -er '.services.mysql.image | select(type == "string" and length > 0)')"
-mysql_actual_configured_image="$(docker inspect --format '{{.Config.Image}}' citybuddy-mysql-1)"
-mysql_resolved_image_id="$(resolve_image_id "$mysql_configured_image")"
-mysql_started_at="$(container_started_at citybuddy-mysql-1)"
-mysql_restart_count="$(container_restart_count citybuddy-mysql-1)"
-if [ "$mysql_actual_configured_image" != "$mysql_configured_image" ] \
-  || [ "$mysql_resolved_image_id" != "$mysql_image_id" ] \
-  || [ "$(docker inspect --format '{{.State.Running}}' citybuddy-mysql-1)" != true ]; then
-  echo "The running MySQL container does not match the Compose image boundary." >&2
-  exit 1
-fi
-mysql_port="$(docker port "$mysql_container_id" 3306/tcp | cut -d: -f2)"
-mysql_max_connections_raw="$(MYSQL_PWD="$root_pw" mysql --protocol=TCP -h 127.0.0.1 \
-  -P "$mysql_port" -u root --batch --raw \
-  -e "SHOW GLOBAL VARIABLES LIKE 'max_connections'")"
-mysql_max_connections="$(printf '%s\n' "$mysql_max_connections_raw" \
-  | awk -F '\t' '$1 == "max_connections" {print $2}')"
-if [[ ! "$mysql_max_connections" =~ ^[1-9][0-9]*$ ]]; then
-  echo "Cannot record MySQL max_connections from its authoritative global variable." >&2
-  exit 1
-fi
 
 host_architecture="$(uname -m)"
 host_kernel="$(uname -srv)"
@@ -474,12 +446,66 @@ docker rm -f citybuddy-bench-k6 citybuddy-bench-agent citybuddy-bench-model city
   citybuddy-bench-elasticsearch >/dev/null 2>&1 || true
 
 echo "== applying and validating the current MySQL migration streams =="
+mysql_pre_migration_container_id="$(docker inspect --format '{{.Id}}' citybuddy-mysql-1)"
+if [[ ! "$mysql_pre_migration_container_id" =~ ^[0-9a-f]{64}$ ]]; then
+  echo "Invalid pre-migration MySQL container ID." >&2
+  exit 1
+fi
+mysql_pre_migration_port="$(docker port "$mysql_pre_migration_container_id" 3306/tcp \
+  | awk -F: 'NR == 1 {print $NF}')"
+if [[ ! "$mysql_pre_migration_port" =~ ^[1-9][0-9]*$ ]]; then
+  echo "Cannot resolve the pre-migration MySQL host port." >&2
+  exit 1
+fi
+mysql_preserved_max_connections_raw="$(MYSQL_PWD="$root_pw" mysql --protocol=TCP \
+  -h 127.0.0.1 -P "$mysql_pre_migration_port" -u root --batch --raw \
+  -e "SHOW GLOBAL VARIABLES LIKE 'max_connections'")"
+mysql_preserved_max_connections="$(printf '%s\n' "$mysql_preserved_max_connections_raw" \
+  | awk -F '\t' '$1 == "max_connections" {print $2}')"
+if [[ ! "$mysql_preserved_max_connections" =~ ^[1-9][0-9]*$ ]]; then
+  echo "Cannot preserve MySQL max_connections across migration reconciliation." >&2
+  exit 1
+fi
 mysql_setup_make=(make "ENV_FILE=.env" "COMPOSE_PROJECT_NAME=citybuddy")
 "${mysql_setup_make[@]}" grant-access
 "${mysql_setup_make[@]}" migrate-auth
 "${mysql_setup_make[@]}" migrate-commerce
 "${mysql_setup_make[@]}" migrate-agent
 "${mysql_setup_make[@]}" grant-access
+mysql_container_id="$(docker inspect --format '{{.Id}}' citybuddy-mysql-1)"
+if [[ ! "$mysql_container_id" =~ ^[0-9a-f]{64}$ ]]; then
+  echo "Invalid MySQL container ID." >&2
+  exit 1
+fi
+mysql_image_id="$(container_image_id citybuddy-mysql-1)"
+mysql_configured_image="$("${compose_command[@]}" config --format json \
+  | jq -er '.services.mysql.image | select(type == "string" and length > 0)')"
+mysql_actual_configured_image="$(docker inspect --format '{{.Config.Image}}' citybuddy-mysql-1)"
+mysql_resolved_image_id="$(resolve_image_id "$mysql_configured_image")"
+mysql_started_at="$(container_started_at citybuddy-mysql-1)"
+mysql_restart_count="$(container_restart_count citybuddy-mysql-1)"
+if [ "$mysql_actual_configured_image" != "$mysql_configured_image" ] \
+  || [ "$mysql_resolved_image_id" != "$mysql_image_id" ] \
+  || [ "$(docker inspect --format '{{.State.Running}}' citybuddy-mysql-1)" != true ]; then
+  echo "The running MySQL container does not match the Compose image boundary." >&2
+  exit 1
+fi
+mysql_port="$(docker port "$mysql_container_id" 3306/tcp | awk -F: 'NR == 1 {print $NF}')"
+if [[ ! "$mysql_port" =~ ^[1-9][0-9]*$ ]]; then
+  echo "Cannot resolve the post-migration MySQL host port." >&2
+  exit 1
+fi
+MYSQL_PWD="$root_pw" mysql --protocol=TCP -h 127.0.0.1 -P "$mysql_port" -u root \
+  -e "SET GLOBAL max_connections = $mysql_preserved_max_connections"
+mysql_max_connections_raw="$(MYSQL_PWD="$root_pw" mysql --protocol=TCP -h 127.0.0.1 \
+  -P "$mysql_port" -u root --batch --raw \
+  -e "SHOW GLOBAL VARIABLES LIKE 'max_connections'")"
+mysql_max_connections="$(printf '%s\n' "$mysql_max_connections_raw" \
+  | awk -F '\t' '$1 == "max_connections" {print $2}')"
+if [ "$mysql_max_connections" != "$mysql_preserved_max_connections" ]; then
+  echo "Cannot preserve MySQL max_connections across migration reconciliation." >&2
+  exit 1
+fi
 auth_migration_version="$(migration_latest_version \
   auth_migration "$auth_migration_pw" commerce_db auth_schema_history)"
 commerce_migration_version="$(migration_latest_version \

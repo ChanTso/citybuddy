@@ -72,6 +72,11 @@ def _prepare_worker_runner(tmp_path: Path) -> tuple[Path, dict[str, str], Path, 
     git_state.write_text(f"{COMMIT}\n", encoding="utf-8")
     mysql_state = tmp_path / "mysql-state"
     mysql_state.write_text("151\n", encoding="utf-8")
+    mysql_port_state = tmp_path / "mysql-port-state"
+    mysql_port_state.write_text("3306\n", encoding="utf-8")
+    mysql_reset_trip = tmp_path / "mysql-reset-trip"
+    mysql_resolve_armed = tmp_path / "mysql-resolve-armed"
+    mysql_resolve_trip = tmp_path / "mysql-resolve-trip"
     publication_trip = tmp_path / "publication-trip"
 
     _write_executable(
@@ -90,8 +95,14 @@ def _prepare_worker_runner(tmp_path: Path) -> tuple[Path, dict[str, str], Path, 
         """
         #!/bin/sh
         case "$1" in
-          inspect) printf '%064d\n' 1 ;;
-          port) printf '127.0.0.1:3306\n' ;;
+          inspect)
+            if [ -e "$MYSQL_RESOLVE_ARMED" ] && [ ! -e "$MYSQL_RESOLVE_TRIP" ]; then
+              : > "$MYSQL_RESOLVE_TRIP"
+              exit 67
+            fi
+            printf '%064d\n' "$(sed -n 1p "$MYSQL_PORT_STATE")"
+            ;;
+          port) printf '127.0.0.1:%s\n' "$(sed -n 1p "$MYSQL_PORT_STATE")" ;;
           version) printf '29.5.3\n' ;;
           info)
             case "$*" in
@@ -108,6 +119,19 @@ def _prepare_worker_runner(tmp_path: Path) -> tuple[Path, dict[str, str], Path, 
         fake_bin / "mysql",
         r"""
         #!/bin/sh
+        expected_port="$(sed -n 1p "$MYSQL_PORT_STATE")"
+        actual_port=''
+        previous=''
+        for argument in "$@"; do
+          if [ "$previous" = -P ]; then actual_port="$argument"; fi
+          case "$argument" in --port=*) actual_port="${argument#--port=}" ;; esac
+          previous="$argument"
+        done
+        if [ "$actual_port" != "$expected_port" ]; then
+          printf 'stale MySQL port: expected %s, received %s\n' \
+            "$expected_port" "$actual_port" >&2
+          exit 66
+        fi
         case "$*" in
           *"SHOW GLOBAL VARIABLES LIKE 'max_connections'"*)
             printf 'Variable_name\tValue\nmax_connections\t%s\n' "$(sed -n 1p "$MYSQL_STATE")"
@@ -150,6 +174,12 @@ def _prepare_worker_runner(tmp_path: Path) -> tuple[Path, dict[str, str], Path, 
         runner.parent / "setup_agent_bench.sh",
         """
         #!/bin/sh
+        port=$(( $(sed -n 1p "$MYSQL_PORT_STATE") + 1 ))
+        printf '%s\n' "$port" > "$MYSQL_PORT_STATE"
+        if [ "${RESET_MYSQL_ON_SETUP_ONCE:-0}" = 1 ] && [ ! -e "$MYSQL_RESET_TRIP" ]; then
+          printf '151\n' > "$MYSQL_STATE"
+          : > "$MYSQL_RESET_TRIP"
+        fi
         exit 0
         """,
     )
@@ -159,7 +189,12 @@ def _prepare_worker_runner(tmp_path: Path) -> tuple[Path, dict[str, str], Path, 
         #!/bin/sh
         count=$(( $(sed -n 1p "$LADDER_COUNT") + 1 ))
         printf '%s\n' "$count" > "$LADDER_COUNT"
-        if [ "${FAIL_LADDER_ON:-0}" -eq "$count" ]; then exit 29; fi
+        if [ "${FAIL_LADDER_ON:-0}" -eq "$count" ]; then
+          if [ "${ARM_MYSQL_RESOLVE_ON_LADDER_FAILURE:-0}" = 1 ]; then
+            : > "$MYSQL_RESOLVE_ARMED"
+          fi
+          exit 29
+        fi
         mkdir -p "$AGENT_RESULTS_DIR"
         printf 'summary for %s\n' "$LABEL" > "$AGENT_RESULTS_DIR/agent_${LABEL}_summary.json"
         """,
@@ -173,6 +208,10 @@ def _prepare_worker_runner(tmp_path: Path) -> tuple[Path, dict[str, str], Path, 
         {
             "GIT_STATE": str(git_state),
             "MYSQL_STATE": str(mysql_state),
+            "MYSQL_PORT_STATE": str(mysql_port_state),
+            "MYSQL_RESET_TRIP": str(mysql_reset_trip),
+            "MYSQL_RESOLVE_ARMED": str(mysql_resolve_armed),
+            "MYSQL_RESOLVE_TRIP": str(mysql_resolve_trip),
             "LADDER_COUNT": str(ladder_count),
             "PATH": f"{fake_bin}:{environment['PATH']}",
             "PUBLICATION_TRIP": str(publication_trip),
@@ -216,6 +255,10 @@ def test_final_checkout_change_rolls_back_every_artifact_and_allows_rerun(
     assert len(list(results.glob("*_mysql_*.txt"))) == 2
     descriptors = list(results.glob("*_baseline_experiment.txt"))
     assert len(descriptors) == 1
+    current_port = Path(environment["MYSQL_PORT_STATE"]).read_text(encoding="utf-8").strip()
+    restored = next(results.glob("*_mysql_restored.txt")).read_text(encoding="utf-8")
+    assert f"mysql_container_id={int(current_port):064d}\n" in restored
+    assert f"mysql_host_port={current_port}\n" in restored
     assert mysql_state.read_text(encoding="utf-8") == "151\n"
 
 
@@ -240,3 +283,54 @@ def test_factorial_retries_the_complete_block_and_records_the_block(tmp_path: Pa
     descriptor = next(results.glob("*_factorial_experiment.txt"))
     assert "retry_blocks=1\n" in descriptor.read_text(encoding="utf-8")
     assert mysql_state.read_text(encoding="utf-8") == "151\n"
+
+
+def test_factorial_reestablishes_mysql_limit_before_retry_after_setup_replacement(
+    tmp_path: Path,
+) -> None:
+    runner, environment, results, mysql_state = _prepare_worker_runner(tmp_path)
+    (tmp_path / "bench/.run/bench.env").write_text("BENCH_USERS=10000\n", encoding="utf-8")
+
+    completed = subprocess.run(
+        ["/bin/bash", str(runner), "factorial"],
+        cwd=tmp_path,
+        env=environment
+        | {
+            "TRIP_PUBLICATION": "0",
+            "RESET_MYSQL_ON_SETUP_ONCE": "1",
+        },
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+
+    assert completed.returncode == 0, completed.stderr
+    assert "setup changed MySQL max_connections from 1000" in completed.stderr
+    descriptor = next(results.glob("*_factorial_experiment.txt"))
+    assert "retry_blocks=1\n" in descriptor.read_text(encoding="utf-8")
+    assert len(list(results.glob("*_summary.json"))) == 16
+    assert mysql_state.read_text(encoding="utf-8") == "151\n"
+
+
+def test_restore_fails_closed_when_the_live_mysql_boundary_cannot_be_resolved(
+    tmp_path: Path,
+) -> None:
+    runner, environment, results, _ = _prepare_worker_runner(tmp_path)
+
+    failed = subprocess.run(
+        ["/bin/bash", str(runner), "baseline"],
+        cwd=tmp_path,
+        env=environment
+        | {
+            "ARM_MYSQL_RESOLVE_ON_LADDER_FAILURE": "1",
+            "FAIL_LADDER_ON": "1",
+            "TRIP_PUBLICATION": "0",
+        },
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+
+    assert failed.returncode == 1
+    assert "Failed to restore MySQL max_connections=151." in failed.stderr
+    assert list(results.iterdir()) == []
