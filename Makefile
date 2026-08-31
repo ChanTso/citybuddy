@@ -48,7 +48,6 @@ guard-layout:
 	test -x scripts/start_support_redis.sh
 	test -f scripts/fake_litellm_server.py
 	test -f scripts/check_knowledge_search.py
-	test -x scripts/verify_agent_knowledge_fixture.py
 	test -f scripts/check_retrieval_evidence.py
 	test -f scripts/check_faq_cache.py
 	test -f scripts/check_retrieval_calibration.py

@@ -24,50 +24,83 @@ AGENT_ATTEMPT_BUDGET="${AGENT_ATTEMPT_BUDGET:-16}"
 run_dir="$repo_root/bench/.run"
 mkdir -p "$run_dir"
 commit_file="$run_dir/citybuddy_commit"
-boundary_file="$run_dir/agent_setup_boundary.json"
-boundary_tmp=""
+environment_file="$run_dir/agent_setup_environment.json"
+legacy_boundary_file="$run_dir/agent_setup_boundary.json"
+environment_tmp=""
 commit_tmp=""
 setup_complete=false
+containers_may_exist=false
+setup_nonce=""
+setup_nonce_label="citybuddy.bench.setup-nonce"
+citybuddy_commit_label="citybuddy.bench.citybuddy-commit"
 knowledge_bootstrap_file="$run_dir/agent_knowledge_bootstrap.json"
-knowledge_alias_file="$run_dir/agent_knowledge_alias.json"
-knowledge_mapping_file="$run_dir/agent_knowledge_mapping.json"
-knowledge_visible_query_file="$run_dir/agent_knowledge_visible_query.json"
-knowledge_visible_file="$run_dir/agent_knowledge_visible.json"
-knowledge_all_query_file="$run_dir/agent_knowledge_all_query.json"
-knowledge_all_file="$run_dir/agent_knowledge_all.json"
 knowledge_health_file="$run_dir/agent_knowledge_cluster_health.json"
-knowledge_summary_file="$run_dir/agent_knowledge_fixture.json"
-auth_history_file="$run_dir/agent_mysql_auth_history.tsv"
-commerce_history_file="$run_dir/agent_mysql_commerce_history.tsv"
-agent_history_file="$run_dir/agent_mysql_agent_history.tsv"
 auth_runtime_file="$run_dir/agent_auth_java_runtime.txt"
 commerce_runtime_file="$run_dir/agent_commerce_java_runtime.txt"
 
-cleanup_setup_boundary() {
-  local status=$?
+cleanup_setup() {
+  local original_status=$? cleanup_status=0 status ids id
   trap - EXIT
-  if [ -n "$boundary_tmp" ]; then
-    rm -f -- "$boundary_tmp" || status=1
+  if [ "$setup_complete" != true ] && [ "$containers_may_exist" = true ]; then
+    for name in citybuddy-bench-pool citybuddy-bench-k6 citybuddy-bench-profile-load \
+      citybuddy-bench-agent citybuddy-bench-model citybuddy-bench-net \
+      citybuddy-bench-commerce citybuddy-bench-auth citybuddy-bench-elasticsearch; do
+      if ids="$(docker ps -aq \
+        --filter "name=^/${name}$" \
+        --filter "label=$setup_nonce_label=$setup_nonce" \
+        --filter "label=$citybuddy_commit_label=$citybuddy_commit")"; then
+        while IFS= read -r id; do
+          [ -n "$id" ] || continue
+          if docker rm -f "$id" >/dev/null; then :; else
+            status=$?
+            echo "Failed to remove setup-owned container $name (status $status)." >&2
+            if [ "$cleanup_status" -eq 0 ]; then cleanup_status="$status"; fi
+          fi
+        done <<<"$ids"
+      else
+        status=$?
+        echo "Failed to inspect setup-owned container $name (status $status)." >&2
+        if [ "$cleanup_status" -eq 0 ]; then cleanup_status="$status"; fi
+      fi
+    done
   fi
-  if [ -n "$commit_tmp" ]; then
-    rm -f -- "$commit_tmp" || status=1
-  fi
-  if [ "$setup_complete" != true ]; then
-    rm -f -- "$boundary_file" "$commit_file" || status=1
-    if [ "$status" -eq 0 ]; then
-      status=1
+  if [ -n "$environment_tmp" ]; then
+    if rm -f -- "$environment_tmp"; then :; else
+      status=$?
+      echo "Failed to remove temporary setup environment record (status $status)." >&2
+      if [ "$cleanup_status" -eq 0 ]; then cleanup_status="$status"; fi
     fi
   fi
-  exit "$status"
+  if [ -n "$commit_tmp" ]; then
+    if rm -f -- "$commit_tmp"; then :; else
+      status=$?
+      echo "Failed to remove temporary setup commit marker (status $status)." >&2
+      if [ "$cleanup_status" -eq 0 ]; then cleanup_status="$status"; fi
+    fi
+  fi
+  if [ "$setup_complete" != true ]; then
+    if rm -f -- "$environment_file" "$commit_file"; then :; else
+      status=$?
+      echo "Failed to invalidate incomplete setup markers (status $status)." >&2
+      if [ "$cleanup_status" -eq 0 ]; then cleanup_status="$status"; fi
+    fi
+  fi
+  if [ "$cleanup_status" -ne 0 ]; then
+    echo "Agent setup cleanup failed with status $cleanup_status (original setup status: $original_status)." >&2
+  fi
+  if [ "$original_status" -ne 0 ]; then exit "$original_status"; fi
+  if [ "$setup_complete" = true ]; then exit 0; fi
+  if [ "$cleanup_status" -ne 0 ]; then exit "$cleanup_status"; fi
+  exit 1
 }
-trap cleanup_setup_boundary EXIT
+trap cleanup_setup EXIT
 trap 'exit 129' HUP
 trap 'exit 130' INT
 trap 'exit 143' TERM
 
-# Invalidate every completed boundary before even inspecting the checkout. A failed git command,
+# Invalidate every completed environment before even inspecting the checkout. A failed git command,
 # dirty source or interrupted setup must never leave the previous fixture looking current.
-rm -f -- "$boundary_file" "$commit_file"
+rm -f -- "$environment_file" "$legacy_boundary_file" "$commit_file"
 setup_started_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 if [[ ! "$AGENT_BENCH_USERS" =~ ^[1-9][0-9]*$ ]] \
   || [[ ! "$AGENT_ATTEMPT_BUDGET" =~ ^[1-9][0-9]*$ ]]; then
@@ -87,6 +120,11 @@ if [ -n "$changes" ]; then
   exit 1
 fi
 citybuddy_commit="$(git rev-parse --verify HEAD)"
+setup_nonce="$(openssl rand -hex 16)"
+if [[ ! "$setup_nonce" =~ ^[0-9a-f]{32}$ ]]; then
+  echo "Cannot generate the setup nonce." >&2
+  exit 1
+fi
 
 read_value() { grep -E "^$1=" .env | head -1 | cut -d= -f2-; }
 commerce_pw="$(read_value MYSQL_COMMERCE_APP_PASSWORD)"
@@ -106,100 +144,19 @@ migration_query() {
     --user="$1" --database="$3" --batch --raw --skip-column-names --execute="$4"
 }
 
-record_migration_boundary() {
-  local stream="$1"
-  local database user password history_table output_file
-  case "$stream" in
-    auth)
-      database=commerce_db
-      user=auth_migration
-      password="$auth_migration_pw"
-      history_table=auth_schema_history
-      output_file="$auth_history_file"
-      ;;
-    commerce)
-      database=commerce_db
-      user=commerce_migration
-      password="$commerce_migration_pw"
-      history_table=commerce_schema_history
-      output_file="$commerce_history_file"
-      ;;
-    agent)
-      database=cs_db
-      user=agent_migration
-      password="$agent_migration_pw"
-      history_table=agent_schema_history
-      output_file="$agent_history_file"
-      ;;
-    *)
-      echo "Unknown migration boundary stream: $stream" >&2
-      return 1
-      ;;
-  esac
-
-  local migration_dir="$repo_root/infra/mysql/migrations/$stream"
-  local -a migration_files=("$migration_dir"/V*__*.sql)
-  local expected_count="${#migration_files[@]}"
-  if [ "$expected_count" -eq 0 ] || [ ! -f "${migration_files[0]}" ]; then
-    echo "Migration stream '$stream' has no committed migrations." >&2
-    return 1
-  fi
-  local expected_latest_file="${migration_files[$((expected_count - 1))]}"
-  local expected_latest="${expected_latest_file##*/}"
-  expected_latest="${expected_latest%%__*}"
-  expected_latest="${expected_latest#V}"
-
-  local counts total_count completed_count failed_count extra
-  counts="$(migration_query "$user" "$password" "$database" "
-SELECT COUNT(*),
-       COALESCE(SUM(success = TRUE), 0),
-       COALESCE(SUM(success = FALSE), 0)
-  FROM ${history_table};")"
-  extra=""
-  IFS=$'\t' read -r total_count completed_count failed_count extra <<<"$counts"
-  if [ -n "$extra" ] || [[ ! "$total_count" =~ ^[0-9]+$ ]] \
-    || [[ ! "$completed_count" =~ ^[0-9]+$ ]] || [[ ! "$failed_count" =~ ^[0-9]+$ ]]; then
-    echo "Malformed migration history counts for '$stream'." >&2
-    return 1
-  fi
-  if [ "$total_count" != "$expected_count" ] || [ "$completed_count" != "$expected_count" ] \
-    || [ "$failed_count" != 0 ]; then
-    echo "Migration boundary mismatch for '$stream': expected=$expected_count total=$total_count completed=$completed_count failed=$failed_count" >&2
-    return 1
-  fi
-
-  local latest latest_version latest_checksum latest_extra
-  latest="$(migration_query "$user" "$password" "$database" "
-SELECT version, checksum
+migration_latest_version() {
+  local user="$1" password="$2" database="$3" history_table="$4" version
+  version="$(migration_query "$user" "$password" "$database" "
+SELECT version
   FROM ${history_table}
  WHERE success = TRUE
  ORDER BY CAST(version AS UNSIGNED) DESC, version DESC
  LIMIT 1;")"
-  latest_extra=""
-  IFS=$'\t' read -r latest_version latest_checksum latest_extra <<<"$latest"
-  if [ -n "$latest_extra" ] || [ "$latest_version" != "$expected_latest" ] \
-    || [[ ! "$latest_checksum" =~ ^[0-9a-f]{64}$ ]]; then
-    echo "Migration latest-version boundary mismatch for '$stream'." >&2
+  if [[ ! "$version" =~ ^[0-9]+$ ]]; then
+    echo "Cannot record the latest successful version from $history_table." >&2
     return 1
   fi
-
-  migration_query "$user" "$password" "$database" "
-SELECT version, checksum, IF(success, 1, 0)
-  FROM ${history_table}
- ORDER BY CAST(version AS UNSIGNED), version;" > "$output_file"
-  local row_count=0 version checksum success row_extra
-  while IFS=$'\t' read -r version checksum success row_extra; do
-    if [ -n "$row_extra" ] || [[ ! "$version" =~ ^[0-9]+$ ]] \
-      || [[ ! "$checksum" =~ ^[0-9a-f]{64}$ ]] || [ "$success" != 1 ]; then
-      echo "Malformed migration history row for '$stream'." >&2
-      return 1
-    fi
-    row_count=$((row_count + 1))
-  done < "$output_file"
-  if [ "$row_count" -ne "$expected_count" ]; then
-    echo "Migration history row count changed while recording '$stream'." >&2
-    return 1
-  fi
+  printf '%s\n' "$version"
 }
 
 sha256_file() {
@@ -251,6 +208,21 @@ java_runtime_version() {
   printf '%s\n' "$version"
 }
 
+verify_setup_container() {
+  local name="$1" expected_id="$2" actual_id actual_nonce actual_commit running
+  actual_id="$(docker inspect --format '{{.Id}}' "$name")"
+  actual_nonce="$(docker inspect --format \
+    '{{ index .Config.Labels "citybuddy.bench.setup-nonce" }}' "$name")"
+  actual_commit="$(docker inspect --format \
+    '{{ index .Config.Labels "citybuddy.bench.citybuddy-commit" }}' "$name")"
+  running="$(docker inspect --format '{{.State.Running}}' "$name")"
+  if [ "$actual_id" != "$expected_id" ] || [ "$actual_nonce" != "$setup_nonce" ] \
+    || [ "$actual_commit" != "$citybuddy_commit" ] || [ "$running" != true ]; then
+    echo "Setup-owned container identity changed for $name." >&2
+    return 1
+  fi
+}
+
 auth_jar="$repo_root/auth-service/target/auth-service-0.0.1-SNAPSHOT.jar"
 commerce_jar="$repo_root/commerce-service/target/commerce-service-0.0.1-SNAPSHOT.jar"
 
@@ -262,7 +234,16 @@ auth_jar_sha256="$(sha256_file "$auth_jar")"
 commerce_jar_sha256="$(sha256_file "$commerce_jar")"
 
 echo "== building the agent and dedicated benchmark Elasticsearch images =="
-docker build --quiet --file bench/agent/Dockerfile --tag citybuddy-bench-agent:local . >/dev/null
+git archive --format=tar "$citybuddy_commit" -- \
+  bench/agent/Dockerfile \
+  pyproject.toml \
+  uv.lock \
+  agent-service/pyproject.toml \
+  agent-service/src \
+  knowledge-indexer/pyproject.toml \
+  knowledge-indexer/src \
+  | docker build --quiet --file bench/agent/Dockerfile \
+      --tag citybuddy-bench-agent:local - >/dev/null
 docker build --quiet --file infra/elasticsearch/Dockerfile \
   --tag citybuddy-bench-elasticsearch:local infra/elasticsearch >/dev/null
 
@@ -285,7 +266,7 @@ echo "== stopping the previous bench services =="
 # passed, leaving retrieval decisions behind that block the support_turn delete.
 docker rm -f citybuddy-bench-k6 citybuddy-bench-agent citybuddy-bench-model citybuddy-bench-net \
   citybuddy-bench-auth citybuddy-bench-commerce citybuddy-bench-pool \
-  citybuddy-bench-elasticsearch >/dev/null 2>&1 || true
+  citybuddy-bench-profile-load citybuddy-bench-elasticsearch >/dev/null 2>&1 || true
 
 echo "== applying and validating the current MySQL migration streams =="
 mysql_setup_make=(make "ENV_FILE=.env" "COMPOSE_PROJECT_NAME=citybuddy")
@@ -294,9 +275,12 @@ mysql_setup_make=(make "ENV_FILE=.env" "COMPOSE_PROJECT_NAME=citybuddy")
 "${mysql_setup_make[@]}" migrate-commerce
 "${mysql_setup_make[@]}" migrate-agent
 "${mysql_setup_make[@]}" grant-access
-record_migration_boundary auth
-record_migration_boundary commerce
-record_migration_boundary agent
+auth_migration_version="$(migration_latest_version \
+  auth_migration "$auth_migration_pw" commerce_db auth_schema_history)"
+commerce_migration_version="$(migration_latest_version \
+  commerce_migration "$commerce_migration_pw" commerce_db commerce_schema_history)"
+agent_migration_version="$(migration_latest_version \
+  agent_migration "$agent_migration_pw" cs_db agent_schema_history)"
 
 echo "== clearing the previous agent fixture =="
 mysql_bootstrap() { MYSQL_PWD="$root_pw" mysql --protocol=TCP -h 127.0.0.1 -P "$mysql_port" -u root -D "$1"; }
@@ -327,7 +311,10 @@ VALUES ('00000000-0000-0000-0000-0000000009a3', 'agent-service', '$agent_service
 echo "== starting the isolated benchmark knowledge node =="
 # This node has no persistent volume and never reads or changes the ordinary local Elasticsearch
 # service.
-docker run --detach --name citybuddy-bench-elasticsearch \
+containers_may_exist=true
+es_container_id="$(docker run --detach --name citybuddy-bench-elasticsearch \
+  --label "$setup_nonce_label=$setup_nonce" \
+  --label "$citybuddy_commit_label=$citybuddy_commit" \
   --network citybuddy_default \
   --network-alias citybuddy-bench-elasticsearch \
   --publish 127.0.0.1::9200 \
@@ -337,7 +324,7 @@ docker run --detach --name citybuddy-bench-elasticsearch \
   --env xpack.security.enabled=false \
   --env xpack.ml.enabled=false \
   --env 'ES_JAVA_OPTS=-Xms512m -Xmx512m' \
-  citybuddy-bench-elasticsearch:local >/dev/null
+  citybuddy-bench-elasticsearch:local)"
 es_binding="$(docker port citybuddy-bench-elasticsearch 9200/tcp)"
 es_port="${es_binding##*:}"
 if [[ ! "$es_port" =~ ^[0-9]+$ ]]; then
@@ -355,42 +342,17 @@ until curl --fail --silent --show-error \
   sleep 1
 done
 
-echo "== bootstrapping and verifying the exact benchmark knowledge corpus =="
-# The retrieval path resolves this alias, validates the mapping, then runs BM25 and dense
-# retrieval. All raw trust-boundary responses are retained under bench/.run.
+echo "== bootstrapping the benchmark knowledge corpus =="
+# The indexer owns corpus and mapping validation. Its raw response is retained without a second
+# implementation of those rules in the benchmark harness.
 uv run citybuddy-indexer bootstrap \
   --elasticsearch-url "http://127.0.0.1:$es_port" \
   --index knowledge_docs_v1 --alias knowledge_docs_read > "$knowledge_bootstrap_file"
-curl --fail --silent --show-error \
-  "http://127.0.0.1:$es_port/_alias/knowledge_docs_read" > "$knowledge_alias_file"
-curl --fail --silent --show-error \
-  "http://127.0.0.1:$es_port/knowledge_docs_v1/_mapping" > "$knowledge_mapping_file"
-knowledge_expected_count="$(uv run python -c \
-  'from citybuddy_indexer.knowledge import INITIAL_PUBLIC_CORPUS; print(len(INITIAL_PUBLIC_CORPUS))')"
-if [[ ! "$knowledge_expected_count" =~ ^[1-9][0-9]*$ ]]; then
-  echo "The committed knowledge corpus is empty or malformed." >&2
-  exit 1
-fi
-knowledge_search_size=$((knowledge_expected_count + 1))
-printf '{"_source":true,"query":{"bool":{"filter":[{"term":{"published":true}},{"term":{"deleted":false}}]}},"size":%s,"track_total_hits":true}\n' \
-  "$knowledge_search_size" > "$knowledge_visible_query_file"
-printf '{"_source":true,"query":{"match_all":{}},"size":%s,"track_total_hits":true}\n' \
-  "$knowledge_search_size" > "$knowledge_all_query_file"
-curl --fail --silent --show-error --request POST \
-  --header 'Content-Type: application/json' --data-binary "@$knowledge_visible_query_file" \
-  "http://127.0.0.1:$es_port/knowledge_docs_read/_search" > "$knowledge_visible_file"
-curl --fail --silent --show-error --request POST \
-  --header 'Content-Type: application/json' --data-binary "@$knowledge_all_query_file" \
-  "http://127.0.0.1:$es_port/knowledge_docs_v1/_search" > "$knowledge_all_file"
-uv run python scripts/verify_agent_knowledge_fixture.py \
-  --bootstrap "$knowledge_bootstrap_file" \
-  --alias "$knowledge_alias_file" \
-  --mapping "$knowledge_mapping_file" \
-  --visible "$knowledge_visible_file" \
-  --all "$knowledge_all_file" > "$knowledge_summary_file"
 
 echo "== starting auth-service =="
-docker run --detach --name citybuddy-bench-auth \
+auth_container_id="$(docker run --detach --name citybuddy-bench-auth \
+  --label "$setup_nonce_label=$setup_nonce" \
+  --label "$citybuddy_commit_label=$citybuddy_commit" \
   --network citybuddy_default \
   --publish 127.0.0.1:18080:8080 \
   --volume "$auth_jar:/opt/citybuddy/auth.jar:ro" \
@@ -410,7 +372,7 @@ docker run --detach --name citybuddy-bench-auth \
   --citybuddy.identity.current-private-key-path=/opt/citybuddy/bench-private.pem \
   --citybuddy.identity.current-public-key-path=/opt/citybuddy/bench-public.pem \
   --citybuddy.identity.exchange-scopes[0]=catalog:read \
-  --citybuddy.identity.exchange-scopes[1]=refund:create >/dev/null
+  --citybuddy.identity.exchange-scopes[1]=refund:create)"
 
 until curl -sf http://127.0.0.1:18080/auth/jwks >/dev/null 2>&1; do
   if [ "$(docker inspect -f '{{.State.Running}}' citybuddy-bench-auth)" != "true" ]; then
@@ -427,7 +389,9 @@ fi
 echo "auth-service ready on 18080"
 
 echo "== starting commerce-service =="
-docker run --detach --name citybuddy-bench-commerce \
+commerce_container_id="$(docker run --detach --name citybuddy-bench-commerce \
+  --label "$setup_nonce_label=$setup_nonce" \
+  --label "$citybuddy_commit_label=$citybuddy_commit" \
   --network citybuddy_default \
   --publish 127.0.0.1:18081:8080 \
   --cpus 4 \
@@ -478,7 +442,7 @@ docker run --detach --name citybuddy-bench-commerce \
   --citybuddy.actions.pending-ttl=15m \
   --citybuddy.actions.lock-wait-timeout-seconds=1 \
   --citybuddy.actions.maximum-observation-attempts=2 \
-  --citybuddy.actions.observation-backoff=25ms >/dev/null
+  --citybuddy.actions.observation-backoff=25ms)"
 
 until [ "$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:18081/api/products)" != "000" ]; do
   if [ "$(docker inspect -f '{{.State.Running}}' citybuddy-bench-commerce)" != "true" ]; then
@@ -499,17 +463,23 @@ echo "== starting the shared network namespace, model fixture and agent =="
 # the generator reaches the agent over loopback with no extra hop. No port is published: a
 # loopback-bound server is not reachable through a published port, which is the reason for this
 # arrangement in the first place.
-docker run --detach --name citybuddy-bench-net \
+net_container_id="$(docker run --detach --name citybuddy-bench-net \
+  --label "$setup_nonce_label=$setup_nonce" \
+  --label "$citybuddy_commit_label=$citybuddy_commit" \
   --network citybuddy_default \
-  alpine:3.20 sleep infinity >/dev/null
+  alpine:3.20 sleep infinity)"
 
-docker run --detach --name citybuddy-bench-model \
+model_container_id="$(docker run --detach --name citybuddy-bench-model \
+  --label "$setup_nonce_label=$setup_nonce" \
+  --label "$citybuddy_commit_label=$citybuddy_commit" \
   --network "container:citybuddy-bench-net" \
   --volume "$repo_root/scripts/fake_litellm_server.py:/opt/fake.py:ro" \
   --entrypoint /opt/citybuddy/.venv/bin/python \
-  citybuddy-bench-agent:local /opt/fake.py --port 8000 >/dev/null
+  citybuddy-bench-agent:local /opt/fake.py --port 8000)"
 
-docker run --detach --name citybuddy-bench-agent \
+agent_container_id="$(docker run --detach --name citybuddy-bench-agent \
+  --label "$setup_nonce_label=$setup_nonce" \
+  --label "$citybuddy_commit_label=$citybuddy_commit" \
   --network "container:citybuddy-bench-net" \
   --cap-add SYS_PTRACE \
   --env CITYBUDDY_ENVIRONMENT=bench \
@@ -533,7 +503,7 @@ docker run --detach --name citybuddy-bench-agent \
   --env CITYBUDDY_METRICS_ENABLED=true \
   --env CITYBUDDY_TRACE_EXPORT_URL= \
   --env AGENT_ATTEMPT_BUDGET="$AGENT_ATTEMPT_BUDGET" \
-  citybuddy-bench-agent:local >/dev/null
+  citybuddy-bench-agent:local)"
 
 # Probed from inside the namespace for the same reason the generator runs there. wget exits
 # non-zero on the 405 that proves the route is live, so its status is discarded and the answer
@@ -558,6 +528,8 @@ bench_password="$(cat "$run_dir/bench_password")"
 # build in the same place keeps setup off the host-to-VM hop as well.
 docker rm -f citybuddy-bench-pool >/dev/null 2>&1 || true
 docker run --rm --name citybuddy-bench-pool \
+  --label "$setup_nonce_label=$setup_nonce" \
+  --label "$citybuddy_commit_label=$citybuddy_commit" \
   --network "container:citybuddy-bench-net" \
   --volume "$repo_root/bench/agent/build_agent_pool.py:/opt/build_agent_pool.py:ro" \
   --volume "$run_dir:/run-data" \
@@ -594,25 +566,20 @@ if [ "$commerce_final_host_sha256" != "$commerce_jar_sha256" ] \
   exit 1
 fi
 
-agent_image_id="$(docker image inspect --format '{{.Id}}' citybuddy-bench-agent:local)"
-agent_container_image_id="$(docker inspect --format '{{.Image}}' citybuddy-bench-agent)"
-knowledge_image_id="$(docker image inspect --format '{{.Id}}' citybuddy-bench-elasticsearch:local)"
-knowledge_container_image_id="$(docker inspect --format '{{.Image}}' citybuddy-bench-elasticsearch)"
-if [ "$agent_image_id" != "$agent_container_image_id" ]; then
-  echo "The running agent container does not use the image built by this setup." >&2
-  exit 1
-fi
-if [ "$knowledge_image_id" != "$knowledge_container_image_id" ]; then
-  echo "The running benchmark Elasticsearch container does not use the image built by this setup." >&2
-  exit 1
-fi
+verify_setup_container citybuddy-bench-elasticsearch "$es_container_id"
+verify_setup_container citybuddy-bench-auth "$auth_container_id"
+verify_setup_container citybuddy-bench-commerce "$commerce_container_id"
+verify_setup_container citybuddy-bench-net "$net_container_id"
+verify_setup_container citybuddy-bench-model "$model_container_id"
+verify_setup_container citybuddy-bench-agent "$agent_container_id"
 
 setup_completed_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-boundary_tmp="$(mktemp "$run_dir/.agent_setup_boundary.XXXXXX")"
+environment_tmp="$(mktemp "$run_dir/.agent_setup_environment.XXXXXX")"
 commit_tmp="$(mktemp "$run_dir/.citybuddy_commit.XXXXXX")"
-echo "== publishing the completed agent benchmark boundary =="
+echo "== publishing the completed agent benchmark environment =="
 uv run python - \
-  "$boundary_tmp" \
+  "$environment_tmp" \
+  "$setup_nonce" \
   "$citybuddy_commit" \
   "$setup_started_at" \
   "$setup_completed_at" \
@@ -624,13 +591,16 @@ uv run python - \
   "$commerce_jar_sha256" \
   "$commerce_mounted_jar_sha256" \
   "$commerce_java_runtime" \
-  "$agent_image_id" \
-  "$knowledge_image_id" \
-  "$es_port" \
-  "$auth_history_file" \
-  "$commerce_history_file" \
-  "$agent_history_file" \
-  "$knowledge_summary_file" <<'PY'
+  "$es_container_id" \
+  "$auth_container_id" \
+  "$commerce_container_id" \
+  "$net_container_id" \
+  "$model_container_id" \
+  "$agent_container_id" \
+  "$auth_migration_version" \
+  "$commerce_migration_version" \
+  "$agent_migration_version" \
+  "$knowledge_bootstrap_file" <<'PY'
 from __future__ import annotations
 
 import json
@@ -639,6 +609,7 @@ from pathlib import Path
 
 (
     output_name,
+    setup_nonce,
     commit,
     started_at,
     completed_at,
@@ -650,54 +621,51 @@ from pathlib import Path
     commerce_host_sha,
     commerce_mounted_sha,
     commerce_runtime,
-    agent_image_id,
-    knowledge_image_id,
-    knowledge_host_port,
-    auth_history_name,
-    commerce_history_name,
-    agent_history_name,
-    knowledge_summary_name,
+    elasticsearch_container_id,
+    auth_container_id,
+    commerce_container_id,
+    net_container_id,
+    model_container_id,
+    agent_container_id,
+    auth_migration_version,
+    commerce_migration_version,
+    agent_migration_version,
+    knowledge_bootstrap_name,
 ) = sys.argv[1:]
 
 
-def migration(name: str, database: str, table: str, path_name: str) -> dict[str, object]:
-    rows = []
-    for line in Path(path_name).read_text(encoding="utf-8").splitlines():
-        version, checksum, success = line.split("\t")
-        rows.append({"checksum": checksum, "success": success == "1", "version": version})
-    return {
-        "completedCount": len(rows),
-        "database": database,
-        "evidence": f"bench/.run/agent_mysql_{name}_history.tsv",
-        "historyTable": table,
-        "latestVersion": rows[-1]["version"],
-        "migrations": rows,
-    }
+label_values = {
+    "citybuddy.bench.citybuddy-commit": commit,
+    "citybuddy.bench.setup-nonce": setup_nonce,
+}
 
 
-knowledge = json.loads(Path(knowledge_summary_name).read_text(encoding="utf-8"))
-boundary = {
+def container(container_id: str) -> dict[str, object]:
+    return {"id": container_id, "labels": label_values}
+
+
+environment = {
     "citybuddyCommit": commit,
+    "setupNonce": setup_nonce,
     "configuration": {
         "agentAttemptBudget": int(attempt_budget),
         "agentBenchUsers": int(users),
-        "composeProject": "citybuddy",
         "metricsEnabled": True,
         "traceExportUrl": "",
     },
-    "formatVersion": "citybuddy-agent-bench-setup-v1",
-    "images": {
-        "agent": {"imageId": agent_image_id, "tag": "citybuddy-bench-agent:local"},
-        "knowledge": {
-            "imageId": knowledge_image_id,
-            "tag": "citybuddy-bench-elasticsearch:local",
-        },
+    "containers": {
+        "citybuddy-bench-agent": container(agent_container_id),
+        "citybuddy-bench-auth": container(auth_container_id),
+        "citybuddy-bench-commerce": container(commerce_container_id),
+        "citybuddy-bench-elasticsearch": container(elasticsearch_container_id),
+        "citybuddy-bench-model": container(model_container_id),
+        "citybuddy-bench-net": container(net_container_id),
     },
+    "formatVersion": "citybuddy-agent-setup-environment-v1",
     "java": {
         "authService": {
             "artifact": "auth-service/target/auth-service-0.0.1-SNAPSHOT.jar",
             "hostJarSha256": auth_host_sha,
-            "javaRuntimeEvidence": "bench/.run/agent_auth_java_runtime.txt",
             "javaRuntimeVersion": auth_runtime,
             "mountedContainer": "citybuddy-bench-auth",
             "mountedJar": "/opt/citybuddy/auth.jar",
@@ -706,47 +674,35 @@ boundary = {
         "commerceService": {
             "artifact": "commerce-service/target/commerce-service-0.0.1-SNAPSHOT.jar",
             "hostJarSha256": commerce_host_sha,
-            "javaRuntimeEvidence": "bench/.run/agent_commerce_java_runtime.txt",
             "javaRuntimeVersion": commerce_runtime,
             "mountedContainer": "citybuddy-bench-commerce",
             "mountedJar": "/opt/citybuddy/commerce.jar",
             "mountedJarSha256": commerce_mounted_sha,
         },
     },
-    "knowledge": {
-        **knowledge,
-        "agentEndpoint": "http://citybuddy-bench-elasticsearch:9200",
-        "container": "citybuddy-bench-elasticsearch",
-        "evidence": {
-            "alias": "bench/.run/agent_knowledge_alias.json",
-            "allDocuments": "bench/.run/agent_knowledge_all.json",
-            "allDocumentsQuery": "bench/.run/agent_knowledge_all_query.json",
-            "bootstrap": "bench/.run/agent_knowledge_bootstrap.json",
-            "clusterHealth": "bench/.run/agent_knowledge_cluster_health.json",
-            "mapping": "bench/.run/agent_knowledge_mapping.json",
-            "visibleDocuments": "bench/.run/agent_knowledge_visible.json",
-            "visibleDocumentsQuery": "bench/.run/agent_knowledge_visible_query.json",
-        },
-        "hostEndpoint": f"http://127.0.0.1:{knowledge_host_port}",
-        "storage": {"destination": "/usr/share/elasticsearch/data", "type": "tmpfs"},
-    },
+    "knowledgeBootstrapRawJson": Path(knowledge_bootstrap_name).read_text(encoding="utf-8"),
     "mysql": {
-        "agent": migration("agent", "cs_db", "agent_schema_history", agent_history_name),
-        "auth": migration("auth", "commerce_db", "auth_schema_history", auth_history_name),
-        "commerce": migration(
-            "commerce", "commerce_db", "commerce_schema_history", commerce_history_name
-        ),
+        "agent": {"latestVersion": agent_migration_version},
+        "auth": {"latestVersion": auth_migration_version},
+        "commerce": {"latestVersion": commerce_migration_version},
     },
+    "migrationCommands": [
+        {"command": "make ENV_FILE=.env COMPOSE_PROJECT_NAME=citybuddy grant-access", "status": "succeeded"},
+        {"command": "make ENV_FILE=.env COMPOSE_PROJECT_NAME=citybuddy migrate-auth", "status": "succeeded"},
+        {"command": "make ENV_FILE=.env COMPOSE_PROJECT_NAME=citybuddy migrate-commerce", "status": "succeeded"},
+        {"command": "make ENV_FILE=.env COMPOSE_PROJECT_NAME=citybuddy migrate-agent", "status": "succeeded"},
+        {"command": "make ENV_FILE=.env COMPOSE_PROJECT_NAME=citybuddy grant-access", "status": "succeeded"},
+    ],
     "setupWindowUtc": {"completedAt": completed_at, "startedAt": started_at},
 }
 Path(output_name).write_text(
-    json.dumps(boundary, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
+    json.dumps(environment, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
     encoding="utf-8",
 )
 PY
 printf '%s\n' "$citybuddy_commit" > "$commit_tmp"
-mv "$boundary_tmp" "$boundary_file"
-boundary_tmp=""
+mv "$environment_tmp" "$environment_file"
+environment_tmp=""
 mv "$commit_tmp" "$commit_file"
 commit_tmp=""
 setup_complete=true

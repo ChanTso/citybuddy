@@ -24,23 +24,9 @@ esac
 
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"; cd "$repo_root"
 out="$repo_root/bench/results"
-commit_file="$repo_root/bench/.run/citybuddy_commit"
-if [ ! -s "$commit_file" ]; then
-  echo "No completed agent benchmark setup records the built commit; rerun setup." >&2
-  exit 1
-fi
-citybuddy_commit="$(tr -d '\r\n' < "$commit_file")"
-current_commit="$(git rev-parse --verify HEAD)"
-source_changes="$(git status --porcelain --untracked-files=all -- . \
-  ':(exclude)bench/results/**' \
-  ':(exclude)bench/.run/**')"
-if [ "$current_commit" != "$citybuddy_commit" ] || [ -n "$source_changes" ]; then
-  echo "The checkout no longer matches the source-clean commit used to build the agent image." >&2
-  echo "setup=$citybuddy_commit current=$current_commit" >&2
-  [ -z "$source_changes" ] || printf '%s\n' "$source_changes" >&2
-  echo "Commit the source and rerun ./bench/agent/setup_agent_bench.sh." >&2
-  exit 1
-fi
+live_setup_environment="$repo_root/bench/.run/agent_setup_environment.json"
+# shellcheck source=bench/agent/setup_environment_gate.sh
+source "$repo_root/bench/agent/setup_environment_gate.sh"
 
 # Output files are named by LABEL, not by path, so a control run against a changed setting does
 # not overwrite the baseline it is meant to be compared with.
@@ -65,6 +51,7 @@ cpu_by_step_path="$out/agent_${LABEL}_cpu_by_step.txt"
 mysql_path="$out/agent_${LABEL}_mysql.txt"
 steps_path="$out/agent_${LABEL}_steps.txt"
 workload_contract_path="$out/agent_${LABEL}_workload_contract.tsv"
+setup_environment_path="$out/agent_${LABEL}_setup_environment.json"
 target_paths=(
   "$summary_path"
   "$summary_path.tmp"
@@ -77,6 +64,8 @@ target_paths=(
   "$mysql_path"
   "$steps_path"
   "$workload_contract_path"
+  "$setup_environment_path"
+  "$setup_environment_path.tmp"
 )
 for target_path in "${target_paths[@]}"; do
   if [ -e "$target_path" ]; then
@@ -86,7 +75,13 @@ for target_path in "${target_paths[@]}"; do
 done
 mkdir -p "$out"
 
-echo "== agent ladder '$LABEL' (commit=$citybuddy_commit path=$PATH_NAME rates=$RATES step=${STEP_SECONDS}s) =="
+cp "$live_setup_environment" "$setup_environment_path.tmp"
+mv "$setup_environment_path.tmp" "$setup_environment_path"
+verify_agent_setup_environment "$setup_environment_path" "before ladder"
+citybuddy_commit="$(agent_setup_json_string "$setup_environment_path" '.citybuddyCommit')"
+setup_nonce="$(agent_setup_json_string "$setup_environment_path" '.setupNonce')"
+
+echo "== agent ladder '$LABEL' (commit=$citybuddy_commit setup=$setup_nonce path=$PATH_NAME rates=$RATES step=${STEP_SECONDS}s) =="
 docker rm -f citybuddy-bench-k6 >/dev/null 2>&1 || true
 
 # The agent opens a fresh MySQL connection for every persistence call rather than pooling, so
@@ -123,7 +118,9 @@ if [ "$PATH_NAME" = "prepare" ]; then
   fi
 fi
 
-docker run --detach --name citybuddy-bench-k6 \
+k6_container_id="$(docker run --detach --name citybuddy-bench-k6 \
+  --label "citybuddy.bench.setup-nonce=$setup_nonce" \
+  --label "citybuddy.bench.citybuddy-commit=$citybuddy_commit" \
   --network "container:citybuddy-bench-net" \
   --volume "$repo_root/bench/agent/k6:/scripts:ro" \
   --volume "$repo_root/bench/.run:/run-data:ro" \
@@ -136,16 +133,35 @@ docker run --detach --name citybuddy-bench-k6 \
   run --summary-export="/out/agent_${LABEL}_summary.json" \
       --out "json=/out/agent_${LABEL}_points.json" \
       --tag "citybuddy_commit=$citybuddy_commit" \
-      /scripts/agent_paths.js >/dev/null
+      --tag "setup_nonce=$setup_nonce" \
+      /scripts/agent_paths.js)"
+if [ "$(docker inspect --format '{{.Id}}' "$k6_container_id")" != "$k6_container_id" ] \
+  || [ "$(docker inspect --format \
+    '{{ index .Config.Labels "citybuddy.bench.setup-nonce" }}' "$k6_container_id")" \
+    != "$setup_nonce" ] \
+  || [ "$(docker inspect --format \
+    '{{ index .Config.Labels "citybuddy.bench.citybuddy-commit" }}' "$k6_container_id")" \
+    != "$citybuddy_commit" ]; then
+  echo "The k6 container does not belong to the saved setup environment." >&2
+  exit 1
+fi
 
 run_started="$(date -u +%s)"
 printf 'citybuddy_commit=%s\n' "$citybuddy_commit" > "$cpu_path"
 : > "$cpu_errors_path"
-sampled=(citybuddy-bench-k6 citybuddy-bench-agent citybuddy-bench-model citybuddy-bench-commerce
-         citybuddy-mysql-1 citybuddy-elasticsearch-1)
-while [ "$(docker inspect -f '{{.State.Running}}' citybuddy-bench-k6 2>/dev/null)" = "true" ]; do
+sampled_names=(citybuddy-bench-k6 citybuddy-bench-agent citybuddy-bench-model
+               citybuddy-bench-commerce citybuddy-mysql-1 citybuddy-bench-elasticsearch)
+sampled_targets=(
+  "$k6_container_id"
+  "$(jq -er '.containers["citybuddy-bench-agent"].id' "$setup_environment_path")"
+  "$(jq -er '.containers["citybuddy-bench-model"].id' "$setup_environment_path")"
+  "$(jq -er '.containers["citybuddy-bench-commerce"].id' "$setup_environment_path")"
+  citybuddy-mysql-1
+  "$(jq -er '.containers["citybuddy-bench-elasticsearch"].id' "$setup_environment_path")"
+)
+while [ "$(docker inspect -f '{{.State.Running}}' "$k6_container_id" 2>/dev/null)" = "true" ]; do
   docker stats --no-stream --format '{{.Name}} cpu={{.CPUPerc}} mem={{.MemUsage}}' \
-    "${sampled[@]}" 2>>"$cpu_errors_path" \
+    "${sampled_targets[@]}" 2>>"$cpu_errors_path" \
     | sed "s/^/$(date -u +%H:%M:%S) /" >> "$cpu_path" || true
 done
 
@@ -158,13 +174,13 @@ mv "$cpu_errors_path.tmp" "$cpu_errors_path"
 
 {
   printf 'citybuddy_commit=%s\n' "$citybuddy_commit"
-  docker logs citybuddy-bench-k6
+  docker logs "$k6_container_id"
 } > "$console_path" 2>&1
 
 # A k6 iteration that throws does not by itself fail the run, and a k6 that dies during init
 # leaves the sampling loop with nothing to sample, so both would otherwise produce a results file
 # that reads clean. The exit code is the one signal that covers each, and it is checked here.
-k6_status="$(docker inspect -f '{{.State.ExitCode}}' citybuddy-bench-k6)"
+k6_status="$(docker inspect -f '{{.State.ExitCode}}' "$k6_container_id")"
 if [ -f "$summary_path" ]; then
   uv run python - "$summary_path" "$citybuddy_commit" <<'PY'
 import json
@@ -295,7 +311,7 @@ fi
 printf 'contract_status=pass\n' >> "$workload_contract_path"
 
 echo "-- peak CPU by container, over the whole ladder --"
-for container in "${sampled[@]}"; do
+for container in "${sampled_names[@]}"; do
   peak="$(awk -v name="$container" '$2 == name {gsub(/cpu=|%/, "", $3); print $3}' \
     "$cpu_path" | sort -n | tail -1)"
   printf '%-28s %s%%\n' "$container" "${peak:-no-sample}"
@@ -347,3 +363,4 @@ echo "-- per-step statistics --"
   uv run python bench/agent/analyze_agent_ladder.py \
     "$points_path" "$LABEL" "$STEP_SECONDS" "$RATES"
 } | tee "$steps_path"
+verify_agent_setup_environment "$setup_environment_path" "after ladder"

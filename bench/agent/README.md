@@ -273,11 +273,11 @@ Pushed past the old range, the agent climbs to a plateau and stops there
 |---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
 | median agent CPU | 12 % | 14 % | 17 % | 23 % | 31 % | 35 % | 61 % | 138 % | 135 % | 133 % |
 
-**Both paths stop at about 1.4 cores of the eight available, and nothing downstream is busy when
-they do.** Median CPU per container inside the collapsed steps, read from the same raw samples
+**Both paths stop at about 1.4 agent cores of the eight available.** Median CPU per container
+inside the collapsed steps, read from the same raw samples
 (`../results/agent_retrieval_ext2_after_cpu.txt`, `agent_chat_ext_after_cpu.txt`):
 
-| Step | agent | MySQL | Elasticsearch | model fixture | commerce |
+| Step | agent | MySQL | ordinary Compose ES (not SUT) | model fixture | commerce |
 |---|---:|---:|---:|---:|---:|
 | retrieval, 75 req/s | **138.0 %** | 38.3 % | 17.8 % | 6.6 % | 0.2 % |
 | retrieval, 90 req/s | **134.6 %** | 38.0 % | 17.4 % | 6.4 % | 0.2 % |
@@ -289,13 +289,15 @@ Each row is the median of the `docker stats` samples inside that step's own twen
 thirty-second window, the same windows the runner prints; a window spanning the gaps between
 steps would mix in the drain and understate every figure.
 
-Throughput stops rising, latency absorbs the rest, and every dependency has capacity to spare.
-Before the change the ceiling was the agent's own wasted CPU; after it, the ceiling is the agent
-process itself.
+Throughput stops rising and latency absorbs the rest while the observed MySQL, model fixture, and
+commerce services remain below one core. The historical runner sampled
+`citybuddy-elasticsearch-1`, but Agent used `citybuddy-bench-elasticsearch`; dedicated benchmark ES
+CPU is therefore unobserved in these runs. The data cannot establish that every dependency had
+spare capacity or isolate the post-change ceiling to the agent process alone.
 
-**What saturates inside the process is not established here, and there are two candidates.** The
+**Two possible contributors inside the process remain readings rather than isolated causes.** The
 first is the interpreter lock: the endpoints are sync handlers on AnyIO's 40-thread pool, and
-forty threads contending for one GIL produce roughly this shape — a little over one core of
+forty threads contending for one GIL could produce roughly this shape — a little over one core of
 aggregate progress, the excess coming from C extensions and syscalls that release it.
 
 The second is the connection pool this change introduced. In the retrieval profile at concurrency
@@ -310,9 +312,9 @@ the pool lock is where the samples are, but samples pile up at whichever lock is
 that does not make it the cause. Two cheap experiments would: serve the same ladders from N
 uvicorn worker processes and see whether the plateau moves with N, which separates
 process-from-everything-else; and vary the pool between one shared client and one per dependency,
-which separates the pool mutex from the GIL. Neither has been run. What the measurement does
-support is only the outer claim: the ceiling is the agent process, not any dependency it talks
-to.
+which separates the pool mutex from the GIL. Neither has been run. Because the SUT Elasticsearch
+CPU was not sampled, these historical measurements do not separate either internal candidate
+from all retrieval dependencies.
 
 ### 3. Most of the agent's on-CPU time built TLS trust stores for plaintext URLs
 
@@ -610,16 +612,25 @@ exceed the ladder's `sum(rate x step_seconds) + 20 per step`.
 
 `LABEL` names the output files. The ladder runner requires every target file to be absent and
 refuses to overwrite an existing label; choose a fresh label for every run. Both the ladder runner
-and the profiler take it. Setup first removes any previous completed boundary, then builds the
-current auth and commerce JARs, applies all three canonical migration streams, and creates the
-knowledge fixture in an isolated, tmpfs-backed Elasticsearch container. A completed setup uses
-atomic renames to publish `bench/.run/agent_setup_boundary.json` first and the compatibility
-`bench/.run/citybuddy_commit` gate last. The boundary records the full source commit, actual host
-and mounted JAR hashes, Java runtime versions, every migration version and checksum, and the exact
-knowledge alias, mapping and corpus. Raw MySQL rows and Elasticsearch JSON remain beside it under
-the ignored `bench/.run/` directory. A failed setup leaves neither completed marker usable. The
-runner and profiler require the same source-clean checkout and write that SHA into every result
-they produce.
+and the profiler take it. Setup first removes any previous completed environment, builds the agent
+image from a scoped archive of the captured commit, builds the current auth and commerce JARs,
+applies all three canonical migration streams, and bootstraps an isolated, tmpfs-backed
+Elasticsearch node. Bootstrap failure stops setup and its raw JSON response is retained.
+
+Every setup has a new nonce. Its persistent `citybuddy-bench-*` containers carry immutable nonce
+and full-commit labels. Setup publishes `bench/.run/agent_setup_environment.json` atomically, then
+publishes `bench/.run/citybuddy_commit` last as the completion marker. The compact environment
+record contains the nonce and commit, setup time window, fixture size, attempt/metrics/trace
+configuration, container IDs and labels, Auth/Commerce host and mounted JAR SHA-256 values and Java
+runtimes, successful canonical migration commands with their latest database versions, and the raw
+knowledge bootstrap output. It does not reconstruct migration, mapping or corpus truth.
+
+Before starting load, the runner and profiler copy that record to the result `LABEL`, then directly
+check the source-clean HEAD, completion marker, live record, container IDs and labels, and mounted
+JAR hashes. They repeat the check after the run, so a same-name container or setup replacement makes
+the run invalid. A later setup may replace `bench/.run`, while existing results retain their own
+setup record. Failed or interrupted setup removes only containers carrying that attempt's nonce and
+commit labels and leaves ordinary Compose services and data untouched.
 
 ### The paired ladders
 
