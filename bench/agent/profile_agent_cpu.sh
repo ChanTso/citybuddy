@@ -9,24 +9,11 @@
 # only permits the attach and does not otherwise change how the service runs.
 set -euo pipefail
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"; cd "$repo_root"
-out="$repo_root/bench/results"; mkdir -p "$out"
-commit_file="$repo_root/bench/.run/citybuddy_commit"
-if [ ! -s "$commit_file" ]; then
-  echo "No completed agent benchmark setup records the built commit; rerun setup." >&2
-  exit 1
-fi
-citybuddy_commit="$(tr -d '\r\n' < "$commit_file")"
-current_commit="$(git rev-parse --verify HEAD)"
-source_changes="$(git status --porcelain --untracked-files=all -- . \
-  ':(exclude)bench/results/**' \
-  ':(exclude)bench/.run/**')"
-if [ "$current_commit" != "$citybuddy_commit" ] || [ -n "$source_changes" ]; then
-  echo "The checkout no longer matches the source-clean commit used to build the agent image." >&2
-  echo "setup=$citybuddy_commit current=$current_commit" >&2
-  [ -z "$source_changes" ] || printf '%s\n' "$source_changes" >&2
-  echo "Commit the source and rerun ./bench/agent/setup_agent_bench.sh." >&2
-  exit 1
-fi
+out="$repo_root/bench/results"
+run_dir="$repo_root/bench/.run"
+live_setup_environment="$repo_root/bench/.run/agent_setup_environment.json"
+# shellcheck source=bench/agent/setup_environment_gate.sh
+source "$repo_root/bench/agent/setup_environment_gate.sh"
 
 PATH_NAME="$1"                                   # chat | retrieval | prepare
 CONCURRENCY="${CONCURRENCY:-8}"
@@ -44,33 +31,82 @@ case "$PATH_NAME" in
   *)         message='hello, can you tell me about delivery times';             default_requests=4000 ;;
 esac
 REQUESTS="${REQUESTS:-$default_requests}"
-profile_path="$out/agent_pyspy_${LABEL}_c${CONCURRENCY}.txt"
-rm -f "$profile_path"
+profile_name="agent_pyspy_${LABEL}_c${CONCURRENCY}.txt"
+setup_environment_name="agent_pyspy_${LABEL}_c${CONCURRENCY}_setup_environment.json"
+for name in "$profile_name" "$setup_environment_name"; do
+  target_path="$out/$name"
+  if [ -e "$target_path" ]; then
+    echo "Refusing to overwrite existing agent profile output: $target_path" >&2
+    exit 1
+  fi
+done
+mkdir -p "$run_dir"
+staging_dir="$(mktemp -d "$run_dir/agent-profile.XXXXXX")"
+result_published=false
+report_unpublished_result() {
+  local status=$?
+  if [ "$result_published" != true ]; then
+    echo "Unpublished profile diagnostics remain in $staging_dir" >&2
+  fi
+  exit "$status"
+}
+trap report_unpublished_result EXIT
+profile_path="$staging_dir/$profile_name"
+setup_environment_path="$staging_dir/$setup_environment_name"
+cp "$live_setup_environment" "$setup_environment_path"
+verify_agent_setup_environment "$setup_environment_path" "before profile"
+citybuddy_commit="$(agent_setup_json_string "$setup_environment_path" '.citybuddyCommit')"
+setup_nonce="$(agent_setup_json_string "$setup_environment_path" '.setupNonce')"
+agent_image_id="$(jq -er \
+  '.containers["citybuddy-bench-agent"].imageId
+   | select(type == "string" and test("^sha256:[0-9a-f]{64}$"))' \
+  "$setup_environment_path")"
 
 docker rm -f citybuddy-bench-profile-load >/dev/null 2>&1 || true
-docker run --detach --rm --name citybuddy-bench-profile-load \
+profile_load_id="$(docker run --detach --rm --name citybuddy-bench-profile-load \
+  --label "citybuddy.bench.setup-nonce=$setup_nonce" \
+  --label "citybuddy.bench.citybuddy-commit=$citybuddy_commit" \
   --network "container:citybuddy-bench-net" \
   --volume "$repo_root/bench/agent/drive_concurrency.py:/opt/drive.py:ro" \
   --volume "$repo_root/bench/.run:/run-data:ro" \
   --entrypoint /opt/citybuddy/.venv/bin/python \
-  citybuddy-bench-agent:local /opt/drive.py "$message" "$CONCURRENCY" "$REQUESTS" >/dev/null
+  "$agent_image_id" /opt/drive.py "$message" "$CONCURRENCY" "$REQUESTS")"
+if [ "$(docker inspect --format '{{.Id}}' "$profile_load_id")" != "$profile_load_id" ] \
+  || [ "$(docker inspect --format '{{.Image}}' "$profile_load_id")" != "$agent_image_id" ] \
+  || [ "$(docker inspect --format \
+    '{{ index .Config.Labels "citybuddy.bench.setup-nonce" }}' "$profile_load_id")" \
+    != "$setup_nonce" ] \
+  || [ "$(docker inspect --format \
+    '{{ index .Config.Labels "citybuddy.bench.citybuddy-commit" }}' "$profile_load_id")" \
+    != "$citybuddy_commit" ]; then
+  echo "The profile load container does not belong to the saved setup environment." >&2
+  exit 1
+fi
+agent_container_id="$(jq -er '.containers["citybuddy-bench-agent"].id' \
+  "$setup_environment_path")"
 sleep 5
 
 command="py-spy record --pid 1 --duration $SECONDS_TO_SAMPLE --rate $HERTZ --nonblocking --format raw"
-docker exec citybuddy-bench-agent /bin/uvx $command --output "/tmp/$PATH_NAME.txt" >/dev/null 2>&1
+docker exec "$agent_container_id" /bin/uvx $command \
+  --output "/tmp/$PATH_NAME.txt" >/dev/null 2>&1
 # The load container must still be running when sampling ends, or part of the window sampled an
 # idle process and the shares below are diluted.
-still_running="$(docker inspect -f '{{.State.Running}}' citybuddy-bench-profile-load 2>/dev/null || true)"
+still_running="$(docker inspect -f '{{.State.Running}}' "$profile_load_id" 2>/dev/null || true)"
 still_running="$(printf '%s' "$still_running" | tr -d '\n')"
 still_running="${still_running:-false}"
-docker rm -f citybuddy-bench-profile-load >/dev/null 2>&1 || true
+if [ "$still_running" != true ]; then
+  echo "The profile load ended before sampling completed; the profile is invalid." >&2
+  exit 1
+fi
+docker rm -f "$profile_load_id" >/dev/null
 
 {
   echo "# citybuddy_commit=$citybuddy_commit"
+  echo "# setup_nonce=$setup_nonce"
   echo "# path=$PATH_NAME concurrency=$CONCURRENCY load-still-running-at-end-of-sample=$still_running"
   echo "# $command"
   echo "# Collapsed stacks, one per line, trailing field is the sample count."
-  docker exec citybuddy-bench-agent cat "/tmp/$PATH_NAME.txt"
+  docker exec "$agent_container_id" cat "/tmp/$PATH_NAME.txt"
 } > "$profile_path"
 
 # Collapsed stacks run to thousands of characters, past what the system awk will read as one
@@ -99,3 +135,7 @@ with open(path, encoding="utf-8", errors="replace") as handle:
 share = 100 * matched / total if total else 0
 print(f"{name:<11} {matched:>8} of {total:>8} samples in ssl.create_default_context = {share:.1f}%")
 TALLY
+publish_agent_results "$setup_environment_path" "after profile" "$staging_dir" "$out" \
+  "$setup_environment_name" "$profile_name"
+result_published=true
+trap - EXIT

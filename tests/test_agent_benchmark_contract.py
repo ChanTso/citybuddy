@@ -10,6 +10,7 @@ import pytest
 REPOSITORY = Path(__file__).resolve().parents[1]
 K6_SCRIPT = REPOSITORY / "bench/agent/k6/agent_paths.js"
 LADDER_RUNNER = REPOSITORY / "bench/agent/run_agent_ladder.sh"
+SETUP = REPOSITORY / "bench/agent/setup_agent_bench.sh"
 
 
 def test_agent_paths_define_exact_workload_contract() -> None:
@@ -89,3 +90,40 @@ def test_ladder_rejects_invalid_path_before_external_commands(
 
     source = LADDER_RUNNER.read_text(encoding="utf-8")
     assert source.index('case "$PATH_NAME" in') < source.index('repo_root="')
+
+
+def test_agent_and_cpu_sampling_use_the_same_dedicated_elasticsearch() -> None:
+    setup = SETUP.read_text(encoding="utf-8")
+    runner = LADDER_RUNNER.read_text(encoding="utf-8")
+    endpoint = re.search(r"AGENT_ELASTICSEARCH_URL=http://([^:/]+):9200", setup)
+    assert endpoint is not None
+    container = endpoint.group(1)
+
+    sampled_targets_start = runner.index("sampled_targets=(")
+    sampled_targets_end = runner.index(")\nwhile", sampled_targets_start)
+    sampled_targets = runner[sampled_targets_start:sampled_targets_end]
+    sampled_names_start = runner.index("sampled_names=(")
+    sampled_names_end = runner.index(")\nsampled_targets", sampled_names_start)
+    sampled_names = runner[sampled_names_start:sampled_names_end]
+
+    assert container == "citybuddy-bench-elasticsearch"
+    assert f'.containers["{container}"].id' in sampled_targets
+    assert container in sampled_names
+    assert '"$mysql_container_id"' in sampled_targets
+    assert "citybuddy-mysql-1" not in sampled_targets
+    assert "citybuddy-elasticsearch-1" not in sampled_targets
+    assert "citybuddy-elasticsearch-1" not in sampled_names
+
+
+def test_agent_ladder_uses_and_records_a_digest_pinned_k6_image() -> None:
+    runner = LADDER_RUNNER.read_text(encoding="utf-8")
+    pinned = re.search(
+        r'^K6_IMAGE_REFERENCE="grafana/k6@sha256:([0-9a-f]{64})"$', runner, re.MULTILINE
+    )
+
+    assert pinned is not None
+    assert "grafana/k6:latest" not in runner
+    assert '--entrypoint k6 "$k6_image_id"' in runner
+    assert "k6_image_reference=%s" in runner
+    assert "k6_image_id=%s" in runner
+    assert "k6_version=%s" in runner

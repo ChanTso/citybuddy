@@ -1,5 +1,5 @@
-# Agent image for latency measurement, mirroring infra/knowledge-indexer/Dockerfile. It also
-# runs the model fixture and the fixture builder, which need the same interpreter and libraries.
+# Agent image for latency measurement. It also runs the knowledge bootstrap, model fixture and
+# fixture builder from the same commit-only source archive.
 #
 # The service binds 127.0.0.1, so everything that talks to it joins one network namespace and
 # reaches it over loopback: no proxy hop and no Docker Desktop host-to-VM hop in the measured
@@ -18,6 +18,6 @@ COPY agent-service/src ./agent-service/src
 COPY knowledge-indexer/pyproject.toml ./knowledge-indexer/pyproject.toml
 COPY knowledge-indexer/src ./knowledge-indexer/src
 
-RUN uv sync --locked --no-dev --package citybuddy-agent-service
+RUN uv sync --locked --no-dev --all-packages
 
 ENTRYPOINT ["/opt/citybuddy/.venv/bin/citybuddy-agent"]

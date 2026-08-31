@@ -42,9 +42,9 @@ budget. The values above reflect the fixture's default budget of 16. The four wo
 message, attempt ceiling, visible schemas, model calls, retrieval and commerce work. Their latency
 cannot be compared to attribute memory SQL or tool-schema cost. The workload-contract SQL artifact
 checks the expected route and zero loaded/included history for completed turns after the measured
-window; it is neither a performance result nor a business grader. Defining this contract does not
-make the current baseline ready to run: the separately scoped runtime and provenance prerequisites
-remain incomplete.
+window; it is neither a performance result nor a business grader. Setup and the runner now enforce
+the runtime and provenance prerequisites, but no current four-selector baseline has been run or
+reported.
 
 ## What is and is not being measured
 
@@ -64,7 +64,7 @@ the platform's own cost.
 | Docker Desktop | 14 GB / 8 CPU allocation |
 | Agent | `agent-service` as a container, single uvicorn process, sync endpoints on the AnyIO worker pool |
 | Dependencies | MySQL 8, Elasticsearch 8 + IK, `auth-service` and `commerce-service` as containers |
-| Generator | k6, `grafana/k6:latest` at run time, inside the agent's network namespace |
+| Generator | k6 inside the agent's network namespace; these historical runs recorded `grafana/k6:latest`, so their exact generator digest is unavailable |
 
 ## Method
 
@@ -236,7 +236,7 @@ seconds and the agent burning five to six cores. After, chat at 150 req/s — tw
 holds p99 at 429 ms and sheds the excess. Retrieval degrades the same way rather than collapsing:
 p99 at 60 req/s is 689 ms against 27 s for the old 12 req/s step.
 
-### 2. What a turn costs, and what the ceiling is now
+### 2. What a turn costs, and where observed throughput plateaus
 
 Peak CPU over a whole ladder is dominated by whichever step collapsed, so it says nothing about
 what serving the load costs. The runner reports each step's own window instead
@@ -273,11 +273,11 @@ Pushed past the old range, the agent climbs to a plateau and stops there
 |---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
 | median agent CPU | 12 % | 14 % | 17 % | 23 % | 31 % | 35 % | 61 % | 138 % | 135 % | 133 % |
 
-**Both paths stop at about 1.4 cores of the eight available, and nothing downstream is busy when
-they do.** Median CPU per container inside the collapsed steps, read from the same raw samples
+**Both paths stop at about 1.4 agent cores of the eight available.** Median CPU per container
+inside the collapsed steps, read from the same raw samples
 (`../results/agent_retrieval_ext2_after_cpu.txt`, `agent_chat_ext_after_cpu.txt`):
 
-| Step | agent | MySQL | Elasticsearch | model fixture | commerce |
+| Step | agent | MySQL | ordinary Compose ES (not SUT) | model fixture | commerce |
 |---|---:|---:|---:|---:|---:|
 | retrieval, 75 req/s | **138.0 %** | 38.3 % | 17.8 % | 6.6 % | 0.2 % |
 | retrieval, 90 req/s | **134.6 %** | 38.0 % | 17.4 % | 6.4 % | 0.2 % |
@@ -289,13 +289,15 @@ Each row is the median of the `docker stats` samples inside that step's own twen
 thirty-second window, the same windows the runner prints; a window spanning the gaps between
 steps would mix in the drain and understate every figure.
 
-Throughput stops rising, latency absorbs the rest, and every dependency has capacity to spare.
-Before the change the ceiling was the agent's own wasted CPU; after it, the ceiling is the agent
-process itself.
+Throughput stops rising and latency absorbs the rest while the observed MySQL, model fixture, and
+commerce services remain below one core. The historical runner sampled
+`citybuddy-elasticsearch-1`, but Agent used `citybuddy-bench-elasticsearch`; dedicated benchmark ES
+CPU is therefore unobserved in these runs. The data cannot establish that every dependency had
+spare capacity or isolate the post-change ceiling to the agent process alone.
 
-**What saturates inside the process is not established here, and there are two candidates.** The
+**Two possible contributors inside the process remain readings rather than isolated causes.** The
 first is the interpreter lock: the endpoints are sync handlers on AnyIO's 40-thread pool, and
-forty threads contending for one GIL produce roughly this shape — a little over one core of
+forty threads contending for one GIL could produce roughly this shape — a little over one core of
 aggregate progress, the excess coming from C extensions and syscalls that release it.
 
 The second is the connection pool this change introduced. In the retrieval profile at concurrency
@@ -307,12 +309,13 @@ never binds at 48 against 40 threads, and says nothing about the lock that guard
 
 **Both are readings, not measurements**, and the evidence available here does not separate them —
 the pool lock is where the samples are, but samples pile up at whichever lock is contended and
-that does not make it the cause. Two cheap experiments would: serve the same ladders from N
-uvicorn worker processes and see whether the plateau moves with N, which separates
-process-from-everything-else; and vary the pool between one shared client and one per dependency,
-which separates the pool mutex from the GIL. Neither has been run. What the measurement does
-support is only the outer claim: the ceiling is the agent process, not any dependency it talks
-to.
+that does not make it the cause. Two controlled experiments would help: serve the same ladders
+from different uvicorn worker counts while sampling the dedicated ES, and vary the client layout
+between one shared client and one per dependency. Movement with worker count while the observed
+dependencies retain headroom would support a process-local limit; the client-layout factor would
+separate the shared pool mutex from interpreter contention. Neither has been run. Because the SUT
+Elasticsearch CPU was not sampled, these historical measurements do not separate either internal
+candidate from all retrieval dependencies.
 
 ### 3. Most of the agent's on-CPU time built TLS trust stores for plaintext URLs
 
@@ -427,8 +430,10 @@ the same arrival rate keeps fewer of them open at once
 
 The counters are whole-ladder totals, so they say the limit was crossed but not at which step.
 The outcome columns say that: before, chat's first shedding step is 75 req/s; after, it is 100.
-Retrieval never rejects at all, even at 110 req/s where it is thoroughly collapsed — its ceiling
-is elsewhere, which is what §2 shows.
+Retrieval never rejects at all, even at 110 req/s where it is thoroughly collapsed, so its
+collapse is not explained by the configured MySQL connection limit. Section 2 shows the Agent CPU
+plateau, but the historical samples omitted the dedicated benchmark Elasticsearch CPU and do not
+isolate the remaining cause.
 
 The original control experiment still stands and was not repeated: raising
 `max_connections` to 1000 and rerunning the identical before-ladder
@@ -443,12 +448,13 @@ the cap did not raise what the path served, it converted fast rejections into lo
 alongside §2 — the agent plateaus at about 1.4 cores while MySQL sits at half of one — the
 expectation is that pooling would change how the chat path fails, and would cut the MySQL wire
 traffic that is now the largest single item in the agent's own profile, without moving the rate
-it serves. Retrieval, which reaches its ceiling without ever touching the limit, is the control
-for that reading.
+it serves. Retrieval, which collapses without ever touching the limit, is a control only for the
+narrow claim that this MySQL limit is not the universal cause.
 
-**Nothing in the agent bounds its own concurrency on any path.** What differs is only what
-happens to bite first: a configured database limit on chat, the commerce tool boundary on
-preparation, and on retrieval nothing external at all — just the process running out of itself.
+**Nothing in the agent bounds its own concurrency on any path.** The observed first constraints
+are a configured database limit on chat and the commerce tool boundary on preparation. Retrieval
+collapses without a MySQL connection rejection, but these runs do not distinguish an Agent-local
+limit from the dedicated Elasticsearch dependency they failed to sample.
 
 ## Three things found while building the fixture
 
@@ -585,11 +591,12 @@ transient response into budget exhaustion.
 
 ## What to measure next
 
-The ceiling is now the agent process rather than anything it depends on (§2), and the single
-cheapest experiment that would settle the mechanism is to serve the same ladders from N uvicorn
-worker processes and see whether the plateau at ~1.4 cores moves with N. If it does, the
-structural change is that the agent must not be one process, and MySQL connection pooling becomes
-a follow-on that raises the chat path's own limit rather than the headline.
+The historical data leave Agent-local interpreter/client contention and the unobserved dedicated
+Elasticsearch dependency unresolved. A controlled worker-count experiment that samples the
+dedicated benchmark ES can test whether the ~1.4-agent-core plateau moves with the number of
+uvicorn processes; it cannot be attributed to the process before that result exists. Client
+ownership must be varied separately if the experiment is also meant to distinguish the shared
+HTTP pool mutex from interpreter contention.
 
 ## Reproducing
 
@@ -610,9 +617,34 @@ exceed the ladder's `sum(rate x step_seconds) + 20 per step`.
 
 `LABEL` names the output files. The ladder runner requires every target file to be absent and
 refuses to overwrite an existing label; choose a fresh label for every run. Both the ladder runner
-and the profiler take it. Setup records the full commit used to build the agent image. The runner
-and profiler require the same source-clean checkout and write that SHA into every result they
-produce.
+and the profiler take it. Setup first removes any previous completed environment, builds the agent
+image from a scoped archive of the captured commit, builds the current auth and commerce JARs,
+applies all three canonical migration streams, and bootstraps an isolated, tmpfs-backed
+Elasticsearch node. The bootstrap runs from that immutable agent/indexer image over the benchmark
+Docker network, so ignored host bytecode and editable installs cannot affect it. Bootstrap failure
+stops setup and its raw JSON response is retained.
+
+Every setup has a new nonce. Its persistent `citybuddy-bench-*` containers carry immutable nonce
+and full-commit labels. Setup publishes `bench/.run/agent_setup_environment.json` atomically, then
+publishes `bench/.run/citybuddy_commit` last as the completion marker. The compact environment
+record contains the nonce and commit, setup time window, fixture size, attempt/metrics/trace
+configuration, container and immutable image IDs, labels, start times and restart counts,
+Auth/Commerce host and mounted JAR SHA-256 values and Java runtimes, the measured MySQL container's
+identity and Compose image reference, successful canonical migration commands with their latest
+database versions, and the raw knowledge bootstrap output. It does not reconstruct migration,
+mapping or corpus truth.
+
+Before starting load, the runner and profiler copy that record into a unique ignored staging
+directory, then directly check the source-clean HEAD, completion marker, live record, container
+IDs, image IDs, labels, start times, restart counts, the MySQL boundary, and mounted JAR hashes.
+They repeat the check after the run. A replacement or restart therefore makes the run invalid, and
+no files are published under `bench/results` until the workload and postcondition both succeed.
+Each ladder console records the digest-pinned k6 reference, actual image ID and version. A later
+setup may replace `bench/.run`, while published results retain their own setup record. Failed or
+interrupted setup cleanup removes only containers carrying that attempt's nonce and commit labels;
+it does not delete ordinary Compose containers or volumes. Migrations, fixture resets, permission
+updates and service-identity writes can precede a later failure and are not rolled back, so setup
+must be rerun before any workload.
 
 ### The paired ladders
 
