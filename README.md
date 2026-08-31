@@ -252,8 +252,10 @@ make ci
 
 ## Current scope
 
-CityBuddy has no cloud deployment and no real model-provider access; the model is a deterministic
-fixture, so every latency figure here excludes inference by construction.
+CityBuddy's checked-in demo, integration, and performance paths use deterministic fixtures and
+require no model-provider credentials; their latency figures exclude inference by construction.
+The runtime accepts an external OpenAI-compatible proxy, and StateEval uses that boundary for
+real-model trials.
 
 Cart, checkout, a full storefront, agent workstation, multimodal intake, PII/output-safety
 handling, cross-session memory, and human handoff are out of scope. The payment and refund providers are mocked: a

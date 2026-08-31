@@ -1,0 +1,148 @@
+{
+  "citybuddyCommit": "65bb40e7c04bbdcc0b4be22531bb16040af49274",
+  "metrics": {
+    "agent_outcomes": {
+      "count": 1201,
+      "rate": 10.007060546476978
+    },
+    "data_received": {
+      "count": 465988,
+      "rate": 3882.7394920330676
+    },
+    "data_sent": {
+      "count": 1459297,
+      "rate": 12159.261810401511
+    },
+    "http_req_blocked": {
+      "avg": 0.01783349958368019,
+      "max": 1.168417,
+      "med": 0.00575,
+      "min": 0.00275,
+      "p(90)": 0.013,
+      "p(95)": 0.031792,
+      "p(99)": 0.284334
+    },
+    "http_req_connecting": {
+      "avg": 0.007634748542880931,
+      "max": 1.077625,
+      "med": 0,
+      "min": 0,
+      "p(90)": 0,
+      "p(95)": 0,
+      "p(99)": 0.195417
+    },
+    "http_req_duration": {
+      "avg": 14.480846995836806,
+      "max": 41.55625,
+      "med": 14.099709,
+      "min": 7.286792,
+      "p(90)": 19.403667,
+      "p(95)": 20.983584,
+      "p(99)": 24.525334
+    },
+    "http_req_duration{expected_response:true}": {
+      "avg": 14.480846995836806,
+      "max": 41.55625,
+      "med": 14.099709,
+      "min": 7.286792,
+      "p(90)": 19.403667,
+      "p(95)": 20.983584,
+      "p(99)": 24.525334
+    },
+    "http_req_failed": {
+      "fails": 1201,
+      "passes": 0,
+      "value": 0
+    },
+    "http_req_receiving": {
+      "avg": 0.06902976935886775,
+      "max": 0.204583,
+      "med": 0.066167,
+      "min": 0.034084,
+      "p(90)": 0.092959,
+      "p(95)": 0.10475,
+      "p(99)": 0.143208
+    },
+    "http_req_sending": {
+      "avg": 0.036192666111573644,
+      "max": 0.2665,
+      "med": 0.029209,
+      "min": 0.012875,
+      "p(90)": 0.058042,
+      "p(95)": 0.072333,
+      "p(99)": 0.115584
+    },
+    "http_req_tls_handshaking": {
+      "avg": 0,
+      "max": 0,
+      "med": 0,
+      "min": 0,
+      "p(90)": 0,
+      "p(95)": 0,
+      "p(99)": 0
+    },
+    "http_req_waiting": {
+      "avg": 14.375624560366346,
+      "max": 41.456,
+      "med": 13.993375,
+      "min": 7.228792,
+      "p(90)": 19.287583,
+      "p(95)": 20.857584,
+      "p(99)": 24.319042
+    },
+    "http_reqs": {
+      "count": 1201,
+      "rate": 10.007060546476978
+    },
+    "iteration_duration": {
+      "avg": 14.803679718567842,
+      "max": 42.014917,
+      "med": 14.383083,
+      "min": 7.447042,
+      "p(90)": 19.901209,
+      "p(95)": 21.3725,
+      "p(99)": 25.017709
+    },
+    "iterations": {
+      "count": 1201,
+      "rate": 10.007060546476978
+    },
+    "pool_exhausted": {
+      "count": 0,
+      "rate": 0,
+      "thresholds": {
+        "count == 0": false
+      }
+    },
+    "vus": {
+      "max": 0,
+      "min": 0,
+      "value": 0
+    },
+    "vus_max": {
+      "max": 50,
+      "min": 50,
+      "value": 50
+    }
+  },
+  "root_group": {
+    "checks": {},
+    "groups": {},
+    "id": "d41d8cd98f00b204e9800998ecf8427e",
+    "name": "",
+    "path": ""
+  },
+  "warmHistory": {
+    "case": "one-short",
+    "durationSeconds": 120,
+    "k6ImageId": "sha256:5221b620a4f874faff6e32ba597aa667c058391fe4898b1c6f6377f062c6cdec",
+    "k6ImageReference": "grafana/k6@sha256:5221b620a4f874faff6e32ba597aa667c058391fe4898b1c6f6377f062c6cdec",
+    "k6Version": "k6 v2.2.0 (commit/00a9a1b7f5, go1.26.5, linux/arm64)",
+    "ratePerSecond": 10,
+    "runWindowUtc": {
+      "completedAt": "2026-08-31T13:53:50.922406797Z",
+      "startedAt": "2026-08-31T13:51:47.818811795Z"
+    },
+    "setupNonce": "0d7b1a7962efd1abf4c8dd0984da8c43"
+  }
+}

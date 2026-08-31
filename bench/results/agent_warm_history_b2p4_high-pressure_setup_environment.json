@@ -1,0 +1,136 @@
+{
+  "citybuddyCommit": "65bb40e7c04bbdcc0b4be22531bb16040af49274",
+  "configuration": {
+    "agentAttemptBudget": 16,
+    "agentBenchUsers": 1300,
+    "metricsEnabled": true,
+    "traceExportUrl": ""
+  },
+  "containers": {
+    "citybuddy-bench-agent": {
+      "id": "ba349d089a03df6a4aa1a3873e83a669630f8c952ded338151f9543a9fe92654",
+      "imageId": "sha256:0019c1fdb674b21f15066d19fa09fdbe189aecf9a83ec5954f617eeb662d0bdd",
+      "labels": {
+        "citybuddy.bench.citybuddy-commit": "65bb40e7c04bbdcc0b4be22531bb16040af49274",
+        "citybuddy.bench.setup-nonce": "8888c0541f3655e0f1d677cadbb14d18"
+      },
+      "restartCount": 0,
+      "startedAt": "2026-08-31T14:20:13.240105918Z"
+    },
+    "citybuddy-bench-auth": {
+      "id": "15a1214b08cfa39682e201187c6f4c5a30d80b6b98df9725a1fe1a13e73f1170",
+      "imageId": "sha256:20e7f7288e1c18eebe8f06a442c9f7183342d9b022d3b9a9677cae2b558ddddd",
+      "labels": {
+        "citybuddy.bench.citybuddy-commit": "65bb40e7c04bbdcc0b4be22531bb16040af49274",
+        "citybuddy.bench.setup-nonce": "8888c0541f3655e0f1d677cadbb14d18"
+      },
+      "restartCount": 0,
+      "startedAt": "2026-08-31T14:20:08.892871097Z"
+    },
+    "citybuddy-bench-commerce": {
+      "id": "498b2d870e779e42e30c4ddb7b84de1e94f608e8b2e44c2da02bdf8074243452",
+      "imageId": "sha256:20e7f7288e1c18eebe8f06a442c9f7183342d9b022d3b9a9677cae2b558ddddd",
+      "labels": {
+        "citybuddy.bench.citybuddy-commit": "65bb40e7c04bbdcc0b4be22531bb16040af49274",
+        "citybuddy.bench.setup-nonce": "8888c0541f3655e0f1d677cadbb14d18"
+      },
+      "restartCount": 0,
+      "startedAt": "2026-08-31T14:20:10.382131125Z"
+    },
+    "citybuddy-bench-elasticsearch": {
+      "id": "037186adb99bc2a02eb83bf164604f339c98428ea0ebfcfd83d3f370e100de02",
+      "imageId": "sha256:87b198dcc5ac75d61dcb873db4869ed0322a903e66bd3459c5cd361567872056",
+      "labels": {
+        "citybuddy.bench.citybuddy-commit": "65bb40e7c04bbdcc0b4be22531bb16040af49274",
+        "citybuddy.bench.setup-nonce": "8888c0541f3655e0f1d677cadbb14d18"
+      },
+      "restartCount": 0,
+      "startedAt": "2026-08-31T14:19:55.557992549Z"
+    },
+    "citybuddy-bench-model": {
+      "id": "a4c34b4089d5e3ab27c90784e7f98d8ca5b5711b4c323b6e3ce3333fda6e7775",
+      "imageId": "sha256:0019c1fdb674b21f15066d19fa09fdbe189aecf9a83ec5954f617eeb662d0bdd",
+      "labels": {
+        "citybuddy.bench.citybuddy-commit": "65bb40e7c04bbdcc0b4be22531bb16040af49274",
+        "citybuddy.bench.setup-nonce": "8888c0541f3655e0f1d677cadbb14d18"
+      },
+      "restartCount": 0,
+      "startedAt": "2026-08-31T14:20:13.088631543Z"
+    },
+    "citybuddy-bench-net": {
+      "id": "b49c06d23abf4d7280eea451382b07e5895edab28c70891a3008e03d30e65d74",
+      "imageId": "sha256:d9e853e87e55526f6b2917df91a2115c36dd7c696a35be12163d44e6e2a4b6bc",
+      "labels": {
+        "citybuddy.bench.citybuddy-commit": "65bb40e7c04bbdcc0b4be22531bb16040af49274",
+        "citybuddy.bench.setup-nonce": "8888c0541f3655e0f1d677cadbb14d18"
+      },
+      "restartCount": 0,
+      "startedAt": "2026-08-31T14:20:12.933304501Z"
+    }
+  },
+  "formatVersion": "citybuddy-agent-setup-environment-v1",
+  "java": {
+    "authService": {
+      "artifact": "auth-service/target/auth-service-0.0.1-SNAPSHOT.jar",
+      "hostJarSha256": "f6cb96f42a7d968b083f81f64f9bb926a535969dd537a7170197f009c38081fc",
+      "javaRuntimeVersion": "21.0.8+9-LTS",
+      "mountedContainer": "citybuddy-bench-auth",
+      "mountedJar": "/opt/citybuddy/auth.jar",
+      "mountedJarSha256": "f6cb96f42a7d968b083f81f64f9bb926a535969dd537a7170197f009c38081fc"
+    },
+    "commerceService": {
+      "artifact": "commerce-service/target/commerce-service-0.0.1-SNAPSHOT.jar",
+      "hostJarSha256": "065980fc98c6cfd512b505b08ce971d0da09b021f7f66d31468a3c91959a2bff",
+      "javaRuntimeVersion": "21.0.8+9-LTS",
+      "mountedContainer": "citybuddy-bench-commerce",
+      "mountedJar": "/opt/citybuddy/commerce.jar",
+      "mountedJarSha256": "065980fc98c6cfd512b505b08ce971d0da09b021f7f66d31468a3c91959a2bff"
+    }
+  },
+  "knowledgeBootstrapRawJson": "{\"alias\":\"knowledge_docs_read\",\"documentCount\":4,\"indexVersion\":\"knowledge_docs_v1\"}\n",
+  "migrationCommands": [
+    {
+      "command": "make ENV_FILE=.env COMPOSE_PROJECT_NAME=citybuddy grant-access",
+      "status": "succeeded"
+    },
+    {
+      "command": "make ENV_FILE=.env COMPOSE_PROJECT_NAME=citybuddy migrate-auth",
+      "status": "succeeded"
+    },
+    {
+      "command": "make ENV_FILE=.env COMPOSE_PROJECT_NAME=citybuddy migrate-commerce",
+      "status": "succeeded"
+    },
+    {
+      "command": "make ENV_FILE=.env COMPOSE_PROJECT_NAME=citybuddy migrate-agent",
+      "status": "succeeded"
+    },
+    {
+      "command": "make ENV_FILE=.env COMPOSE_PROJECT_NAME=citybuddy grant-access",
+      "status": "succeeded"
+    }
+  ],
+  "mysql": {
+    "agent": {
+      "latestVersion": "009"
+    },
+    "auth": {
+      "latestVersion": "003"
+    },
+    "commerce": {
+      "latestVersion": "017"
+    },
+    "container": {
+      "configuredImage": "mysql:8.4.10@sha256:c831a0f11348d402b43d77453e17d770be2eef356615a2823fe0f5a0d6c8b9af",
+      "id": "263629a38be3ff120ae25f9a6ab3591f2e061bce905e58b8246e3799e0f4676b",
+      "imageId": "sha256:c831a0f11348d402b43d77453e17d770be2eef356615a2823fe0f5a0d6c8b9af",
+      "restartCount": 0,
+      "startedAt": "2026-08-31T13:36:46.417488836Z"
+    }
+  },
+  "setupNonce": "8888c0541f3655e0f1d677cadbb14d18",
+  "setupWindowUtc": {
+    "completedAt": "2026-08-31T14:20:26Z",
+    "startedAt": "2026-08-31T14:19:24Z"
+  }
+}

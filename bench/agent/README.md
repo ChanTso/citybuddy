@@ -1,10 +1,11 @@
 # Agent workload latency
 
 This document reports the current four-path empty-history baseline at
-`bd646937d0c7f45c107ce2283a244d1b4fc8d952` and preserves the historical three-path measurement of
-a plain answer, an answer grounded in retrieved knowledge, and a refund preparation that writes a
-durable pending action. Every measured result reported here was produced by the scripts in this
-directory against the real local topology, and the raw tool output is in `../results/`.
+`bd646937d0c7f45c107ce2283a244d1b4fc8d952`, the formal warm-history comparison at
+`65bb40e7c04bbdcc0b4be22531bb16040af49274`, and the historical three-path measurement of a plain
+answer, an answer grounded in retrieved knowledge, and a refund preparation that writes a durable
+pending action. Every measured result reported here was produced by the scripts in this directory
+against the real local topology, and the raw tool output is in `../results/`.
 
 The first measurement found that most of the agent's CPU went on work it threw away. This
 document now records that measurement, the change it led to, and the paired re-measurement that
@@ -12,9 +13,10 @@ says what the change was worth.
 
 ## Version boundary
 
-Every current raw and result artifact records the measured full commit
-`bd646937d0c7f45c107ce2283a244d1b4fc8d952`. Repository history reconstructs the earlier paired
-baseline boundary as
+The current four-path raw and result artifacts record the measured full commit
+`bd646937d0c7f45c107ce2283a244d1b4fc8d952`. The 16 warm-history run bundles and their aggregate
+record the measured full commit `65bb40e7c04bbdcc0b4be22531bb16040af49274`. Repository history
+reconstructs the earlier paired baseline boundary as
 `272eecdfb79b73811bc6fff677360a0d79a07991` and the post-client-reuse boundary as
 `6acf856716ff0b926bb147c0e1d99614a8d9e9c8`. The artifacts were committed immediately after the
 passes but do not contain those SHAs, so they cannot independently prove the checkout that
@@ -62,12 +64,15 @@ serialization. It cannot be attributed to prompt packing alone or to the history
 
 The deterministic cases are:
 
-| Case | Persisted completed history | Bounded candidate/load boundary | Expected context behaviour |
-|---|---:|---|---|
-| `empty` | 0 pairs | 0 candidates, 0 loaded | Empty control. |
-| `one-short` | 1 short neutral pair | 1 candidate, 1 loaded | The pair remains included. |
-| `max-count` | 17 short neutral pairs | 17 candidates, newest 16 loaded | `olderTurnsAvailable=true`; all 16 loaded pairs remain included. |
-| `high-pressure` | 17 long neutral pairs | 17 candidates, newest 16 loaded | `olderTurnsAvailable=true`; the existing high-watermark policy trims oldest whole pairs. |
+| Case | Persisted / candidate / loaded / included pairs | Older | Watermark | Candidate / included tokens | Omitted loaded pairs | Trim action |
+|---|---|---|---|---|---:|---|
+| `empty` | 0 / 0 / 0 / 0 | false | low | 0 / 0 | 0 | none |
+| `one-short` | 1 / 1 / 1 / 1 | false | low | 48 / 48 | 0 | none |
+| `max-count` | 17 / 17 / 16 / 16 | true | low | 768 / 768 | 0 | none |
+| `high-pressure` | 17 / 17 / 16 / 1 | true | high | 68,224 / 4,264 | 15 | omit oldest whole pairs |
+
+All four cases use the `utf8-bytes-v1` estimator and a 6,144-token budget. The result contract
+checks these values independently for every completed turn in every run.
 
 `build_warm_history_fixture.py` constructs the selected history before the measured window. It does
 not issue warm-up chat requests. `k6/warm_history.js` then uses one fixed-arrival-rate scenario and
@@ -84,15 +89,95 @@ and a fresh output label explicitly:
 
 The runner accepts only `empty`, `one-short`, `max-count`, or `high-pressure`, refuses an existing
 output label, and drives `summarize_warm_history.py` only after k6 and the workload contract succeed.
-The future result bundle records the full CityBuddy commit, case, persisted/candidate/loaded/included
+Each result bundle records the full CityBuddy commit, case, persisted/candidate/loaded/included
 counts, `olderTurnsAvailable`, token estimate and budget, watermark and trimming evidence, final tool
 profile, UTC setup/run windows, and nominal/completed/dropped/error counts. It uses the same
 source-clean, setup nonce, container/image/JAR, completion-marker, pre/post runtime gate, staging, and
 publication boundaries as the four-path runner. A failed or interrupted run remains unpublished in
 ignored `bench/.run/` staging, and no existing result is overwritten.
 
-This change adds only the reproducible fixture and runner. It reports and publishes no warm-history
-performance result.
+### Formal warm-history result at 65bb40e7
+
+The formal comparison ran from `2026-08-31T13:41:19Z` through
+`2026-08-31T15:01:38.261247554Z` at full commit
+`65bb40e7c04bbdcc0b4be22531bb16040af49274`. The
+[aggregate result](../results/agent_warm_history_65bb40e_comparison.json) preserves every run,
+artifact path, setup and run window, count, context value, block-relative delta, and four-block
+summary.
+
+This is a **fixed read path, fixture-warm state, single-host local topology end-to-end increment
+from non-empty history**. The increment includes the MySQL history read and row decoding,
+durable-history validation, token estimation and whole-pair trimming, prompt construction, and
+request serialization. Fixture construction and base setup are outside the measured window, and
+the deterministic fake LiteLLM fixture holds inference at zero. Each run used a fresh completed
+setup and a quiet host; the harness issued no warm-up chat request.
+
+Each of the 16 runs used a constant arrival rate of 10 requests/s for 120 seconds: 1,200 nominal
+requests, 1,220 target sessions, 1,300 benchmark users, and attempt budget 16. This 10 requests/s
+rate is the **measurement load, not a capacity claim**. The host was a MacBook Pro `Mac16,1` with an
+Apple M4 (10 cores, 24 GB), macOS 26.5 (`25F71`), and arm64. Docker Desktop 29.5.3 supplied 8 CPUs,
+14,638,391,296 bytes of memory, aarch64, and the overlayfs storage driver.
+
+The fixed Williams-balanced schedule was:
+
+| Block | Case order | Output labels |
+|---:|---|---|
+| 1 | `empty` → `one-short` → `high-pressure` → `max-count` | `b1p1_empty`, `b1p2_one-short`, `b1p3_high-pressure`, `b1p4_max-count` |
+| 2 | `one-short` → `max-count` → `empty` → `high-pressure` | `b2p1_one-short`, `b2p2_max-count`, `b2p3_empty`, `b2p4_high-pressure` |
+| 3 | `max-count` → `high-pressure` → `one-short` → `empty` | `b3p1_max-count`, `b3p2_high-pressure`, `b3p3_one-short`, `b3p4_empty` |
+| 4 | `high-pressure` → `empty` → `max-count` → `one-short` | `b4p1_high-pressure`, `b4p2_empty`, `b4p3_max-count`, `b4p4_one-short` |
+
+All latency values below are milliseconds. Across the 16 runs, 19,211 requests completed against
+19,200 nominally offered, with zero dropped iterations, HTTP errors, failed turns, or processing
+turns. For every run, iteration, route-boundary, completion, distinct-session, matching-profile,
+matching-context, context-event, and routing-event counts agreed; the maximum was one formal request
+per session. The actual profile was always `read`, and every context array matched its case in the
+contract table above.
+
+| Block | Pos. | Case | Completed | p50 | p95 | p99 | max |
+|---:|---:|---|---:|---:|---:|---:|---:|
+| 1 | 1 | `empty` | 1201 | 14.108 | 19.862 | 23.504 | 54.700 |
+| 1 | 2 | `one-short` | 1201 | 14.100 | 20.984 | 24.525 | 41.556 |
+| 1 | 3 | `high-pressure` | 1200 | 15.767 | 22.066 | 30.522 | 53.856 |
+| 1 | 4 | `max-count` | 1200 | 13.314 | 20.618 | 23.579 | 49.977 |
+| 2 | 1 | `one-short` | 1200 | 12.977 | 20.543 | 24.202 | 36.507 |
+| 2 | 2 | `max-count` | 1200 | 13.510 | 21.024 | 24.556 | 36.227 |
+| 2 | 3 | `empty` | 1201 | 14.378 | 20.112 | 24.696 | 55.164 |
+| 2 | 4 | `high-pressure` | 1201 | 14.812 | 21.069 | 27.367 | 57.987 |
+| 3 | 1 | `max-count` | 1201 | 13.912 | 20.721 | 24.734 | 39.670 |
+| 3 | 2 | `high-pressure` | 1200 | 15.143 | 21.919 | 27.742 | 45.913 |
+| 3 | 3 | `one-short` | 1201 | 14.292 | 20.495 | 24.220 | 36.977 |
+| 3 | 4 | `empty` | 1201 | 13.339 | 19.888 | 23.503 | 38.868 |
+| 4 | 1 | `high-pressure` | 1201 | 15.431 | 21.830 | 26.666 | 59.782 |
+| 4 | 2 | `empty` | 1201 | 13.667 | 20.925 | 24.358 | 38.753 |
+| 4 | 3 | `max-count` | 1201 | 13.950 | 20.520 | 24.409 | 36.974 |
+| 4 | 4 | `one-short` | 1201 | 13.646 | 19.894 | 24.539 | 37.300 |
+
+The signed deltas below are each case minus the `empty` result in the same block. Positive values
+are slower than empty. The median is the midpoint of the four block deltas, not a percentile pooled
+across individual requests.
+
+| Case | Metric | B1 | B2 | B3 | B4 | Median | Range |
+|---|---|---:|---:|---:|---:|---:|---:|
+| `one-short` | p50 | -0.008 | -1.400 | 0.953 | -0.021 | -0.015 | -1.400 to 0.953 |
+| `one-short` | p95 | 1.122 | 0.431 | 0.608 | -1.032 | 0.519 | -1.032 to 1.122 |
+| `one-short` | p99 | 1.022 | -0.493 | 0.716 | 0.181 | 0.449 | -0.493 to 1.022 |
+| `one-short` | max | -13.143 | -18.657 | -1.891 | -1.453 | -7.517 | -18.657 to -1.453 |
+| `max-count` | p50 | -0.794 | -0.867 | 0.573 | 0.283 | -0.256 | -0.867 to 0.573 |
+| `max-count` | p95 | 0.757 | 0.912 | 0.833 | -0.406 | 0.795 | -0.406 to 0.912 |
+| `max-count` | p99 | 0.076 | -0.140 | 1.230 | 0.051 | 0.063 | -0.140 to 1.230 |
+| `max-count` | max | -4.723 | -18.937 | 0.802 | -1.780 | -3.251 | -18.937 to 0.802 |
+| `high-pressure` | p50 | 1.659 | 0.434 | 1.804 | 1.764 | 1.711 | 0.434 to 1.804 |
+| `high-pressure` | p95 | 2.204 | 0.957 | 2.031 | 0.905 | 1.494 | 0.905 to 2.204 |
+| `high-pressure` | p99 | 7.019 | 2.672 | 4.238 | 2.308 | 3.455 | 2.308 to 7.019 |
+| `high-pressure` | max | -0.844 | 2.823 | 7.044 | 21.028 | 4.934 | -0.844 to 21.028 |
+
+The central-percentile ranges for `one-short` and `max-count` cross zero and did not show a
+consistent increase across the four blocks. `high-pressure` is consistently slower at p50, p95,
+and p99: the four-block median increments are 1.711 ms, 1.494 ms, and 3.455 ms respectively, and
+none of those ranges crosses zero. Its maximum-latency range does cross zero, so the experiment does
+not establish a degradation of the maximum. Maximums are retained as requested but are not used to
+infer a speedup from the lower `one-short` observations.
 
 ## What is and is not being measured
 
@@ -108,7 +193,8 @@ the platform's own cost.
 
 | | |
 |---|---|
-| Current source | `bd646937d0c7f45c107ce2283a244d1b4fc8d952`, measured 2026-08-31 UTC |
+| Current four-path source | `bd646937d0c7f45c107ce2283a244d1b4fc8d952`, measured 2026-08-31 UTC |
+| Warm-history source | `65bb40e7c04bbdcc0b4be22531bb16040af49274`, measured 2026-08-31 UTC |
 | Host | MacBook Pro M4, 10 cores, 24 GB |
 | Docker Desktop | 13.6 GiB / 8 CPU allocation, aarch64, server 29.5.3 |
 | Agent | `agent-service` as a container, single uvicorn process, sync endpoints on the AnyIO worker pool |

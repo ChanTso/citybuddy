@@ -1,0 +1,118 @@
+{
+  "baseSetupWindowUtc": {
+    "completedAt": "2026-08-31T13:55:20Z",
+    "startedAt": "2026-08-31T13:54:04Z"
+  },
+  "case": "high-pressure",
+  "citybuddyCommit": "65bb40e7c04bbdcc0b4be22531bb16040af49274",
+  "configuration": {
+    "arrivalModel": "constant-arrival-rate",
+    "durationSeconds": 120,
+    "gracefulStopSeconds": 45,
+    "k6ImageId": "sha256:5221b620a4f874faff6e32ba597aa667c058391fe4898b1c6f6377f062c6cdec",
+    "k6ImageReference": "grafana/k6@sha256:5221b620a4f874faff6e32ba597aa667c058391fe4898b1c6f6377f062c6cdec",
+    "k6Version": "k6 v2.2.0 (commit/00a9a1b7f5, go1.26.5, linux/arm64)",
+    "ratePerSecond": 10,
+    "targetSessionCount": 1220
+  },
+  "counts": {
+    "completed": 1200,
+    "completedTurns": 1200,
+    "failedTurns": 0,
+    "httpErrors": 0,
+    "k6Dropped": 0,
+    "nominalOffered": 1200,
+    "processingTurns": 0
+  },
+  "fixtureSetupWindowUtc": {
+    "completedAt": "2026-08-31T13:58:34.521693Z",
+    "startedAt": "2026-08-31T13:58:30.944550Z"
+  },
+  "formatVersion": "citybuddy-agent-warm-history-result-v1",
+  "history": {
+    "candidateTokens": 68224,
+    "candidateTurnCount": 17,
+    "includedTokens": 4264,
+    "includedTurnCount": 1,
+    "loadedTurnCount": 16,
+    "olderTurnsAvailable": true,
+    "omittedLoadedTurnCount": 15,
+    "persistedTurnCount": 17,
+    "tokenBudget": 6144,
+    "tokenEstimator": "utf8-bytes-v1",
+    "tokenWatermark": "high",
+    "trimAction": "omit-oldest-whole-turns",
+    "trimmed": true
+  },
+  "label": "b1p3_high-pressure",
+  "rawArtifacts": [
+    "bench/results/agent_warm_history_b1p3_high-pressure_summary.json",
+    "bench/results/agent_warm_history_b1p3_high-pressure_console.txt",
+    "bench/results/agent_warm_history_b1p3_high-pressure_points.json",
+    "bench/results/agent_warm_history_b1p3_high-pressure_contract.tsv",
+    "bench/results/agent_warm_history_b1p3_high-pressure_fixture.json",
+    "bench/results/agent_warm_history_b1p3_high-pressure_setup_environment.json"
+  ],
+  "routeContextEvidence": {
+    "actualToolProfiles": [
+      "read"
+    ],
+    "artifact": "bench/results/agent_warm_history_b1p3_high-pressure_contract.tsv",
+    "boundary_turns": 1200,
+    "candidateTokens": [
+      68224
+    ],
+    "candidateTurnCounts": [
+      17
+    ],
+    "completed_turns": 1200,
+    "context_events": 1200,
+    "contractStatus": "pass",
+    "distinct_sessions": 1200,
+    "evidenceRole": "workload and context contract only, not performance attribution",
+    "failed_turns": 0,
+    "includedTokens": [
+      4264
+    ],
+    "includedTurnCounts": [
+      1
+    ],
+    "loadedTurnCounts": [
+      16
+    ],
+    "matching_context_turns": 1200,
+    "matching_profile_turns": 1200,
+    "max_requests_per_session": 1,
+    "olderTurnsAvailable": [
+      true
+    ],
+    "omittedLoadedTurnCounts": [
+      15
+    ],
+    "persistedTurnCounts": [
+      17
+    ],
+    "processing_turns": 0,
+    "routing_events": 1200,
+    "tokenBudgets": [
+      6144
+    ],
+    "tokenWatermarks": [
+      "high"
+    ]
+  },
+  "runWindowUtc": {
+    "completedAt": "2026-08-31T14:00:37.071048721Z",
+    "startedAt": "2026-08-31T13:58:35.044480803Z"
+  },
+  "setupNonce": "ed6c76c60d839a511e2152e5d9ffa859",
+  "setupWindowUtc": {
+    "completedAt": "2026-08-31T13:58:34.521693Z",
+    "startedAt": "2026-08-31T13:54:04Z"
+  },
+  "workload": {
+    "exactMessage": "hello, can you tell me about delivery times",
+    "expectedToolProfile": "read",
+    "formalRequestsPerSession": 1
+  }
+}

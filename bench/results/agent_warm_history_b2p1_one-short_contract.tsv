@@ -1,0 +1,9 @@
+citybuddy_commit=65bb40e7c04bbdcc0b4be22531bb16040af49274
+setup_nonce=3f079d052da2eec027983f84802ecce3
+case=one-short
+correlation_boundary=b2p1_one-short-warm-one-short-
+expected_tool_profile=read
+evidence_role=workload_and_context_contract_only_not_performance_attribution
+boundary_turns	completed_turns	failed_turns	processing_turns	distinct_sessions	max_requests_per_session	matching_profile_turns	matching_context_turns	routing_events	context_events	actual_tool_profiles	persisted_turn_counts	candidate_turn_counts	loaded_turn_counts	included_turn_counts	older_turn_values	token_watermarks	candidate_token_counts	included_token_counts	token_budgets	omitted_loaded_turn_counts
+1200	1200	0	0	1200	1	1200	1200	1200	1200	read	1	1	1	1	false	low	48	48	6144	0
+contract_status=pass
