@@ -236,7 +236,7 @@ seconds and the agent burning five to six cores. After, chat at 150 req/s — tw
 holds p99 at 429 ms and sheds the excess. Retrieval degrades the same way rather than collapsing:
 p99 at 60 req/s is 689 ms against 27 s for the old 12 req/s step.
 
-### 2. What a turn costs, and what the ceiling is now
+### 2. What a turn costs, and where observed throughput plateaus
 
 Peak CPU over a whole ladder is dominated by whichever step collapsed, so it says nothing about
 what serving the load costs. The runner reports each step's own window instead
@@ -309,12 +309,13 @@ never binds at 48 against 40 threads, and says nothing about the lock that guard
 
 **Both are readings, not measurements**, and the evidence available here does not separate them —
 the pool lock is where the samples are, but samples pile up at whichever lock is contended and
-that does not make it the cause. Two cheap experiments would: serve the same ladders from N
-uvicorn worker processes and see whether the plateau moves with N, which separates
-process-from-everything-else; and vary the pool between one shared client and one per dependency,
-which separates the pool mutex from the GIL. Neither has been run. Because the SUT Elasticsearch
-CPU was not sampled, these historical measurements do not separate either internal candidate
-from all retrieval dependencies.
+that does not make it the cause. Two controlled experiments would help: serve the same ladders
+from different uvicorn worker counts while sampling the dedicated ES, and vary the client layout
+between one shared client and one per dependency. Movement with worker count while the observed
+dependencies retain headroom would support a process-local limit; the client-layout factor would
+separate the shared pool mutex from interpreter contention. Neither has been run. Because the SUT
+Elasticsearch CPU was not sampled, these historical measurements do not separate either internal
+candidate from all retrieval dependencies.
 
 ### 3. Most of the agent's on-CPU time built TLS trust stores for plaintext URLs
 
@@ -429,8 +430,10 @@ the same arrival rate keeps fewer of them open at once
 
 The counters are whole-ladder totals, so they say the limit was crossed but not at which step.
 The outcome columns say that: before, chat's first shedding step is 75 req/s; after, it is 100.
-Retrieval never rejects at all, even at 110 req/s where it is thoroughly collapsed — its ceiling
-is elsewhere, which is what §2 shows.
+Retrieval never rejects at all, even at 110 req/s where it is thoroughly collapsed, so its
+collapse is not explained by the configured MySQL connection limit. Section 2 shows the Agent CPU
+plateau, but the historical samples omitted the dedicated benchmark Elasticsearch CPU and do not
+isolate the remaining cause.
 
 The original control experiment still stands and was not repeated: raising
 `max_connections` to 1000 and rerunning the identical before-ladder
@@ -445,12 +448,13 @@ the cap did not raise what the path served, it converted fast rejections into lo
 alongside §2 — the agent plateaus at about 1.4 cores while MySQL sits at half of one — the
 expectation is that pooling would change how the chat path fails, and would cut the MySQL wire
 traffic that is now the largest single item in the agent's own profile, without moving the rate
-it serves. Retrieval, which reaches its ceiling without ever touching the limit, is the control
-for that reading.
+it serves. Retrieval, which collapses without ever touching the limit, is a control only for the
+narrow claim that this MySQL limit is not the universal cause.
 
-**Nothing in the agent bounds its own concurrency on any path.** What differs is only what
-happens to bite first: a configured database limit on chat, the commerce tool boundary on
-preparation, and on retrieval nothing external at all — just the process running out of itself.
+**Nothing in the agent bounds its own concurrency on any path.** The observed first constraints
+are a configured database limit on chat and the commerce tool boundary on preparation. Retrieval
+collapses without a MySQL connection rejection, but these runs do not distinguish an Agent-local
+limit from the dedicated Elasticsearch dependency they failed to sample.
 
 ## Three things found while building the fixture
 
@@ -587,11 +591,12 @@ transient response into budget exhaustion.
 
 ## What to measure next
 
-The ceiling is now the agent process rather than anything it depends on (§2), and the single
-cheapest experiment that would settle the mechanism is to serve the same ladders from N uvicorn
-worker processes and see whether the plateau at ~1.4 cores moves with N. If it does, the
-structural change is that the agent must not be one process, and MySQL connection pooling becomes
-a follow-on that raises the chat path's own limit rather than the headline.
+The historical data leave Agent-local interpreter/client contention and the unobserved dedicated
+Elasticsearch dependency unresolved. A controlled worker-count experiment that samples the
+dedicated benchmark ES can test whether the ~1.4-agent-core plateau moves with the number of
+uvicorn processes; it cannot be attributed to the process before that result exists. Client
+ownership must be varied separately if the experiment is also meant to distinguish the shared
+HTTP pool mutex from interpreter contention.
 
 ## Reproducing
 
