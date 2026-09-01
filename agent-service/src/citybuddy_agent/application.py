@@ -121,6 +121,7 @@ class AgentSettings(BaseModel):
     environment: str = "development"
     identity_enabled: bool = False
     evaluation_enabled: bool = False
+    evaluation_session_propagation_enabled: bool = True
     evaluation_client_id: str = ""
     evaluation_client_secret: str = ""
     issuer: str = ""
@@ -684,6 +685,10 @@ def _create_app(
             ),
             model_client,
             resolved_tools,
+            evaluation_profile_enabled=resolved.evaluation_enabled,
+            evaluation_session_propagation_enabled=(
+                resolved.evaluation_session_propagation_enabled
+            ),
         )
         resolved_confirmer: ActionConfirmer | None = confirmer or resolved_tools
     else:

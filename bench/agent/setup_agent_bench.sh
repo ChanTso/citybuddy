@@ -749,6 +749,7 @@ agent_container_id="$(docker run --detach --name citybuddy-bench-agent \
   --env MYSQL_AGENT_APP_PASSWORD="$agent_pw" \
   --env CITYBUDDY_METRICS_ENABLED=true \
   --env CITYBUDDY_TRACE_EXPORT_URL= \
+  --env AGENT_EVALUATION_SESSION_PROPAGATION_ENABLED=true \
   --env AGENT_WORKERS="$AGENT_WORKERS" \
   --env AGENT_HTTP_CLIENT_LAYOUT="$AGENT_HTTP_CLIENT_LAYOUT" \
   --env AGENT_ATTEMPT_BUDGET="$AGENT_ATTEMPT_BUDGET" \
@@ -881,6 +882,8 @@ actual_http_client_layout="$(container_environment_value \
   citybuddy-bench-agent AGENT_HTTP_CLIENT_LAYOUT)"
 actual_trace_export_url="$(container_environment_value \
   citybuddy-bench-agent CITYBUDDY_TRACE_EXPORT_URL)"
+actual_evaluation_session_propagation_enabled="$(container_environment_value \
+  citybuddy-bench-agent AGENT_EVALUATION_SESSION_PROPAGATION_ENABLED)"
 actual_model_proxy_url="$(container_environment_value \
   citybuddy-bench-agent AGENT_MODEL_PROXY_URL)"
 actual_identity_jwks_url="$(container_environment_value \
@@ -896,6 +899,7 @@ actual_elasticsearch_url="$(container_environment_value \
 if [ "$actual_agent_workers" != "$AGENT_WORKERS" ] \
   || [ "$actual_http_client_layout" != "$AGENT_HTTP_CLIENT_LAYOUT" ] \
   || [ -n "$actual_trace_export_url" ] \
+  || [ "$actual_evaluation_session_propagation_enabled" != true ] \
   || [ "$actual_model_proxy_url" != http://127.0.0.1:8000 ] \
   || [ "$actual_identity_jwks_url" != http://citybuddy-bench-auth:8080/auth/jwks ] \
   || [ "$actual_identity_exchange_url" != http://citybuddy-bench-auth:8080/auth/token/exchange ] \
@@ -970,6 +974,7 @@ uv run python - \
   "$agent_worker_pids_csv" \
   "$mysql_max_connections" \
   "$actual_trace_export_url" \
+  "$actual_evaluation_session_propagation_enabled" \
   "$actual_model_proxy_url" \
   "$actual_identity_jwks_url" \
   "$actual_identity_exchange_url" \
@@ -1044,6 +1049,7 @@ from pathlib import Path
     worker_pids_csv,
     mysql_max_connections,
     trace_export_url,
+    evaluation_session_propagation_enabled,
     model_proxy_url,
     identity_jwks_url,
     identity_exchange_url,
@@ -1096,6 +1102,7 @@ environment = {
         "httpClientLayout": http_client_layout,
         "metricsEnabled": True,
         "traceExportUrl": trace_export_url,
+        "evaluationSessionPropagationEnabled": evaluation_session_propagation_enabled == "true",
         "outboundEndpoints": {
             "modelProxyUrl": model_proxy_url,
             "identityJwksUrl": identity_jwks_url,

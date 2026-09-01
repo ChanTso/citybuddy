@@ -463,11 +463,13 @@ start_commerce() {
 start_agent() {
   local evaluation_enabled="$1"
   local tools_url="${2:-http://127.0.0.1:$commerce_port}"
+  local evaluation_session_propagation_enabled="${3:-true}"
   local log_offset
   port_log_offset log_offset "$tmp_dir/agent.log"
   AGENT_PORT=0 \
   AGENT_IDENTITY_ENABLED=true \
   AGENT_EVALUATION_ENABLED="$evaluation_enabled" \
+  AGENT_EVALUATION_SESSION_PROPAGATION_ENABLED="$evaluation_session_propagation_enabled" \
   AGENT_EVALUATION_CLIENT_ID=evaluation-manager \
   AGENT_EVALUATION_CLIENT_SECRET="$management_password" \
   CITYBUDDY_METRICS_ENABLED=true \
@@ -489,6 +491,73 @@ start_agent() {
   agent_pid=$!
   process_bound_port agent_port uvicorn "$agent_pid" "$tmp_dir/agent.log" "$log_offset"
   wait_http "http://127.0.0.1:$agent_port/api/sessions" "$agent_pid" "$tmp_dir/agent.log"
+}
+
+assert_agent_routing() {
+  local trace_id="$1"
+  local sandbox_id="$2"
+  local refund_context="$3"
+  local refund_context_source="$4"
+  local chitchat="$5"
+  local tool_profile="$6"
+  local session_propagation_enabled="$7"
+  local label="$8"
+  local expected_raw="$refund_context:$refund_context_source:$chitchat:$tool_profile:$session_propagation_enabled"
+  assert_equal "$expected_raw" \
+    "$(mysql_query agent_app "$agent_app_password" cs_db \
+      "SELECT CONCAT(JSON_UNQUOTE(JSON_EXTRACT(payload_json, '$.signals.refundContext')), ':', JSON_UNQUOTE(JSON_EXTRACT(payload_json, '$.signals.refundContextSource')), ':', JSON_UNQUOTE(JSON_EXTRACT(payload_json, '$.signals.chitchat')), ':', JSON_UNQUOTE(JSON_EXTRACT(payload_json, '$.toolProfile')), ':', JSON_UNQUOTE(JSON_EXTRACT(payload_json, '$.sessionPropagationEnabled'))) FROM support_event WHERE trace_id = '$trace_id' AND event_type = 'ROUTING_DECISION'")" \
+    "$label raw routing decision"
+  if [[ -z "$sandbox_id" ]]; then
+    return
+  fi
+  assert_status 200 "$label evaluation routing evidence" \
+    --request GET "http://127.0.0.1:$agent_port/api/eval/evidence/$trace_id" \
+    --user "evaluation-manager:$management_password" \
+    --header "X-Eval-Sandbox-Id: $sandbox_id"
+  jq -e \
+    --argjson refund_context "$refund_context" \
+    --arg refund_context_source "$refund_context_source" \
+    --argjson chitchat "$chitchat" \
+    --arg tool_profile "$tool_profile" \
+    --argjson session_propagation_enabled "$session_propagation_enabled" \
+    '[.events[] | select(.eventKind == "ROUTING_DECISION") | .routing] == [{
+      refundContext: $refund_context,
+      refundContextSource: $refund_context_source,
+      chitchat: $chitchat,
+      toolProfile: $tool_profile,
+      sessionPropagationEnabled: $session_propagation_enabled
+    }]' "$tmp_dir/http-response.json" >/dev/null
+  echo "Verified routing projection: $label"
+}
+
+run_agent_chat() {
+  local result_name="$1"
+  local token="$2"
+  local sandbox_id="$3"
+  local session_id="$4"
+  local idempotency_key="$5"
+  local message="$6"
+  local label="$7"
+  if [[ -n "$sandbox_id" ]]; then
+    assert_status 200 "$label" \
+      --request POST "http://127.0.0.1:$agent_port/api/chat" \
+      --header "Authorization: Bearer $token" \
+      --header "X-Eval-Sandbox-Id: $sandbox_id" \
+      --header "X-Session-Id: $session_id" \
+      --header "Idempotency-Key: $idempotency_key" \
+      --header 'Content-Type: application/json' \
+      --data "$(jq -cn --arg message "$message" '{message: $message}')"
+  else
+    assert_status 200 "$label" \
+      --request POST "http://127.0.0.1:$agent_port/api/chat" \
+      --header "Authorization: Bearer $token" \
+      --header "X-Session-Id: $session_id" \
+      --header "Idempotency-Key: $idempotency_key" \
+      --header 'Content-Type: application/json' \
+      --data "$(jq -cn --arg message "$message" '{message: $message}')"
+  fi
+  printf -v "$result_name" '%s' \
+    "$(uv run python scripts/read_json_field.py "$tmp_dir/http-response.json" traceId)"
 }
 
 reset_body() {
@@ -576,6 +645,7 @@ evaluator_password="$(openssl rand -hex 24)"
 agent_service_password="$(openssl rand -hex 24)"
 management_password="$(openssl rand -hex 24)"
 invalid_management_password="$(openssl rand -hex 24)"
+ordinary_user_password="$(openssl rand -hex 24)"
 mock_payment_key="cb105-$(openssl rand -hex 12)"
 mock_payment_secret="$(openssl rand -hex 32)"
 legacy_sandbox_id='sandbox-legacy-upgrade'
@@ -613,6 +683,7 @@ legacy_other_reference_id_2="$(evaluation_product_reference \
 commerce_service_hash="$(uv run python scripts/hash_test_credential.py "$commerce_service_password")"
 evaluator_hash="$(uv run python scripts/hash_test_credential.py "$evaluator_password")"
 agent_service_hash="$(uv run python scripts/hash_test_credential.py "$agent_service_password")"
+ordinary_user_hash="$(uv run python scripts/hash_test_credential.py "$ordinary_user_password")"
 
 "${compose[@]}" up --detach --wait --wait-timeout 60 mysql
 compose_host_port MYSQL_PORT mysql 3306
@@ -902,6 +973,10 @@ if [[ "$v013_only" == true ]]; then
 fi
 
 mysql_query auth_app "$auth_app_password" commerce_db "
+INSERT INTO auth_user_principal (principal_id, subject, login_identifier, state, permissions) VALUES
+  ('00000000-0000-0000-0000-000000000104', 'session-propagation-user', 'session-propagation-user', 'ACTIVE', 'support:session:create support:chat');
+INSERT INTO auth_login_credential (principal_id, password_hash) VALUES
+  ('00000000-0000-0000-0000-000000000104', '$ordinary_user_hash');
 INSERT INTO auth_service_identity (service_id, client_id, credential_hash, state, allowed_scopes) VALUES
   ('00000000-0000-0000-0000-000000000101', 'commerce-service', '$commerce_service_hash', 'ACTIVE', 'eval:principal:manage'),
   ('00000000-0000-0000-0000-000000000102', 'evaluation-client', '$evaluator_hash', 'ACTIVE', 'eval:test-token:issue'),
@@ -1025,7 +1100,7 @@ fi
 
 start_auth production
 start_commerce production "http://127.0.0.1:$auth_port"
-start_agent false
+start_agent false "http://127.0.0.1:$commerce_port" false
 assert_status 404 "production profile omits agent evaluation evidence" \
   --request GET "http://127.0.0.1:$agent_port/api/eval/evidence/00000000-0000-0000-0000-000000000103" \
   --user "evaluation-manager:$management_password" \
@@ -4398,6 +4473,105 @@ uv run python scripts/fake_litellm_server.py --port 0 >>"$tmp_dir/model.log" 2>&
 model_pid=$!
 process_bound_port proxy_port uvicorn "$model_pid" "$tmp_dir/model.log" 0
 wait_http "http://127.0.0.1:$proxy_port/fixture/counts" "$model_pid" "$tmp_dir/model.log"
+start_agent true
+assert_status 201 "session propagation default-on session is sandbox-bound" \
+  --request POST "http://127.0.0.1:$agent_port/api/sessions" \
+  --header "Authorization: Bearer $direct_token" \
+  --header 'X-Eval-Sandbox-Id: sandbox-main' \
+  --header 'Content-Type: application/json' \
+  --data '{}'
+session_propagation_on_session="$(uv run python scripts/read_json_field.py \
+  "$tmp_dir/http-response.json" sessionId)"
+run_agent_chat session_propagation_on_current_trace \
+  "$direct_token" sandbox-main "$session_propagation_on_session" \
+  session-propagation-on-current 'refund context-seed propagation-on' \
+  "default-on current refund turn"
+assert_agent_routing "$session_propagation_on_current_trace" sandbox-main \
+  true current false all true "default-on current refund turn"
+run_agent_chat session_propagation_on_followup_trace \
+  "$direct_token" sandbox-main "$session_propagation_on_session" \
+  session-propagation-on-followup 'context-followup propagation-on' \
+  "default-on session refund follow-up"
+assert_agent_routing "$session_propagation_on_followup_trace" sandbox-main \
+  true session false all true "default-on session refund follow-up"
+
+stop_process agent_pid "$agent_pid"
+start_agent true "http://127.0.0.1:$commerce_port" false
+assert_status 401 "evaluation token cannot omit the sandbox while propagation is off" \
+  --request POST "http://127.0.0.1:$agent_port/api/sessions" \
+  --header "Authorization: Bearer $direct_token" \
+  --header 'Content-Type: application/json' \
+  --data '{}'
+assert_status 401 "evaluation token cannot substitute the sandbox while propagation is off" \
+  --request POST "http://127.0.0.1:$agent_port/api/sessions" \
+  --header "Authorization: Bearer $direct_token" \
+  --header 'X-Eval-Sandbox-Id: sandbox-other' \
+  --header 'Content-Type: application/json' \
+  --data '{}'
+assert_status 201 "session propagation off session is sandbox-bound" \
+  --request POST "http://127.0.0.1:$agent_port/api/sessions" \
+  --header "Authorization: Bearer $direct_token" \
+  --header 'X-Eval-Sandbox-Id: sandbox-main' \
+  --header 'Content-Type: application/json' \
+  --data '{}'
+session_propagation_off_session="$(uv run python scripts/read_json_field.py \
+  "$tmp_dir/http-response.json" sessionId)"
+run_agent_chat session_propagation_off_current_trace \
+  "$direct_token" sandbox-main "$session_propagation_off_session" \
+  session-propagation-off-current 'refund context-seed propagation-off' \
+  "off-arm current refund turn"
+assert_agent_routing "$session_propagation_off_current_trace" sandbox-main \
+  true current false all false "off-arm current refund turn"
+run_agent_chat session_propagation_off_followup_trace \
+  "$direct_token" sandbox-main "$session_propagation_off_session" \
+  session-propagation-off-followup 'context-followup propagation-off' \
+  "off-arm session refund follow-up"
+assert_agent_routing "$session_propagation_off_followup_trace" sandbox-main \
+  true session false read false "off-arm session refund follow-up"
+run_agent_chat session_propagation_off_chitchat_seed_trace \
+  "$direct_token" sandbox-main "$session_propagation_off_session" \
+  session-propagation-off-chitchat-seed 'refund context-seed propagation-off-chitchat' \
+  "off-arm chitchat refund seed"
+assert_agent_routing "$session_propagation_off_chitchat_seed_trace" sandbox-main \
+  true current false all false "off-arm chitchat refund seed"
+run_agent_chat session_propagation_off_chitchat_trace \
+  "$direct_token" sandbox-main "$session_propagation_off_session" \
+  session-propagation-off-chitchat hello \
+  "off-arm exact chitchat with session refund context"
+assert_agent_routing "$session_propagation_off_chitchat_trace" sandbox-main \
+  true session true none false "off-arm exact chitchat with session refund context"
+
+assert_status 200 "issue ordinary direct token for the propagation fail-safe" \
+  --request POST "http://127.0.0.1:$auth_port/auth/login" \
+  --header 'Content-Type: application/json' \
+  --data "{\"loginIdentifier\":\"session-propagation-user\",\"password\":\"$ordinary_user_password\"}"
+ordinary_direct_token="$(uv run python scripts/read_json_field.py \
+  "$tmp_dir/http-response.json" accessToken)"
+assert_status 201 "ordinary user session cannot enter the propagation off arm" \
+  --request POST "http://127.0.0.1:$agent_port/api/sessions" \
+  --header "Authorization: Bearer $ordinary_direct_token" \
+  --header 'Content-Type: application/json' \
+  --data '{}'
+ordinary_session_propagation_session="$(uv run python scripts/read_json_field.py \
+  "$tmp_dir/http-response.json" sessionId)"
+assert_equal 1 \
+  "$(mysql_query agent_app "$agent_app_password" cs_db \
+    "SELECT COUNT(*) FROM support_session WHERE session_id = '$ordinary_session_propagation_session' AND sandbox_id IS NULL")" \
+  "ordinary user session remains outside evaluation sandbox identity"
+run_agent_chat ordinary_session_propagation_current_trace \
+  "$ordinary_direct_token" '' "$ordinary_session_propagation_session" \
+  ordinary-session-propagation-current 'refund context-seed ordinary-user' \
+  "ordinary user current refund turn with raw propagation off"
+assert_agent_routing "$ordinary_session_propagation_current_trace" '' \
+  true current false all true "ordinary user current refund turn with raw propagation off"
+run_agent_chat ordinary_session_propagation_followup_trace \
+  "$ordinary_direct_token" '' "$ordinary_session_propagation_session" \
+  ordinary-session-propagation-followup 'context-followup ordinary-user' \
+  "ordinary user session refund follow-up with raw propagation off"
+assert_agent_routing "$ordinary_session_propagation_followup_trace" '' \
+  true session false all true "ordinary user session refund follow-up with raw propagation off"
+
+stop_process agent_pid "$agent_pid"
 start_agent true
 assert_status 201 "evaluation support session binds subject and sandbox" \
   --request POST "http://127.0.0.1:$agent_port/api/sessions" \

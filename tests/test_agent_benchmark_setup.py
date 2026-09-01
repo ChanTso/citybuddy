@@ -186,6 +186,31 @@ def test_setup_pins_the_measured_mysql_boundary_after_compose_reconciliation() -
     assert measured_boundary < migration_versions
 
 
+def test_setup_pins_session_propagation_and_empty_trace_in_the_runtime_gate() -> None:
+    setup = SETUP.read_text(encoding="utf-8")
+    gate = SETUP_GATE.read_text(encoding="utf-8")
+
+    assert "  --env AGENT_EVALUATION_SESSION_PROPAGATION_ENABLED=true \\\n" in setup
+    assert "  --env CITYBUDDY_TRACE_EXPORT_URL= \\\n" in setup
+    assert "citybuddy-bench-agent AGENT_EVALUATION_SESSION_PROPAGATION_ENABLED)" in setup
+    assert '[ "$actual_evaluation_session_propagation_enabled" != true ]' in setup
+    assert (
+        '"evaluationSessionPropagationEnabled": '
+        'evaluation_session_propagation_enabled == "true"' in setup
+    )
+
+    assert gate.count(".configuration.evaluationSessionPropagationEnabled") == 2
+    assert "citybuddy-bench-agent AGENT_EVALUATION_SESSION_PROPAGATION_ENABLED)" in gate
+    for value in (
+        "expected_session_propagation",
+        "live_session_propagation",
+        "actual_session_propagation",
+    ):
+        assert f'[ "${value}" != true ]' in gate
+    assert '[ -n "$expected_trace" ]' in gate
+    assert '[ -n "$actual_trace" ]' in gate
+
+
 def _write_executable(path: Path, source: str) -> None:
     path.write_text(textwrap.dedent(source).lstrip(), encoding="utf-8")
     path.chmod(0o755)

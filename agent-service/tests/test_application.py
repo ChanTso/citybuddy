@@ -11,6 +11,7 @@ from datetime import UTC, datetime, timedelta
 from types import FrameType
 from typing import Any, Literal, cast
 
+import citybuddy_agent.application as application_module
 import httpx
 import jwt
 import pymysql
@@ -938,6 +939,48 @@ def test_create_app_keeps_identity_routes_disabled_without_runtime_configuration
     assert TestClient(app).post("/api/sessions", json={}).status_code == 404
 
 
+@pytest.mark.parametrize("evaluation_profile", (False, True))
+def test_agent_assembly_keeps_profile_and_raw_session_propagation_as_separate_gates(
+    monkeypatch: pytest.MonkeyPatch,
+    evaluation_profile: bool,
+) -> None:
+    captured: dict[str, bool] = {}
+
+    def build_agent(*args: object, **kwargs: bool) -> MemoryAgent:
+        del args
+        captured.update(kwargs)
+        return MemoryAgent()
+
+    monkeypatch.setattr(application_module, "BoundedAgent", build_agent)
+    resolved = settings().model_copy(
+        update={
+            "evaluation_enabled": evaluation_profile,
+            "evaluation_session_propagation_enabled": False,
+            "evaluation_client_id": "evaluation-manager" if evaluation_profile else "",
+            "evaluation_client_secret": "evaluation-runtime-secret" if evaluation_profile else "",
+            "commerce_liveness_url": "https://commerce.test" if evaluation_profile else "",
+        }
+    )
+    sessions = MemorySessionStore()
+
+    with TestClient(
+        create_app(
+            resolved,
+            validator=object(),  # type: ignore[arg-type]
+            sessions=sessions,
+            conversations=MemoryConversationStore(sessions),
+            feedback=object(),  # type: ignore[arg-type]
+            liveness=MemoryLiveness() if evaluation_profile else None,
+        )
+    ):
+        pass
+
+    assert captured == {
+        "evaluation_profile_enabled": evaluation_profile,
+        "evaluation_session_propagation_enabled": False,
+    }
+
+
 def test_create_app_prebuilds_configured_origins_and_closes_trace_before_clients(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -1165,9 +1208,10 @@ def test_direct_validator_expires_retired_known_key_after_bounded_cache() -> Non
 
 def test_session_endpoint_uses_token_subject_and_rejects_client_identity_and_eval_header() -> None:
     private, public_jwk = key_fixture("current-key")
-    validator = DirectJwtValidator(settings(), CountingJwksSource([public_jwk]))
+    resolved = settings().model_copy(update={"evaluation_session_propagation_enabled": False})
+    validator = DirectJwtValidator(resolved, CountingJwksSource([public_jwk]))
     sessions = MemorySessionStore()
-    client = TestClient(create_app(settings(), validator=validator, sessions=sessions))
+    client = TestClient(create_app(resolved, validator=validator, sessions=sessions))
     token = direct_token(private, "current-key")
 
     response = client.post("/api/sessions", headers={"Authorization": f"Bearer {token}"}, json={})
@@ -1299,7 +1343,9 @@ def test_session_endpoint_returns_exact_canonical_edge_session(session_id: str) 
 
 def test_evaluation_session_and_chat_require_liveness_and_exact_sandbox() -> None:
     private, public_jwk = key_fixture("current-key")
-    resolved = evaluation_settings()
+    resolved = evaluation_settings().model_copy(
+        update={"evaluation_session_propagation_enabled": False}
+    )
     validator = DirectJwtValidator(resolved, CountingJwksSource([public_jwk]))
     sessions = MemorySessionStore()
     conversations = MemoryConversationStore(sessions)
@@ -1338,6 +1384,32 @@ def test_evaluation_session_and_chat_require_liveness_and_exact_sandbox() -> Non
         ).status_code
         == 401
     )
+    assert (
+        client.post(
+            "/api/chat",
+            headers={
+                **headers,
+                "X-Eval-Sandbox-Id": "sandbox-2",
+                "X-Session-Id": session_id,
+                "Idempotency-Key": "eval-wrong-sandbox",
+            },
+            json={"message": "Show product-1"},
+        ).status_code
+        == 401
+    )
+    assert (
+        client.post(
+            "/api/chat",
+            headers={
+                "Authorization": f"Bearer {token}",
+                "X-Session-Id": session_id,
+                "Idempotency-Key": "eval-missing-sandbox",
+            },
+            json={"message": "Show product-1"},
+        ).status_code
+        == 401
+    )
+    assert agent.calls == 0
 
     chat = client.post(
         "/api/chat",
@@ -1365,6 +1437,46 @@ def test_evaluation_session_and_chat_require_liveness_and_exact_sandbox() -> Non
     assert blocked.status_code == 403
     assert conversations.calls == 1
     assert agent.calls == 1
+
+
+def test_evaluation_session_propagation_ablation_does_not_apply_to_an_ordinary_token() -> None:
+    private, public_jwk = key_fixture("current-key")
+    resolved = evaluation_settings().model_copy(
+        update={"evaluation_session_propagation_enabled": False}
+    )
+    validator = DirectJwtValidator(resolved, CountingJwksSource([public_jwk]))
+    sessions = MemorySessionStore()
+    conversations = MemoryConversationStore(sessions)
+    agent = MemoryAgent()
+    liveness = MemoryLiveness()
+    client = TestClient(
+        create_app(
+            resolved,
+            validator=validator,
+            sessions=sessions,
+            conversations=conversations,
+            agent=agent,
+            feedback=MemoryFeedbackStore(sessions, {}),
+            liveness=liveness,
+        )
+    )
+    token = direct_token(private, "current-key")
+    created = client.post("/api/sessions", headers={"Authorization": f"Bearer {token}"}, json={})
+    assert created.status_code == 201
+
+    response = client.post(
+        "/api/chat",
+        headers={
+            "Authorization": f"Bearer {token}",
+            "X-Session-Id": created.json()["sessionId"],
+            "Idempotency-Key": "ordinary-token",
+        },
+        json={"message": "Show product-1"},
+    )
+
+    assert response.status_code == 200
+    assert agent.sandbox_ids == [None]
+    assert liveness.calls == []
 
 
 def test_obo_client_rechecks_owner_and_server_allowlist(

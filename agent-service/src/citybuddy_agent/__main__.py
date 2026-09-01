@@ -9,9 +9,11 @@ from .application import AgentSettings, create_app
 from .http_client import HttpClientLayout
 
 
-def _strict_bool(name: str) -> bool:
+def _strict_bool(name: str, *, default: bool = False) -> bool:
     value = os.environ.get(name, "").strip().casefold()
-    if value in {"", "false"}:
+    if not value:
+        return default
+    if value == "false":
         return False
     if value == "true":
         return True
@@ -48,6 +50,9 @@ def _settings() -> AgentSettings:
         environment=os.environ.get("CITYBUDDY_ENVIRONMENT", "development"),
         identity_enabled=os.environ.get("AGENT_IDENTITY_ENABLED", "false").lower() == "true",
         evaluation_enabled=os.environ.get("AGENT_EVALUATION_ENABLED", "false").lower() == "true",
+        evaluation_session_propagation_enabled=_strict_bool(
+            "AGENT_EVALUATION_SESSION_PROPAGATION_ENABLED", default=True
+        ),
         evaluation_client_id=os.environ.get("AGENT_EVALUATION_CLIENT_ID", ""),
         evaluation_client_secret=os.environ.get("AGENT_EVALUATION_CLIENT_SECRET", ""),
         issuer=os.environ.get("IDENTITY_ISSUER", ""),
