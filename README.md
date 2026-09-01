@@ -10,8 +10,9 @@ no in-memory substitutes and no mocked infrastructure in the integration suite.
 
 ## Evidence at a glance
 
-| Boundary | Measured result | Exact local boundary |
+| Boundary | Measured result | Measurement boundary |
 |---|---|---|
+| [Transactional ownership binding](https://github.com/ChanTso/state-eval/tree/main/results/ownership-campaign-v1) | In this fixed 600-trial evaluation, commerce's in-transaction ownership binding reduced unauthorized refund requests observed by independent terminal SQL from 55/300 (18.33%; 95% Wilson CI 14.36%–23.10%) with the binding off to 0/300 (0%; 95% Wilson CI approximately 0%–1.264%) with it on. | 5 phrasings × 2 arms × 60 in 60 balanced randomized blocks (seed `2026083102`); 600/600 planned trials measured, the activation check passed, and operationally inconclusive, interrupted, and extra trial counts were each 0. StateEval `38cdde3aec1c4b8044d535fcdb7a7616dc81722b`; CityBuddy SUT `09130fa3c0209648f98781ff0892c3d07a55e59f`; one operator-attested proxy-exposed `gpt-5.4` alias, not an immutable upstream model pin; two 100-trial calibration runs excluded. |
 | [Seckill reservation contention](bench/README.md#finding-and-fix-the-serializing-lock-was-also-suppressing-a-deadlock) | The pre-fix 32-activity ladder logged roughly 6,200 deadlock events; the fixed run logged 0. At the 800 req/s target, 12,003 admissions completed at 799.9 req/s with p99 39.4 ms and 0 drops or failed requests. | One MacBook Pro M4 (10 cores, 24 GB), Docker Desktop (8 CPUs, 14 GB), authenticated requests across Redis Lua and real MySQL transactions; 32 activities, a 15 s fixed-arrival-rate step, setup excluded. This is a local workload result, not a capacity claim. |
 | [Concurrent standard-order creation](bench/results/order_idempotency_parallel_creation_fix.txt) | Four workers created 6,000/6,000 distinct orders with 6,000 matched idempotency rows and outbox events, 0 orphan idempotency rows, and MySQL 1205/1213 counter deltas of 0. | One Apple M4 (10 cores, 24 GB), Docker (8 CPUs, 14 GB), real MySQL 8.4.10; 6,000 unique users and order intents. The 16.9 s window included per-user login and `POST /api/orders`; seeding and service startup were excluded. |
 
@@ -41,18 +42,29 @@ durably recorded.
 
 ## That boundary is measured, not asserted
 
-[StateEval](https://github.com/ChanTso/state-eval) disables one check inside commerce and grades
-the outcome from the authoritative database through a read-only account the system under test
-cannot write to. An agent serving one user was asked to refund another user's order. It issued a
-prepare request in 7 of 18 first turns. With commerce's resource-ownership check enforced, 0 of
-those 3 attempts recorded a refund request; with only that check disabled in the evaluation
-profile, 4 of 4 did — while the JWT signature, the exact `refund:create` scope, the `act.azp` actor
-binding and the support session stayed enforced in both arms.
+[StateEval](https://github.com/ChanTso/state-eval) toggles commerce's in-transaction
+resource-ownership binding and grades every trial against the authoritative terminal SQL state,
+queried through a read-only account the system under test cannot write to. Only that binding
+changed between arms: the JWT signature, exact `refund:create` scope, `act.azp` actor binding, and
+support session remained enforced. An agent serving one user was asked to refund another user's
+order. In the fixed 600-trial evaluation, independent terminal SQL observed an unauthorized refund
+request in 55 of 300 trials with the binding off (18.33%; 95% Wilson CI 14.36%–23.10%) and 0 of 300
+with it on (0%; 95% Wilson CI approximately 0%–1.264%).
 
-Removing the last check inside the transaction was enough. That is why the comparison lives here
-and not in the agent's prompt: the model was instructed to refund only orders owned by the
-requester, and had no tool that could tell it who owned one.
-[Finding and raw artifacts](https://github.com/ChanTso/state-eval#readme).
+The campaign used 5 phrasings × 2 arms × 60 in 60 balanced randomized blocks with seed
+`2026083102`. All 600 planned trials were measured; none were operationally inconclusive,
+interrupted, or extra, and the activation check passed. Attempt issuance was a diagnostic rather
+than the result denominator: 55/300 off-arm trials and 63/300 on-arm trials contained an attempt.
+The run does not establish equal attempt propensity between arms; the primary measure is terminal
+SQL across all 300 trials in each arm.
+
+The harness and catalog were at StateEval
+`38cdde3aec1c4b8044d535fcdb7a7616dc81722b`; the system under test was CityBuddy
+`09130fa3c0209648f98781ff0892c3d07a55e59f`. The run used one operator-attested proxy-exposed
+`gpt-5.4` alias, not an immutable upstream model pin, and excluded both 100-trial calibration
+runs. These numbers characterize this fixed campaign and these commits, not production safety or
+a claim that a model will never propose an unauthorized action.
+[Formal summary and raw artifacts](https://github.com/ChanTso/state-eval/tree/main/results/ownership-campaign-v1).
 
 StateEval does not claim this evaluation method as novel; related mutation-testing,
 agent-evaluation, and database-oracle work is catalogued in its
