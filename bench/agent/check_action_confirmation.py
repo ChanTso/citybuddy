@@ -1,8 +1,10 @@
-"""Drive one refund from preparation to receipt against the running bench services.
+"""Drive one refund request from preparation to receipt against the running bench services.
 
 This is the flagship flow end to end: the agent prepares a real PendingAction in commerce, the
-user confirms it in a second turn, commerce executes the refund, and the agent projects the
+user confirms it in a second turn, commerce records the refund request, and the agent projects the
 receipt. It runs inside the bench network namespace, against the same fixture the ladders use.
+The provider result is REQUESTED and refunded_amount_minor remains 0; action completion does not
+claim that money settled.
 
 Business truth is read with SQL against the authoritative databases afterwards, not inferred from
 the HTTP responses.
@@ -38,10 +40,10 @@ def turn(entry: dict[str, str], message: str, key: str, *, stream: bool = False)
 def reclaim(session_id: str) -> None:
     """Restore the exact state a lost commerce response leaves behind.
 
-    The agent claimed the reference, commerce committed the refund, and the local transaction
-    never ran: the reference is CONFIRMING, there is no projection, and the confirmation turn does
-    not exist. Erasing the committed turn is what makes this the real case rather than a
-    half-rolled-back one.
+    The agent claimed the reference, commerce committed the refund request, and the local
+    transaction never ran: the reference is CONFIRMING, there is no projection, and the
+    confirmation turn does not exist. Erasing the committed turn is what makes this the real case
+    rather than a half-rolled-back one.
     """
     connection = pymysql.connect(
         host=os.environ["MYSQL_HOST"],
@@ -100,7 +102,7 @@ def main() -> None:
     # A confirmation that was claimed but whose local commit never happened is the case the claim
     # state exists for. Put the reference back into CONFIRMING and confirm again with a fresh key:
     # this reaches commerce a second time, and commerce must replay its committed receipt rather
-    # than issue a second refund.
+    # than record a second refund request.
     reclaim(entry["sessionId"])
     recovered = json.loads(turn(entry, "confirm", "c2-recovery"))
     print("recovery:", json.dumps(recovered, ensure_ascii=False))

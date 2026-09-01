@@ -3,8 +3,8 @@
 CityBuddy exists to hold one line: an LLM agent may read business data and *prepare* a sensitive
 action, but it never becomes the authority on whether the transaction happened. This demonstration
 walks that line from both sides in about ninety seconds — the agent answering with evidence, the
-model claiming a refund that never happened, and a real refund that only completes because a human
-confirmed it and commerce committed it.
+model claiming a refund that never happened, and a real refund request that is durably recorded
+only because a human confirmed it and commerce committed it.
 
 ## Bring the stack up
 
@@ -40,8 +40,8 @@ database rather than believing the HTTP response that produced it.
 | 2 | The agent answers from the knowledge base | Retrieval is a decision with a persisted record — sufficiency outcome, calibration version, candidate and evidence counts — not a hidden step inside a prompt. The citations are the indexer's own public corpus. |
 | 3 | The model claims the refund already happened | The JSON path passes the sentence through with `outcome=completed` and no receipt, so no client can render a success state from it. The SSE path refuses to tokenise it at all and fails the turn with `unsafe_output`. Commerce still holds zero refunds. |
 | 4 | The agent prepares the refund | Preparation writes a `PendingAction` in commerce and stops. The turn carries `action_pending` and a null receipt. |
-| 5 | The user confirms | The agent claims the action, commerce executes the refund, and the agent projects an `ActionReceipt`. The receipt is the only thing that lets a client render a success state. |
-| 6 | Confirming again does not refund again | The same idempotency key replays the stored turn; a fresh confirmation finds no live action on the conversation, because the agent-side reference is resolved and commerce's own action is `CONSUMED`. Exactly one refund exists. |
+| 5 | The user confirms | The agent claims the action, commerce records the refund request, and the agent projects an `ActionReceipt`. The receipt is the only thing that lets a client render a success state. |
+| 6 | Confirming again does not record a second refund request | The same idempotency key replays the stored turn; a fresh confirmation finds no live action on the conversation, because the agent-side reference is resolved and commerce's own action is `CONSUMED`. Exactly one refund request exists. |
 
 `--pace 0` runs the same thing with no pauses, in about a second, which is the form to use when
 checking that the flow still works rather than watching it.
