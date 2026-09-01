@@ -110,6 +110,80 @@ def test_evaluation_helpers_accept_bound_leading_dash_session(tmp_path: Path) ->
     assert audit.returncode == 0, audit.stderr
 
 
+def test_agent_evidence_checker_accepts_legacy_and_closed_routing(tmp_path: Path) -> None:
+    valid_routing = {
+        "refundContext": True,
+        "refundContextSource": "session",
+        "chitchat": False,
+        "toolProfile": "read",
+        "sessionPropagationEnabled": False,
+    }
+    cases = (
+        ("legacy", None, True),
+        ("closed", valid_routing, True),
+        ("extra", {**valid_routing, "privateSignal": True}, False),
+    )
+
+    for name, routing, accepted in cases:
+        route: dict[str, object] = {
+            "sequence": 2,
+            "eventKind": "ROUTING_DECISION",
+            "outcome": "standard",
+            "attemptLimit": 16,
+            "occurredAt": TIMESTAMP,
+        }
+        if routing is not None:
+            route["routing"] = routing
+        evidence_path = tmp_path / f"routing-{name}.json"
+        evidence_path.write_text(
+            json.dumps(
+                {
+                    "schemaVersion": "agent-evidence-v1",
+                    "traceId": TRACE_ID,
+                    "sessionId": "sandbox-session",
+                    "turnId": TURN_ID,
+                    "terminalOutcome": "completed",
+                    "events": [
+                        {"sequence": 1, "eventKind": "USER_INPUT", "occurredAt": TIMESTAMP},
+                        route,
+                        {
+                            "sequence": 3,
+                            "eventKind": "AGENT_OUTCOME",
+                            "outcome": "completed",
+                            "occurredAt": TIMESTAMP,
+                        },
+                        {
+                            "sequence": 4,
+                            "eventKind": "ASSISTANT_RESPONSE",
+                            "outcome": "completed",
+                            "occurredAt": TIMESTAMP,
+                        },
+                        {
+                            "sequence": 5,
+                            "eventKind": "TURN_COMPLETED",
+                            "outcome": "completed",
+                            "occurredAt": TIMESTAMP,
+                        },
+                    ],
+                    "feedback": [],
+                }
+            ),
+            encoding="utf-8",
+        )
+
+        result = run_helper(
+            "scripts/check_agent_evaluation_evidence.py",
+            str(evidence_path),
+            "--trace",
+            TRACE_ID,
+            "--session=sandbox-session",
+            "--outcome",
+            "completed",
+        )
+
+        assert (result.returncode == 0) is accepted, result.stderr
+
+
 def test_evaluation_script_binds_every_opaque_session_option() -> None:
     script = INTEGRATION_SCRIPT.read_text(encoding="utf-8")
     logical_commands = script.replace("\\\n", " ").splitlines()

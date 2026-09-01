@@ -5,6 +5,7 @@ from typing import Any
 
 import pytest
 from citybuddy_agent import __main__ as main_module
+from citybuddy_agent.application import AgentSettings
 
 
 @pytest.mark.parametrize("value", (None, "", "   "))
@@ -73,6 +74,42 @@ def test_settings_records_requested_http_client_layout(monkeypatch: pytest.Monke
     monkeypatch.setenv("AGENT_HTTP_CLIENT_LAYOUT", "per-authority")
 
     assert main_module._settings().http_client_layout == "per-authority"
+
+
+@pytest.mark.parametrize(
+    ("value", "expected"),
+    (
+        (None, True),
+        ("", True),
+        ("   ", True),
+        ("true", True),
+        ("TrUe", True),
+        ("false", False),
+        ("FALSE", False),
+    ),
+)
+def test_evaluation_session_propagation_is_strict_with_enabled_default(
+    monkeypatch: pytest.MonkeyPatch, value: str | None, expected: bool
+) -> None:
+    if value is None:
+        monkeypatch.delenv("AGENT_EVALUATION_SESSION_PROPAGATION_ENABLED", raising=False)
+    else:
+        monkeypatch.setenv("AGENT_EVALUATION_SESSION_PROPAGATION_ENABLED", value)
+
+    assert main_module._settings().evaluation_session_propagation_enabled is expected
+    assert AgentSettings().evaluation_session_propagation_enabled is True
+
+
+def test_evaluation_session_propagation_rejects_other_nonempty_values(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("AGENT_EVALUATION_SESSION_PROPAGATION_ENABLED", "yes")
+
+    with pytest.raises(
+        ValueError,
+        match="AGENT_EVALUATION_SESSION_PROPAGATION_ENABLED must be true or false",
+    ):
+        main_module._settings()
 
 
 def test_main_always_uses_the_zero_argument_factory_and_explicit_workers(

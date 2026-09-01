@@ -450,6 +450,7 @@
           "attempt": {"type": "integer", "minimum": 1, "maximum": 32},
           "attemptLimit": {"type": "integer", "minimum": 1, "maximum": 32},
           "context": {"$ref": "#/components/schemas/AgentEvaluationContext"},
+          "routing": {"$ref": "#/components/schemas/AgentEvaluationRouting"},
           "occurredAt": {"type": "string", "format": "date-time", "readOnly": true}
         }
       },
@@ -488,6 +489,28 @@
           "olderTurnsAvailable": {"type": "boolean"}
         },
         "description": "Content-free record of the completed same-session turns selected for the model prompt."
+      },
+      "AgentEvaluationRouting": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "refundContext",
+          "refundContextSource",
+          "chitchat",
+          "toolProfile",
+          "sessionPropagationEnabled"
+        ],
+        "properties": {
+          "refundContext": {"type": "boolean"},
+          "refundContextSource": {
+            "type": "string",
+            "enum": ["none", "current", "session"]
+          },
+          "chitchat": {"type": "boolean"},
+          "toolProfile": {"type": "string", "enum": ["none", "read", "all"]},
+          "sessionPropagationEnabled": {"type": "boolean"}
+        },
+        "description": "Content-free routing signals and the effective history-driven sensitive-tool exposure setting."
       },
       "AgentEvaluationRetrieval": {
         "type": "object",

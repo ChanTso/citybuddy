@@ -108,7 +108,8 @@ verify_agent_setup_environment() {
   local live_worker_pids actual_workers actual_layout actual_trace actual_worker_pids
   local expected_worker_log_occurrences live_worker_log_occurrences
   local actual_worker_log_occurrences
-  local expected_trace
+  local expected_trace expected_session_propagation live_session_propagation
+  local actual_session_propagation
   expected_workers="$(jq -er \
     '.configuration.requestedWorkers
      | select(type == "number" and . >= 1 and floor == .) | tostring' "$expected_record")"
@@ -121,8 +122,14 @@ verify_agent_setup_environment() {
      | sort | map(tostring) | join(",")' "$expected_record")"
   expected_trace="$(jq -r '.configuration.traceExportUrl | select(type == "string")' \
     "$expected_record")"
+  expected_session_propagation="$(jq -er \
+    '.configuration.evaluationSessionPropagationEnabled
+     | select(type == "boolean") | tostring' "$expected_record")"
   live_workers="$(jq -er '.configuration.requestedWorkers | tostring' "$live_record")"
   live_layout="$(jq -er '.configuration.httpClientLayout' "$live_record")"
+  live_session_propagation="$(jq -er \
+    '.configuration.evaluationSessionPropagationEnabled
+     | select(type == "boolean") | tostring' "$live_record")"
   live_worker_pids="$(jq -er \
     '.configuration.observedWorkerPids | sort | map(tostring) | join(",")' "$live_record")"
   expected_worker_log_occurrences="$(jq -er \
@@ -134,6 +141,8 @@ verify_agent_setup_environment() {
     citybuddy-bench-agent AGENT_HTTP_CLIENT_LAYOUT)"
   actual_trace="$(agent_setup_container_environment_value \
     citybuddy-bench-agent CITYBUDDY_TRACE_EXPORT_URL)"
+  actual_session_propagation="$(agent_setup_container_environment_value \
+    citybuddy-bench-agent AGENT_EVALUATION_SESSION_PROPAGATION_ENABLED)"
   actual_worker_pids="$(agent_setup_server_pids_from_logs | paste -sd, -)"
   actual_worker_log_occurrences="$(docker logs citybuddy-bench-agent 2>&1 \
     | sed -nE 's/.*Started server process \[([0-9]+)\].*/\1/p' \
@@ -149,6 +158,9 @@ verify_agent_setup_environment() {
     || [ "$actual_layout" != "$expected_layout" ] \
     || [ -n "$expected_trace" ] \
     || [ -n "$actual_trace" ] \
+    || [ "$expected_session_propagation" != true ] \
+    || [ "$live_session_propagation" != true ] \
+    || [ "$actual_session_propagation" != true ] \
     || [ "$actual_worker_pids" != "$expected_worker_pids" ] \
     || [ "$actual_worker_log_occurrences" != "$expected_workers" ] \
     || ! jq -e '
@@ -158,7 +170,7 @@ verify_agent_setup_environment() {
         "elasticsearch": "http://citybuddy-bench-elasticsearch:9200",
         "model": "http://127.0.0.1:8000"
       }' "$expected_record" >/dev/null; then
-    echo "Agent setup environment gate failed ($phase): worker, client layout or trace boundary changed." >&2
+    echo "Agent setup environment gate failed ($phase): worker, client layout, trace or session propagation boundary changed." >&2
     return 1
   fi
   local worker_pid worker_state

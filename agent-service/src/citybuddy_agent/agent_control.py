@@ -425,12 +425,17 @@ class ModelRouter:
             "support-reranker-standard", "reranker"
         )
 
-    def plan(self, signals: RoutingSignals) -> ModelPlan:
+    def plan(
+        self,
+        signals: RoutingSignals,
+        *,
+        session_propagation_enabled: bool = True,
+    ) -> ModelPlan:
         if signals.refund_context_source == "current":
             tool_profile: ToolProfile = "all"
         elif signals.chitchat:
             tool_profile = "none"
-        elif signals.refund_context:
+        elif signals.refund_context and session_propagation_enabled:
             tool_profile = "all"
         else:
             tool_profile = "read"
@@ -1808,12 +1813,17 @@ class BoundedAgent:
         model: LiteLlmClient,
         tools: ToolAdapter,
         context_policy: SessionContextPolicy | None = None,
+        *,
+        evaluation_profile_enabled: bool = False,
+        evaluation_session_propagation_enabled: bool = True,
     ) -> None:
         self._rule_router = rule_router
         self._model_router = model_router
         self._model = model
         self._tools = tools
         self._context_policy = context_policy or SessionContextPolicy()
+        self._evaluation_profile_enabled = evaluation_profile_enabled
+        self._evaluation_session_propagation_enabled = evaluation_session_propagation_enabled
 
     def run(
         self,
@@ -1836,7 +1846,15 @@ class BoundedAgent:
             previous_turn = context_window.turns[-1]
             prior_task_context = (previous_turn.user_text, previous_turn.assistant_text)
         signals = self._rule_router.signals(message, prior_task_context)
-        plan = self._model_router.plan(signals)
+        session_propagation_enabled = (
+            self._evaluation_session_propagation_enabled
+            if self._evaluation_profile_enabled and bool(sandbox_id)
+            else True
+        )
+        plan = self._model_router.plan(
+            signals,
+            session_propagation_enabled=session_propagation_enabled,
+        )
         events.append(
             AgentEvent(
                 "ROUTING_DECISION",
@@ -1845,6 +1863,7 @@ class BoundedAgent:
                     "tier": plan.tier,
                     "attemptLimit": plan.attempt_limit,
                     "toolProfile": plan.tool_profile,
+                    "sessionPropagationEnabled": session_propagation_enabled,
                 },
             )
         )

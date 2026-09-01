@@ -30,6 +30,7 @@ from citybuddy_agent.agent_control import (
     ProviderCircuits,
     ProviderFailure,
     ProviderRoute,
+    RoutingSignals,
     RuleRouter,
     SessionContextPolicy,
     ToolAdapter,
@@ -198,6 +199,289 @@ def test_rule_router_uses_only_the_visible_previous_turn_for_task_continuation()
     assert model_router.plan(continued).tool_profile == "all"
     assert model_router.plan(greeting).tool_profile == "none"
     assert model_router.plan(unrelated).tool_profile == "read"
+
+
+@pytest.mark.parametrize(
+    ("signals", "session_propagation_enabled", "tool_profile"),
+    [
+        (RoutingSignals(True, "current", False), True, "all"),
+        (RoutingSignals(True, "current", False), False, "all"),
+        (RoutingSignals(True, "current", True), False, "all"),
+        (RoutingSignals(True, "session", False), True, "all"),
+        (RoutingSignals(True, "session", False), False, "read"),
+        (RoutingSignals(True, "session", True), True, "none"),
+        (RoutingSignals(True, "session", True), False, "none"),
+        (RoutingSignals(False, "none", False), False, "read"),
+    ],
+)
+def test_model_router_applies_session_propagation_only_to_history_driven_refund_context(
+    signals: RoutingSignals,
+    session_propagation_enabled: bool,
+    tool_profile: str,
+) -> None:
+    selected = ModelRouter((ProviderRoute("primary", "provider-a"),), 16).plan(
+        signals,
+        session_propagation_enabled=session_propagation_enabled,
+    )
+
+    assert selected.tool_profile == tool_profile
+
+
+def test_session_propagation_changes_no_other_plan_policy() -> None:
+    routes = (
+        ProviderRoute("support-standard-primary", "provider-a"),
+        ProviderRoute("support-standard-fallback", "provider-b"),
+    )
+    reranker = ProviderRoute("support-reranker-standard", "reranker")
+    router = ModelRouter(routes, 16, reranker)
+    signals = RoutingSignals(True, "session", False)
+
+    enabled = router.plan(signals, session_propagation_enabled=True)
+    disabled = router.plan(signals, session_propagation_enabled=False)
+
+    assert enabled.tool_profile == "all"
+    assert disabled.tool_profile == "read"
+    assert (
+        enabled.tier,
+        enabled.routes,
+        enabled.reranker_route,
+        enabled.attempt_limit,
+    ) == (
+        disabled.tier,
+        disabled.routes,
+        disabled.reranker_route,
+        disabled.attempt_limit,
+    )
+
+
+@pytest.mark.parametrize(
+    (
+        "evaluation_profile_enabled",
+        "configured_enabled",
+        "sandbox_id",
+        "effective_enabled",
+        "tool_profile",
+    ),
+    [
+        (False, False, "sandbox-1", True, "all"),
+        (True, False, None, True, "all"),
+        (True, False, "", True, "all"),
+        (True, False, "sandbox-1", False, "read"),
+        (True, True, "sandbox-1", True, "all"),
+    ],
+)
+def test_bounded_agent_emits_the_effective_session_propagation_boundary(
+    evaluation_profile_enabled: bool,
+    configured_enabled: bool,
+    sandbox_id: str | None,
+    effective_enabled: bool,
+    tool_profile: str,
+) -> None:
+    class CapturingModel:
+        def __init__(self) -> None:
+            self.plans: list[Any] = []
+
+        def complete(
+            self,
+            plan: Any,
+            messages: list[dict[str, object]],
+            tools: list[dict[str, object]],
+            budget: AttemptBudget,
+            events: list[AgentEvent],
+        ) -> ModelReply:
+            del messages, tools, budget, events
+            self.plans.append(plan)
+            return ModelReply(content="bounded response")
+
+    class NoTools:
+        @staticmethod
+        def schemas(plan: Any) -> list[dict[str, object]]:
+            del plan
+            return []
+
+    model = CapturingModel()
+    result = BoundedAgent(
+        RuleRouter(),
+        ModelRouter((ProviderRoute("support-standard-primary", "provider-a"),), 16),
+        model,  # type: ignore[arg-type]
+        NoTools(),  # type: ignore[arg-type]
+        evaluation_profile_enabled=evaluation_profile_enabled,
+        evaluation_session_propagation_enabled=configured_enabled,
+    ).run(
+        message="The order id is 00000000-0000-0000-0000-000000000001",
+        direct_token="direct",
+        subject="user-1",
+        session_id="session-1",
+        trace_id="00000000-0000-0000-0000-000000000123",
+        turn_id="00000000-0000-0000-0000-000000000122",
+        history=ConversationHistory(
+            (
+                ConversationTurn(
+                    turn_id="00000000-0000-0000-0000-000000000121",
+                    turn_sequence=1,
+                    user_text="I need a refund.",
+                    assistant_text="Which order should I use?",
+                ),
+            )
+        ),
+        sandbox_id=sandbox_id,
+    )
+
+    assert model.plans[0].tool_profile == tool_profile
+    routing = next(event for event in result.events if event.event_type == "ROUTING_DECISION")
+    assert routing.payload == {
+        "signals": {
+            "refundContext": True,
+            "refundContextSource": "session",
+            "chitchat": False,
+        },
+        "tier": "standard",
+        "attemptLimit": 16,
+        "toolProfile": tool_profile,
+        "sessionPropagationEnabled": effective_enabled,
+    }
+
+
+def routing_evidence_payload(
+    *,
+    refund_context: bool,
+    refund_context_source: str,
+    chitchat: bool,
+    tool_profile: str,
+    session_propagation_enabled: object,
+) -> dict[str, object]:
+    return {
+        "signals": {
+            "refundContext": refund_context,
+            "refundContextSource": refund_context_source,
+            "chitchat": chitchat,
+        },
+        "tier": "standard",
+        "attemptLimit": 16,
+        "toolProfile": tool_profile,
+        "sessionPropagationEnabled": session_propagation_enabled,
+    }
+
+
+@pytest.mark.parametrize(
+    (
+        "refund_context_source",
+        "chitchat",
+        "tool_profile",
+        "session_propagation_enabled",
+    ),
+    [
+        ("current", False, "all", False),
+        ("session", False, "all", True),
+        ("session", False, "read", False),
+        ("session", True, "none", False),
+    ],
+)
+def test_routing_evidence_projects_closed_current_and_session_decisions(
+    refund_context_source: str,
+    chitchat: bool,
+    tool_profile: str,
+    session_propagation_enabled: bool,
+) -> None:
+    projected = object.__new__(MysqlEvaluationEvidenceStore)._project_event(  # noqa: SLF001
+        1,
+        "ROUTING_DECISION",
+        routing_evidence_payload(
+            refund_context=True,
+            refund_context_source=refund_context_source,
+            chitchat=chitchat,
+            tool_profile=tool_profile,
+            session_propagation_enabled=session_propagation_enabled,
+        ),
+        datetime(2026, 9, 1, tzinfo=UTC),
+    )
+
+    assert projected.outcome == "standard"
+    assert projected.attempt_limit == 16
+    assert projected.routing is not None
+    assert projected.routing.model_dump(by_alias=True) == {
+        "refundContext": True,
+        "refundContextSource": refund_context_source,
+        "chitchat": chitchat,
+        "toolProfile": tool_profile,
+        "sessionPropagationEnabled": session_propagation_enabled,
+    }
+
+
+def test_legacy_routing_evidence_without_session_flag_remains_readable() -> None:
+    payload = routing_evidence_payload(
+        refund_context=True,
+        refund_context_source="session",
+        chitchat=False,
+        tool_profile="all",
+        session_propagation_enabled=True,
+    )
+    del payload["sessionPropagationEnabled"]
+
+    projected = object.__new__(MysqlEvaluationEvidenceStore)._project_event(  # noqa: SLF001
+        1,
+        "ROUTING_DECISION",
+        payload,
+        datetime(2026, 9, 1, tzinfo=UTC),
+    )
+
+    assert projected.outcome == "standard"
+    assert projected.attempt_limit == 16
+    assert projected.routing is None
+    assert "routing" not in projected.model_dump(by_alias=True, exclude_none=True)
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        routing_evidence_payload(
+            refund_context=True,
+            refund_context_source="session",
+            chitchat=False,
+            tool_profile="read",
+            session_propagation_enabled="false",
+        ),
+        routing_evidence_payload(
+            refund_context=True,
+            refund_context_source="none",
+            chitchat=False,
+            tool_profile="read",
+            session_propagation_enabled=False,
+        ),
+        routing_evidence_payload(
+            refund_context=True,
+            refund_context_source="session",
+            chitchat=False,
+            tool_profile="all",
+            session_propagation_enabled=False,
+        ),
+        {
+            **routing_evidence_payload(
+                refund_context=True,
+                refund_context_source="session",
+                chitchat=False,
+                tool_profile="read",
+                session_propagation_enabled=False,
+            ),
+            "signals": {
+                "refundContext": True,
+                "refundContextSource": "session",
+                "chitchat": False,
+                "unexpected": True,
+            },
+        },
+    ],
+)
+def test_new_routing_evidence_rejects_non_strict_or_inconsistent_payloads(
+    payload: dict[str, Any],
+) -> None:
+    with pytest.raises(EvaluationEvidenceInvalid):
+        object.__new__(MysqlEvaluationEvidenceStore)._project_event(  # noqa: SLF001
+            1,
+            "ROUTING_DECISION",
+            payload,
+            datetime(2026, 9, 1, tzinfo=UTC),
+        )
 
 
 @pytest.mark.parametrize(
@@ -899,6 +1183,39 @@ def test_tool_schemas_follow_the_server_selected_profile(message: str, expected:
         names.add(name)
 
     assert names == expected
+
+
+def test_session_propagation_changes_the_visible_subset_without_mutating_registered_specs() -> None:
+    router = ModelRouter((ProviderRoute("primary", "provider-a"),), 16)
+    signals = RoutingSignals(True, "session", False)
+    enabled = router.plan(signals, session_propagation_enabled=True)
+    disabled = router.plan(signals, session_propagation_enabled=False)
+    adapter = ToolAdapter("https://commerce.test", RecordingObo())
+
+    registered_before = adapter.schemas(enabled)
+    visible_disabled = adapter.schemas(disabled)
+    registered_after = adapter.schemas(enabled)
+
+    def names(schemas: list[dict[str, object]]) -> set[str]:
+        result: set[str] = set()
+        for schema in schemas:
+            function = schema.get("function")
+            assert isinstance(function, dict)
+            name = function.get("name")
+            assert isinstance(name, str)
+            result.add(name)
+        return result
+
+    assert registered_after == registered_before
+    assert names(visible_disabled) == {
+        CATALOG_PRODUCT_SPEC.wire_name,
+        KNOWLEDGE_SEARCH_SPEC.wire_name,
+    }
+    assert names(registered_after) == {
+        CATALOG_PRODUCT_SPEC.wire_name,
+        KNOWLEDGE_SEARCH_SPEC.wire_name,
+        REFUND_PREPARE_SPEC.wire_name,
+    }
 
 
 def test_hidden_known_tool_is_denied_before_identity_or_commerce_io(
@@ -1645,6 +1962,12 @@ def test_bounded_agent_carries_exact_denial_producer_without_model_disclosure() 
     ]
     routing_event = next(event for event in result.events if event.event_type == "ROUTING_DECISION")
     assert routing_event.payload["toolProfile"] == "all"
+    assert routing_event.payload["sessionPropagationEnabled"] is True
+    assert routing_event.payload["signals"] == {
+        "refundContext": True,
+        "refundContextSource": "current",
+        "chitchat": False,
+    }
     assert any(
         event.event_type == "TOOL_DENIED" and event.payload.get("tool") == REFUND_PREPARE_SPEC.name
         for event in result.events

@@ -50,11 +50,12 @@ def test_evaluation_evidence_schema_is_a_closed_safe_projection() -> None:
     response = schemas["AgentEvaluationEvidence"]
     event = schemas["AgentEvaluationEvent"]
     context = schemas["AgentEvaluationContext"]
+    routing = schemas["AgentEvaluationRouting"]
     retrieval = schemas["AgentEvaluationRetrieval"]
     source = schemas["AgentEvaluationSource"]
     feedback = schemas["AgentEvaluationFeedback"]
 
-    for schema in (response, event, context, retrieval, source, feedback):
+    for schema in (response, event, context, routing, retrieval, source, feedback):
         assert schema["additionalProperties"] is False
     assert set(response["properties"]) == {
         "schemaVersion",
@@ -77,8 +78,10 @@ def test_evaluation_evidence_schema_is_a_closed_safe_projection() -> None:
         "attempt",
         "attemptLimit",
         "context",
+        "routing",
         "occurredAt",
     }
+    assert "routing" not in event["required"]
     assert set(context["properties"]) == {
         "policyVersion",
         "tokenEstimator",
@@ -94,6 +97,20 @@ def test_evaluation_evidence_schema_is_a_closed_safe_projection() -> None:
     assert context["properties"]["tokenBudget"]["const"] == 6144
     assert context["properties"]["candidateTokens"]["maximum"] == 272512
     assert context["properties"]["includedTurnIds"]["maxItems"] == 16
+    assert set(routing["properties"]) == {
+        "refundContext",
+        "refundContextSource",
+        "chitchat",
+        "toolProfile",
+        "sessionPropagationEnabled",
+    }
+    assert set(routing["required"]) == set(routing["properties"])
+    assert set(routing["properties"]["refundContextSource"]["enum"]) == {
+        "none",
+        "current",
+        "session",
+    }
+    assert set(routing["properties"]["toolProfile"]["enum"]) == {"none", "read", "all"}
     assert set(retrieval["properties"]) == {
         "outcome",
         "reason",
@@ -127,6 +144,7 @@ def test_evaluation_evidence_schema_is_a_closed_safe_projection() -> None:
         set(response["properties"])
         | set(event["properties"])
         | set(context["properties"])
+        | set(routing["properties"])
         | set(retrieval["properties"])
         | set(source["properties"])
         | set(feedback["properties"])

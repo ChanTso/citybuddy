@@ -5,10 +5,18 @@ from __future__ import annotations
 import json
 import uuid
 from datetime import UTC, datetime
-from typing import Literal, Protocol, cast
+from typing import Literal, Protocol, Self, cast
 
 import pymysql
-from pydantic import AwareDatetime, BaseModel, ConfigDict, Field, ValidationError, field_validator
+from pydantic import (
+    AwareDatetime,
+    BaseModel,
+    ConfigDict,
+    Field,
+    ValidationError,
+    field_validator,
+    model_validator,
+)
 
 from .actions import (
     ACTION_TURN_EVENTS_SQL,
@@ -175,6 +183,34 @@ class ContextWindowEvidenceResponse(BaseModel):
         return values
 
 
+class RoutingEvidenceResponse(BaseModel):
+    model_config = ConfigDict(frozen=True, extra="forbid", strict=True)
+
+    refund_context: bool = Field(serialization_alias="refundContext")
+    refund_context_source: Literal["none", "current", "session"] = Field(
+        serialization_alias="refundContextSource"
+    )
+    chitchat: bool
+    tool_profile: Literal["none", "read", "all"] = Field(serialization_alias="toolProfile")
+    session_propagation_enabled: bool = Field(serialization_alias="sessionPropagationEnabled")
+
+    @model_validator(mode="after")
+    def consistent_route(self) -> Self:
+        if self.refund_context != (self.refund_context_source != "none"):
+            raise ValueError("Routing refund context and source disagree")
+        if self.refund_context_source == "current":
+            expected_profile = "all"
+        elif self.chitchat:
+            expected_profile = "none"
+        elif self.refund_context and self.session_propagation_enabled:
+            expected_profile = "all"
+        else:
+            expected_profile = "read"
+        if self.tool_profile != expected_profile:
+            raise ValueError("Routing tool profile disagrees with its signals")
+        return self
+
+
 class EvidenceEventResponse(BaseModel):
     model_config = ConfigDict(frozen=True)
 
@@ -185,6 +221,7 @@ class EvidenceEventResponse(BaseModel):
     attempt: int | None = Field(default=None, ge=1, le=32)
     attempt_limit: int | None = Field(default=None, serialization_alias="attemptLimit", ge=1, le=32)
     context: ContextWindowEvidenceResponse | None = None
+    routing: RoutingEvidenceResponse | None = None
     occurred_at: AwareDatetime = Field(serialization_alias="occurredAt")
 
 
@@ -509,6 +546,7 @@ class MysqlEvaluationEvidenceStore:
         attempt: int | None = None
         attempt_limit: int | None = None
         context: ContextWindowEvidenceResponse | None = None
+        routing: RoutingEvidenceResponse | None = None
         if event_type == "USER_INPUT":
             if payload.get("accepted") is not True:
                 raise EvaluationEvidenceInvalid
@@ -557,6 +595,26 @@ class MysqlEvaluationEvidenceStore:
             limit = payload.get("attemptLimit")
             if tier != "standard" or not self._bounded_int(limit, 1, 32):
                 raise EvaluationEvidenceInvalid
+            if "sessionPropagationEnabled" in payload:
+                signals = payload.get("signals")
+                if not isinstance(signals, dict) or set(signals) != {
+                    "refundContext",
+                    "refundContextSource",
+                    "chitchat",
+                }:
+                    raise EvaluationEvidenceInvalid
+                try:
+                    routing = RoutingEvidenceResponse.model_validate(
+                        {
+                            "refund_context": signals["refundContext"],
+                            "refund_context_source": signals["refundContextSource"],
+                            "chitchat": signals["chitchat"],
+                            "tool_profile": payload.get("toolProfile"),
+                            "session_propagation_enabled": payload["sessionPropagationEnabled"],
+                        }
+                    )
+                except ValidationError as exception:
+                    raise EvaluationEvidenceInvalid from exception
             outcome = str(tier)
             attempt_limit = cast(int, limit)
         elif event_type == "BUDGET_CHARGED":
@@ -660,6 +718,7 @@ class MysqlEvaluationEvidenceStore:
             attempt=attempt,
             attempt_limit=attempt_limit,
             context=context,
+            routing=routing,
             occurred_at=occurred_at,
         )
 

@@ -27,6 +27,7 @@ EVENT_KEYS = {
     "attempt",
     "attemptLimit",
     "context",
+    "routing",
     "occurredAt",
 }
 CONTEXT_KEYS = {
@@ -40,6 +41,13 @@ CONTEXT_KEYS = {
     "includedTurnIds",
     "omittedLoadedTurnCount",
     "olderTurnsAvailable",
+}
+ROUTING_KEYS = {
+    "refundContext",
+    "refundContextSource",
+    "chitchat",
+    "toolProfile",
+    "sessionPropagationEnabled",
 }
 SOURCE_KEYS = {"rank", "sourceId", "chunkId", "sourceVersion", "docType"}
 
@@ -163,6 +171,35 @@ def main() -> None:
                 raise SystemExit("Context selection is outside its closed bounds")
         elif context is not None:
             raise SystemExit("Non-context event carried context selection")
+        routing = event.get("routing")
+        if routing is not None:
+            if event["eventKind"] != "ROUTING_DECISION" or not isinstance(routing, dict):
+                raise SystemExit("Non-routing event carried a routing decision")
+            require_keys(routing, ROUTING_KEYS, ROUTING_KEYS)
+            refund_context = routing["refundContext"]
+            refund_context_source = routing["refundContextSource"]
+            chitchat = routing["chitchat"]
+            tool_profile = routing["toolProfile"]
+            session_propagation_enabled = routing["sessionPropagationEnabled"]
+            if (
+                type(refund_context) is not bool
+                or refund_context_source not in {"none", "current", "session"}
+                or type(chitchat) is not bool
+                or tool_profile not in {"none", "read", "all"}
+                or type(session_propagation_enabled) is not bool
+                or refund_context != (refund_context_source != "none")
+            ):
+                raise SystemExit("Routing decision is outside its closed bounds")
+            if refund_context_source == "current":
+                expected_tool_profile = "all"
+            elif chitchat:
+                expected_tool_profile = "none"
+            elif refund_context and session_propagation_enabled:
+                expected_tool_profile = "all"
+            else:
+                expected_tool_profile = "read"
+            if tool_profile != expected_tool_profile:
+                raise SystemExit("Routing decision conflicts with its visible tool profile")
         kinds.append(event["eventKind"])
     if kinds[0] != "USER_INPUT":
         raise SystemExit("Evidence omitted accepted-input boundary")
