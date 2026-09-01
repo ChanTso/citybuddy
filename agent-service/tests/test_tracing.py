@@ -5,7 +5,7 @@ import threading
 import time
 from collections.abc import Iterator
 from contextlib import contextmanager
-from typing import Any
+from typing import Any, cast
 
 import httpx
 import pytest
@@ -171,6 +171,50 @@ class FakeStreamResponse:
         assert chunk_size == 1
         if self.body:
             yield self.body[:1]
+
+
+def test_each_export_thread_uses_its_own_app_runtime() -> None:
+    owners: list[str] = []
+
+    class Client:
+        def __init__(self, owner: str) -> None:
+            self.owner = owner
+
+        def stream(self, *args: object, **kwargs: object) -> FakeStreamResponse:
+            del args, kwargs
+            owners.append(self.owner)
+            return FakeStreamResponse(204, b"")
+
+    class Clients:
+        def __init__(self, owner: str) -> None:
+            self.client = Client(owner)
+
+        def client_for(self, url: str) -> httpx.Client:
+            assert url == "http://trace.test/export"
+            return cast(httpx.Client, self.client)
+
+    first_metrics = RecordingMetrics()
+    second_metrics = RecordingMetrics()
+    first = BoundedHttpTraceSink(
+        "http://trace.test/export",
+        first_metrics,
+        http_clients=cast(http_client.HttpClients, Clients("first")),
+    )
+    second = BoundedHttpTraceSink(
+        "http://trace.test/export",
+        second_metrics,
+        http_clients=cast(http_client.HttpClients, Clients("second")),
+    )
+    try:
+        first.emit(envelope())
+        second.emit(envelope())
+        wait_for(lambda: first_metrics.trace_exports == [TraceExportOutcome.SENT])
+        wait_for(lambda: second_metrics.trace_exports == [TraceExportOutcome.SENT])
+    finally:
+        first.close()
+        second.close()
+
+    assert sorted(owners) == ["first", "second"]
 
 
 @pytest.mark.parametrize(

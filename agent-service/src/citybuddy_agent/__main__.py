@@ -3,8 +3,10 @@
 import os
 
 import uvicorn
+from fastapi import FastAPI
 
 from .application import AgentSettings, create_app
+from .http_client import HttpClientLayout
 
 
 def _strict_bool(name: str) -> bool:
@@ -14,6 +16,29 @@ def _strict_bool(name: str) -> bool:
     if value == "true":
         return True
     raise ValueError(f"{name} must be true or false")
+
+
+def _positive_ascii_integer(name: str, *, default: int) -> int:
+    value = os.environ.get(name, "").strip()
+    if not value:
+        return default
+    if not value.isascii() or not value.isdecimal():
+        raise ValueError(f"{name} must be a positive ASCII integer")
+    parsed = int(value)
+    if parsed <= 0:
+        raise ValueError(f"{name} must be a positive ASCII integer")
+    return parsed
+
+
+def _http_client_layout() -> HttpClientLayout:
+    value = os.environ.get("AGENT_HTTP_CLIENT_LAYOUT", "").strip()
+    if not value:
+        return "shared"
+    if value == "shared":
+        return "shared"
+    if value == "per-authority":
+        return "per-authority"
+    raise ValueError("AGENT_HTTP_CLIENT_LAYOUT must be shared or per-authority")
 
 
 def _settings() -> AgentSettings:
@@ -56,14 +81,22 @@ def _settings() -> AgentSettings:
         circuit_half_open_probes=int(os.environ.get("AGENT_CIRCUIT_HALF_OPEN_PROBES", "1")),
         metrics_enabled=_strict_bool("CITYBUDDY_METRICS_ENABLED"),
         trace_export_url=os.environ.get("CITYBUDDY_TRACE_EXPORT_URL", ""),
+        http_client_layout=_http_client_layout(),
     )
+
+
+def create_runtime_app() -> FastAPI:
+    """Build one worker's complete application before it accepts traffic."""
+    return create_app(_settings())
 
 
 def main() -> None:
     uvicorn.run(
-        create_app(_settings()),
+        "citybuddy_agent.__main__:create_runtime_app",
         host="127.0.0.1",
         port=int(os.environ.get("AGENT_PORT", "8001")),
+        factory=True,
+        workers=_positive_ascii_integer("AGENT_WORKERS", default=1),
     )
 
 

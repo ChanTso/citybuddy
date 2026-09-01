@@ -11,6 +11,7 @@ from typing import Any
 
 import httpx
 import pymysql
+from citybuddy_agent import http_client
 from citybuddy_agent.agent_control import (
     BoundedAgent,
     LiteLlmClient,
@@ -196,7 +197,26 @@ def main() -> None:
     parser.add_argument("--agent-cache-url", required=True)
     parser.add_argument("--indexer-cache-url", required=True)
     args = parser.parse_args()
+    clients = http_client.HttpClients(
+        "shared",
+        (
+            args.model_url,
+            args.elasticsearch_url,
+            "http://commerce-must-not-be-used",
+            "http://127.0.0.1:9",
+        ),
+    )
+    http_client.install(clients)
+    try:
+        run(args)
+    finally:
+        try:
+            clients.close()
+        finally:
+            http_client.uninstall(clients)
 
+
+def run(args: argparse.Namespace) -> None:
     settings = AgentSettings(
         identity_enabled=True,
         mysql_host=args.mysql_host,

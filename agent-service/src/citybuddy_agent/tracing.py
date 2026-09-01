@@ -6,6 +6,7 @@ import json
 import queue
 import threading
 import time
+from contextlib import nullcontext
 from dataclasses import asdict, dataclass
 from datetime import UTC, datetime
 from enum import StrEnum
@@ -98,9 +99,16 @@ class NoopTraceSink:
 
 
 class BoundedHttpTraceSink:
-    def __init__(self, url: str, metrics: CityBuddyMetrics) -> None:
+    def __init__(
+        self,
+        url: str,
+        metrics: CityBuddyMetrics,
+        *,
+        http_clients: http_client.HttpClients | None = None,
+    ) -> None:
         self._url = validate_trace_url(url)
         self._metrics = SafeCityBuddyMetrics(metrics)
+        self._http_clients = http_clients
         self._queue: queue.Queue[bytes] = queue.Queue(maxsize=TRACE_QUEUE_SIZE)
         self._closed = False
         self._lock = threading.Lock()
@@ -161,16 +169,22 @@ class BoundedHttpTraceSink:
         outcome = TraceExportOutcome.FAILED
         try:
             timeout = httpx.Timeout(TRACE_HTTP_TIMEOUT_SECONDS)
-            with http_client.stream(
-                "POST",
-                self._url,
-                content=payload,
-                headers={"Content-Type": "application/json"},
-                timeout=timeout,
-            ) as response:
-                has_body = next(response.iter_raw(chunk_size=1), b"") != b""
-                if response.status_code == 204 and not has_body:
-                    outcome = TraceExportOutcome.SENT
+            binding = (
+                http_client.use(self._http_clients)
+                if self._http_clients is not None
+                else nullcontext()
+            )
+            with binding:
+                with http_client.stream(
+                    "POST",
+                    self._url,
+                    content=payload,
+                    headers={"Content-Type": "application/json"},
+                    timeout=timeout,
+                ) as response:
+                    has_body = next(response.iter_raw(chunk_size=1), b"") != b""
+                    if response.status_code == 204 and not has_body:
+                        outcome = TraceExportOutcome.SENT
         except Exception:
             outcome = TraceExportOutcome.FAILED
         self._metrics.record_trace_export(outcome)
@@ -209,10 +223,15 @@ class OperationObservation:
             pass
 
 
-def create_trace_sink(url: str, metrics: CityBuddyMetrics) -> TraceSink:
+def create_trace_sink(
+    url: str,
+    metrics: CityBuddyMetrics,
+    *,
+    http_clients: http_client.HttpClients | None = None,
+) -> TraceSink:
     if not url:
         return NoopTraceSink()
-    return BoundedHttpTraceSink(url, metrics)
+    return BoundedHttpTraceSink(url, metrics, http_clients=http_clients)
 
 
 def validate_trace_url(url: str) -> str:

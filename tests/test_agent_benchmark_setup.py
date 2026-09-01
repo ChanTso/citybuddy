@@ -12,6 +12,7 @@ import pytest
 
 REPOSITORY = Path(__file__).resolve().parents[1]
 SETUP = REPOSITORY / "bench/agent/setup_agent_bench.sh"
+SETUP_GATE = REPOSITORY / "bench/agent/setup_environment_gate.sh"
 DOCKERFILE = REPOSITORY / "bench/agent/Dockerfile"
 
 
@@ -160,6 +161,31 @@ def test_agent_image_context_contains_only_tracked_commit_sources(tmp_path: Path
     assert "RUN uv sync --locked --no-dev --all-packages" in DOCKERFILE.read_text(encoding="utf-8")
 
 
+@pytest.mark.parametrize("script", (SETUP, SETUP_GATE))
+def test_worker_liveness_rejects_unschedulable_process_states(script: Path) -> None:
+    source = script.read_text(encoding="utf-8")
+
+    assert 'rsplit(")", 1)[1].split()[0]' in source
+    assert "R | S | D) ;;" in source
+    assert "schedulable" in source
+
+
+def test_setup_pins_the_measured_mysql_boundary_after_compose_reconciliation() -> None:
+    source = SETUP.read_text(encoding="utf-8")
+
+    migration_start = source.index('mysql_setup_make=(make "ENV_FILE=.env"')
+    final_grant = source.index(
+        '"${mysql_setup_make[@]}" grant-access',
+        source.index('"${mysql_setup_make[@]}" migrate-agent', migration_start),
+    )
+    measured_boundary = source.index('mysql_container_id="$(docker inspect', final_grant)
+    migration_versions = source.index("auth_migration_version=", measured_boundary)
+    preserved_limit = source.index('mysql_preserved_max_connections="')
+
+    assert preserved_limit < migration_start < final_grant < measured_boundary
+    assert measured_boundary < migration_versions
+
+
 def _write_executable(path: Path, source: str) -> None:
     path.write_text(textwrap.dedent(source).lstrip(), encoding="utf-8")
     path.chmod(0o755)
@@ -199,8 +225,15 @@ def _prepare_cleanup_counterexample(tmp_path: Path) -> tuple[Path, dict[str, str
     fake_bin.mkdir()
     docker_log = tmp_path / "docker.log"
     docker_state = tmp_path / "es-started"
+    mysql_live_state = tmp_path / "mysql-live-state"
+    mysql_live_state.write_text("old\n", encoding="utf-8")
+    mysql_max_state = tmp_path / "mysql-max-state"
+    mysql_max_state.write_text("1000\n", encoding="utf-8")
+    mysql_log = tmp_path / "mysql.log"
+    mysql_rotation_trip = tmp_path / "mysql-rotation-trip"
     es_id = "e" * 64
-    mysql_id = "1" * 64
+    old_mysql_id = "1" * 64
+    new_mysql_id = "2" * 64
     agent_image_id = f"sha256:{'a' * 64}"
     es_image_id = f"sha256:{'b' * 64}"
     java_image_id = f"sha256:{'c' * 64}"
@@ -228,13 +261,49 @@ def _prepare_cleanup_counterexample(tmp_path: Path) -> tuple[Path, dict[str, str
         esac
         """,
     )
-    _write_executable(fake_bin / "make", "#!/bin/sh\nexit 0\n")
     _write_executable(
-        fake_bin / "mysql",
+        fake_bin / "make",
         """
         #!/bin/sh
+        if [ ! -e "$MYSQL_ROTATION_TRIP" ]; then
+          : > "$MYSQL_ROTATION_TRIP"
+          printf 'new\\n' > "$MYSQL_LIVE_STATE"
+          printf '151\\n' > "$MYSQL_MAX_STATE"
+        fi
+        exit 0
+        """,
+    )
+    _write_executable(
+        fake_bin / "mysql",
+        r"""
+        #!/bin/sh
+        live="$(sed -n 1p "$MYSQL_LIVE_STATE")"
+        if [ "$live" = old ]; then expected_port=3306; else expected_port=4406; fi
+        actual_port=''
+        previous=''
+        for argument in "$@"; do
+          if [ "$previous" = -P ]; then actual_port="$argument"; fi
+          case "$argument" in
+            --port=*) actual_port="$(printf '%s' "$argument" | cut -d= -f2-)" ;;
+          esac
+          previous="$argument"
+        done
+        printf 'live=%s expected=%s actual=%s args=%s\n' \
+          "$live" "$expected_port" "$actual_port" "$*" >> "$MYSQL_LOG"
+        if [ "$actual_port" != "$expected_port" ]; then exit 68; fi
         case "$*" in
-          *"SELECT version"*) printf '001\\n' ;;
+          *"SELECT version"*) printf '001\n' ;;
+          *"SHOW GLOBAL VARIABLES LIKE 'max_connections'"*)
+            printf 'Variable_name\tValue\nmax_connections\t%s\n' \
+              "$(sed -n 1p "$MYSQL_MAX_STATE")"
+            ;;
+          *"SET GLOBAL max_connections = "*)
+            value=$(
+              printf '%s\n' "$*" \
+                | sed -n 's/.*SET GLOBAL max_connections = \([0-9][0-9]*\).*/\1/p'
+            )
+            printf '%s\n' "$value" > "$MYSQL_MAX_STATE"
+            ;;
         esac
         """,
     )
@@ -262,7 +331,14 @@ def _prepare_cleanup_counterexample(tmp_path: Path) -> tuple[Path, dict[str, str
         case "$command" in
           port)
             case "$1" in
-              {mysql_id}) printf '0.0.0.0:3306\\n' ;;
+              {old_mysql_id})
+                [ "$(sed -n 1p "$MYSQL_LIVE_STATE")" = old ] || exit 69
+                printf '0.0.0.0:3306\\n'
+                ;;
+              {new_mysql_id})
+                [ "$(sed -n 1p "$MYSQL_LIVE_STATE")" = new ] || exit 69
+                printf '0.0.0.0:4406\\n'
+                ;;
               citybuddy-bench-elasticsearch) printf '127.0.0.1:49200\\n' ;;
             esac
             ;;
@@ -278,6 +354,16 @@ def _prepare_cleanup_counterexample(tmp_path: Path) -> tuple[Path, dict[str, str
               *eclipse-temurin*) printf '%s' '{java_image_id}' ;;
               *alpine:3.20*) printf '%s' '{net_image_id}' ;;
               *mysql:8.4.10*) printf '%s' '{mysql_image_id}' ;;
+              *) exit 1 ;;
+            esac
+            ;;
+          info)
+            case "$*" in
+              *ServerVersion*) printf '29.5.3\\n' ;;
+              *Architecture*) printf 'aarch64\\n' ;;
+              *NCPU*) printf '8\\n' ;;
+              *MemTotal*) printf '14638391296\\n' ;;
+              *Driver*) printf 'overlayfs\\n' ;;
               *) exit 1 ;;
             esac
             ;;
@@ -309,7 +395,13 @@ def _prepare_cleanup_counterexample(tmp_path: Path) -> tuple[Path, dict[str, str
             case "$name:$format" in
               citybuddy-mysql-1:*Config.Image*) printf '%s\\n' '{mysql_image_ref}' ;;
               citybuddy-mysql-1:*'.Image'*) printf '%s\\n' '{mysql_image_id}' ;;
-              citybuddy-mysql-1:*'.Id'*) printf '%s\\n' '{mysql_id}' ;;
+              citybuddy-mysql-1:*'.Id'*)
+                if [ "$(sed -n 1p "$MYSQL_LIVE_STATE")" = old ]; then
+                  printf '%s\\n' '{old_mysql_id}'
+                else
+                  printf '%s\\n' '{new_mysql_id}'
+                fi
+                ;;
               citybuddy-bench-elasticsearch:*'.Image'*) printf '%s\\n' '{es_image_id}' ;;
               citybuddy-bench-elasticsearch:*'.Id'*) printf '%s\\n' '{es_id}' ;;
               *:*StartedAt*) printf '2026-08-31T00:00:00Z\\n' ;;
@@ -346,6 +438,10 @@ def _prepare_cleanup_counterexample(tmp_path: Path) -> tuple[Path, dict[str, str
             "CLEANUP_FAILURE": "0",
             "DOCKER_LOG": str(docker_log),
             "DOCKER_STATE": str(docker_state),
+            "MYSQL_LIVE_STATE": str(mysql_live_state),
+            "MYSQL_LOG": str(mysql_log),
+            "MYSQL_MAX_STATE": str(mysql_max_state),
+            "MYSQL_ROTATION_TRIP": str(mysql_rotation_trip),
             "PATH": f"{fake_bin}:{environment['PATH']}",
             "SETUP_SIGNAL": "",
         }
@@ -370,6 +466,11 @@ def test_failed_setup_cleans_only_its_labeled_containers_and_preserves_status(
     )
 
     assert result.returncode == 41
+    mysql_log = Path(environment["MYSQL_LOG"]).read_text(encoding="utf-8")
+    assert "live=old expected=3306 actual=3306" in mysql_log
+    assert "live=new expected=4406 actual=4406" in mysql_log
+    assert "SET GLOBAL max_connections = 1000" in mysql_log
+    assert Path(environment["MYSQL_MAX_STATE"]).read_text(encoding="utf-8") == "1000\n"
     docker_log = Path(environment["DOCKER_LOG"]).read_text(encoding="utf-8")
     assert f"sha256:{'b' * 64}" in docker_log
     assert "--name citybuddy-bench-indexer" in docker_log

@@ -1,7 +1,7 @@
 # Agent workload latency
 
-This document reports the current four-path empty-history baseline at
-`bd646937d0c7f45c107ce2283a244d1b4fc8d952`, the formal warm-history comparison at
+This document reports the current four-path empty-history baseline and worker × outbound-client
+factorial at `cdbe1cbd40d6463270aa5652151f8330bc38773f`, the formal warm-history comparison at
 `65bb40e7c04bbdcc0b4be22531bb16040af49274`, and the historical three-path measurement of a plain
 answer, an answer grounded in retrieved knowledge, and a refund preparation that writes a durable
 pending action. Every measured result reported here was produced by the scripts in this directory
@@ -13,10 +13,10 @@ says what the change was worth.
 
 ## Version boundary
 
-The current four-path raw and result artifacts record the measured full commit
-`bd646937d0c7f45c107ce2283a244d1b4fc8d952`. The 16 warm-history run bundles and their aggregate
-record the measured full commit `65bb40e7c04bbdcc0b4be22531bb16040af49274`. Repository history
-reconstructs the earlier paired baseline boundary as
+The current four-path baseline and 16-cell worker × outbound-client bundles record the measured
+full commit `cdbe1cbd40d6463270aa5652151f8330bc38773f`. The 16 warm-history run bundles and their
+aggregate record the measured full commit `65bb40e7c04bbdcc0b4be22531bb16040af49274`.
+Repository history reconstructs the earlier paired baseline boundary as
 `272eecdfb79b73811bc6fff677360a0d79a07991` and the post-client-reuse boundary as
 `6acf856716ff0b926bb147c0e1d99614a8d9e9c8`. The artifacts were committed immediately after the
 passes but do not contain those SHAs, so they cannot independently prove the checkout that
@@ -47,10 +47,11 @@ message, attempt ceiling, visible schemas, model calls, retrieval and commerce w
 cannot be compared to attribute memory SQL or tool-schema cost. The workload-contract SQL artifact
 checks the expected route and zero loaded/included history for completed turns after the measured
 window; it is neither a performance result nor a business grader. Setup and the runner now enforce
-the runtime and provenance prerequisites. The current contracts cover 7,502 completed greeting
-turns with `none`, 5,201 delivery turns with `read`, 8,905 retrieval turns with `all`, and 2,276
+the runtime and provenance prerequisites. The current contracts cover 7,505 completed greeting
+turns with `none`, 5,205 delivery turns with `read`, 8,907 retrieval turns with `all`, and 2,295
 completed preparation turns with `all`; every one has zero loaded and included history. The
-preparation boundary also contains 12 failed overload turns, recorded separately from those
+retrieval boundary also contains two nonserved overload requests that failed before creating a
+correlated turn. Preparation contains seven failed overload turns, recorded separately from its
 completed contracts.
 
 ## Warm-history comparison harness
@@ -193,11 +194,11 @@ the platform's own cost.
 
 | | |
 |---|---|
-| Current four-path source | `bd646937d0c7f45c107ce2283a244d1b4fc8d952`, measured 2026-08-31 UTC |
+| Current four-path and worker-factorial source | `cdbe1cbd40d6463270aa5652151f8330bc38773f`, measured 2026-08-31 UTC |
 | Warm-history source | `65bb40e7c04bbdcc0b4be22531bb16040af49274`, measured 2026-08-31 UTC |
 | Host | MacBook Pro M4, 10 cores, 24 GB |
 | Docker Desktop | 13.6 GiB / 8 CPU allocation, aarch64, server 29.5.3 |
-| Agent | `agent-service` as a container, single uvicorn process, sync endpoints on the AnyIO worker pool |
+| Agent | `agent-service` as a container; one uvicorn worker in the baseline and one/two in the factorial, with sync endpoints on each worker's AnyIO pool |
 | Dependencies | MySQL 8, Elasticsearch 8 + IK, `auth-service` and `commerce-service` as containers |
 | Model | Deterministic fake LiteLLM fixture; inference time held at zero |
 | Current generator | k6 v2.2.0, linux/arm64, pinned as `grafana/k6@sha256:5221b620a4f874faff6e32ba597aa667c058391fe4898b1c6f6377f062c6cdec` |
@@ -260,35 +261,208 @@ service's shape.
 
 ## Results
 
-### Current four-path baseline at bd646937
+### Current four-path baseline at cdbe1cb
 
 The four ladders ran in the fixed order greeting, delivery chat, retrieval, preparation with
 `randomization=none`. Each began from its own completed setup on an otherwise idle host. A clean
-step has zero k6-dropped iterations and zero HTTP errors; it is the highest step tested clean in
-this first ladder, not a sustainable-throughput or capacity claim.
+step finished and served at least its nominal request count with zero HTTP errors. Because this
+measured harness retained executor drops only at ladder scope, `clean` here does not assert a
+per-rate drop count. It is the highest step meeting that boundary in this first ladder, not a
+sustainable-throughput or capacity claim.
 
 | Workload | Profile and ladder | Highest tested clean step | First observed load boundary | Evidence |
 |---|---|---|---|---|
-| Bare greeting | `none`; 25/50/75/100/125 req/s for 20 s | 125 req/s: 2,500 nominally offered, 2,501 completed, p99 96.9 ms | None in the tested range | [result](../results/agent_greeting_bd646_result.json), [steps](../results/agent_greeting_bd646_steps.txt), [console](../results/agent_greeting_bd646_console.txt), [summary](../results/agent_greeting_bd646_summary.json), [route/context](../results/agent_greeting_bd646_workload_contract.tsv), [setup](../results/agent_greeting_bd646_setup_environment.json) |
-| Delivery chat | `read`; 10/25/50/75/100 req/s for 20 s | 100 req/s: 2,000 offered/completed, p99 27.6 ms | None in the tested range | [result](../results/agent_chat_read_bd646_result.json), [steps](../results/agent_chat_read_bd646_steps.txt), [console](../results/agent_chat_read_bd646_console.txt), [summary](../results/agent_chat_read_bd646_summary.json), [route/context](../results/agent_chat_read_bd646_workload_contract.tsv), [setup](../results/agent_chat_read_bd646_setup_environment.json) |
-| Knowledge retrieval | `all`; 40/50/60/75/90 req/s for 30 s | 60 req/s: 1,800 nominally offered, 1,801 completed, p99 243.0 ms | 75 req/s: 2,123 completed, 128 dropped, zero HTTP errors, p99 4,183.8 ms | [result](../results/agent_retrieval_bd646_result.json), [steps](../results/agent_retrieval_bd646_steps.txt), [console](../results/agent_retrieval_bd646_console.txt), [summary](../results/agent_retrieval_bd646_summary.json), [route/context](../results/agent_retrieval_bd646_workload_contract.tsv), [setup](../results/agent_retrieval_bd646_setup_environment.json) |
-| Owned-order refund preparation | `all`; 5/10/15/20/30 req/s for 30 s | 20 req/s: 600 nominally offered, 601 `action_pending`, p99 553.1 ms | 30 req/s: 785 completed requests, of which 773 reached `action_pending` and 12 returned HTTP 503; 115 were dropped; p99 7,822.7 ms | [result](../results/agent_prepare_bd646_result.json), [steps](../results/agent_prepare_bd646_steps.txt), [console](../results/agent_prepare_bd646_console.txt), [summary](../results/agent_prepare_bd646_summary.json), [route/context](../results/agent_prepare_bd646_workload_contract.tsv), [setup](../results/agent_prepare_bd646_setup_environment.json) |
+| Bare greeting | `none`; 25/50/75/100/125 req/s for 20 s | 125 req/s: 2,500 nominally offered, 2,501 completed, p99 148.0 ms | None in the tested range | [steps](../results/agent_worker_http_layout_cdbe1cb_20260831T185801Z_baseline_p1_greeting_steps.txt), [console](../results/agent_worker_http_layout_cdbe1cb_20260831T185801Z_baseline_p1_greeting_console.txt), [summary](../results/agent_worker_http_layout_cdbe1cb_20260831T185801Z_baseline_p1_greeting_summary.json), [route/context](../results/agent_worker_http_layout_cdbe1cb_20260831T185801Z_baseline_p1_greeting_workload_contract.tsv), [setup](../results/agent_worker_http_layout_cdbe1cb_20260831T185801Z_baseline_p1_greeting_setup_environment.json) |
+| Delivery chat | `read`; 10/25/50/75/100 req/s for 20 s | 100 req/s: 2,000 nominally offered, 2,001 completed, p99 36.3 ms | None in the tested range | [steps](../results/agent_worker_http_layout_cdbe1cb_20260831T185801Z_baseline_p2_chat_steps.txt), [console](../results/agent_worker_http_layout_cdbe1cb_20260831T185801Z_baseline_p2_chat_console.txt), [summary](../results/agent_worker_http_layout_cdbe1cb_20260831T185801Z_baseline_p2_chat_summary.json), [route/context](../results/agent_worker_http_layout_cdbe1cb_20260831T185801Z_baseline_p2_chat_workload_contract.tsv), [setup](../results/agent_worker_http_layout_cdbe1cb_20260831T185801Z_baseline_p2_chat_setup_environment.json) |
+| Knowledge retrieval | `all`; 40/50/60/75/90 req/s for 30 s | 60 req/s: 1,800 offered/completed, p99 83.9 ms | At 75 req/s, 2,148 finished, 2,147 were served, one returned HTTP 5xx, and p99 reached 3,696.7 ms; the overloaded 75/90 region produced 542 aggregate ladder drops | [steps](../results/agent_worker_http_layout_cdbe1cb_20260831T185801Z_baseline_p3_retrieval_steps.txt), [console](../results/agent_worker_http_layout_cdbe1cb_20260831T185801Z_baseline_p3_retrieval_console.txt), [summary](../results/agent_worker_http_layout_cdbe1cb_20260831T185801Z_baseline_p3_retrieval_summary.json), [route/context](../results/agent_worker_http_layout_cdbe1cb_20260831T185801Z_baseline_p3_retrieval_workload_contract.tsv), [setup](../results/agent_worker_http_layout_cdbe1cb_20260831T185801Z_baseline_p3_retrieval_setup_environment.json) |
+| Owned-order refund preparation | `all`; 5/10/15/20/30 req/s for 30 s | 20 req/s: 600 nominally offered, 601 reached `action_pending`, p99 704.4 ms | At 30 req/s, 800 finished, 793 reached `action_pending`, seven returned HTTP 5xx, 101 were dropped across the ladder, and p99 reached 7,066.0 ms | [steps](../results/agent_worker_http_layout_cdbe1cb_20260831T185801Z_baseline_p4_prepare_steps.txt), [console](../results/agent_worker_http_layout_cdbe1cb_20260831T185801Z_baseline_p4_prepare_console.txt), [summary](../results/agent_worker_http_layout_cdbe1cb_20260831T185801Z_baseline_p4_prepare_summary.json), [route/context](../results/agent_worker_http_layout_cdbe1cb_20260831T185801Z_baseline_p4_prepare_workload_contract.tsv), [setup](../results/agent_worker_http_layout_cdbe1cb_20260831T185801Z_baseline_p4_prepare_setup_environment.json) |
 
 Nominal offered is configured `rate x duration`; k6 can emit one iteration on a scenario boundary,
-so it is not reconstructed from completed and dropped counts. Completed, per-rate dropped, HTTP
-error and outcome counts in each result record come from the locally retained tagged point stream.
-k6 emits no interruption point metric; all four consoles finish with zero interrupted iterations,
-which makes every non-negative per-step interruption count zero. Percentiles include every
-completed HTTP request, including a rejection.
+so it is not reconstructed from completed and dropped counts. Completed, HTTP-error and outcome
+counts are retained per rate. In this k6 version, executor-level drops are retained in the raw
+summary and console only as a ladder aggregate: its custom `rate` submetrics remain zero, so the
+aggregate is not assigned to individual rates. Per-rate nominal-versus-started counts still expose
+where the generator missed arrivals. k6 emits no interruption point metric; all four consoles
+finish with zero interrupted iterations, which makes every non-negative per-step interruption
+count zero. Percentiles include every completed HTTP request, including a rejection.
 
 The route/context contracts show `none`/`read`/`all`/`all`, with `loadedTurnCount=0` and zero
-included turns for every completed turn. Preparation's 12 failed turns exactly match its 12 HTTP
-503 responses. The committed bundle does not isolate or attribute their internal cause. Each
-bundle prefix also includes raw CPU, CPU-error, CPU-by-step and MySQL files. The large
-`*_points.json` streams remain ignored and local through result construction and review.
+included turns for every completed turn. Retrieval's two nonserved requests did not create
+correlated turns. Preparation's seven failed turns exactly match its seven HTTP 5xx responses.
+Each bundle prefix also includes raw CPU, CPU-error and MySQL files.
+
+### Worker × outbound-client factorial at cdbe1cb
+
+The qualified [baseline descriptor](../results/agent_worker_http_layout_cdbe1cb_20260831T185801Z_baseline_experiment.txt)
+covers `2026-08-31T18:58:31Z` through `2026-08-31T19:29:20Z`. The reported
+[factorial descriptor](../results/agent_worker_http_layout_cdbe1cb_20260831T185801Z_factorial_experiment.txt)
+covers `2026-08-31T21:14:22Z` through `2026-08-31T22:36:36Z`, records
+`retry_blocks=none`, and measures full commit
+`cdbe1cbd40d6463270aa5652151f8330bc38773f`. Both phases used the host and Docker boundary in the
+table above. The factorial raised MySQL `max_connections` from 151 to 1,000 and restored 151 on
+the same container and host port; the raw
+[original](../results/agent_worker_http_layout_cdbe1cb_20260831T185801Z_factorial_mysql_original.txt),
+[factorial](../results/agent_worker_http_layout_cdbe1cb_20260831T185801Z_factorial_mysql_factorial.txt),
+and [restored](../results/agent_worker_http_layout_cdbe1cb_20260831T185801Z_factorial_mysql_restored.txt)
+captures are retained.
+
+All 16 cells completed on their first scheduled attempt. Every setup has a unique nonce, the exact
+commit, requested and observed worker counts in agreement, exactly one start-log occurrence per
+worker, the requested client layout, an empty trace-export URL, and MySQL at 1,000. Every CPU
+series has a maximum timestamp gap of three seconds, every CPU-error file contains headers only,
+and every cell's raw MySQL before/after capture has zero connection-limit errors. The workload SQL
+closes over 104,160 completed retrieval turns: every completed turn used profile `all`, empty
+history and the expected routing/context events, and every per-rate SQL completed count equals the
+k6 served count. The ten nonserved requests equal the ten HTTP errors and created no correlated
+turn; SQL has zero `FAILED` or `PROCESSING` factorial turns.
+
+Two workers are the decisive factor. Both two-worker treatments served the complete 60, 75 and 90
+requests/s schedules in every block with zero aggregate k6 drops or HTTP errors. Every one-worker
+cell saturated above 60 requests/s. The raw summary's cell-level `dropped_iterations` counts are:
+
+| Treatment | Block 1 | Block 2 | Block 3 | Block 4 | Total | Nonserved / HTTP errors |
+|---|---:|---:|---:|---:|---:|---:|
+| `1S` | [515](../results/agent_worker_http_layout_cdbe1cb_20260831T185801Z_b1a1p1_1s_summary.json) | [535](../results/agent_worker_http_layout_cdbe1cb_20260831T185801Z_b2a1p3_1s_summary.json) | [560](../results/agent_worker_http_layout_cdbe1cb_20260831T185801Z_b3a1p4_1s_summary.json) | [513](../results/agent_worker_http_layout_cdbe1cb_20260831T185801Z_b4a1p2_1s_summary.json) | 2,123 | 3 / 3 |
+| `1PA` | [462](../results/agent_worker_http_layout_cdbe1cb_20260831T185801Z_b1a1p2_1pa_summary.json) | [438](../results/agent_worker_http_layout_cdbe1cb_20260831T185801Z_b2a1p1_1pa_summary.json) | [426](../results/agent_worker_http_layout_cdbe1cb_20260831T185801Z_b3a1p3_1pa_summary.json) | [414](../results/agent_worker_http_layout_cdbe1cb_20260831T185801Z_b4a1p4_1pa_summary.json) | 1,740 | 7 / 7 |
+| `2S` | [0](../results/agent_worker_http_layout_cdbe1cb_20260831T185801Z_b1a1p3_2s_summary.json) | [0](../results/agent_worker_http_layout_cdbe1cb_20260831T185801Z_b2a1p4_2s_summary.json) | [0](../results/agent_worker_http_layout_cdbe1cb_20260831T185801Z_b3a1p2_2s_summary.json) | [0](../results/agent_worker_http_layout_cdbe1cb_20260831T185801Z_b4a1p1_2s_summary.json) | 0 | 0 / 0 |
+| `2PA` | [0](../results/agent_worker_http_layout_cdbe1cb_20260831T185801Z_b1a1p4_2pa_summary.json) | [0](../results/agent_worker_http_layout_cdbe1cb_20260831T185801Z_b2a1p2_2pa_summary.json) | [0](../results/agent_worker_http_layout_cdbe1cb_20260831T185801Z_b3a1p1_2pa_summary.json) | [0](../results/agent_worker_http_layout_cdbe1cb_20260831T185801Z_b4a1p3_2pa_summary.json) | 0 | 0 / 0 |
+
+The k6 executor emits `dropped_iterations` before a VU starts, so this run's custom `rate`
+submetrics are empty even when the aggregate is nonzero. The `Drop*` column below transcribes those
+raw analyzer submetrics exactly; its zeros must not be read as per-rate zero drops. The cell-level
+aggregate table above is authoritative for drops, while nominal-versus-started counts show which
+rate windows missed arrivals. Exact per-rate allocation is unavailable and is not reconstructed.
+The analyzer now reads k6's automatic `scenario=rate_<n>` tag for future runs and rejects a
+summary unless those counts sum to the aggregate; that fail-closed fix does not rewrite this
+commit's retained raw output.
+
+#### Per-cell analyzer rows
+
+Every latency value is milliseconds. Cell names link to the retained analyzer output; the same
+prefix identifies that cell's raw summary, console, CPU, CPU-error, MySQL, workload-contract and
+setup files.
+
+| Cell | Rate | Nominal | Started | Finished | Served | Nonserved | Drop* | Interrupted | 5xx | Errors | Finished/s | p50 | p95 | p99 | Max |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| [b1a1p1_1s](../results/agent_worker_http_layout_cdbe1cb_20260831T185801Z_b1a1p1_1s_steps.txt) | 60 | 1800 | 1801 | 1801 | 1801 | 0 | 0 | 0 | 0 | 0 | 60.03 | 29.0 | 824.5 | 944.9 | 1080.7 |
+| [b1a1p1_1s](../results/agent_worker_http_layout_cdbe1cb_20260831T185801Z_b1a1p1_1s_steps.txt) | 75 | 2250 | 2145 | 2145 | 2145 | 0 | 0 | 0 | 0 | 0 | 71.50 | 2627.9 | 3669.8 | 3809.0 | 3958.9 |
+| [b1a1p1_1s](../results/agent_worker_http_layout_cdbe1cb_20260831T185801Z_b1a1p1_1s_steps.txt) | 90 | 2700 | 2290 | 2290 | 2290 | 0 | 0 | 0 | 0 | 0 | 76.33 | 5488.5 | 8595.0 | 8738.6 | 8874.2 |
+| [b1a1p2_1pa](../results/agent_worker_http_layout_cdbe1cb_20260831T185801Z_b1a1p2_1pa_steps.txt) | 60 | 1800 | 1801 | 1801 | 1801 | 0 | 0 | 0 | 0 | 0 | 60.03 | 16.2 | 497.0 | 627.2 | 948.5 |
+| [b1a1p2_1pa](../results/agent_worker_http_layout_cdbe1cb_20260831T185801Z_b1a1p2_1pa_steps.txt) | 75 | 2250 | 2191 | 2191 | 2189 | 2 | 0 | 0 | 2 | 2 | 73.03 | 1575.3 | 2947.5 | 3098.8 | 3289.7 |
+| [b1a1p2_1pa](../results/agent_worker_http_layout_cdbe1cb_20260831T185801Z_b1a1p2_1pa_steps.txt) | 90 | 2700 | 2299 | 2299 | 2299 | 0 | 0 | 0 | 0 | 0 | 76.63 | 5290.3 | 8075.7 | 8351.8 | 8593.1 |
+| [b1a1p3_2s](../results/agent_worker_http_layout_cdbe1cb_20260831T185801Z_b1a1p3_2s_steps.txt) | 60 | 1800 | 1800 | 1800 | 1800 | 0 | 0 | 0 | 0 | 0 | 60.00 | 17.2 | 49.6 | 86.4 | 143.4 |
+| [b1a1p3_2s](../results/agent_worker_http_layout_cdbe1cb_20260831T185801Z_b1a1p3_2s_steps.txt) | 75 | 2250 | 2251 | 2251 | 2251 | 0 | 0 | 0 | 0 | 0 | 75.03 | 13.3 | 69.8 | 159.3 | 228.5 |
+| [b1a1p3_2s](../results/agent_worker_http_layout_cdbe1cb_20260831T185801Z_b1a1p3_2s_steps.txt) | 90 | 2700 | 2701 | 2701 | 2701 | 0 | 0 | 0 | 0 | 0 | 90.03 | 17.0 | 331.2 | 480.3 | 654.4 |
+| [b1a1p4_2pa](../results/agent_worker_http_layout_cdbe1cb_20260831T185801Z_b1a1p4_2pa_steps.txt) | 60 | 1800 | 1801 | 1801 | 1801 | 0 | 0 | 0 | 0 | 0 | 60.03 | 17.3 | 49.5 | 129.2 | 282.7 |
+| [b1a1p4_2pa](../results/agent_worker_http_layout_cdbe1cb_20260831T185801Z_b1a1p4_2pa_steps.txt) | 75 | 2250 | 2251 | 2251 | 2251 | 0 | 0 | 0 | 0 | 0 | 75.03 | 13.1 | 44.7 | 92.5 | 250.6 |
+| [b1a1p4_2pa](../results/agent_worker_http_layout_cdbe1cb_20260831T185801Z_b1a1p4_2pa_steps.txt) | 90 | 2700 | 2701 | 2701 | 2701 | 0 | 0 | 0 | 0 | 0 | 90.03 | 15.0 | 66.9 | 154.3 | 358.4 |
+| [b2a1p1_1pa](../results/agent_worker_http_layout_cdbe1cb_20260831T185801Z_b2a1p1_1pa_steps.txt) | 60 | 1800 | 1800 | 1800 | 1800 | 0 | 0 | 0 | 0 | 0 | 60.00 | 15.9 | 429.5 | 554.7 | 678.2 |
+| [b2a1p1_1pa](../results/agent_worker_http_layout_cdbe1cb_20260831T185801Z_b2a1p1_1pa_steps.txt) | 75 | 2250 | 2179 | 2179 | 2179 | 0 | 0 | 0 | 0 | 0 | 72.63 | 2223.8 | 3057.4 | 3225.1 | 3334.3 |
+| [b2a1p1_1pa](../results/agent_worker_http_layout_cdbe1cb_20260831T185801Z_b2a1p1_1pa_steps.txt) | 90 | 2700 | 2334 | 2334 | 2333 | 1 | 0 | 0 | 1 | 1 | 77.80 | 4934.7 | 7500.4 | 7712.4 | 8016.7 |
+| [b2a1p2_2pa](../results/agent_worker_http_layout_cdbe1cb_20260831T185801Z_b2a1p2_2pa_steps.txt) | 60 | 1800 | 1801 | 1801 | 1801 | 0 | 0 | 0 | 0 | 0 | 60.03 | 14.6 | 45.1 | 100.5 | 168.7 |
+| [b2a1p2_2pa](../results/agent_worker_http_layout_cdbe1cb_20260831T185801Z_b2a1p2_2pa_steps.txt) | 75 | 2250 | 2251 | 2251 | 2251 | 0 | 0 | 0 | 0 | 0 | 75.03 | 12.9 | 44.4 | 107.0 | 154.7 |
+| [b2a1p2_2pa](../results/agent_worker_http_layout_cdbe1cb_20260831T185801Z_b2a1p2_2pa_steps.txt) | 90 | 2700 | 2701 | 2701 | 2701 | 0 | 0 | 0 | 0 | 0 | 90.03 | 15.1 | 84.8 | 262.3 | 343.7 |
+| [b2a1p3_1s](../results/agent_worker_http_layout_cdbe1cb_20260831T185801Z_b2a1p3_1s_steps.txt) | 60 | 1800 | 1801 | 1801 | 1800 | 1 | 0 | 0 | 1 | 1 | 60.03 | 321.3 | 1124.4 | 1302.7 | 1592.0 |
+| [b2a1p3_1s](../results/agent_worker_http_layout_cdbe1cb_20260831T185801Z_b2a1p3_1s_steps.txt) | 75 | 2250 | 2137 | 2137 | 2137 | 0 | 0 | 0 | 0 | 0 | 71.23 | 2738.3 | 3776.1 | 3909.4 | 4018.4 |
+| [b2a1p3_1s](../results/agent_worker_http_layout_cdbe1cb_20260831T185801Z_b2a1p3_1s_steps.txt) | 90 | 2700 | 2279 | 2279 | 2279 | 0 | 0 | 0 | 0 | 0 | 75.97 | 5637.9 | 8599.7 | 9040.3 | 9216.1 |
+| [b2a1p4_2s](../results/agent_worker_http_layout_cdbe1cb_20260831T185801Z_b2a1p4_2s_steps.txt) | 60 | 1800 | 1801 | 1801 | 1801 | 0 | 0 | 0 | 0 | 0 | 60.03 | 14.9 | 51.6 | 109.0 | 166.2 |
+| [b2a1p4_2s](../results/agent_worker_http_layout_cdbe1cb_20260831T185801Z_b2a1p4_2s_steps.txt) | 75 | 2250 | 2250 | 2250 | 2250 | 0 | 0 | 0 | 0 | 0 | 75.00 | 13.0 | 48.7 | 214.8 | 289.0 |
+| [b2a1p4_2s](../results/agent_worker_http_layout_cdbe1cb_20260831T185801Z_b2a1p4_2s_steps.txt) | 90 | 2700 | 2701 | 2701 | 2701 | 0 | 0 | 0 | 0 | 0 | 90.03 | 15.0 | 55.1 | 115.4 | 195.5 |
+| [b3a1p1_2pa](../results/agent_worker_http_layout_cdbe1cb_20260831T185801Z_b3a1p1_2pa_steps.txt) | 60 | 1800 | 1801 | 1801 | 1801 | 0 | 0 | 0 | 0 | 0 | 60.03 | 15.1 | 47.5 | 98.4 | 227.7 |
+| [b3a1p1_2pa](../results/agent_worker_http_layout_cdbe1cb_20260831T185801Z_b3a1p1_2pa_steps.txt) | 75 | 2250 | 2251 | 2251 | 2251 | 0 | 0 | 0 | 0 | 0 | 75.03 | 12.9 | 36.2 | 50.0 | 73.8 |
+| [b3a1p1_2pa](../results/agent_worker_http_layout_cdbe1cb_20260831T185801Z_b3a1p1_2pa_steps.txt) | 90 | 2700 | 2701 | 2701 | 2701 | 0 | 0 | 0 | 0 | 0 | 90.03 | 15.2 | 66.2 | 125.8 | 200.6 |
+| [b3a1p2_2s](../results/agent_worker_http_layout_cdbe1cb_20260831T185801Z_b3a1p2_2s_steps.txt) | 60 | 1800 | 1801 | 1801 | 1801 | 0 | 0 | 0 | 0 | 0 | 60.03 | 17.6 | 41.9 | 82.7 | 167.4 |
+| [b3a1p2_2s](../results/agent_worker_http_layout_cdbe1cb_20260831T185801Z_b3a1p2_2s_steps.txt) | 75 | 2250 | 2251 | 2251 | 2251 | 0 | 0 | 0 | 0 | 0 | 75.03 | 13.5 | 40.7 | 87.9 | 185.0 |
+| [b3a1p2_2s](../results/agent_worker_http_layout_cdbe1cb_20260831T185801Z_b3a1p2_2s_steps.txt) | 90 | 2700 | 2700 | 2700 | 2700 | 0 | 0 | 0 | 0 | 0 | 90.00 | 17.0 | 208.8 | 335.9 | 545.7 |
+| [b3a1p3_1pa](../results/agent_worker_http_layout_cdbe1cb_20260831T185801Z_b3a1p3_1pa_steps.txt) | 60 | 1800 | 1800 | 1800 | 1800 | 0 | 0 | 0 | 0 | 0 | 60.00 | 14.9 | 169.7 | 247.6 | 276.1 |
+| [b3a1p3_1pa](../results/agent_worker_http_layout_cdbe1cb_20260831T185801Z_b3a1p3_1pa_steps.txt) | 75 | 2250 | 2206 | 2206 | 2206 | 0 | 0 | 0 | 0 | 0 | 73.53 | 1272.9 | 2634.6 | 2810.2 | 3004.9 |
+| [b3a1p3_1pa](../results/agent_worker_http_layout_cdbe1cb_20260831T185801Z_b3a1p3_1pa_steps.txt) | 90 | 2700 | 2319 | 2319 | 2317 | 2 | 0 | 0 | 2 | 2 | 77.30 | 5071.9 | 7665.3 | 7799.5 | 7966.5 |
+| [b3a1p4_1s](../results/agent_worker_http_layout_cdbe1cb_20260831T185801Z_b3a1p4_1s_steps.txt) | 60 | 1800 | 1801 | 1801 | 1801 | 0 | 0 | 0 | 0 | 0 | 60.03 | 81.4 | 695.6 | 849.9 | 985.1 |
+| [b3a1p4_1s](../results/agent_worker_http_layout_cdbe1cb_20260831T185801Z_b3a1p4_1s_steps.txt) | 75 | 2250 | 2103 | 2103 | 2103 | 0 | 0 | 0 | 0 | 0 | 70.10 | 3138.6 | 4316.6 | 4411.1 | 4631.0 |
+| [b3a1p4_1s](../results/agent_worker_http_layout_cdbe1cb_20260831T185801Z_b3a1p4_1s_steps.txt) | 90 | 2700 | 2288 | 2288 | 2287 | 1 | 0 | 0 | 1 | 1 | 76.27 | 5595.1 | 8565.0 | 8749.3 | 8949.0 |
+| [b4a1p1_2s](../results/agent_worker_http_layout_cdbe1cb_20260831T185801Z_b4a1p1_2s_steps.txt) | 60 | 1800 | 1800 | 1800 | 1800 | 0 | 0 | 0 | 0 | 0 | 60.00 | 17.0 | 39.9 | 62.3 | 160.6 |
+| [b4a1p1_2s](../results/agent_worker_http_layout_cdbe1cb_20260831T185801Z_b4a1p1_2s_steps.txt) | 75 | 2250 | 2251 | 2251 | 2251 | 0 | 0 | 0 | 0 | 0 | 75.03 | 13.0 | 42.6 | 93.6 | 219.6 |
+| [b4a1p1_2s](../results/agent_worker_http_layout_cdbe1cb_20260831T185801Z_b4a1p1_2s_steps.txt) | 90 | 2700 | 2700 | 2700 | 2700 | 0 | 0 | 0 | 0 | 0 | 90.00 | 15.1 | 83.4 | 228.1 | 363.3 |
+| [b4a1p2_1s](../results/agent_worker_http_layout_cdbe1cb_20260831T185801Z_b4a1p2_1s_steps.txt) | 60 | 1800 | 1801 | 1801 | 1800 | 1 | 0 | 0 | 1 | 1 | 60.03 | 43.4 | 1053.5 | 1171.8 | 1398.8 |
+| [b4a1p2_1s](../results/agent_worker_http_layout_cdbe1cb_20260831T185801Z_b4a1p2_1s_steps.txt) | 75 | 2250 | 2151 | 2151 | 2151 | 0 | 0 | 0 | 0 | 0 | 71.70 | 2512.5 | 3506.8 | 3609.3 | 3716.5 |
+| [b4a1p2_1s](../results/agent_worker_http_layout_cdbe1cb_20260831T185801Z_b4a1p2_1s_steps.txt) | 90 | 2700 | 2287 | 2287 | 2287 | 0 | 0 | 0 | 0 | 0 | 76.23 | 5470.3 | 8759.2 | 8982.4 | 9129.1 |
+| [b4a1p3_2pa](../results/agent_worker_http_layout_cdbe1cb_20260831T185801Z_b4a1p3_2pa_steps.txt) | 60 | 1800 | 1801 | 1801 | 1801 | 0 | 0 | 0 | 0 | 0 | 60.03 | 16.8 | 45.5 | 87.5 | 164.9 |
+| [b4a1p3_2pa](../results/agent_worker_http_layout_cdbe1cb_20260831T185801Z_b4a1p3_2pa_steps.txt) | 75 | 2250 | 2251 | 2251 | 2251 | 0 | 0 | 0 | 0 | 0 | 75.03 | 13.3 | 235.7 | 478.5 | 610.0 |
+| [b4a1p3_2pa](../results/agent_worker_http_layout_cdbe1cb_20260831T185801Z_b4a1p3_2pa_steps.txt) | 90 | 2700 | 2701 | 2701 | 2701 | 0 | 0 | 0 | 0 | 0 | 90.03 | 15.3 | 66.4 | 97.3 | 130.4 |
+| [b4a1p4_1pa](../results/agent_worker_http_layout_cdbe1cb_20260831T185801Z_b4a1p4_1pa_steps.txt) | 60 | 1800 | 1801 | 1801 | 1801 | 0 | 0 | 0 | 0 | 0 | 60.03 | 14.8 | 344.3 | 481.9 | 603.7 |
+| [b4a1p4_1pa](../results/agent_worker_http_layout_cdbe1cb_20260831T185801Z_b4a1p4_1pa_steps.txt) | 75 | 2250 | 2204 | 2204 | 2202 | 2 | 0 | 0 | 2 | 2 | 73.47 | 1929.3 | 2700.4 | 2867.1 | 3056.9 |
+| [b4a1p4_1pa](../results/agent_worker_http_layout_cdbe1cb_20260831T185801Z_b4a1p4_1pa_steps.txt) | 90 | 2700 | 2333 | 2333 | 2333 | 0 | 0 | 0 | 0 | 0 | 77.77 | 5149.0 | 7590.4 | 7714.9 | 7910.4 |
+
+#### Planned within-block contrasts
+
+The tables below apply the frozen contrast definitions to each block, then report the midpoint of
+the four block values and their full range. A positive finished/s difference is faster. A positive
+p99 difference is slower. These are differences of block-level observations, not percentiles
+pooled across requests.
+
+Finished requests per second:
+
+| Rate | Contrast | B1 | B2 | B3 | B4 | Median | Range |
+|---:|---|---:|---:|---:|---:|---:|---:|
+| 60 | `1PA-1S` | 0.00 | -0.03 | -0.03 | 0.00 | -0.02 | -0.03 to 0.00 |
+| 60 | `2PA-2S` | 0.03 | 0.00 | 0.00 | 0.03 | 0.02 | 0.00 to 0.03 |
+| 60 | `2S-1S` | -0.03 | 0.00 | 0.00 | -0.03 | -0.02 | -0.03 to 0.00 |
+| 60 | `2PA-1PA` | 0.00 | 0.03 | 0.03 | 0.00 | 0.02 | 0.00 to 0.03 |
+| 60 | `(2PA-2S)-(1PA-1S)` | 0.03 | 0.03 | 0.03 | 0.03 | 0.03 | 0.03 to 0.03 |
+| 75 | `1PA-1S` | 1.53 | 1.40 | 3.43 | 1.77 | 1.65 | 1.40 to 3.43 |
+| 75 | `2PA-2S` | 0.00 | 0.03 | 0.00 | 0.00 | 0.00 | 0.00 to 0.03 |
+| 75 | `2S-1S` | 3.53 | 3.77 | 4.93 | 3.33 | 3.65 | 3.33 to 4.93 |
+| 75 | `2PA-1PA` | 2.00 | 2.40 | 1.50 | 1.56 | 1.78 | 1.50 to 2.40 |
+| 75 | `(2PA-2S)-(1PA-1S)` | -1.53 | -1.37 | -3.43 | -1.77 | -1.65 | -3.43 to -1.37 |
+| 90 | `1PA-1S` | 0.30 | 1.83 | 1.03 | 1.54 | 1.28 | 0.30 to 1.83 |
+| 90 | `2PA-2S` | 0.00 | 0.00 | 0.03 | 0.03 | 0.02 | 0.00 to 0.03 |
+| 90 | `2S-1S` | 13.70 | 14.06 | 13.73 | 13.77 | 13.75 | 13.70 to 14.06 |
+| 90 | `2PA-1PA` | 13.40 | 12.23 | 12.73 | 12.26 | 12.50 | 12.23 to 13.40 |
+| 90 | `(2PA-2S)-(1PA-1S)` | -0.30 | -1.83 | -1.00 | -1.51 | -1.25 | -1.83 to -0.30 |
+
+p99 milliseconds:
+
+| Rate | Contrast | B1 | B2 | B3 | B4 | Median | Range |
+|---:|---|---:|---:|---:|---:|---:|---:|
+| 60 | `1PA-1S` | -317.70 | -748.00 | -602.30 | -689.90 | -646.10 | -748.00 to -317.70 |
+| 60 | `2PA-2S` | 42.80 | -8.50 | 15.70 | 25.20 | 20.45 | -8.50 to 42.80 |
+| 60 | `2S-1S` | -858.50 | -1193.70 | -767.20 | -1109.50 | -984.00 | -1193.70 to -767.20 |
+| 60 | `2PA-1PA` | -498.00 | -454.20 | -149.20 | -394.40 | -424.30 | -498.00 to -149.20 |
+| 60 | `(2PA-2S)-(1PA-1S)` | 360.50 | 739.50 | 618.00 | 715.10 | 666.55 | 360.50 to 739.50 |
+| 75 | `1PA-1S` | -710.20 | -684.30 | -1600.90 | -742.20 | -726.20 | -1600.90 to -684.30 |
+| 75 | `2PA-2S` | -66.80 | -107.80 | -37.90 | 384.90 | -52.35 | -107.80 to 384.90 |
+| 75 | `2S-1S` | -3649.70 | -3694.60 | -4323.20 | -3515.70 | -3672.15 | -4323.20 to -3515.70 |
+| 75 | `2PA-1PA` | -3006.30 | -3118.10 | -2760.20 | -2388.60 | -2883.25 | -3118.10 to -2388.60 |
+| 75 | `(2PA-2S)-(1PA-1S)` | 643.40 | 576.50 | 1563.00 | 1127.10 | 885.25 | 576.50 to 1563.00 |
+| 90 | `1PA-1S` | -386.80 | -1327.90 | -949.80 | -1267.50 | -1108.65 | -1327.90 to -386.80 |
+| 90 | `2PA-2S` | -326.00 | 146.90 | -210.10 | -130.80 | -170.45 | -326.00 to 146.90 |
+| 90 | `2S-1S` | -8258.30 | -8924.90 | -8413.40 | -8754.30 | -8583.85 | -8924.90 to -8258.30 |
+| 90 | `2PA-1PA` | -8197.50 | -7450.10 | -7673.70 | -7617.60 | -7645.65 | -8197.50 to -7450.10 |
+| 90 | `(2PA-2S)-(1PA-1S)` | 60.80 | 1474.80 | 739.70 | 1136.70 | 938.20 | 60.80 to 1474.80 |
+
+At 75 and 90 requests/s, the worker-count p99 contrasts compare a fully served two-worker cell
+with a saturated one-worker cell, so the throughput and aggregate-drop outcomes are primary; the
+large p99 differences are not isolated latency effects. At 60, all treatments finished the offered
+load, although two `1S` blocks each had one nonserved response. The direction is still clear:
+moving to two workers reduced the matched p99 by a four-block median 984.00 ms for shared clients
+and 424.30 ms for per-authority clients.
+
+The clean client-layout comparison is the two-worker pair: every one of those cells fully served
+the load with zero aggregate drops and zero errors. `2PA-2S` p99 changes sign across blocks at all
+three rates, and its ranges all cross zero. Per-authority clients therefore have no consistent
+advantage at two workers. `1PA` was directionally better than `1S`, including fewer aggregate
+drops in every block, but those saturated cells do not isolate latency from their differing
+delivery mixes. The evidence-backed setting for this measured boundary is `AGENT_WORKERS=2` with
+the simpler shared client; the result does not support making per-authority clients the default.
+The program retains its backward-compatible one-worker default when `AGENT_WORKERS` is unset.
+
+This is a single-host end-to-end layout effect with the deterministic model fixture, not a
+production-capacity claim. The worker result is consistent with a remaining process-local
+bottleneck, but worker count also changes process count, total AnyIO thread capacity and
+per-worker state, so it does not establish a GIL mechanism.
 
 The numbered subsections below preserve the earlier paired client-reuse analysis; they do not
-describe the current route-profile baseline.
+describe the current route-profile baseline or worker factorial.
 
 ### 1. What each path serves, before and after
 
@@ -756,14 +930,27 @@ bounded model fallback and reranker retry policy can raise a successful rewrite 
 physical attempts, so setting the default to the bare minimum of 9 would still turn an ordinary
 transient response into budget exhaustion.
 
-## What to measure next
+## Frozen worker × outbound-client experiment
 
-The historical profiles leave Agent-local interpreter/client contention unresolved. The current
-ladders sample the dedicated benchmark Elasticsearch dependency, but this result includes neither
-a CPU profile nor a worker-count experiment. A controlled worker-count experiment could test
-whether the historical ~1.4-agent-core plateau moves with the number of uvicorn processes; it
-cannot be attributed to the process before that result exists. Client ownership would have to vary
-separately to distinguish the shared HTTP pool mutex from interpreter contention.
+The next measurement varies worker count and outbound-client ownership independently. The harness
+is frozen here; no result is claimed until the fixed schedule below has completed from one
+committed, source-clean SHA.
+
+`AGENT_WORKERS` defaults to `1` when unset or blank and otherwise accepts only an ASCII positive
+integer. `AGENT_HTTP_CLIENT_LAYOUT` defaults to `shared` when unset or blank and otherwise accepts
+exactly `shared` or `per-authority`. Setup passes both resolved values explicitly into the agent
+container. `shared` means one client per worker. `per-authority` means one client per worker for
+each normalized scheme, host and effective port. Model, Auth, Commerce and Elasticsearch are the
+four configured origins; an empty trace export URL creates no exporter thread, queue or network,
+although ordinary observation-envelope CPU remains.
+
+Each setup records the requested values, the actual container environment and the worker PIDs
+from Uvicorn's `Started server process [PID]` log entries. The pre/post gates require the same
+unique PID set, exactly one start-log occurrence per requested worker and every PID alive in
+`/proc` with a runnable or sleeping `R`, `S` or `D` state; stopped, zombie and missing workers are
+rejected. They also check the source/SUT/harness SHA, setup nonce, images, JARs, endpoints, empty
+trace exporter, MySQL `max_connections`, core container identities and restart counts. Metrics are
+per-worker registries; one worker's metrics endpoint is not aggregate multi-worker evidence.
 
 ## Reproducing
 
@@ -872,10 +1059,108 @@ RATES=5,10,15,20,30 STEP_SECONDS=30 GRACEFUL_STOP_SECONDS=45 GAP_SECONDS=55 \
 POOL_BASE=0 ./bench/agent/run_agent_ladder.sh prepare
 ```
 
-Successful publication writes the summary, console, CPU, CPU-error, CPU-by-step, MySQL, step,
-workload-contract and setup-environment files under `bench/results/agent_<label>_*`. The tagged
-`*_points.json` stream is retained locally but ignored because of its size. An invalid or
+The SHA-injected k6 summary JSON is the primary per-rate raw HTTP evidence. The analyzer is only a
+small summary calculator: it prints one row per rate with nominal, started, finished, served,
+nonserved, dropped, interrupted, 5xx, errors, finished/s, p50, p95, p99 and max. Executor drops
+are attributed by k6's automatic scenario tag because they occur before custom iteration tags can
+be emitted; the analyzer rejects a missing submetric or a scenario-total/aggregate mismatch. It
+writes no result file and does not interpret CPU, workload SQL or MySQL evidence. An invalid or
 interrupted run remains under ignored `bench/.run/agent-ladder.*` staging and is not a result.
+
+### Worker × outbound-client formal run
+
+Confirm that the host is quiet and send or record the exact execution list before each formal
+phase. Freeze the implementation and harness in one commit first; both phases reject a dirty
+source tree. The raw setup, k6, CPU and database evidence carries the measured full commit.
+The orchestrator rechecks the same clean HEAD before and after base setup, every agent setup and
+ladder, and final publication. It holds every raw cell bundle in ignored outer staging until the
+phase is complete; a checkout switch rolls back a publication already in progress, so the same
+experiment ID can be rerun without complete-looking leftovers.
+
+Baseline and factorial are separate publications. Each publishes its raw cell bundles, then
+publishes `bench/results/agent_${EXPERIMENT_ID}_${PHASE}_experiment.txt` last as the completion
+marker. This simple descriptor records the full commit, fixed design and environment, and the
+numbers of any retried blocks. It contains no achieved measurements and no artifact inventory.
+
+Run the four default baselines first. This phase performs `BENCH_USERS=10000` base setup, requires
+the untouched MySQL `max_connections` value to be exactly 151, and uses a fresh setup before each
+path with `AGENT_WORKERS` and `AGENT_HTTP_CLIENT_LAYOUT` unset. The observed treatment must resolve
+to one worker and the shared layout.
+
+```bash
+./bench/agent/run_worker_http_layout.sh baseline
+```
+
+The fixed baseline order and pools are greeting at 25/50/75/100/125 requests/s for 20 seconds
+(8,000 users), chat/read at 10/25/50/75/100 for 20 seconds (6,000 users), retrieval at
+40/50/60/75/90 for 30 seconds (10,000 users), and prepare at 5/10/15/20/30 for 30 seconds (3,000
+users). Inspect these results before proceeding. If a clean step's p99 has an unexplained large
+regression that is not an error/outcome-mix change, diagnose it before running the factorial.
+The formal workflow deliberately uses separate `baseline` and `factorial` invocations; `all` is
+available for harness development but is not the formal command.
+
+After that inspection, reconfirm that the host is quiet and run the factorial from the same
+commit:
+
+```bash
+./bench/agent/run_worker_http_layout.sh factorial
+```
+
+The factorial uses retrieval at 60/75/90 requests/s for 30 seconds, 7,000 users, attempt budget
+16, 45 seconds graceful stop, 55 seconds between rate windows and pool base zero. It raises MySQL
+`max_connections` from the observed original 151 to 1,000, verifies 1,000 at every setup and
+pre/post gate, and restores and verifies 151 on normal exit or HUP/INT/TERM. Labeled raw before and
+after MySQL `SHOW` output is the primary database evidence; reporting reads it directly rather
+than relying on parsed fields or a generated confound verdict.
+
+The four treatments are `1S` (one/shared), `1PA` (one/per-authority), `2S` (two/shared) and `2PA`
+(two/per-authority). Randomization is `none`, `randomSeed` is null, and the schedule is the fixed
+four-block Williams-balanced order:
+
+| Block | Fixed order |
+|---:|:---|
+| 1 | 1S, 1PA, 2S, 2PA |
+| 2 | 1PA, 2PA, 1S, 2S |
+| 3 | 2PA, 2S, 1PA, 1S |
+| 4 | 2S, 1S, 2PA, 1PA |
+
+Every cell receives a fresh setup. If one cell is operationally invalid, its block is excluded and
+the entire block is rerun once with new labels. A second operational failure stops the experiment.
+Completed cells from an excluded attempt remain raw evidence. Every cell filename includes the
+label segment `b<block>a<attempt>p<position>_<treatment-lower>`; for example, a retry changes
+`b1a1p1_1s` to `b1a2p1_1s`. This keeps both attempts distinct, while the phase descriptor records
+only the retried block numbers.
+
+Operational invalidity is limited to a source/config/worker mismatch; abnormal k6 or runner exit,
+including pool exhaustion; absent or uncalculable k6 summary output; fixture exhaustion; CPU
+sampler errors; non-empty trace export; failure to hold or restore the required MySQL boundary; or
+a core container/worker replacement. Dropped or interrupted
+iterations, HTTP errors, 5xx, FAILED or PROCESSING turns and the served/nonserved mix are treatment
+outcomes: they are published and do not cause a rerun.
+
+The SHA-injected k6 summary JSON remains the primary per-rate HTTP evidence for every cell. The
+small analyzer prints nominal, started, finished, served, nonserved, dropped, interrupted, 5xx,
+errors, finished/s, p50, p95, p99 and max for each rate. It reads executor drops from k6's
+automatic scenario tag and rejects a missing submetric or a scenario-total/aggregate mismatch.
+Raw CPU samples are the primary CPU evidence, raw workload-contract SQL is the primary
+business-correctness evidence, and the labeled raw before/after MySQL `SHOW` captures are the
+primary database evidence. The analyzer does not parse or reproduce those models.
+
+There is no generated factorial aggregate or Markdown report. After publication, reporting is
+manual: inspect the raw evidence, transcribe the per-cell rows, and calculate the planned
+within-block contrasts `1PA-1S`, `2PA-2S`, `2S-1S`, `2PA-1PA` and
+`(2PA-2S)-(1PA-1S)`, followed by each contrast's four-block median and range. Latency differences
+should be emphasized only when the served/nonserved mix, drops, 5xx and HTTP-error counts are
+comparable, with the raw workload SQL consulted for business correctness.
+
+This is an end-to-end client-layout effect on one local host with the deterministic fake model and
+fixed retrieval fixture, not a production-capacity claim. A per-authority improvement supports a
+contribution from cross-origin shared-client/pool topology but does not prove a mutex cause. A
+worker improvement supports a remaining process-local bottleneck and is consistent with, but does
+not prove, a GIL cause: worker count also changes process count, total AnyIO thread capacity and
+per-worker cache, circuit and metrics state. A null per-authority result does not exclude an
+httpcore mutex within each authority-specific pool, and no distinguishable effect is a valid
+conclusion.
 
 ### Historical paired ladders
 

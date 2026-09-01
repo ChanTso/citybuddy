@@ -9,7 +9,7 @@ from collections.abc import Mapping
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from types import FrameType
-from typing import Any, Literal
+from typing import Any, Literal, cast
 
 import httpx
 import jwt
@@ -936,6 +936,155 @@ def test_create_app_keeps_identity_routes_disabled_without_runtime_configuration
     assert app.title == "agent-service"
     assert app.state.settings is explicit
     assert TestClient(app).post("/api/sessions", json={}).status_code == 404
+
+
+def test_create_app_prebuilds_configured_origins_and_closes_trace_before_clients(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    events: list[str] = []
+    captured: dict[str, object] = {}
+
+    class Clients:
+        def close(self) -> None:
+            events.append("clients")
+
+    clients = Clients()
+
+    def build(layout: str, urls: tuple[str, ...]) -> Clients:
+        captured["layout"] = layout
+        captured["urls"] = urls
+        return clients
+
+    class Sink:
+        def emit(self, envelope: object) -> None:
+            del envelope
+
+        def close(self) -> None:
+            events.append("trace")
+
+    monkeypatch.setattr(http_client, "HttpClients", build)
+    resolved = AgentSettings(
+        http_client_layout="per-authority",
+        model_proxy_url="http://127.0.0.1:8000",
+        jwks_url="http://citybuddy-bench-auth:8080/jwks",
+        auth_exchange_url="http://citybuddy-bench-auth:8080/exchange",
+        commerce_tools_url="http://citybuddy-bench-commerce:8080/tools",
+        commerce_liveness_url="http://citybuddy-bench-commerce:8080/liveness",
+        elasticsearch_url="http://citybuddy-bench-elasticsearch:9200",
+        trace_export_url="",
+    )
+
+    with TestClient(create_app(resolved, trace_sink=Sink())):
+        pass
+
+    assert captured == {
+        "layout": "per-authority",
+        "urls": (
+            "http://127.0.0.1:8000",
+            "http://citybuddy-bench-auth:8080/jwks",
+            "http://citybuddy-bench-auth:8080/exchange",
+            "http://citybuddy-bench-commerce:8080/tools",
+            "http://citybuddy-bench-commerce:8080/liveness",
+            "http://citybuddy-bench-elasticsearch:9200",
+            "",
+        ),
+    }
+    assert events == ["trace", "clients"]
+
+
+def test_two_live_apps_route_through_their_own_clients_and_close_independently(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    events: list[str] = []
+
+    class OutboundClient:
+        def __init__(self, owner: str) -> None:
+            self.owner = owner
+
+        def get(self, url: str, *, timeout: float) -> httpx.Response:
+            del url, timeout
+            return httpx.Response(200, json={"owner": self.owner})
+
+    class Clients:
+        def __init__(self, owner: str) -> None:
+            self.owner = owner
+            self.client = OutboundClient(owner)
+
+        def client_for(self, url: str) -> httpx.Client:
+            assert url.startswith(self.owner)
+            return cast(httpx.Client, self.client)
+
+        def close(self) -> None:
+            events.append(f"{self.owner}:clients")
+
+    class Sink:
+        def __init__(self, owner: str) -> None:
+            self.owner = owner
+
+        def emit(self, envelope: object) -> None:
+            del envelope
+
+        def close(self) -> None:
+            events.append(f"{self.owner}:trace")
+
+    def build(layout: str, urls: tuple[str, ...]) -> Clients:
+        del layout
+        return Clients(urls[0])
+
+    monkeypatch.setattr(http_client, "HttpClients", build)
+    first_url = "http://first.test"
+    second_url = "http://second.test"
+    first = create_app(AgentSettings(model_proxy_url=first_url), trace_sink=Sink(first_url))
+    second = create_app(AgentSettings(model_proxy_url=second_url), trace_sink=Sink(second_url))
+
+    @first.get("/runtime-owner")
+    def first_runtime_owner() -> dict[str, str]:
+        return cast(dict[str, str], http_client.get(first_url, timeout=1.0).json())
+
+    @second.get("/runtime-owner")
+    def second_runtime_owner() -> dict[str, str]:
+        return cast(dict[str, str], http_client.get(second_url, timeout=1.0).json())
+
+    with TestClient(first) as first_client:
+        assert first_client.get("/runtime-owner").json() == {"owner": first_url}
+        with TestClient(second) as second_client:
+            assert second_client.get("/runtime-owner").json() == {"owner": second_url}
+            assert first_client.get("/runtime-owner").json() == {"owner": first_url}
+        assert first_client.get("/runtime-owner").json() == {"owner": first_url}
+
+    assert events == [
+        f"{second_url}:trace",
+        f"{second_url}:clients",
+        f"{first_url}:trace",
+        f"{first_url}:clients",
+    ]
+
+
+def test_create_app_closes_prebuilt_clients_when_factory_construction_fails(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    events: list[str] = []
+
+    class Clients:
+        def close(self) -> None:
+            events.append("clients")
+
+    class Sink:
+        def emit(self, envelope: object) -> None:
+            del envelope
+
+        def close(self) -> None:
+            events.append("trace")
+
+    monkeypatch.setattr(http_client, "HttpClients", lambda layout, urls: Clients())
+
+    with pytest.raises(ValueError, match="Evaluation API credential is required"):
+        create_app(
+            AgentSettings(identity_enabled=True, evaluation_enabled=True),
+            trace_sink=Sink(),
+        )
+
+    assert events == ["trace", "clients"]
 
 
 def test_direct_validator_refreshes_once_for_unknown_kid_and_accepts_overlap() -> None:

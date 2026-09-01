@@ -190,24 +190,37 @@ npm --prefix web ci && cp web/.env.example web/.env.local && npm --prefix web ru
 ## Measured performance
 
 Local post-memory, empty-history, first-turn latency for the four support-agent workloads at
-`bd646937d0c7f45c107ce2283a244d1b4fc8d952`. The deterministic model fixture holds inference at
+`cdbe1cbd40d6463270aa5652151f8330bc38773f`. The deterministic model fixture holds inference at
 zero, so the numbers cover CityBuddy orchestration only. Each workload used a fresh fixture on an
 otherwise idle MacBook Pro M4 host (10 cores, 24 GiB; Docker Desktop: 8 CPUs, 13.6 GiB), one agent
-process, and a fixed, non-randomized run order. The table reports the highest tested step with zero
-dropped iterations and zero HTTP errors; it is a single local first ladder, not a capacity claim.
+worker with the shared outbound client, and a fixed, non-randomized run order. The table reports
+the highest tested step that finished and served at least its nominal count with zero HTTP errors;
+it is one local ladder, not a capacity claim.
 
 | Workload | Tool profile | Highest tested clean step | First observed load boundary |
 |---|---|---|---|
-| [Bare greeting](bench/results/agent_greeting_bd646_result.json) | `none` | 125 req/s for 20 s: 2,500 nominally offered, 2,501 completed, p99 96.9 ms | None in the tested 25–125 req/s range. |
-| [Delivery chat](bench/results/agent_chat_read_bd646_result.json) | `read` | 100 req/s for 20 s: 2,000 offered/completed, p99 27.6 ms | None in the tested 10–100 req/s range. |
-| [Knowledge retrieval](bench/results/agent_retrieval_bd646_result.json) | `all` | 60 req/s for 30 s: 1,800 nominally offered, 1,801 completed, p99 243.0 ms | At 75 req/s, 2,123 completed, 128 were dropped, and p99 reached 4.18 s; no HTTP errors. |
-| [Owned-order refund preparation](bench/results/agent_prepare_bd646_result.json) | `all` | 20 req/s for 30 s: 600 nominally offered, 601 reached `action_pending`, p99 553.1 ms | At 30 req/s, 773 reached `action_pending`, 115 were dropped, 12 returned HTTP 503, and p99 reached 7.82 s. |
+| [Bare greeting](bench/results/agent_worker_http_layout_cdbe1cb_20260831T185801Z_baseline_p1_greeting_steps.txt) | `none` | 125 req/s for 20 s: 2,500 nominally offered, 2,501 completed, p99 148.0 ms | None in the tested 25–125 req/s range. |
+| [Delivery chat](bench/results/agent_worker_http_layout_cdbe1cb_20260831T185801Z_baseline_p2_chat_steps.txt) | `read` | 100 req/s for 20 s: 2,000 nominally offered, 2,001 completed, p99 36.3 ms | None in the tested 10–100 req/s range. |
+| [Knowledge retrieval](bench/results/agent_worker_http_layout_cdbe1cb_20260831T185801Z_baseline_p3_retrieval_steps.txt) | `all` | 60 req/s for 30 s: 1,800 offered/completed, p99 83.9 ms | At 75 req/s, 2,147 were served, one request returned 5xx, p99 reached 3.70 s, and the overloaded 75/90 region contributed to 542 aggregate ladder drops. |
+| [Owned-order refund preparation](bench/results/agent_worker_http_layout_cdbe1cb_20260831T185801Z_baseline_p4_prepare_steps.txt) | `all` | 20 req/s for 30 s: 600 nominally offered, 601 reached `action_pending`, p99 704.4 ms | At 30 req/s, 793 reached `action_pending`, seven returned 5xx, the ladder recorded 101 aggregate drops, and p99 reached 7.07 s. |
 
 k6 may emit one iteration at a scenario time boundary, so a completed count can exceed nominal
 `rate x duration` by one. Latency percentiles include every completed HTTP request, including an
 error response. Route/context evidence shows `none`/`read`/`all`/`all`; every completed turn had
-`loadedTurnCount=0` and zero included turns. The [method and raw bundles](bench/agent/README.md#current-four-path-baseline-at-bd646937)
+`loadedTurnCount=0` and zero included turns. The
+[baseline method and raw bundles](bench/agent/README.md#current-four-path-baseline-at-cdbe1cb)
 record the exact fixture, configuration, UTC windows and count boundaries.
+
+A four-block Williams-balanced factorial at the same commit then varied one versus two workers
+and shared versus per-authority outbound clients on retrieval at 60/75/90 requests/s. Every
+two-worker cell fully served every rate with zero aggregate drops or HTTP errors. The one-worker
+cells saturated above 60 requests/s and recorded 3,863 aggregate drops. At 90 requests/s the
+four-block median finished-rate gain was 13.75 requests/s for `2S-1S` and 12.50 requests/s for
+`2PA-1PA`. The fully served `2PA-2S` p99 contrast changed sign across blocks at every rate, so the
+experiment supports two workers but not per-authority clients; the runtime keeps the simpler
+shared layout. The measured recommendation is `AGENT_WORKERS=2`; the program still defaults to one
+worker when the setting is absent. The [method, per-cell rows, planned contrasts, and raw bundles](bench/agent/README.md#worker--outbound-client-factorial-at-cdbe1cb)
+state the single-host boundary and the aggregate-only k6 drop limitation.
 
 The earlier paired measurement found most of the agent's CPU going on work it threw away — a fresh
 TLS context per outbound request. Its raw output, profiles and remaining unknowns are retained in

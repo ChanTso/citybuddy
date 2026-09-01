@@ -107,17 +107,13 @@ def test_agent_and_cpu_sampling_use_the_same_dedicated_elasticsearch() -> None:
     sampled_targets_start = runner.index("sampled_targets=(")
     sampled_targets_end = runner.index(")\nwhile", sampled_targets_start)
     sampled_targets = runner[sampled_targets_start:sampled_targets_end]
-    sampled_names_start = runner.index("sampled_names=(")
-    sampled_names_end = runner.index(")\nsampled_targets", sampled_names_start)
-    sampled_names = runner[sampled_names_start:sampled_names_end]
 
     assert container == "citybuddy-bench-elasticsearch"
     assert f'.containers["{container}"].id' in sampled_targets
-    assert container in sampled_names
     assert '"$mysql_container_id"' in sampled_targets
     assert "citybuddy-mysql-1" not in sampled_targets
     assert "citybuddy-elasticsearch-1" not in sampled_targets
-    assert "citybuddy-elasticsearch-1" not in sampled_names
+    assert "{{.Name}}" in runner
 
 
 def test_agent_ladder_uses_and_records_a_digest_pinned_k6_image() -> None:

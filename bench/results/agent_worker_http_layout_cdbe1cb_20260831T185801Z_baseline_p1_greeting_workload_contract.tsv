@@ -1,0 +1,13 @@
+citybuddy_commit=cdbe1cbd40d6463270aa5652151f8330bc38773f
+sut_commit=cdbe1cbd40d6463270aa5652151f8330bc38773f
+benchmark_harness_commit=cdbe1cbd40d6463270aa5652151f8330bc38773f
+correlation_boundary=worker_http_layout_cdbe1cb_20260831T185801Z_baseline_p1_greeting-greeting-
+path=greeting
+expected_tool_profile=none
+evidence_role=workload_contract_only_not_performance_or_business_grader
+rate_per_second	boundary_turns	completed_turns	failed_turns	processing_turns	matching_profile_turns	empty_history_turns	unexpected_routing_events	nonempty_context_events	routing_events	context_events	actual_tool_profiles	loaded_turn_counts	included_turn_counts
+25	501	501	0	0	501	501	0	0	501	501	none	0	0
+50	1001	1001	0	0	1001	1001	0	0	1001	1001	none	0	0
+75	1501	1501	0	0	1501	1501	0	0	1501	1501	none	0	0
+100	2001	2001	0	0	2001	2001	0	0	2001	2001	none	0	0
+125	2501	2501	0	0	2501	2501	0	0	2501	2501	none	0	0
