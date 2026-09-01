@@ -187,6 +187,36 @@ The web surface proxies the three APIs in development, at the ports `scripts/dem
 npm --prefix web ci && cp web/.env.example web/.env.local && npm --prefix web run dev
 ```
 
+## Local demo observability
+
+The local demo opts in to Agent Prometheus metrics only inside `scripts/demo.sh`; the normal Agent
+defaults remain metrics disabled and an empty trace-export URL. Without an explicit opt-in,
+`GET /internal/metrics/prometheus` is a 404. The demo Agent binds to loopback, but the metrics
+endpoint has no application authentication and is omitted from OpenAPI, so do not expose demo
+port 8000 or proxy it to an untrusted network without an access-control boundary. The demo also
+sets `CITYBUDDY_TRACE_EXPORT_URL` to empty explicitly, overriding any value inherited from the
+calling shell.
+
+After `uv run python scripts/demo_story.py --pace 0`, the following was captured with
+`curl --fail --silent http://127.0.0.1:8000/internal/metrics/prometheus` from committed code
+`4352a5c71ff4d3e4e5325a94b82e174949da6cfb`:
+
+```text
+# HELP citybuddy_agent_operation_requests_total Completed eligible Agent operation observations.
+# TYPE citybuddy_agent_operation_requests_total counter
+citybuddy_agent_operation_requests_total{operation="knowledge_search",outcome="sufficient"} 1.0
+citybuddy_agent_operation_requests_total{operation="pending_action_prepare",outcome="success"} 1.0
+citybuddy_agent_operation_requests_total{operation="pending_action_confirm",outcome="confirmed"} 1.0
+# HELP citybuddy_knowledge_backend_decisions_total Completed FAQ-cache versus issued Elasticsearch backend choices.
+# TYPE citybuddy_knowledge_backend_decisions_total counter
+citybuddy_knowledge_backend_decisions_total{decision="elasticsearch_issued"} 1.0
+```
+
+This is one scrape from the demo's single Agent process and is a functional observability example,
+not a performance result. With more than one worker, each process has its own collector registry;
+a scrape reaches one worker and does not represent a service-wide total. This repository does not
+implement multiprocess Prometheus aggregation.
+
 ## Measured performance
 
 Local post-memory, empty-history, first-turn latency for the four support-agent workloads at
