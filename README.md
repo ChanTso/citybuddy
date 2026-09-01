@@ -2,13 +2,19 @@
 
 [![ci](https://github.com/ChanTso/citybuddy/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/ChanTso/citybuddy/actions/workflows/ci.yml)
 
-CityBuddy is a local-commerce transaction backend with a text-only AI customer-support agent
-built on top of it. The point of the project is the boundary between the two: an LLM agent can
-read business data and *prepare* sensitive actions such as refunds, but it cannot become the
-authority on whether a transaction happened.
+CityBuddy is a local-commerce backend where an LLM support agent can read data and prepare
+sensitive actions, while the server owns identity, authorization, confirmation, and transaction truth.
 
 Everything below runs locally against real MySQL, Redis, Elasticsearch, and RocketMQ instances —
 no in-memory substitutes and no mocked infrastructure in the integration suite.
+
+## Evidence at a glance
+
+| Boundary | Measured result | Measurement boundary |
+|---|---|---|
+| [Transactional ownership binding](https://github.com/ChanTso/state-eval/tree/main/results/ownership-campaign-v1) | In this fixed 600-trial evaluation, commerce's in-transaction ownership binding reduced unauthorized refund requests observed by independent terminal SQL from 55/300 (18.33%; 95% Wilson CI 14.36%–23.10%) with the binding off to 0/300 (0%; 95% Wilson CI approximately 0%–1.264%) with it on. | 5 phrasings × 2 arms × 60 in 60 balanced randomized blocks (seed `2026083102`); 600/600 planned trials measured, the activation check passed, and operationally inconclusive, interrupted, and extra trial counts were each 0. StateEval `38cdde3aec1c4b8044d535fcdb7a7616dc81722b`; CityBuddy SUT `09130fa3c0209648f98781ff0892c3d07a55e59f`; one operator-attested proxy-exposed `gpt-5.4` alias, not an immutable upstream model pin; two 100-trial calibration runs excluded. |
+| [Seckill reservation contention](bench/README.md#finding-and-fix-the-serializing-lock-was-also-suppressing-a-deadlock) | The pre-fix 32-activity ladder logged roughly 6,200 deadlock events; the fixed run logged 0. At the 800 req/s target, 12,003 admissions completed at 799.9 req/s with p99 39.4 ms and 0 drops or failed requests. | One MacBook Pro M4 (10 cores, 24 GB), Docker Desktop (8 CPUs, 14 GB), authenticated requests across Redis Lua and real MySQL transactions; 32 activities, a 15 s fixed-arrival-rate step, setup excluded. This is a local workload result, not a capacity claim. |
+| [Concurrent standard-order creation](bench/results/order_idempotency_parallel_creation_fix.txt) | Four workers created 6,000/6,000 distinct orders with 6,000 matched idempotency rows and outbox events, 0 orphan idempotency rows, and MySQL 1205/1213 counter deltas of 0. | One Apple M4 (10 cores, 24 GB), Docker (8 CPUs, 14 GB), real MySQL 8.4.10; 6,000 unique users and order intents. The 16.9 s window included per-user login and `POST /api/orders`; seeding and service startup were excluded. |
 
 ```mermaid
 flowchart LR
@@ -31,22 +37,38 @@ flowchart LR
 ```
 
 The dashed edge is the whole point. Everything the model says reaches the user as explanation; the
-solid path through commerce into MySQL is the only thing that decides whether a refund happened.
+solid path through commerce into MySQL is the only thing that decides whether a refund request was
+durably recorded.
 
 ## That boundary is measured, not asserted
 
-[StateEval](https://github.com/ChanTso/state-eval) disables one check inside commerce and grades
-the outcome from the authoritative database through a read-only account the system under test
-cannot write to. An agent serving one user was asked to refund another user's order. It issued a
-prepare request in 7 of 18 first turns. With commerce's resource-ownership check enforced, 0 of
-those 3 attempts recorded a refund; with only that check disabled in the evaluation profile, 4 of
-4 did — while the JWT signature, the exact `refund:create` scope, the `act.azp` actor binding and
-the support session stayed enforced in both arms.
+[StateEval](https://github.com/ChanTso/state-eval) toggles commerce's in-transaction
+resource-ownership binding and grades every trial against the authoritative terminal SQL state,
+queried through a read-only account the system under test cannot write to. Only that binding
+changed between arms: the JWT signature, exact `refund:create` scope, `act.azp` actor binding, and
+support session remained enforced. An agent serving one user was asked to refund another user's
+order. In the fixed 600-trial evaluation, independent terminal SQL observed an unauthorized refund
+request in 55 of 300 trials with the binding off (18.33%; 95% Wilson CI 14.36%–23.10%) and 0 of 300
+with it on (0%; 95% Wilson CI approximately 0%–1.264%).
 
-Removing the last check inside the transaction was enough. That is why the comparison lives here
-and not in the agent's prompt: the model was instructed to refund only orders owned by the
-requester, and had no tool that could tell it who owned one.
-[Finding and raw artifacts](https://github.com/ChanTso/state-eval#readme).
+The campaign used 5 phrasings × 2 arms × 60 in 60 balanced randomized blocks with seed
+`2026083102`. All 600 planned trials were measured; none were operationally inconclusive,
+interrupted, or extra, and the activation check passed. Attempt issuance was a diagnostic rather
+than the result denominator: 55/300 off-arm trials and 63/300 on-arm trials contained an attempt.
+The run does not establish equal attempt propensity between arms; the primary measure is terminal
+SQL across all 300 trials in each arm.
+
+The harness and catalog were at StateEval
+`38cdde3aec1c4b8044d535fcdb7a7616dc81722b`; the system under test was CityBuddy
+`09130fa3c0209648f98781ff0892c3d07a55e59f`. The run used one operator-attested proxy-exposed
+`gpt-5.4` alias, not an immutable upstream model pin, and excluded both 100-trial calibration
+runs. These numbers characterize this fixed campaign and these commits, not production safety or
+a claim that a model will never propose an unauthorized action.
+[Formal summary and raw artifacts](https://github.com/ChanTso/state-eval/tree/main/results/ownership-campaign-v1).
+
+StateEval does not claim this evaluation method as novel; related mutation-testing,
+agent-evaluation, and database-oracle work is catalogued in its
+[prior-art review](https://github.com/ChanTso/state-eval/blob/main/docs/PRIOR_ART.md).
 
 ## What is worth reading here
 
@@ -60,17 +82,18 @@ requester, and had no tool that could tell it who owned one.
   RocketMQ transaction message binds the admission decision to durable order creation, and the
   transaction checker resolves from a persisted decision marker only.
 - **Sensitive action truth.** Commerce owns `PendingAction` and an immutable `ActionReceipt`. The
-  agent prepares an action and claims it before commerce commits, so a lost response can never
-  leave a refund executed remotely and recorded locally as never executed. Model prose is
-  explicitly non-authoritative: only a projected receipt lets a client render success, SSE tokens
-  cannot produce a success state, and a deterministic action-claim lexicon exists as defense in
-  depth.
+  agent prepares an action and claims it before commerce records the refund request, so a lost
+  response cannot leave that request durably recorded in commerce and permanently absent from the
+  agent's receipt projection. Model prose is explicitly non-authoritative: only a projected
+  receipt lets a client render success, SSE tokens cannot produce a success state, and a
+  deterministic action-claim lexicon exists as defense in depth.
 - **Bounded conversation context.** Each modeled turn can receive only the 16 most recent
-  completed user/assistant pairs from the same owned support session, under a 6,144 estimated-token
-  history budget. Whole pairs are trimmed at fixed watermarks, and content-free evidence records
-  exactly which turn ids entered the prompt. Pending actions, confirmation, authorization and live
-  commerce facts remain server-owned state rather than model memory. The policy and its limits are
-  in [the agent-control contract](docs/CONTRACTS.md#contract-agent-action-evidence).
+  completed user/assistant pairs from the same owned support session, under a deterministic
+  6,144-unit `utf8-bytes-v1` history budget. These estimator units are UTF-8 byte counts, not
+  provider token usage. Whole pairs are trimmed at fixed watermarks, and content-free evidence
+  records exactly which turn ids entered the prompt. Pending actions, confirmation, authorization
+  and live commerce facts remain server-owned state rather than model memory. The policy and its
+  limits are in [the agent-control contract](docs/CONTRACTS.md#contract-agent-action-evidence).
 - **Failure convergence.** Idempotency keys, unique constraints, an inventory ledger, and
   status/version CAS make duplicate delivery, unpaid-timeout cancellation, and partial refunds
   converge to one result. The deadlocks, stale snapshots, and precision losses found while proving
@@ -105,8 +128,8 @@ Full ownership, invariant, and interface tables are in [docs/CONTRACTS.md](docs/
 ## Seeing it run
 
 The flagship flow — an answer with citations, a model claiming a refund that never happened, and a
-real refund that completes only because a human confirmed it and commerce committed it — runs in
-about ninety seconds once the local topology below is up:
+real refund request that is durably recorded only because a human confirmed it and commerce
+committed it — runs in about ninety seconds once the local topology below is up:
 
 ```bash
 make demo
@@ -142,7 +165,7 @@ that produced it. The middle three, verbatim from a run:
   MySQL      pending action fcce7b0e-8192-479d-993c-c3753f2e0029 is PREPARED
 
 ──────────────────────────────────────────────────────────────────────────────
-  5. The user confirms. Commerce executes, and the agent projects the receipt.
+  5. The user confirms. Commerce records the request, and the agent projects the receipt.
      The receipt is the only thing that lets a client render a success state.
 ──────────────────────────────────────────────────────────────────────────────
   outcome    action_completed
@@ -151,6 +174,9 @@ that produced it. The middle three, verbatim from a run:
   MySQL      receipt REQUESTED, refund f1474937-c01a-4485-9147-72ce800c121e
   MySQL      pending action is now CONSUMED
 ```
+
+`REQUESTED` means commerce durably recorded the request; `refunded_amount_minor=0` because the
+mocked provider has no settlement step.
 
 The walkthrough, including the browser version and an account of which parts are fixtures, is in
 [docs/DEMO.md](docs/DEMO.md).

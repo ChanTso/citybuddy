@@ -60,20 +60,21 @@ The separate warm-history harness holds the current request fixed at `hello, can
 delivery times` and requires the `read` tool profile for every completed turn. It is designed to
 measure the **end-to-end increment from non-empty history** on that fixed delivery/read path against
 the `empty` control. That increment includes the MySQL history read and row decoding, durable-history
-validation, token estimation and whole-pair trimming, prompt construction, and request
+validation, `utf8-bytes-v1` estimation and whole-pair trimming, prompt construction, and request
 serialization. It cannot be attributed to prompt packing alone or to the history SQL query alone.
 
 The deterministic cases are:
 
-| Case | Persisted / candidate / loaded / included pairs | Older | Watermark | Candidate / included tokens | Omitted loaded pairs | Trim action |
+| Case | Persisted / candidate / loaded / included pairs | Older | Watermark | Candidate / included estimator units | Omitted loaded pairs | Trim action |
 |---|---|---|---|---|---:|---|
 | `empty` | 0 / 0 / 0 / 0 | false | low | 0 / 0 | 0 | none |
 | `one-short` | 1 / 1 / 1 / 1 | false | low | 48 / 48 | 0 | none |
 | `max-count` | 17 / 17 / 16 / 16 | true | low | 768 / 768 | 0 | none |
 | `high-pressure` | 17 / 17 / 16 / 1 | true | high | 68,224 / 4,264 | 15 | omit oldest whole pairs |
 
-All four cases use the `utf8-bytes-v1` estimator and a 6,144-token budget. The result contract
-checks these values independently for every completed turn in every run.
+All four cases use a deterministic 6,144-unit `utf8-bytes-v1` estimator budget. The units are UTF-8
+byte counts, not provider token usage. The result contract checks these values independently for
+every completed turn in every run.
 
 `build_warm_history_fixture.py` constructs the selected history before the measured window. It does
 not issue warm-up chat requests. `k6/warm_history.js` then uses one fixed-arrival-rate scenario and
@@ -91,8 +92,8 @@ and a fresh output label explicitly:
 The runner accepts only `empty`, `one-short`, `max-count`, or `high-pressure`, refuses an existing
 output label, and drives `summarize_warm_history.py` only after k6 and the workload contract succeed.
 Each result bundle records the full CityBuddy commit, case, persisted/candidate/loaded/included
-counts, `olderTurnsAvailable`, token estimate and budget, watermark and trimming evidence, final tool
-profile, UTC setup/run windows, and nominal/completed/dropped/error counts. It uses the same
+counts, `olderTurnsAvailable`, estimator-unit count and budget, watermark and trimming evidence,
+final tool profile, UTC setup/run windows, and nominal/completed/dropped/error counts. It uses the same
 source-clean, setup nonce, container/image/JAR, completion-marker, pre/post runtime gate, staging, and
 publication boundaries as the four-path runner. A failed or interrupted run remains unpublished in
 ignored `bench/.run/` staging, and no existing result is overwritten.
@@ -108,8 +109,8 @@ summary.
 
 This is a **fixed read path, fixture-warm state, single-host local topology end-to-end increment
 from non-empty history**. The increment includes the MySQL history read and row decoding,
-durable-history validation, token estimation and whole-pair trimming, prompt construction, and
-request serialization. Fixture construction and base setup are outside the measured window, and
+durable-history validation, `utf8-bytes-v1` estimation and whole-pair trimming, prompt construction,
+and request serialization. Fixture construction and base setup are outside the measured window, and
 the deterministic fake LiteLLM fixture holds inference at zero. Each run used a fresh completed
 setup and a quiet host; the harness issued no warm-up chat request.
 
