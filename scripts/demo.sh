@@ -262,6 +262,8 @@ echo "model fixture ready"
 
 echo "== starting agent-service on $agent_port =="
 CITYBUDDY_ENVIRONMENT=development \
+CITYBUDDY_METRICS_ENABLED=true \
+CITYBUDDY_TRACE_EXPORT_URL="" \
 AGENT_PORT="$agent_port" \
 AGENT_IDENTITY_ENABLED=true \
 IDENTITY_ISSUER=https://identity.citybuddy.test \
