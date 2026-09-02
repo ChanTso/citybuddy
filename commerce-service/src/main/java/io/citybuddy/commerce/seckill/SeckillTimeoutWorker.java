@@ -32,7 +32,7 @@ public final class SeckillTimeoutWorker {
     if (!activationComplete) {
       SeckillTimeoutDispatchService.DispatchBatch batch =
           dispatch.dispatchPreexistingOnce(activationCutoff);
-      activationComplete = batch.selected() < properties.dispatchBatchSize();
+      activationComplete = batch.failed() > 0 || batch.selected() < properties.dispatchBatchSize();
       return batch;
     }
     return dispatch.dispatchCurrentOnce();

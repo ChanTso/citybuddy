@@ -11,9 +11,7 @@ public record SeckillTimeoutProperties(
     Duration receiveAwait,
     Duration receiveInvisibleDuration,
     Integer receiveBatchSize,
-    Integer dispatchBatchSize,
-    Integer maximumDispatchAttempts,
-    Integer maximumDeliveryAttempts) {
+    Integer dispatchBatchSize) {
 
   public SeckillTimeoutProperties {
     receiveAwait = receiveAwait == null ? Duration.ofSeconds(2) : receiveAwait;
@@ -21,8 +19,6 @@ public record SeckillTimeoutProperties(
         receiveInvisibleDuration == null ? Duration.ofSeconds(30) : receiveInvisibleDuration;
     receiveBatchSize = receiveBatchSize == null ? 16 : receiveBatchSize;
     dispatchBatchSize = dispatchBatchSize == null ? 32 : dispatchBatchSize;
-    maximumDispatchAttempts = maximumDispatchAttempts == null ? 5 : maximumDispatchAttempts;
-    maximumDeliveryAttempts = maximumDeliveryAttempts == null ? 3 : maximumDeliveryAttempts;
     requireText(rocketmqEndpoints, "RocketMQ endpoints");
     requireText(rocketmqTopic, "RocketMQ timeout topic");
     requireText(rocketmqConsumerGroup, "RocketMQ timeout consumer group");
@@ -34,8 +30,6 @@ public record SeckillTimeoutProperties(
     }
     requireBounded(receiveBatchSize, 32, "Receive batch size");
     requireBounded(dispatchBatchSize, 1_000, "Dispatch batch size");
-    requireBounded(maximumDispatchAttempts, 100, "Maximum dispatch attempts");
-    requireBounded(maximumDeliveryAttempts, 100, "Maximum delivery attempts");
   }
 
   private static void requireText(String value, String label) {

@@ -374,6 +374,17 @@ not by treating the product cache-invalidation consumer as a knowledge-indexer f
 - Delay messages trigger unpaid-order cancellation and, in the retained handoff design, ticket SLA
   checks. Delivery is a trigger, not authority: consumers re-read MySQL state and use conditional
   status/version updates.
+- The timeout subscription group's Broker configuration owns the delivery retry and DLQ budget;
+  the application does not impose a second limit from `deliveryAttempt`. It acknowledges only after
+  a terminal timeout disposition and extends invisibility while an order is not yet due. One
+  message's processing failure leaves that message unacknowledged without preventing the remaining
+  messages in the received batch from being processed; the first failure is rethrown after the
+  batch so worker failure remains observable.
+- Timeout-message dispatch remains recoverable in both `PENDING` and `FAILED` until a durable Broker
+  message identity is recorded. `FAILED` records the latest send failure and cumulative failed-send
+  count; it is not a terminal business disposition. Each scheduled scan remains bounded and selects
+  the lowest failed-send count first, with creation order and order id as FIFO tie-breakers. A failed
+  activation batch exits the pre-activation cutoff so newer zero-attempt rows remain eligible.
 - A consumer may produce a terminal business disposition only from a positively established
   business conclusion. Integrity failure, dependency unavailability, timeout, malformed or
   contradictory owner-local state, and any result whose truth cannot be determined are not

@@ -483,12 +483,18 @@ admin updateTopic \
   --namesrvAddr rocketmq-namesrv:9876 \
   --clusterName DefaultCluster \
   --topic "$timeout_topic" \
-  --readQueueNums 4 \
-  --writeQueueNums 4 \
+  --readQueueNums 1 \
+  --writeQueueNums 1 \
   -a +message.type=DELAY
 admin updateSubGroup --namesrvAddr rocketmq-namesrv:9876 --clusterName DefaultCluster \
-  --groupName "$timeout_group" --consumeEnable true --retryMaxTimes 3
+  --groupName "$timeout_group" --consumeEnable true --retryMaxTimes 3 \
+  --groupRetryPolicy '{"type":"CUSTOMIZED","customizedRetryPolicy":{"next":[1000,1000,1000,1000]}}'
 groups_created=1
+timeout_consumer_config="$(
+  admin getConsumerConfig --namesrvAddr rocketmq-namesrv:9876 --groupName "$timeout_group"
+)"
+grep -Eq 'retryMaxTimes[[:space:]]*=[[:space:]]*3' <<<"$timeout_consumer_config"
+echo "Verified pinned timeout retry maximum=3 Broker retries (four delivery attempts)."
 
 required_surefire_classes=(
   io.citybuddy.commerce.catalog.CatalogIntegrationTest

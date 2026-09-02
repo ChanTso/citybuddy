@@ -6,16 +6,21 @@ import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.verifyNoInteractions;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
+import java.sql.Timestamp;
 import java.time.Clock;
 import java.time.Duration;
 import java.time.Instant;
+import java.time.ZoneOffset;
 import java.time.temporal.ChronoUnit;
+import java.util.ArrayList;
+import java.util.List;
 import java.util.Map;
 import java.util.UUID;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicReference;
 import org.apache.rocketmq.client.apis.ClientConfiguration;
 import org.apache.rocketmq.client.apis.ClientServiceProvider;
 import org.apache.rocketmq.client.apis.message.Message;
@@ -101,8 +106,6 @@ class SeckillTransactionIntegrationTest {
     registry.add("citybuddy.seckill.timeout.receive-await", () -> "1s");
     registry.add("citybuddy.seckill.timeout.receive-invisible-duration", () -> "10s");
     registry.add("citybuddy.seckill.timeout.dispatch-batch-size", () -> "32");
-    registry.add("citybuddy.seckill.timeout.maximum-dispatch-attempts", () -> "3");
-    registry.add("citybuddy.seckill.timeout.maximum-delivery-attempts", () -> "3");
   }
 
   @Autowired private TestRestTemplate http;
@@ -842,7 +845,7 @@ class SeckillTransactionIntegrationTest {
 
   @Test
   @Order(10)
-  void databaseFailureIsNotAcknowledgedAndDispatchRetryIsBoundedAndReplaySafe() throws Exception {
+  void brokerOwnsDeliveryBudgetAndFailedDispatchesRemainRecoverable() throws Exception {
     String activityId = "cb061-database-retry";
     String reservationId =
         createOrderedReservation(
@@ -892,9 +895,10 @@ class SeckillTransactionIntegrationTest {
                 activityId))
         .isEqualTo(1);
     sendImmediateTimeout(SeckillTimeoutMessage.from(order));
-    assertThatThrownBy(() -> timeoutMessaging.consumeOnce(cancellationService))
-        .isInstanceOf(IllegalStateException.class)
-        .hasMessageContaining("cannot be incremented safely");
+    for (int attempt = 1; attempt <= 3; attempt++) {
+      awaitTimeoutCancellationFailure(
+          Duration.ofSeconds(45), "cannot be incremented safely", attempt);
+    }
     assertThat(orderStatus(reservationId)).isEqualTo("UNPAID");
     assertThat(cancellationMovementCount(reservationId)).isZero();
     assertThat(productStock(order.productId())).isZero();
@@ -906,7 +910,7 @@ class SeckillTransactionIntegrationTest {
                 "UPDATE seckill_activity SET projection_version = 1 WHERE activity_id = ?",
                 activityId))
         .isEqualTo(1);
-    assertThat(consumeTimeoutEventually(Duration.ofSeconds(20))).isEqualTo(1);
+    consumeTimeoutUntilCancelled(reservationId, Duration.ofSeconds(45));
     assertCancelledAndRestored(reservationId, 1, 1);
 
     String dispatchActivity = "cb061-dispatch-bound";
@@ -914,17 +918,6 @@ class SeckillTransactionIntegrationTest {
         createOrderedReservation(
             dispatchActivity, "cb061-product-dispatch-bound", "cb061-dispatch-bound-key", 1);
     forceOrderDueIn(dispatchReservation, Duration.ofMinutes(5));
-    SeckillTimeoutProperties twoAttempts =
-        new SeckillTimeoutProperties(
-            timeoutProperties.rocketmqEndpoints(),
-            timeoutProperties.rocketmqTopic(),
-            timeoutProperties.rocketmqConsumerGroup(),
-            timeoutProperties.receiveAwait(),
-            timeoutProperties.receiveInvisibleDuration(),
-            timeoutProperties.receiveBatchSize(),
-            timeoutProperties.dispatchBatchSize(),
-            2,
-            timeoutProperties.maximumDeliveryAttempts());
     SeckillTimeoutDispatchService ambiguousDispatch =
         new SeckillTimeoutDispatchService(
             orderRepository,
@@ -933,11 +926,11 @@ class SeckillTransactionIntegrationTest {
               throw new org.apache.rocketmq.client.apis.ClientException(
                   "controlled lost send receipt");
             },
-            twoAttempts);
+            timeoutProperties);
     assertThat(ambiguousDispatch.dispatchCurrentOnce().failed()).isGreaterThanOrEqualTo(1);
     assertThat(timeoutDispatchAttempts(dispatchReservation)).isEqualTo(1);
-    assertThat(timeoutDispatchState(dispatchReservation)).isEqualTo("PENDING");
-    assertThat(timeoutDispatch.dispatchCurrentOnce().sent()).isGreaterThanOrEqualTo(1);
+    assertThat(timeoutDispatchState(dispatchReservation)).isEqualTo("FAILED");
+    dispatchUntilState(timeoutDispatch, dispatchReservation, "SENT", 10);
     assertDispatchEvidence(dispatchReservation);
 
     String exhaustedActivity = "cb061-dispatch-exhausted";
@@ -955,20 +948,74 @@ class SeckillTransactionIntegrationTest {
               throw new org.apache.rocketmq.client.apis.ClientException(
                   "controlled broker unavailability");
             },
-            twoAttempts);
-    while ("PENDING".equals(timeoutDispatchState(exhaustedReservation))) {
-      alwaysFailing.dispatchCurrentOnce();
-    }
+            timeoutProperties);
+    dispatchUntilAttemptsExceed(alwaysFailing, exhaustedReservation, 0, 10);
     assertThat(timeoutDispatchState(exhaustedReservation)).isEqualTo("FAILED");
-    assertThat(timeoutDispatchAttempts(exhaustedReservation)).isEqualTo(2);
-    assertThat(alwaysFailing.dispatchCurrentOnce().selected()).isZero();
+    int firstFailureCount = timeoutDispatchAttempts(exhaustedReservation);
+    dispatchUntilAttemptsExceed(alwaysFailing, exhaustedReservation, firstFailureCount, 10);
+    assertThat(timeoutDispatchState(exhaustedReservation)).isEqualTo("FAILED");
+    assertThat(timeoutDispatchAttempts(exhaustedReservation)).isGreaterThan(firstFailureCount);
+    dispatchUntilState(timeoutDispatch, exhaustedReservation, "SENT", 10);
+    assertDispatchEvidence(exhaustedReservation);
+
+    drainTimeoutDispatches(timeoutDispatch, 10);
+    List<String> starvationReservations = new ArrayList<>();
+    for (int index = 0; index < timeoutProperties.dispatchBatchSize(); index++) {
+      String suffix = String.format("%02d", index);
+      String starvationReservation =
+          createOrderedReservation(
+              "cb061-starve-" + suffix,
+              "cb061-product-starve-" + suffix,
+              "cb061-starve-key-" + suffix,
+              1);
+      forceOrderDueIn(starvationReservation, Duration.ofMinutes(5));
+      starvationReservations.add(starvationReservation);
+    }
+    AtomicReference<String> sendableEventId = new AtomicReference<>();
+    SeckillTimeoutDispatchService selectiveDispatch =
+        new SeckillTimeoutDispatchService(
+            orderRepository,
+            message -> {
+              if (message.eventId().equals(sendableEventId.get())) {
+                return timeoutMessaging.send(message);
+              }
+              throw new org.apache.rocketmq.client.apis.ClientException(
+                  "controlled oldest-row failure");
+            },
+            timeoutProperties);
+    Instant activationCutoff =
+        jdbc.queryForObject("SELECT CURRENT_TIMESTAMP(6)", Timestamp.class).toInstant();
+    SeckillTimeoutWorker activationWorker =
+        new SeckillTimeoutWorker(
+            selectiveDispatch,
+            timeoutMessaging,
+            cancellationService,
+            timeoutProperties,
+            Clock.fixed(activationCutoff, ZoneOffset.UTC));
+    SeckillTimeoutDispatchService.DispatchBatch failedActivation = activationWorker.dispatchOnce();
+    assertThat(failedActivation.selected()).isEqualTo(timeoutProperties.dispatchBatchSize());
+    assertThat(failedActivation.failed()).isEqualTo(timeoutProperties.dispatchBatchSize());
+    for (String starvationReservation : starvationReservations) {
+      assertThat(timeoutDispatchState(starvationReservation)).isEqualTo("FAILED");
+      assertThat(timeoutDispatchAttempts(starvationReservation)).isEqualTo(1);
+    }
+
+    String laterReservation =
+        createOrderedReservation(
+            "cb061-starve-later", "cb061-product-starve-later", "cb061-starve-key-later", 1);
+    forceOrderDueIn(laterReservation, Duration.ofMinutes(5));
+    sendableEventId.set(
+        orderRepository.findByReservation(laterReservation).orElseThrow().timeoutEventId());
+    SeckillTimeoutDispatchService.DispatchBatch progress = activationWorker.dispatchOnce();
+    assertThat(progress.sent()).isEqualTo(1);
+    assertDispatchEvidence(laterReservation);
   }
 
   @Test
   @Order(11)
-  void realBrokerConsumersRejectReservedEvaluationContextOnProductionOnlyPaths() throws Exception {
+  void realBrokerConsumersRejectReservedEvaluationContextAndIsolateTimeoutBatchFailures()
+      throws Exception {
     SeckillOrderService untouchedOrderHandler = mock(SeckillOrderService.class);
-    SeckillCancellationService untouchedTimeoutHandler = mock(SeckillCancellationService.class);
     SeckillReservation reservation =
         reservationRepository
             .findByIdempotencyForShare(USER, "cb060-commit", "cb060-key-commit")
@@ -999,13 +1046,23 @@ class SeckillTransactionIntegrationTest {
 
     SeckillOrderRepository.OrderRecord order =
         orderRepository.findByReservation(reservation.reservationId()).orElseThrow();
-    sendImmediateTimeout(SeckillTimeoutMessage.from(order), true);
+    String validReservation =
+        createOrderedReservation(
+            "cb061-batch-isolation",
+            "cb061-product-batch-isolation",
+            "cb061-batch-isolation-key",
+            1);
+    forceOrderDueIn(validReservation, Duration.ofSeconds(-1));
+    SeckillOrderRepository.OrderRecord validOrder =
+        orderRepository.findByReservation(validReservation).orElseThrow();
+    sendImmediateTimeoutBatch(
+        SeckillTimeoutMessage.from(order), SeckillTimeoutMessage.from(validOrder));
     awaitProductionOnlyRejection(
-        () -> timeoutMessaging.consumeOnce(untouchedTimeoutHandler),
+        () -> timeoutMessaging.consumeOnce(cancellationService),
         "Production seckill timeout cannot carry evaluation context");
-    verifyNoInteractions(untouchedTimeoutHandler);
     assertThat(orderStatus(reservation.reservationId())).isEqualTo("UNPAID");
     assertThat(cancellationMovementCount(reservation.reservationId())).isZero();
+    assertCancelledAndRestored(validReservation, 1, 1);
   }
 
   private void forceDue(String reservationId) {
@@ -1143,6 +1200,67 @@ class SeckillTransactionIntegrationTest {
     return 0;
   }
 
+  private void awaitTimeoutCancellationFailure(
+      Duration timeout, String expectedMessage, int expectedAttempt) throws Exception {
+    long deadline = System.nanoTime() + timeout.toNanos();
+    while (System.nanoTime() < deadline) {
+      try {
+        timeoutMessaging.consumeOnce(cancellationService);
+      } catch (IllegalStateException exception) {
+        assertThat(exception)
+            .as("timeout delivery attempt %s", expectedAttempt)
+            .hasMessageContaining(expectedMessage);
+        return;
+      }
+    }
+    throw new AssertionError("Timeout message was not redelivered within " + timeout);
+  }
+
+  private void consumeTimeoutUntilCancelled(String reservationId, Duration timeout)
+      throws Exception {
+    long deadline = System.nanoTime() + timeout.toNanos();
+    while (System.nanoTime() < deadline && !"CANCELLED".equals(orderStatus(reservationId))) {
+      timeoutMessaging.consumeOnce(cancellationService);
+    }
+    assertThat(orderStatus(reservationId)).isEqualTo("CANCELLED");
+  }
+
+  private void dispatchUntilState(
+      SeckillTimeoutDispatchService dispatcher,
+      String reservationId,
+      String expectedState,
+      int maximumBatches) {
+    for (int batch = 0;
+        batch < maximumBatches && !expectedState.equals(timeoutDispatchState(reservationId));
+        batch++) {
+      dispatcher.dispatchCurrentOnce();
+    }
+    assertThat(timeoutDispatchState(reservationId)).isEqualTo(expectedState);
+  }
+
+  private void dispatchUntilAttemptsExceed(
+      SeckillTimeoutDispatchService dispatcher,
+      String reservationId,
+      int previousAttempts,
+      int maximumBatches) {
+    for (int batch = 0;
+        batch < maximumBatches && timeoutDispatchAttempts(reservationId) <= previousAttempts;
+        batch++) {
+      dispatcher.dispatchCurrentOnce();
+    }
+    assertThat(timeoutDispatchAttempts(reservationId)).isGreaterThan(previousAttempts);
+  }
+
+  private void drainTimeoutDispatches(
+      SeckillTimeoutDispatchService dispatcher, int maximumBatches) {
+    for (int batch = 0; batch < maximumBatches; batch++) {
+      if (dispatcher.dispatchCurrentOnce().selected() == 0) {
+        return;
+      }
+    }
+    throw new AssertionError("Timeout dispatch rows did not drain within the batch bound");
+  }
+
   private void sendImmediateTimeout(SeckillTimeoutMessage payload) throws Exception {
     sendImmediateTimeout(payload, false);
   }
@@ -1150,20 +1268,33 @@ class SeckillTransactionIntegrationTest {
   private void sendImmediateTimeout(SeckillTimeoutMessage payload, boolean reservedSandbox)
       throws Exception {
     try (Producer producer = plainProducer(required("ROCKETMQ_TIMEOUT_TOPIC"))) {
-      var builder =
-          ClientServiceProvider.loadService()
-              .newMessageBuilder()
-              .setTopic(required("ROCKETMQ_TIMEOUT_TOPIC"))
-              .setTag(RocketMqSeckillTimeouts.TAG)
-              .setKeys(payload.eventId())
-              .setDeliveryTimestamp(System.currentTimeMillis())
-              .setBody(objectMapper.writeValueAsBytes(payload));
-      if (reservedSandbox) {
-        builder.addProperty(
-            RocketMqSeckillTransactions.RESERVED_SANDBOX_PROPERTY, "sandbox-must-not-be-accepted");
-      }
-      producer.send(builder.build());
+      sendImmediateTimeout(producer, payload, reservedSandbox);
     }
+  }
+
+  private void sendImmediateTimeoutBatch(SeckillTimeoutMessage poison, SeckillTimeoutMessage valid)
+      throws Exception {
+    try (Producer producer = plainProducer(required("ROCKETMQ_TIMEOUT_TOPIC"))) {
+      sendImmediateTimeout(producer, poison, true);
+      sendImmediateTimeout(producer, valid, false);
+    }
+  }
+
+  private void sendImmediateTimeout(
+      Producer producer, SeckillTimeoutMessage payload, boolean reservedSandbox) throws Exception {
+    var builder =
+        ClientServiceProvider.loadService()
+            .newMessageBuilder()
+            .setTopic(required("ROCKETMQ_TIMEOUT_TOPIC"))
+            .setTag(RocketMqSeckillTimeouts.TAG)
+            .setKeys(payload.eventId())
+            .setDeliveryTimestamp(System.currentTimeMillis())
+            .setBody(objectMapper.writeValueAsBytes(payload));
+    if (reservedSandbox) {
+      builder.addProperty(
+          RocketMqSeckillTransactions.RESERVED_SANDBOX_PROPERTY, "sandbox-must-not-be-accepted");
+    }
+    producer.send(builder.build());
   }
 
   private void awaitProductionOnlyRejection(CheckedConsume consume, String message)

@@ -65,6 +65,19 @@ public final class RocketMqSeckillTimeouts implements AutoCloseable, SeckillTime
     }
   }
 
+  RocketMqSeckillTimeouts(
+      ObjectMapper objectMapper,
+      SeckillTimeoutProperties properties,
+      ClientServiceProvider provider,
+      Producer producer,
+      SimpleConsumer consumer) {
+    this.objectMapper = objectMapper;
+    this.properties = properties;
+    this.provider = provider;
+    this.producer = producer;
+    this.consumer = consumer;
+  }
+
   @Override
   public String send(SeckillTimeoutMessage payload) throws ClientException {
     return producer.send(message(payload)).getMessageId().toString();
@@ -74,20 +87,59 @@ public final class RocketMqSeckillTimeouts implements AutoCloseable, SeckillTime
     List<MessageView> messages =
         consumer.receive(properties.receiveBatchSize(), properties.receiveInvisibleDuration());
     int consumed = 0;
+    Exception firstFailure = null;
     for (MessageView message : messages) {
-      rejectEvaluationContext(message);
-      if (message.getDeliveryAttempt() > properties.maximumDeliveryAttempts()) {
-        throw new IllegalStateException("Seckill timeout delivery exceeded its configured bound");
+      try {
+        rejectEvaluationContext(message);
+        SeckillCancellationService.CancellationResult result =
+            cancellations.cancel(payload(message));
+        if (result.outcome() == SeckillCancellationService.Outcome.EARLY) {
+          consumer.changeInvisibleDuration(message, result.retryAfter());
+          continue;
+        }
+        consumer.ack(message);
+        consumed++;
+      } catch (ClientException | RuntimeException exception) {
+        if (interrupted(exception)) {
+          if (firstFailure != null) {
+            exception.addSuppressed(firstFailure);
+          }
+          Thread.currentThread().interrupt();
+          if (exception instanceof ClientException clientException) {
+            throw clientException;
+          }
+          throw (RuntimeException) exception;
+        }
+        firstFailure = retain(firstFailure, exception);
       }
-      SeckillCancellationService.CancellationResult result = cancellations.cancel(payload(message));
-      if (result.outcome() == SeckillCancellationService.Outcome.EARLY) {
-        consumer.changeInvisibleDuration(message, result.retryAfter());
-        continue;
-      }
-      consumer.ack(message);
-      consumed++;
+    }
+    if (firstFailure instanceof ClientException clientException) {
+      throw clientException;
+    }
+    if (firstFailure instanceof RuntimeException runtimeException) {
+      throw runtimeException;
     }
     return consumed;
+  }
+
+  private static Exception retain(Exception firstFailure, Exception failure) {
+    if (firstFailure == null) {
+      return failure;
+    }
+    firstFailure.addSuppressed(failure);
+    return firstFailure;
+  }
+
+  private static boolean interrupted(Throwable failure) {
+    for (Throwable cause = failure; cause != null; cause = cause.getCause()) {
+      if (cause instanceof InterruptedException) {
+        return true;
+      }
+      if (cause == cause.getCause()) {
+        break;
+      }
+    }
+    return Thread.currentThread().isInterrupted();
   }
 
   private Message message(SeckillTimeoutMessage payload) {

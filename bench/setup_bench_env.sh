@@ -79,13 +79,18 @@ cat_group="cb030-catalog-consumer-$topic_suffix"
 
 echo "== creating RocketMQ topics =="
 admin() { docker compose --project-name citybuddy --env-file .env --file compose.yaml run --rm --no-deps rocketmq-admin "$@" >/dev/null 2>&1; }
+admin_output() { docker compose --project-name citybuddy --env-file .env --file compose.yaml run --rm --no-deps rocketmq-admin "$@"; }
 # RocketMQ 5 topics must declare the message type they accept.
 admin updateTopic --namesrvAddr rocketmq-namesrv:9876 --clusterName DefaultCluster --topic "$tx_topic" --readQueueNums 4 --writeQueueNums 4 -a +message.type=TRANSACTION || true
 admin updateTopic --namesrvAddr rocketmq-namesrv:9876 --clusterName DefaultCluster --topic "$to_topic" --readQueueNums 4 --writeQueueNums 4 -a +message.type=DELAY || true
 admin updateTopic --namesrvAddr rocketmq-namesrv:9876 --clusterName DefaultCluster --topic "$cat_topic" --readQueueNums 4 --writeQueueNums 4 || true
-for g in "$tx_group" "$to_group" "$cat_group"; do
+for g in "$tx_group" "$cat_group"; do
   admin updateSubGroup --namesrvAddr rocketmq-namesrv:9876 --clusterName DefaultCluster --groupName "$g" --consumeEnable true || true
 done
+admin updateSubGroup --namesrvAddr rocketmq-namesrv:9876 --clusterName DefaultCluster --groupName "$to_group" --consumeEnable true --retryMaxTimes 3
+timeout_consumer_config="$(admin_output getConsumerConfig --namesrvAddr rocketmq-namesrv:9876 --groupName "$to_group")"
+grep -Eq 'retryMaxTimes[[:space:]]*=[[:space:]]*3' <<<"$timeout_consumer_config"
+echo "Verified pinned timeout retry maximum=3 Broker retries (four delivery attempts)."
 
 echo "== generating signing key =="
 openssl genpkey -algorithm RSA -pkeyopt rsa_keygen_bits:2048 -out "$run_dir/bench-private.pem" 2>/dev/null
