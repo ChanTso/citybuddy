@@ -234,7 +234,8 @@ direct-user downgrade.
    BCrypt rows remain accepted and execute BCrypt on every request; no successful verifier is
    cached. Deploying a new binary does not rewrite those rows: obtaining the digest-path behavior
    requires an explicit `generate` then client-bound `hash` credential rotation. Human login always
-   executes BCrypt cost 12 directly.
+   executes BCrypt directly. New application-generated BCrypt hashes use configured strength 12;
+   verification honors the cost encoded in each persisted hash.
 8. The OBO contains at least an explicit OBO purpose/type, `sub`, `user_id`, support `session`,
    `aud=commerce-service`, exact `scope`, `act.azp=agent-service`, `jti`, `exp`, and applicable
    not-before/issued-at metadata. Scope is fixed by ToolSpec; neither model nor request payload can

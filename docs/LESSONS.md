@@ -234,8 +234,9 @@ reveal both the HMAC key and a reusable proof for a low-entropy service secret. 
 prototype remains in the evidence directory rather than being relabelled as the final result.
 
 The replacement makes the credential class explicit. Human passwords and legacy service rows keep
-BCrypt cost 12; newly provisioned service identities receive generated 256-bit machine tokens and
-store client-bound, versioned SHA-256 digests. The deployment counterfactual therefore includes an
+per-request BCrypt at the cost encoded in each hash; the measured baseline service row used cost 12.
+Newly provisioned service identities receive generated 256-bit machine tokens and store
+client-bound, versioned SHA-256 digests. The deployment counterfactual therefore includes an
 explicit service-credential rotation. At 30/s it changed 803 served plus 98 dropped at p50 4.14
 seconds to 901/901 served, zero dropped, and p50 13.4 ms. Auth median CPU fell from 694.42% to 4.30%.
 The final 5→30/s ladder had no HTTP error, SQL-classified failed turn, or observed new saturation,

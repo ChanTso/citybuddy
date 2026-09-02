@@ -815,8 +815,9 @@ the same windows were 1.95%, 2.53%, 3.31%, 4.89%, and 5.56%. The old description
 constraint as “the commerce tool boundary” was therefore contradicted by the component samples.
 
 The final design separates human passwords from machine credentials. Human login and legacy
-service rows remain BCrypt cost 12. New service credentials are `cbsvc_v1_` tokens with 256 bits
-from a CSPRNG; the database stores a versioned SHA-256 digest bound to the exact client id. Every
+service rows remain on per-request BCrypt using the cost encoded in each stored hash; the measured
+baseline service row used cost 12. New service credentials are `cbsvc_v1_` tokens with 256 bits from
+a CSPRNG; the database stores a versioned SHA-256 digest bound to the exact client id. Every
 exchange still reads current state, allowed scopes, and the persisted verifier. The fast verifier is
 appropriate only because the machine token has 256 bits of generated entropy; it is not a password
 hash and must not be used for human-selected secrets. Existing BCrypt rows are not migrated by a
