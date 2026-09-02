@@ -141,7 +141,7 @@ public final class SeckillReservationService {
   private PreparedReservation reserveIntent(
       String userSubject, String activityId, String idempotencyKey, ValidatedIntent intent) {
     activityRepository
-        .findForUpdate(activityId)
+        .findForShare(activityId)
         .orElseThrow(() -> new IllegalArgumentException("Seckill activity is missing"));
     SeckillReservation pending =
         new SeckillReservation(

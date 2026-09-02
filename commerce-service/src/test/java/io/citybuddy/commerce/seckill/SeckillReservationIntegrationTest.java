@@ -13,8 +13,11 @@ import java.util.List;
 import java.util.Properties;
 import java.util.UUID;
 import java.util.concurrent.Callable;
+import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.TimeoutException;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.condition.EnabledIfEnvironmentVariable;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -228,6 +231,69 @@ class SeckillReservationIntegrationTest {
                 .filter(result -> result.decisionCode() == ReservationDecisionCode.DUPLICATE_USER))
         .hasSize(9);
     assertRemaining("reservation-one-user", 9);
+  }
+
+  @Test
+  void activityShareLocksCoexistAndKeepTheExclusiveRebuildFence() throws Exception {
+    String suffix = UUID.randomUUID().toString();
+    String activityId = "reservation-lock-" + suffix;
+    createActivity(
+        activityId, "reservation-lock-product-" + suffix, SeckillActivityState.ACTIVE, 2);
+    CountDownLatch firstShareAcquired = new CountDownLatch(1);
+    CountDownLatch secondShareAcquired = new CountDownLatch(1);
+    CountDownLatch releaseFirstShare = new CountDownLatch(1);
+    CountDownLatch releaseSecondShare = new CountDownLatch(1);
+    CountDownLatch exclusiveStarted = new CountDownLatch(1);
+
+    try (var executor = Executors.newFixedThreadPool(3)) {
+      try {
+        Future<SeckillActivity> firstShare =
+            executor.submit(
+                () -> holdActivityForShare(activityId, firstShareAcquired, releaseFirstShare));
+        assertThat(firstShareAcquired.await(5, TimeUnit.SECONDS)).isTrue();
+
+        Future<SeckillActivity> secondShare =
+            executor.submit(
+                () -> holdActivityForShare(activityId, secondShareAcquired, releaseSecondShare));
+        assertThat(secondShareAcquired.await(5, TimeUnit.SECONDS)).isTrue();
+
+        Future<SeckillActivity> exclusive =
+            executor.submit(
+                () -> {
+                  exclusiveStarted.countDown();
+                  SeckillActivity activity =
+                      transactions.execute(
+                          status ->
+                              activityRepository
+                                  .findForUpdate(activityId)
+                                  .orElseThrow(
+                                      () ->
+                                          new IllegalStateException(
+                                              "Locked activity truth is missing")));
+                  if (activity == null) {
+                    throw new IllegalStateException("Exclusive activity transaction returned null");
+                  }
+                  return activity;
+                });
+        assertThat(exclusiveStarted.await(5, TimeUnit.SECONDS)).isTrue();
+        assertThatThrownBy(() -> exclusive.get(1, TimeUnit.SECONDS))
+            .isInstanceOf(TimeoutException.class);
+
+        releaseFirstShare.countDown();
+        assertThat(firstShare.get(5, TimeUnit.SECONDS).activityId()).isEqualTo(activityId);
+        assertThatThrownBy(() -> exclusive.get(1, TimeUnit.SECONDS))
+            .isInstanceOf(TimeoutException.class);
+
+        releaseSecondShare.countDown();
+        assertThat(secondShare.get(5, TimeUnit.SECONDS).activityId()).isEqualTo(activityId);
+        assertThat(exclusive.get(5, TimeUnit.SECONDS).activityId()).isEqualTo(activityId);
+      } finally {
+        releaseFirstShare.countDown();
+        releaseSecondShare.countDown();
+      }
+    } finally {
+      redis.delete(projectionStore.key(activityId));
+    }
   }
 
   @Test
@@ -755,6 +821,34 @@ class SeckillReservationIntegrationTest {
       }
       return results;
     }
+  }
+
+  private SeckillActivity holdActivityForShare(
+      String activityId, CountDownLatch acquired, CountDownLatch release) {
+    SeckillActivity activity =
+        transactions.execute(
+            status -> {
+              SeckillActivity locked =
+                  activityRepository
+                      .findForShare(activityId)
+                      .orElseThrow(
+                          () -> new IllegalStateException("Locked activity truth is missing"));
+              acquired.countDown();
+              try {
+                if (!release.await(10, TimeUnit.SECONDS)) {
+                  throw new IllegalStateException("Timed out while holding shared activity lock");
+                }
+              } catch (InterruptedException exception) {
+                Thread.currentThread().interrupt();
+                throw new IllegalStateException(
+                    "Interrupted while holding shared activity lock", exception);
+              }
+              return locked;
+            });
+    if (activity == null) {
+      throw new IllegalStateException("Shared activity transaction returned null");
+    }
+    return activity;
   }
 
   private void createActivity(
