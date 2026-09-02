@@ -1,0 +1,101 @@
+citybuddy_commit=f4ae145bfa8bc292f6c13efa973f2f899d13efa0
+setup_window_utc=2026-09-02T13:36:23Z/2026-09-02T13:37:01Z
+run_started_at_utc=2026-09-02T13:40:46Z
+run_completed_at_utc=2026-09-02T13:41:06Z
+label=seckill_s2_f4ae145_20260902T133609Z_spread_r1000 activities=32 rates=1000 step_seconds=15 gap_seconds=5 nominal_iterations=15000
+fixture_users=16000 fixture_activities=32 fixture_quota=1000000 fixture_stock=2000000 topic_suffix=s2-spread-1000-f4ae145-20260902T133609Z
+docker_cpus=8 docker_memory_bytes=14638391296 commerce_cpu_limit=4
+k6_image=grafana/k6@sha256:5221b620a4f874faff6e32ba597aa667c058391fe4898b1c6f6377f062c6cdec
+
+
+         /\      Grafana   /‾‾/
+    /\  /  \     |\  __   /  /
+   /  \/    \    | |/ /  /   ‾‾\
+  /          \   |   (  |  (‾)  |
+ / __________ \  |_|\_\  \_____/
+
+
+     execution: local
+        script: /scripts/seckill_ladder.js
+        output: json (/out/k6_seckill_s2_f4ae145_20260902T133609Z_spread_r1000_points.json)
+
+     scenarios: (100.00%) 1 scenario, 3000 max VUs, 45s max duration (incl. graceful stop):
+              * rate_1000: 1000.00 iterations/s for 15s (maxVUs: 800-3000, exec: reserve, gracefulStop: 30s)
+
+
+running (01.0s), 0810/0852 VUs, 69 complete and 0 interrupted iterations
+rate_1000   [   6% ] 0810/0852 VUs  01.0s/15s  1000.00 iters/s
+
+running (02.0s), 0961/0962 VUs, 737 complete and 0 interrupted iterations
+rate_1000   [  13% ] 0961/0962 VUs  02.0s/15s  1000.00 iters/s
+
+running (03.0s), 0991/1000 VUs, 1635 complete and 0 interrupted iterations
+rate_1000   [  20% ] 0991/1000 VUs  03.0s/15s  1000.00 iters/s
+
+running (04.0s), 0868/1000 VUs, 2759 complete and 0 interrupted iterations
+rate_1000   [  26% ] 0868/1000 VUs  04.0s/15s  1000.00 iters/s
+
+running (05.0s), 0499/1000 VUs, 4128 complete and 0 interrupted iterations
+rate_1000   [  33% ] 0499/1000 VUs  05.0s/15s  1000.00 iters/s
+
+running (06.0s), 0045/1000 VUs, 5582 complete and 0 interrupted iterations
+rate_1000   [  40% ] 0045/1000 VUs  06.0s/15s  1000.00 iters/s
+
+running (07.0s), 0018/1000 VUs, 6608 complete and 0 interrupted iterations
+rate_1000   [  46% ] 0018/1000 VUs  07.0s/15s  1000.00 iters/s
+
+running (08.0s), 0013/1000 VUs, 7613 complete and 0 interrupted iterations
+rate_1000   [  53% ] 0013/1000 VUs  08.0s/15s  1000.00 iters/s
+
+running (09.0s), 0031/1000 VUs, 8596 complete and 0 interrupted iterations
+rate_1000   [  60% ] 0031/1000 VUs  09.0s/15s  1000.00 iters/s
+
+running (10.0s), 0016/1000 VUs, 9611 complete and 0 interrupted iterations
+rate_1000   [  66% ] 0016/1000 VUs  10.0s/15s  1000.00 iters/s
+
+running (11.0s), 0014/1000 VUs, 10613 complete and 0 interrupted iterations
+rate_1000   [  73% ] 0014/1000 VUs  11.0s/15s  1000.00 iters/s
+
+running (12.0s), 0007/1000 VUs, 11620 complete and 0 interrupted iterations
+rate_1000   [  80% ] 0007/1000 VUs  12.0s/15s  1000.00 iters/s
+
+running (13.0s), 0008/1000 VUs, 12619 complete and 0 interrupted iterations
+rate_1000   [  86% ] 0008/1000 VUs  13.0s/15s  1000.00 iters/s
+
+running (14.0s), 0008/1000 VUs, 13620 complete and 0 interrupted iterations
+rate_1000   [  93% ] 0008/1000 VUs  14.0s/15s  1000.00 iters/s
+
+running (15.0s), 0009/1000 VUs, 14618 complete and 0 interrupted iterations
+rate_1000   [ 100% ] 0009/1000 VUs  15.0s/15s  1000.00 iters/s
+
+running (15.0s), 0000/1000 VUs, 14660 complete and 0 interrupted iterations
+rate_1000 ✓ [ 100% ] 0000/1000 VUs  15s  1000.00 iters/s
+
+
+  █ TOTAL RESULTS
+
+    CUSTOM
+    seckill_decisions..............: 14660  976.596104/s
+
+    HTTP
+    http_req_duration..............: avg=294.33ms min=4.75ms med=25.98ms p(90)=1.03s p(95)=1.11s p(99)=1.21s max=1.42s
+      { expected_response:true }...: avg=294.33ms min=4.75ms med=25.98ms p(90)=1.03s p(95)=1.11s p(99)=1.21s max=1.42s
+    http_req_failed................: 0.00%  0 out of 14660
+    http_reqs......................: 14660  976.596104/s
+
+    EXECUTION
+    dropped_iterations.............: 340    22.649569/s
+    iteration_duration.............: avg=294.59ms min=4.84ms med=26.24ms p(90)=1.03s p(95)=1.11s p(99)=1.21s max=1.42s
+    iterations.....................: 14660  976.596104/s
+    vus............................: 9      min=7          max=992
+    vus_max........................: 1000   min=852        max=1000
+
+    NETWORK
+    data_received..................: 5.6 MB 374 kB/s
+    data_sent......................: 17 MB  1.1 MB/s
+
+
+
+
+running (15.0s), 0000/1000 VUs, 14660 complete and 0 interrupted iterations
+rate_1000 ✓ [ 100% ] 0000/1000 VUs  15s  1000.00 iters/s

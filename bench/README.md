@@ -230,6 +230,71 @@ These absolute numbers describe that healthcheck-disabled local measurement boun
 directly interchangeable with the older default-Compose results above or with production
 capacity.
 
+## Throughput-knee protocol after removing the activity-row X lock
+
+The next run bracketed the knee with a deterministic stop rule. For each topology, run fresh
+single-rate points at 1000, 1200, 1600, then 2000 requests/s and stop at the first point with any
+failed request, any dropped iteration, or a p99 at least twice the immediately preceding clean
+point. Both topologies stopped at 1000 because k6 dropped iterations; no 1200, 1600, or 2000 point
+was run.
+
+| Topology | Prior clean anchor | First protocol stop | Done / dropped / failed | Achieved/s | p50 | p95 | p99 | Peak CPU: commerce / MySQL / k6 / Redis |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|
+| One activity | 800: 800.1/s, p99 26.0 ms, 0 dropped | 1000 | 14,735 / 266 / 0 | 982.3 | 24.6 ms | 1078.9 ms | 1206.7 ms | 387.54% / 206.70% / 70.99% / 8.72% |
+| 32 activities | 800: 800.1/s, p99 70.0 ms, 0 dropped | 1000 | 14,660 / 340 / 0 | 977.3 | 26.0 ms | 1113.1 ms | 1213.4 ms | 383.16% / 209.58% / 77.49% / 8.86% |
+
+`Achieved/s` is completed iterations divided by the nominal 15-second step. The k6 summaries use
+their actual elapsed windows and therefore report 969.13/s and 976.60/s; those rates answer a
+different timing question.
+
+The measured source was merge commit
+`f4ae145bfa8bc292f6c13efa973f2f899d13efa0`; the production path is unchanged from the Stage 1
+after build. The clean 800 anchors above are the fifth, warmed step of that Stage 1 ladder, whereas
+each 1000 point used a new setup and was the only rate in its process. The result is therefore a
+workload-bounded protocol bracket—800 was clean and 1000 was not—not a claim that an exact
+threshold was measured between them.
+
+At 1000, both topologies reached about 980 requests/s, then accumulated roughly 1.21 s p99 and
+dropped work. Commerce briefly used nearly all of its four-CPU allowance while MySQL used about
+two cores and the generator stayed below one core. That makes the commerce CPU allowance the
+leading saturation hypothesis, but the samples do not isolate a definitive code-level
+bottleneck.
+
+The raw point streams add an important limit to that inference: every dropped iteration occurred
+in the first four one-second buckets. From the seventh bucket onward, both runs completed about
+1000 iterations/s and their per-bucket p99 was approximately 17–82 ms. The stop rule was still
+correctly triggered, but the observed bad point was dominated by a fresh-process startup
+transient. This evidence does not establish that sustained capacity ends at 800 or 1000; locating
+that ceiling would require a separately declared warm-up protocol and new measurements.
+
+Each point used 16,000 fresh users, 32 fresh activities, a fresh Broker/Proxy process, a unique
+topic, a verified route, and the same 8-CPU / 14-GB Docker allocation and quiet-healthcheck
+boundary as Stage 1. The spread run's first host-idle gate (`85.36,70.54,81.29`) was rejected; its
+accepted retry was `86.66,83.68,85.91`. The contended gate was
+`85.83,84.72,84.93`. Both postchecks recorded zero pending or due-pending reservations, zero
+MySQL deadlocks, zero relevant commerce error matches, and zero RocketMQ restarts. These retained
+postcheck scalars close the admission-run bookkeeping; they are not a standalone business-
+correctness proof.
+
+The asynchronous consumer tail is deliberately outside this admission-path measurement. At the
+postcheck, 240 of 14,735 admitted contended reservations and 272 of 14,660 admitted spread
+reservations had become orders. Consumers were stopped before preparing the next fresh fixture,
+and the unique topic prevented that excluded tail from entering the other run. These are local
+single-machine results, not production-capacity claims.
+
+The retained evidence is:
+
+- one activity: [steps](results/ladder_seckill_s2_f4ae145_20260902T132826Z_contended_r1000_steps.txt),
+  [k6 summary](results/k6_seckill_s2_f4ae145_20260902T132826Z_contended_r1000_summary.json),
+  [k6 console](results/k6_seckill_s2_f4ae145_20260902T132826Z_contended_r1000_console.txt),
+  [CPU samples](results/k6_seckill_s2_f4ae145_20260902T132826Z_contended_r1000_cpu.txt), and
+  [setup and postcheck](results/seckill_seckill_s2_f4ae145_20260902T132826Z_contended_r1000_setup.txt)
+- 32 activities: [steps](results/ladder_seckill_s2_f4ae145_20260902T133609Z_spread_r1000_steps.txt),
+  [k6 summary](results/k6_seckill_s2_f4ae145_20260902T133609Z_spread_r1000_summary.json),
+  [k6 console](results/k6_seckill_s2_f4ae145_20260902T133609Z_spread_r1000_console.txt),
+  [CPU samples](results/k6_seckill_s2_f4ae145_20260902T133609Z_spread_r1000_cpu.txt), and
+  [setup and postcheck](results/seckill_seckill_s2_f4ae145_20260902T133609Z_spread_r1000_setup.txt)
+
 ## Reproducing
 
 Build the exact clean commit that will be measured; setup mounts these host JARs.
