@@ -1,111 +1,56 @@
 package io.citybuddy.auth.identity;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.when;
 
-import java.util.ArrayList;
-import java.util.List;
-import java.util.concurrent.CountDownLatch;
-import java.util.concurrent.Executors;
-import java.util.concurrent.Future;
 import org.junit.jupiter.api.Test;
 import org.springframework.security.crypto.password.PasswordEncoder;
 
 class ServiceCredentialVerifierTest {
-  private static final byte[] FINGERPRINT_KEY = new byte[32];
+  private static final String SECRET = "cbsvc_v1_" + "0123456789abcdef".repeat(4);
 
   @Test
-  void cachesOnlySuccessfulProofForTheCurrentPersistedHash() {
+  void verifiesAClientBoundGeneratedCredentialWithoutPasswordHashing() {
     PasswordEncoder passwordEncoder = mock(PasswordEncoder.class);
-    when(passwordEncoder.matches("correct", "hash-v1")).thenReturn(true);
-    when(passwordEncoder.matches("wrong", "hash-v1")).thenReturn(false);
-    when(passwordEncoder.matches("correct", "hash-v2")).thenReturn(true);
-    ServiceCredentialVerifier verifier =
-        new ServiceCredentialVerifier(passwordEncoder, FINGERPRINT_KEY);
+    ServiceCredentialVerifier verifier = new ServiceCredentialVerifier(passwordEncoder);
+    String encoded = ServiceCredentialVerifier.encodedDigest("agent-service", SECRET);
 
-    assertThat(verifier.matches("agent-service", "correct", "hash-v1")).isTrue();
-    assertThat(verifier.matches("agent-service", "correct", "hash-v1")).isTrue();
-    assertThat(verifier.matches("agent-service", "wrong", "hash-v1")).isFalse();
-    assertThat(verifier.matches("agent-service", "correct", "hash-v2")).isTrue();
-
-    verify(passwordEncoder).matches("correct", "hash-v1");
-    verify(passwordEncoder).matches("wrong", "hash-v1");
-    verify(passwordEncoder).matches("correct", "hash-v2");
+    assertThat(encoded)
+        .isEqualTo("sha256$v1$9b4ba6b7ddad9e69a3b5604cdee2d3929e8c0751b976e5b072d3f907f8c0bc9a");
+    assertThat(verifier.matches("agent-service", SECRET, encoded)).isTrue();
+    assertThat(verifier.matches("commerce-service", SECRET, encoded)).isFalse();
+    assertThat(verifier.matches("agent-service", "cbsvc_v1_" + "f".repeat(64), encoded)).isFalse();
+    verifyNoInteractions(passwordEncoder);
   }
 
   @Test
-  void scopesProofsToTheClientIdentity() {
+  void rejectsMalformedGeneratedCredentialsAndUnknownDigestVersions() {
     PasswordEncoder passwordEncoder = mock(PasswordEncoder.class);
-    when(passwordEncoder.matches("correct", "shared-hash")).thenReturn(true);
-    ServiceCredentialVerifier verifier =
-        new ServiceCredentialVerifier(passwordEncoder, FINGERPRINT_KEY);
+    ServiceCredentialVerifier verifier = new ServiceCredentialVerifier(passwordEncoder);
 
-    assertThat(verifier.matches("agent-service", "correct", "shared-hash")).isTrue();
-    assertThat(verifier.matches("evaluation-client", "correct", "shared-hash")).isTrue();
-
-    verify(passwordEncoder, times(2)).matches("correct", "shared-hash");
+    assertThat(verifier.matches("agent-service", "short", "sha256$v1$" + "0".repeat(64))).isFalse();
+    assertThat(verifier.matches("agent-service", SECRET, "sha256$v2$" + "0".repeat(64))).isFalse();
+    assertThat(verifier.matches("agent-service", SECRET, "sha256$v1$" + "z".repeat(64))).isFalse();
+    assertThatThrownBy(() -> ServiceCredentialVerifier.encodedDigest("agent-service", "short"))
+        .isInstanceOf(IllegalArgumentException.class);
+    verifyNoInteractions(passwordEncoder);
   }
 
   @Test
-  void serializesAColdBurstToOneBcryptVerification() throws Exception {
+  void retainsBcryptForLegacyServiceCredentialsWithoutCaching() {
     PasswordEncoder passwordEncoder = mock(PasswordEncoder.class);
-    when(passwordEncoder.matches("correct", "hash-v1")).thenReturn(true);
-    ServiceCredentialVerifier verifier =
-        new ServiceCredentialVerifier(passwordEncoder, FINGERPRINT_KEY);
-    CountDownLatch start = new CountDownLatch(1);
+    String legacyHash = "$2a$12$" + "x".repeat(53);
+    when(passwordEncoder.matches("legacy-secret", legacyHash)).thenReturn(true);
+    ServiceCredentialVerifier verifier = new ServiceCredentialVerifier(passwordEncoder);
 
-    try (var executor = Executors.newFixedThreadPool(16)) {
-      List<Future<Boolean>> results = new ArrayList<>();
-      for (int index = 0; index < 32; index++) {
-        results.add(
-            executor.submit(
-                () -> {
-                  start.await();
-                  return verifier.matches("agent-service", "correct", "hash-v1");
-                }));
-      }
-      start.countDown();
+    assertThat(verifier.matches("agent-service", "legacy-secret", legacyHash)).isTrue();
+    assertThat(verifier.matches("agent-service", "legacy-secret", legacyHash)).isTrue();
 
-      for (Future<Boolean> result : results) {
-        assertThat(result.get()).isTrue();
-      }
-    }
-
-    verify(passwordEncoder).matches("correct", "hash-v1");
-  }
-
-  @Test
-  void neverSharesAValidCandidatesResultWithAnInvalidCandidate() throws Exception {
-    PasswordEncoder passwordEncoder = mock(PasswordEncoder.class);
-    when(passwordEncoder.matches("correct", "hash-v1")).thenReturn(true);
-    when(passwordEncoder.matches("wrong", "hash-v1")).thenReturn(false);
-    ServiceCredentialVerifier verifier =
-        new ServiceCredentialVerifier(passwordEncoder, FINGERPRINT_KEY);
-    CountDownLatch start = new CountDownLatch(1);
-
-    try (var executor = Executors.newFixedThreadPool(2)) {
-      Future<Boolean> correct =
-          executor.submit(
-              () -> {
-                start.await();
-                return verifier.matches("agent-service", "correct", "hash-v1");
-              });
-      Future<Boolean> wrong =
-          executor.submit(
-              () -> {
-                start.await();
-                return verifier.matches("agent-service", "wrong", "hash-v1");
-              });
-      start.countDown();
-
-      assertThat(correct.get()).isTrue();
-      assertThat(wrong.get()).isFalse();
-    }
-
-    verify(passwordEncoder).matches("correct", "hash-v1");
-    verify(passwordEncoder).matches("wrong", "hash-v1");
+    verify(passwordEncoder, times(2)).matches("legacy-secret", legacyHash);
   }
 }

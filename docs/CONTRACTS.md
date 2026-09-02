@@ -227,10 +227,12 @@ direct-user downgrade.
    authenticated service credential, the verified support-session binding, and the exact
    server-side ToolSpec scope to token exchange. `auth-service` trusts the authenticated service's
    session-binding assertion and writes that support session into the OBO. Service authentication
-   reads current state, scope, and the exact persisted BCrypt hash on every exchange. A process-local
-   verifier may reuse only a successful HMAC fingerprint bound to client id and that exact hash;
-   cache misses and invalid candidates still execute BCrypt, while a changed hash or non-ACTIVE row
-   cannot use the proof. Human login always executes BCrypt directly.
+   reads current state, scope, and the exact persisted verifier on every exchange. New machine
+   credentials are `cbsvc_v1_` tokens containing 256 CSPRNG bits and store a versioned, client-bound
+   SHA-256 digest; `scripts/service_credential.py` is the provisioning primitive. The digest is safe
+   only for those generated high-entropy tokens, not for human-chosen passwords. Legacy service
+   BCrypt rows remain accepted and execute BCrypt on every request; no successful verifier is
+   cached. Human login always executes BCrypt cost 12 directly.
 8. The OBO contains at least an explicit OBO purpose/type, `sub`, `user_id`, support `session`,
    `aud=commerce-service`, exact `scope`, `act.azp=agent-service`, `jti`, `exp`, and applicable
    not-before/issued-at metadata. Scope is fixed by ToolSpec; neither model nor request payload can

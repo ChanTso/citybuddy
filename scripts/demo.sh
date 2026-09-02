@@ -93,7 +93,10 @@ password_file="$run_dir/demo_password"
 [ -f "$password_file" ] || printf 'demo-%s' "$(openssl rand -hex 8)" > "$password_file"
 demo_password="$(cat "$password_file")"
 secret_file="$run_dir/agent_service_secret"
-[ -f "$secret_file" ] || printf 'demo-agent-%s' "$(openssl rand -hex 12)" > "$secret_file"
+if [ ! -f "$secret_file" ] \
+  || ! uv run python scripts/service_credential.py validate < "$secret_file"; then
+  uv run python scripts/service_credential.py generate > "$secret_file"
+fi
 agent_secret="$(cat "$secret_file")"
 payment_file="$run_dir/mock_payment"
 [ -f "$payment_file" ] || printf 'demo-callback-key\ndemo-%s\n' "$(openssl rand -hex 16)" > "$payment_file"
@@ -113,7 +116,8 @@ admin updateSubGroup --namesrvAddr rocketmq-namesrv:9876 --clusterName DefaultCl
 
 echo "== seeding the demo identity and catalog fixture =="
 demo_hash="$(uv run python -c "import bcrypt,sys; print(bcrypt.hashpw(sys.argv[1].encode(), bcrypt.gensalt(rounds=10)).decode())" "$demo_password")"
-service_hash="$(uv run python scripts/hash_test_credential.py "$agent_secret")"
+service_hash="$(printf '%s' "$agent_secret" \
+  | uv run python scripts/service_credential.py hash agent-service)"
 
 # The runtime accounts hold no DELETE grant by design, so fixture teardown uses bootstrap.
 sql root "$root_pw" commerce_db "
