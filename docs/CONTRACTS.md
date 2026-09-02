@@ -232,7 +232,9 @@ direct-user downgrade.
    SHA-256 digest; `scripts/service_credential.py` is the provisioning primitive. The digest is safe
    only for those generated high-entropy tokens, not for human-chosen passwords. Legacy service
    BCrypt rows remain accepted and execute BCrypt on every request; no successful verifier is
-   cached. Human login always executes BCrypt cost 12 directly.
+   cached. Deploying a new binary does not rewrite those rows: obtaining the digest-path behavior
+   requires an explicit `generate` then client-bound `hash` credential rotation. Human login always
+   executes BCrypt cost 12 directly.
 8. The OBO contains at least an explicit OBO purpose/type, `sub`, `user_id`, support `session`,
    `aud=commerce-service`, exact `scope`, `act.azp=agent-service`, `jti`, `exp`, and applicable
    not-before/issued-at metadata. Scope is fixed by ToolSpec; neither model nor request payload can
