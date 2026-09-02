@@ -1,42 +1,78 @@
-"""Per-step steady-state statistics from a k6 JSON point stream."""
-import json, sys, collections, statistics
+"""Per-step counts and latency percentiles from a k6 JSON point stream."""
 
-path, label = sys.argv[1], sys.argv[2]
-dur = collections.defaultdict(list)
+import collections
+import json
+import re
+import sys
+
+path, label = sys.argv[1:3]
+rates = sys.argv[sys.argv.index("--rates") + 1].split(",")
+step_seconds = int(sys.argv[sys.argv.index("--step-seconds") + 1])
+durations = collections.defaultdict(list)
 decisions = collections.defaultdict(collections.Counter)
-first_t, last_t = {}, {}
+failures = collections.defaultdict(float)
+drops = collections.defaultdict(float)
 
-with open(path) as fh:
-    for line in fh:
-        try: rec = json.loads(line)
-        except Exception: continue
-        if rec.get("type") != "Point": continue
-        m, d = rec.get("metric"), rec["data"]
-        rate = d.get("tags", {}).get("rate")
-        if not rate: continue
-        if m == "http_req_duration":
-            dur[rate].append(d["value"])
-            t = d["time"]
-            first_t.setdefault(rate, t); last_t[rate] = t
-        elif m == "seckill_decisions":
-            decisions[rate][d.get("tags", {}).get("decision", "?")] += 1
 
-def pct(xs, p):
-    xs = sorted(xs); k = (len(xs) - 1) * p / 100
-    lo, hi = int(k), min(int(k) + 1, len(xs) - 1)
-    return xs[lo] + (xs[hi] - xs[lo]) * (k - lo)
+def point_rate(tags):
+    rate = tags.get("rate")
+    if rate and str(rate).isdigit():
+        return str(rate)
+    match = re.fullmatch(r"rate_([0-9]+)", str(tags.get("scenario", "")))
+    return match.group(1) if match else None
 
-print(f"\n=== {label} ===")
-hdr = f"{'target':>7} {'done':>7} {'achieved/s':>11} {'p50 ms':>9} {'p95 ms':>9} {'p99 ms':>9} {'max ms':>9}  decisions"
-print(hdr); print("-" * len(hdr))
-rows = []
-for rate in sorted(dur, key=lambda r: int(r)):
-    xs = dur[rate]
-    from datetime import datetime
-    def parse(t): return datetime.fromisoformat(t.replace("Z", "+00:00"))
-    span = (parse(last_t[rate]) - parse(first_t[rate])).total_seconds() or 1
-    achieved = len(xs) / span
-    mix = ", ".join(f"{k}={v}" for k, v in decisions[rate].most_common(3))
-    print(f"{rate:>7} {len(xs):>7} {achieved:>11.1f} {pct(xs,50):>9.1f} {pct(xs,95):>9.1f} "
-          f"{pct(xs,99):>9.1f} {max(xs):>9.1f}  {mix}")
-    rows.append((rate, achieved, pct(xs, 99)))
+
+with open(path) as stream:
+    for line in stream:
+        try:
+            record = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if record.get("type") != "Point" or not isinstance(record.get("data"), dict):
+            continue
+        data = record["data"]
+        tags = data.get("tags", {})
+        rate = point_rate(tags)
+        if rate is None or not isinstance(data.get("value"), int | float):
+            continue
+        metric, value = record.get("metric"), float(data["value"])
+        if metric == "http_req_duration":
+            durations[rate].append(value)
+        elif metric == "http_req_failed":
+            failures[rate] += value
+        elif metric == "dropped_iterations":
+            drops[rate] += value
+        elif metric == "seckill_decisions":
+            decisions[rate][str(tags.get("decision", "?"))] += value
+
+
+def percentile(values, percent):
+    values = sorted(values)
+    position = (len(values) - 1) * percent / 100
+    lower, upper = int(position), min(int(position) + 1, len(values) - 1)
+    return values[lower] + (values[upper] - values[lower]) * (position - lower)
+
+
+print(f"=== {label} ===")
+header = (
+    f"{'target':>7} {'nominal':>8} {'done':>8} {'dropped':>8} {'failed':>7} "
+    f"{'fail %':>7} {'achieved/s':>11} {'p50 ms':>9} {'p95 ms':>9} "
+    f"{'p99 ms':>9} {'max ms':>9}  decisions"
+)
+print(header)
+print("-" * len(header))
+for rate in rates:
+    values = durations[rate]
+    done = len(values)
+    failed, dropped = int(failures[rate]), int(drops[rate])
+    latencies = [percentile(values, p) for p in (50, 95, 99)] + [max(values)] if values else []
+    latency_text = (
+        " ".join(f"{value:>9.1f}" for value in latencies)
+        or "        -         -         -         -"
+    )
+    mix = ", ".join(f"{key}={int(value)}" for key, value in decisions[rate].most_common(3))
+    print(
+        f"{rate:>7} {int(rate) * step_seconds:>8} {done:>8} {dropped:>8} {failed:>7} "
+        f"{failed * 100 / done if done else 0:>7.2f} {done / step_seconds:>11.1f} "
+        f"{latency_text}  {mix}"
+    )

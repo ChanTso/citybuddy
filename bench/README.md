@@ -39,6 +39,11 @@ the shape of the curve and where the ceiling comes from, not the absolute number
    measurement includes a transport cost that can exceed the work being measured. Redis is
    measured from both the host and inside the compose network, and the difference is reported
    as a result in its own right.
+6. **Formal runs are commit-bound.** Setup requires a clean source tree, records the full HEAD and
+   auth/commerce JAR digests in `bench/.run/bench.env`, and clears only synthetic activity, user and
+   rebuild Redis keys. Runners check that record before load and confirm HEAD afterward.
+7. **Results never overwrite.** Every run needs a unique safe `LABEL`. k6 is digest-pinned and its
+   exit code is checked; every result records the measured commit, UTC window and configuration.
 
 ## Results
 
@@ -155,27 +160,76 @@ exhausted, ledger and stock conserved (`results/correctness_sql.txt`).
 
 ## Reproducing
 
+Build the exact clean commit that will be measured; setup mounts these host JARs.
+
 ```bash
 make init-local && make up
+./mvnw --batch-mode --no-transfer-progress \
+  -pl auth-service,commerce-service -am clean package
 ```
+
+Before the formal commands below, stop other builds and workloads, ask the machine's user to pause
+their work, and wait for confirmation. After confirmation, let the host settle and record three
+idle CPU/process/container samples plus `pmset -g therm`. Confirm Docker Desktop still exposes 8
+CPUs and about 14 GB; do not change its allocation.
+
+Use a new `TOPIC_SUFFIX` for every setup so prior asynchronous work cannot enter the run.
+`BENCH_USERS=25000` covers the five default rate steps.
 
 ```bash
-BENCH_USERS=25000 ./bench/setup_bench_env.sh
+SHORT="$(git rev-parse --short=7 HEAD)"
+STAMP="$(date -u +%Y%m%dT%H%M%SZ)"
+
+TOPIC_SUFFIX="s1-contended-${SHORT}-${STAMP}" \
+  BENCH_USERS=25000 BENCH_ACTIVITIES=32 \
+  ./bench/setup_bench_env.sh
+
+CORRECTNESS_LABEL="seckill_s1_${SHORT}_${STAMP}_correctness"
+./bench/run_correctness.sh "$CORRECTNESS_LABEL"
+
+CONTENDED_LABEL="seckill_s1_${SHORT}_${STAMP}_contended"
+RATES=50,100,200,400,800 STEP_SECONDS=15 \
+  ./bench/run_ladder.sh "$CONTENDED_LABEL" 1
 ```
+
+The 32-activity comparison needs another setup and topic:
 
 ```bash
-./bench/run_correctness.sh
+SHORT="$(git rev-parse --short=7 HEAD)"
+STAMP="$(date -u +%Y%m%dT%H%M%SZ)"
+TOPIC_SUFFIX="s1-spread-${SHORT}-${STAMP}" \
+  BENCH_USERS=25000 BENCH_ACTIVITIES=32 \
+  ./bench/setup_bench_env.sh
+
+SPREAD_LABEL="seckill_s1_${SHORT}_${STAMP}_spread"
+RATES=50,100,200,400,800 STEP_SECONDS=15 \
+  ./bench/run_ladder.sh "$SPREAD_LABEL" 32
 ```
+
+The runner writes `k6_${LABEL}_{summary,console,cpu}.…`, `ladder_${LABEL}_steps.txt`, and
+`seckill_${LABEL}_setup.txt`; points remain ignored but available to the automatic calculator.
+Correctness writes `correctness_${LABEL}_{http,sql}.txt`. Existing paths are never replaced.
+
+To locate the next ceiling, run one rate at a time from a fresh setup. Inspect the automatically
+generated step row and summary after each command; stop that topology at the first non-zero HTTP
+failure count, non-zero dropped count, or clear p99 knee. Only proceed from 1000 to 1200, 1600 and
+2000 when the previous rate is clean.
 
 ```bash
-./bench/run_ladder.sh contended 1
+rate=1000
+activities=1
+topology=contended
+users=$((rate * 15 + 1000))
+SHORT="$(git rev-parse --short=7 HEAD)"
+STAMP="$(date -u +%Y%m%dT%H%M%SZ)"
+
+TOPIC_SUFFIX="s2-${topology}-${rate}-${SHORT}-${STAMP}" \
+  BENCH_USERS="$users" BENCH_ACTIVITIES=32 \
+  ./bench/setup_bench_env.sh
+
+LABEL="seckill_s2_${SHORT}_${STAMP}_${topology}_r${rate}"
+RATES="$rate" STEP_SECONDS=15 ./bench/run_ladder.sh "$LABEL" "$activities"
 ```
 
-```bash
-./bench/run_ladder.sh spread 32
-```
-
-Each run reuses one RocketMQ topic; set `TOPIC_SUFFIX` to a fresh value to start from an empty
-queue. Order creation is asynchronous, so a previous run's backlog otherwise sits in front of the
-next run's messages — and deleting fixture rows while their transaction messages are still queued
-is what produces `Committed reservation is missing` in the order worker.
+Repeat the same block independently with `activities=32` and `topology=spread`. Advance `rate` to
+1200, 1600 and 2000 only while the prior point is clean.
