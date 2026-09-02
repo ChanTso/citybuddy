@@ -348,10 +348,11 @@ not by treating the product cache-invalidation consumer as a knowledge-indexer f
 
 - RocketMQ 5 runs with Broker and Proxy available to the 5.x clients. The Proxy endpoint remains
   explicit.
-- Seckill ordering uses a transaction message: send the half message, run Redis Lua admission,
-  then commit, roll back, or temporarily return `UNKNOWN`. A deterministic result writes a durable
-  transaction decision marker; admission also writes the reservation projection required by the
-  order path.
+- Current seckill ordering first inserts or replays a MySQL `PENDING` reservation under the
+  owner/activity/idempotency unique key. It then sends the transaction half message, runs Redis Lua
+  admission, persists the Redis decision back to MySQL, and commits, rolls back, or temporarily
+  returns `UNKNOWN`. A deterministic Lua result writes the transaction decision marker and the
+  reservation projection required by the order path.
 - `UNKNOWN` is an intermediate checker result only when the durable decision marker is missing or
   temporarily indeterminate. It is not a permanent application terminal state. The application
   persists one stable transaction-resolution deadline derived from configured transaction
@@ -429,17 +430,21 @@ sequenceDiagram
     participant D as MySQL commerce_db
 
     U->>C: Request seckill reservation
+    C->>D: Insert or replay PENDING reservation intent
+    D-->>C: Stable reservation id and transaction deadline
     C->>M: Send transaction half message
     M-->>C: Half message accepted
     C->>R: Run Lua quota, one-user, and reservation admission
 
     alt Lua deterministically rejects and writes a rejection marker
         R-->>C: Rejected
+        C->>D: Persist REJECTED decision
         C->>M: Roll back half message
         Note over M,W: Rolled-back message is not delivered
         C-->>U: Rejected reservation status
     else Lua admits and writes reservation plus admission marker
         R-->>C: Admitted with reservation id
+        C->>D: Persist ADMITTED decision
         C->>M: Commit half message
         M-->>W: Deliver committed transaction message
         W->>D: Conditional order insert and reservation transition
@@ -457,7 +462,8 @@ sequenceDiagram
     else Lua result has no durable decision marker
         R-->>C: Indeterminate
         C->>M: Report UNKNOWN
-        C-->>U: Indeterminate reservation status
+        C->>D: Read the existing owned PENDING reservation
+        C-->>U: PENDING reservation status
     end
 
     opt Second-phase acknowledgement is missing or result is UNKNOWN
@@ -473,6 +479,303 @@ sequenceDiagram
         end
     end
 ```
+
+### 6.6 Redis-first admission checkpoint
+
+**Retained design.** Nothing in this section is implemented. Sections 6.1 through 6.5 continue to
+describe the current MySQL-first request path. This proposal deliberately changes the rejection
+replay contract and the transaction-checker authority; those choices require explicit acceptance
+before implementation.
+
+#### Decision summary
+
+| Question | Decision | Benefit | Accepted cost or limit |
+|---|---|---|---|
+| Where is request idempotency anchored? | One Redis intent anchor, written by the admission Lua script before any quota mutation | A replay or conflicting body is resolved before MySQL; rejected submissions perform no database or broker work | A Redis-only rejection has a 15-minute absolute replay window, not permanent history; explicit recovery accepts one indexed durable-truth read |
+| What commits an admitted transaction message? | Lua admission first, half message second, direct MySQL `ADMITTED` commit third, then half-message commit; checker reads exact MySQL truth | Only admitted requests use MySQL and RocketMQ, and checker follows the durable business commit | A small admitted-only handoff record and resolver are mandatory for the Lua-to-MySQL crash window |
+| How is a rejection recovered after disconnect? | Redis serves reservation-id polling and an owner-scoped lookup by idempotency key during the replay window | A lost response is recoverable without inserting a rejection row | After expiry an undurable result is honestly `unknown or expired`; it cannot be reconstructed |
+| What happens when Redis is unavailable? | Fail closed with `503 UNAVAILABLE`; do not fall back to MySQL, send a half message, or queue the incoming request | A Redis incident cannot redirect the rejection flood to the database or create a second quota authority | Availability is traded for correctness; projection replacement and unrecoverable Redis loss require a fail-closed fence |
+
+The recommendation is to proceed only with this narrow design. If the product requires permanent
+rejected-request replay, automatic service continuation after unrecoverable Redis loss, or no
+admitted-only raw identity in Redis, the Redis-first change should not be implemented: satisfying
+any of those constraints would put rejected writes back in a durable store or require a
+substantially larger cross-store protocol.
+
+#### Proposed Redis and MySQL state
+
+The names below describe logical state, not a frozen key schema. Long-lived Redis keys use hashes
+rather than raw subjects or idempotency keys.
+
+| State | Contents and authority | Lifetime |
+|---|---|---|
+| Activity projection | Existing versioned activity window, state, and remaining quota derived from MySQL | Existing activity projection contract |
+| Intent anchor | SHA-256 key over a length-prefixed `(userSubject, activityId, idempotencyKey)` tuple; value includes schema version, winning reservation id, owner and key hashes, canonical intent hash, quantity, expected activity version, decision, creation time, and rejection replay expiry | A rejection expires absolutely 15 minutes after its first decision; an admitted-but-undurable anchor cannot expire before handoff completes; replay never extends either lifetime |
+| Reservation result | Owner-hashed result keyed by the winning reservation id, allowing the existing polling path to return a Redis-only rejection or pending handoff | Same lifetime as its intent anchor |
+| Admitted-user marker | Activity, owner hash, winning reservation id, intent-anchor hash, and canonical intent hash | At least through `activity.endsAt` plus the configured clock-skew margin; it must not retain the current fixed 15-minute TTL |
+| Pending handoff | Admitted reservation id plus the minimum fields needed to send the transaction message and insert the durable row, with a per-activity pending index | Written atomically with quota decrement and retained until durable handoff; it must not expire while pending |
+| Activity write fence | Token and blocked reason checked by Lua before admission | Set before any operation replaces an existing activity projection; cleared only by an exact successful publish or an explicit safe abort |
+| Durable reservation | MySQL row inserted directly as `ADMITTED`, later conditionally becoming `ORDERED` or `CANCELLED` | Durable business truth under the existing retention policy |
+
+The handoff record contains `userSubject` and the opaque idempotency key because a process that
+crashes immediately after Lua must still be able to create the exact MySQL row and message. Those
+fields already belong to the Commerce trust boundary and are deleted immediately after handoff;
+they are never used in a Redis key or log. This is a real privacy and outage-retention cost, not a
+general-purpose request queue. During a downstream outage they remain until exact handoff, so their
+count, age, access, and cleanup require operational monitoring. Rejected attempts never create a
+handoff record.
+
+For a new request the service validates the body, computes the two hashes, and supplies a candidate
+random UUID to Lua. The first concurrent caller for an intent anchor wins that UUID. Lua must check
+the anchor before changing quota or the one-user marker:
+
+- the same key and same canonical intent return the stored decision and reservation id;
+- the same key with a different canonical intent returns an idempotency conflict without mutation;
+- if the short anchor is gone but the admitted-user marker carries the same intent-anchor and
+  canonical intent hashes, Lua returns that durable reservation id without decrementing quota; a
+  different value remains a duplicate-user rejection; this check precedes activity state and
+  window rejection;
+- a missing anchor is decided once, and the anchor plus all resulting state is written in the same
+  Lua invocation;
+- the existing activity projection remains the admission input, so the rejection path performs no
+  MySQL read as well as no MySQL write.
+
+```mermaid
+sequenceDiagram
+    actor U as User or Web
+    participant C as commerce-service
+    participant R as Commerce Redis
+    participant M as RocketMQ Broker and Proxy
+    participant D as MySQL commerce_db
+    participant W as commerce-service consumer
+
+    U->>C: POST with owner, activity, intent, and idempotency key
+    C->>R: Atomic Lua replay check and admission
+    alt Existing or new deterministic rejection
+        R-->>C: REJECTED, reservation id, absolute expiry
+        Note over C,D: No MySQL read or write and no half message
+        C-->>U: 409 with the replayable result
+    else ADMITTED and pending durable handoff
+        R-->>C: ADMITTED, reservation id, handoff registered
+        C->>M: Send transaction half message
+        M-->>C: Half message accepted
+        C->>D: Insert or verify exact ADMITTED reservation
+        D-->>C: Durable commit
+        C->>M: Commit half message
+        C->>R: Remove pending handoff after acknowledged commit
+        C-->>U: 201, or 200 for replay, only after MySQL is durable
+        M-->>W: Deliver committed transaction message
+        W->>D: Idempotent order, ledger, and reservation transition
+    else Redis execution is unavailable or indeterminate
+        C-->>U: 503; retain the same key and intent
+    end
+
+    opt Broker transaction checkback
+        M->>C: Check reservation transaction
+        C->>D: Read reservation and compare every message identity field
+        alt Exact ADMITTED, ORDERED, or CANCELLED truth
+            C-->>M: COMMIT
+        else Missing, conflicting, or database unavailable
+            C-->>M: UNKNOWN
+        end
+    end
+```
+
+#### Idempotency retention and expiry
+
+Fifteen minutes preserves the current Redis retention envelope and bounds rejection memory by
+recent request rate. At 1,000 rejected attempts per second it retains about 900,000 attempts; one
+day would retain 86.4 million, 96 times as many, before accounting for the reservation lookup key.
+Retrying a hot key never refreshes its expiry, so abuse cannot make a rejected anchor immortal.
+An admitted-but-undurable anchor is the exception: it stays with its pending handoff until MySQL is
+durable, because expiry would otherwise permit an unrecoverable split. Its population is bounded by
+admitted quota rather than rejected request rate. Once MySQL is durable, recovery no longer depends
+on that Redis anchor.
+
+Expiry is an intentional contract boundary:
+
+- while a rejection anchor exists, the same key is a replay and a different intent is a conflict;
+- after that anchor expires, a Redis-only rejection is no longer distinguishable from an unseen
+  attempt and the same POST is a new attempt; a previous pre-open rejection may therefore be
+  reconsidered once the activity opens;
+- an admitted/ordered/cancelled result remains recoverable from MySQL, but recovery after the Redis
+  window uses the explicit read path rather than silently reissuing the POST;
+- the admitted-user marker survives through the activity window, so expiry of the short replay
+  anchor cannot let one user decrement the same activity quota twice.
+
+Permanent replay of rejected results and a rule that rejected attempts never enter durable storage
+cannot both be provided. The design chooses bounded replay. If that is unacceptable, retain the
+current MySQL rejection row and stop the Redis-first work.
+
+#### Half-message commit, checker, and admitted recovery
+
+The durable commit point is the MySQL transaction that inserts or exactly replays the `ADMITTED`
+reservation. A Redis `ADMITTED` decision reserves quota but is not sufficient for either an HTTP
+success response or a broker `COMMIT`. The request path sends a half message only after Lua admits,
+commits the MySQL reservation, then commits the half message. Rejected attempts never contact the
+broker.
+
+The transaction checker is a read-only MySQL verifier. It parses the message, exactly matches its
+reservation/event id, activity, user subject, quantity, and activity projection version, and also
+requires the MySQL decision code and state to be durable `ADMITTED`, `ORDERED`, or `CANCELLED`
+before returning `COMMIT`.
+Missing rows, legacy `PENDING`, mismatched identity, malformed input, or database unavailability
+return `UNKNOWN`. The checker does not use a Redis mirror and does not create or repair business
+state. A Redis checker marker would add a MySQL-commit-to-marker crash window and a second recovery
+protocol without adding authority.
+
+Lua atomically writes an admitted-only handoff record and per-activity pending index with its quota
+mutation. A small state-specific worker retries that handoff with the same reservation/event id.
+It may send a fresh half message and either insert the row or verify an exact existing row before
+commit. Existing order, reservation, and ledger uniqueness makes duplicate committed deliveries
+safe. This worker is not an inbox, a general saga engine, or a queue for rejected or dependency-
+failed incoming requests.
+
+| Crash or fault boundary | Required convergence |
+|---|---|
+| Before Lua executes | No state exists; return `503` if unavailable and retry the same key |
+| Lua rejection commits but the response is lost | Intent anchor returns the identical rejection within its absolute window |
+| Lua admits before any half message | Pending handoff sends the first half message; no success was returned yet |
+| Half message is accepted before MySQL commit | Checker returns `UNKNOWN`; handoff retries with the same event id |
+| MySQL commits before half-message commit | Checker sees exact durable truth and returns `COMMIT`; a repeated handoff is harmless |
+| Half-message commit is acknowledged before handoff cleanup | Cleanup replay removes the stale pending item; duplicate delivery remains idempotent |
+| MySQL commit outcome is ambiguous | Do not restore quota; the worker first reads exact MySQL truth, then inserts or retries |
+| Durable identity conflicts | Keep admission closed for that item, surface an invariant alert, and do not guess or compensate quota |
+
+Automatic quota compensation is forbidden after an ambiguous database result: a commit may already
+exist, so adding quota back could oversell. The accepted failure bias is temporarily under-selling
+until exact durable truth is known.
+
+#### Rejected polling and reconnect
+
+The existing owner-scoped `GET /api/reservations/{reservationId}` reads the Redis reservation result
+first. A live rejection returns without a database query. An admitted marker causes a MySQL read for
+the latest durable order state; a Redis miss may fall back to MySQL for a durable admitted result.
+If neither store has owner-visible truth, the honest response is `404 unknown or expired`, because
+the service cannot distinguish a never-seen request from an expired Redis-only rejection.
+
+Add an owner-scoped recovery read such as
+`GET /api/seckill/activities/{activityId}/reservations/by-idempotency`, carrying
+`Idempotency-Key` in the header rather than the URL. Unlike the hot POST and reservation-id poll,
+this explicit recovery endpoint performs one indexed MySQL lookup first, so durable admitted truth
+always wins over a later Redis-only rejection for the same expired key. If MySQL has no durable
+match, it reads the Redis intent anchor and returns that result without making a new attempt. If
+Redis is unavailable and no durable MySQL result is positively established, return `503`, never
+`404`. This read-path cost is accepted to prevent Redis from hiding an `ORDERED` or `CANCELLED`
+business result; rejected submission itself still performs no database work.
+
+Redis-only rejection responses expose `idempotencyExpiresAt`; a pending durable handoff does not
+claim an expiry before it settles. Before the first POST, the web client stores the activity, key,
+canonical body, and creation time in `sessionStorage`, scoped to the authenticated session. A
+reload or lost response uses the read-only recovery endpoint, then continues reservation-id polling
+when appropriate. It never generates a replacement key or automatically re-POSTs after the server
+returns `unknown or expired`; starting a new attempt requires an explicit user action.
+
+#### Redis outage and projection-mutation boundary
+
+The Lua call itself is the availability test. Do not add a separate `PING`, automatic in-call retry,
+or fallback path. A connection failure, timeout, missing or malformed activity projection, version
+conflict, partial state, or active rebuild fence returns `503 UNAVAILABLE`. The service does not
+intentionally create a MySQL intent, half message, or fallback backlog before a determinate Lua
+admission. A lost response may mean Lua atomically created an admitted handoff; the service must not
+add quota back or invent a rejection. Once Redis returns, the same key and intent replay the anchor
+if it exists or make the first decision if it does not.
+
+| Failure class | Behavior | Explicitly not done |
+|---|---|---|
+| Transient Redis unavailability with data intact | Fail closed; same-key recovery after Redis returns | MySQL admission fallback, MQ queueing, local-memory queueing, or static business rejection |
+| Known Lua `ADMITTED`, later dependency failure | Keep the handoff pending; do not return success until MySQL is durable | Ambiguous quota compensation or a false completed-order claim |
+| Existing activity allocation change or projection rebuild | Acquire the persistent activity write fence before the MySQL transaction, block new Lua admissions, and abort while its pending handoff index is non-empty; hold the fence through exact Redis publish and clear it only after success | Replacing quota across the Lua-to-MySQL window or letting a lease expire after MySQL commit but before publish |
+| Unrecoverable Redis data loss | Close affected admission, quiesce request and handoff writers, settle legacy MySQL `PENDING` rows and broker windows, then rebuild durable activity/user/reservation state under a fence | Automatic reopen or fabrication of lost pending/rejected decisions |
+
+Redis serializes fence acquisition with Lua. Therefore either admission runs first and atomically
+registers a pending handoff, causing the projection operation to abort, or the fence runs first and
+Lua returns unavailable. Allocation change, activity-projection rebuild, and full reservation-state
+rebuild all replace remaining quota from MySQL and must share this rule. New-activity publication
+has no pre-existing admission state; cancellation's conditional Redis quota restoration mutates the
+live projection rather than replacing it and keeps its existing idempotent contract.
+
+The fence cannot be only the current expiring rebuild lease. If MySQL allocation commits and Redis
+publish fails, lease expiry would reopen admission against the stale quota/version. The blocked
+state remains until the exact committed MySQL projection is published under its token. A known
+MySQL rollback before publication may clear its own fence; a crash or ambiguous outcome fails
+closed for reconciliation.
+
+The full-loss procedure is offline because the Redis pending index is itself gone. Durable MySQL
+admissions can be rebuilt; Redis-only rejections and Lua admissions that never reached MySQL cannot.
+Restore AOF/backup if their replay window must be preserved. Otherwise reopening is an explicit new
+idempotency epoch, and affected clients receive `unknown or expired`; the system does not claim to
+have reconstructed their old result. The current Redis `AOF everysec`, persistent volume, and
+`noeviction` configuration reduce ordinary loss and turn memory pressure into a visible failure,
+but they do not make Redis an infinite or lossless history store.
+
+A Redis process restart, changed server run identity, unknown reconnect identity, AOF truncation, or
+cold Commerce start with an existing active activity is suspected state loss, not an automatically
+healthy transient reconnect. The current single-instance topology keeps admission locally closed,
+drains any surviving handoffs, and performs the fenced MySQL rebuild before reopening. Only a
+reconnect positively known to retain the same Redis process and state may take the transient path.
+This check is outside the request hot path; Lua remains the only per-request dependency call. A
+future multi-instance topology would require a shared startup/recovery gate and is not claimed here.
+
+MySQL fallback is rejected because it would require a second quota and one-user CAS protocol, route
+the fault-time request flood into the hot database, and later merge two admission authorities. MQ
+or local queue fallback is rejected because it converts a short outage into an expiring,
+deduplicated, back-pressured recovery backlog without a quota decision. Those costs exceed their
+availability benefit for this change.
+
+#### Cutover, observability, and implementation acceptance
+
+The existing MySQL unique key covers `(user, activity, idempotencyKey)` for every reservation state.
+That is incompatible with the chosen expiry rule: a legacy `REJECTED` row would block a legitimate
+new attempt after its Redis window, after Lua had already decremented quota. Replace the broad
+constraint with the repository's existing generated-column pattern so uniqueness applies to
+`PENDING`, `ADMITTED`, `ORDERED`, and `CANCELLED` durable intents while rejected rows yield `NULL`.
+Retain a non-unique lookup path for legacy recovery; do not backfill every historical rejection into
+Redis.
+
+This cannot be a rolling cutover. The ordered maintenance boundary is:
+
+1. close public seckill submission so no old node can create another MySQL-first `PENDING` intent;
+2. let legacy resolution and broker checkback settle, prove there are no `PENDING` rows, and wait
+   the complete configured legacy broker transaction window after the final old half message,
+   regardless of whether its MySQL row is already `ADMITTED` or `REJECTED`;
+3. stop the old producer/checker path, migrate the uniqueness rule, and deploy the Redis-first
+   request path, checker, handoff worker, and recovery read as one compatibility boundary;
+4. rebuild active activity and admitted-user projections under the new persistent write fence, then
+   reopen submission.
+
+Relaxing the constraint while an old submitter is live would let it insert a second intent beside a
+legacy rejection. Running a new submitter against the old constraint could decrement Redis and then
+strand its `ADMITTED` insert behind that same rejection. No old/new overlap is permitted.
+
+Minimum production signals are decision counts by code, replay and idempotency-conflict counts,
+Redis unavailable/indeterminate counts, pending-handoff count and oldest age, handoff retry outcome,
+checker `COMMIT`/`UNKNOWN`, and rebuild blocked by pending handoff. No request subject, raw
+idempotency key, or handoff payload is logged.
+
+Implementation is acceptable only when executable tests demonstrate all of the following:
+
+- new submissions rejected by Lua, or stopped before a determinate Lua admission by Redis
+  unavailability, perform zero MySQL and RocketMQ operations;
+- concurrent same-key/same-intent calls return one reservation and one decision, while a different
+  intent conflicts before quota mutation;
+- absolute anchor expiry never slides, admitted-user state covers the activity window, and the
+  documented post-expiry behavior is exact;
+- every crash-table boundary converges through real Redis, MySQL, and RocketMQ without oversell,
+  duplicate order/ledger movement, orphan durable admission, or false success;
+- rebuild cannot cross a pending handoff, and full-loss recovery never invents Redis-only truth;
+- allocation change and both projection rebuild paths cannot replace quota across a pending
+  handoff, and a publish failure cannot reopen stale activity state when a lease expires;
+- recovery by idempotency key returns existing durable admitted/order truth before any later
+  Redis-only rejection for that key;
+- a Redis restart or unknown reconnect cannot reopen admission before a fenced rebuild, and cutover
+  cannot overlap old MySQL-first and new Redis-first submitters;
+- reload and response-loss recovery preserve the same key and never silently start an expired
+  attempt.
+
+This checkpoint intentionally does not select entry rate limiting, add a generalized recovery
+framework, change cancellation/payment/refund, or claim a throughput improvement. Those decisions
+require implementation evidence rather than design inference.
 
 ## 7. Payment, refund, and sensitive-action truth
 
