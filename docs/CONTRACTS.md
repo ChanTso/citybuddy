@@ -240,7 +240,9 @@ direct-user downgrade.
     requests also require sandbox header/claim equality and an ACTIVE sandbox. Production tokens
     carry no sandbox claim, and production rejects the evaluation header.
 11. Signing private keys stay in `auth-service` secret material. Public keys overlap for at least
-    the maximum token lifetime plus accepted clock skew during rotation.
+    the maximum token lifetime plus accepted clock skew during rotation, measured from the new
+    `CURRENT` key's `activated_at`. Metadata contains exactly one `CURRENT` key, and it must match
+    the configured signer; ambiguity or an undersized overlap fails closed before publication.
 
 ### 4.3 Persistent identity invariants
 

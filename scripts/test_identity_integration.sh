@@ -370,6 +370,9 @@ INSERT INTO auth_signing_key_metadata (kid, state, activated_at, retire_after) V
   ('current-key', 'CURRENT', CURRENT_TIMESTAMP(6), NULL),
   ('overlap-key', 'OVERLAP', CURRENT_TIMESTAMP(6), TIMESTAMPADD(HOUR, 1, CURRENT_TIMESTAMP(6)));
 "
+assert_mysql_rejects "a second CURRENT signing key" 'Duplicate entry' \
+  mysql_query auth_app "$auth_app_password" commerce_db \
+  "INSERT INTO auth_signing_key_metadata (kid, state, activated_at, retire_after) VALUES ('other-current', 'CURRENT', CURRENT_TIMESTAMP(6), NULL)"
 
 mysql_query commerce_app "$commerce_app_password" commerce_db "
 INSERT INTO product (
@@ -458,6 +461,54 @@ wait_http "http://127.0.0.1:$proxy_port/fixture/counts" "$proxy_pid" "$tmp_dir/p
 curl --silent --show-error "http://127.0.0.1:$auth_port/auth/jwks" >"$tmp_dir/jwks.json"
 uv run python scripts/check_identity_jwks.py "$tmp_dir/jwks.json" current-key overlap-key
 echo "Verified JWKS current/overlap publication with no private RSA fields."
+
+mysql_query auth_app "$auth_app_password" commerce_db "
+SET @current_activation = CURRENT_TIMESTAMP(6);
+UPDATE auth_signing_key_metadata
+   SET activated_at = @current_activation
+ WHERE kid = 'current-key';
+UPDATE auth_signing_key_metadata
+   SET activated_at = TIMESTAMPADD(HOUR, -1, @current_activation),
+       retire_after = TIMESTAMPADD(SECOND, 929, @current_activation)
+ WHERE kid = 'overlap-key';
+"
+assert_status 500 "JWKS rejects overlap one second shorter than the direct-token window" \
+  --request GET "http://127.0.0.1:$auth_port/auth/jwks"
+mysql_query auth_app "$auth_app_password" commerce_db "
+SET @current_activation = (
+  SELECT activated_at FROM auth_signing_key_metadata WHERE kid = 'current-key'
+);
+UPDATE auth_signing_key_metadata
+   SET retire_after = TIMESTAMPADD(SECOND, 930, @current_activation)
+ WHERE kid = 'overlap-key';
+"
+assert_status 200 "JWKS accepts overlap at the exact direct-token window" \
+  --request GET "http://127.0.0.1:$auth_port/auth/jwks"
+uv run python scripts/check_identity_jwks.py "$tmp_dir/http-response.json" current-key overlap-key
+mysql_query auth_app "$auth_app_password" commerce_db "
+SET @current_time = CURRENT_TIMESTAMP(6);
+UPDATE auth_signing_key_metadata
+   SET activated_at = TIMESTAMPADD(SECOND, -60, @current_time)
+ WHERE kid = 'current-key';
+UPDATE auth_signing_key_metadata
+   SET activated_at = TIMESTAMPADD(HOUR, -1, @current_time),
+       retire_after = TIMESTAMPADD(SECOND, -1, @current_time)
+ WHERE kid = 'overlap-key';
+"
+assert_status 500 "JWKS validates an expired overlap before publication filtering" \
+  --request GET "http://127.0.0.1:$auth_port/auth/jwks"
+mysql_query auth_app "$auth_app_password" commerce_db "
+SET @current_activation = CURRENT_TIMESTAMP(6);
+UPDATE auth_signing_key_metadata
+   SET activated_at = @current_activation
+ WHERE kid = 'current-key';
+UPDATE auth_signing_key_metadata
+   SET activated_at = TIMESTAMPADD(HOUR, -1, @current_activation),
+       retire_after = TIMESTAMPADD(HOUR, 1, @current_activation)
+ WHERE kid = 'overlap-key';
+"
+assert_status 200 "JWKS resumes after valid rotation metadata is restored" \
+  --request GET "http://127.0.0.1:$auth_port/auth/jwks"
 assert_status 401 "auth JWKS rejects production evaluation header" \
   --request GET "http://127.0.0.1:$auth_port/auth/jwks" \
   --header 'X-Eval-Sandbox-Id: forbidden-production-context'

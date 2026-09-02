@@ -158,34 +158,38 @@ public final class AuthController {
     return authorization.substring(7);
   }
 
-  private void requireCurrentSigningKey() {
-    requireCurrentSigningKey(repository.publicKeyMetadata());
+  private AuthRepository.KeyMetadata requireCurrentSigningKey() {
+    return requireCurrentSigningKey(repository.publicKeyMetadata());
   }
 
-  private void requireCurrentSigningKey(
+  private AuthRepository.KeyMetadata requireCurrentSigningKey(
       java.util.List<AuthRepository.KeyMetadata> signingMetadata) {
-    boolean current =
-        signingMetadata.stream()
-            .anyMatch(
-                metadata ->
-                    properties.currentKid().equals(metadata.kid())
-                        && "CURRENT".equals(metadata.state()));
-    if (!current) {
-      throw new IllegalStateException("Current signing key is not published");
+    var currentKeys =
+        signingMetadata.stream().filter(metadata -> "CURRENT".equals(metadata.state())).toList();
+    if (currentKeys.size() != 1 || !properties.currentKid().equals(currentKeys.getFirst().kid())) {
+      throw new IllegalStateException(
+          "Exactly one configured current signing key must be published");
     }
+    return currentKeys.getFirst();
   }
 
   private Set<String> activeSigningKids(
       java.util.List<AuthRepository.KeyMetadata> signingMetadata) {
-    validateKeyOverlap(signingMetadata);
+    AuthRepository.KeyMetadata current = requireCurrentSigningKey(signingMetadata);
+    validateKeyOverlap(signingMetadata, current);
+    var now = clock.instant();
     Set<String> activeKids = new HashSet<>();
     signingMetadata.stream()
-        .filter(item -> "CURRENT".equals(item.state()) || "OVERLAP".equals(item.state()))
+        .filter(
+            item ->
+                "CURRENT".equals(item.state())
+                    || ("OVERLAP".equals(item.state()) && item.retireAfter().isAfter(now)))
         .forEach(item -> activeKids.add(item.kid()));
     return Set.copyOf(activeKids);
   }
 
-  private void validateKeyOverlap(java.util.List<AuthRepository.KeyMetadata> metadata) {
+  private void validateKeyOverlap(
+      java.util.List<AuthRepository.KeyMetadata> metadata, AuthRepository.KeyMetadata current) {
     var minimumOverlap =
         (properties.directTtl().compareTo(properties.oboTtl()) >= 0
                 ? properties.directTtl()
@@ -196,7 +200,7 @@ public final class AuthController {
         .forEach(
             item -> {
               if (item.retireAfter() == null
-                  || item.retireAfter().isBefore(item.activatedAt().plus(minimumOverlap))) {
+                  || item.retireAfter().isBefore(current.activatedAt().plus(minimumOverlap))) {
                 throw new IllegalStateException(
                     "Signing-key overlap is shorter than token lifetime");
               }

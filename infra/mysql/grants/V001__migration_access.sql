@@ -3,6 +3,7 @@ GRANT SELECT, INSERT, UPDATE, DELETE, CREATE, ALTER, DROP, INDEX, REFERENCES, TR
 GRANT CREATE, ALTER, REFERENCES ON commerce_db.* TO 'commerce_migration'@'%';
 GRANT SELECT, INSERT, UPDATE, DELETE, CREATE, ALTER, DROP, INDEX, REFERENCES, TRIGGER ON commerce_db.commerce_schema_history TO 'commerce_migration'@'%';
 GRANT SELECT, INSERT, UPDATE, DELETE, CREATE, ALTER, DROP, INDEX, REFERENCES, CREATE VIEW, SHOW VIEW, TRIGGER ON cs_db.* TO 'agent_migration'@'%';
+GRANT INDEX ON commerce_db.auth_signing_key_metadata TO 'auth_migration'@'%';
 GRANT SELECT, INSERT, UPDATE ON commerce_db.auth_user_principal TO 'auth_app'@'%';
 GRANT SELECT, INSERT, UPDATE ON commerce_db.auth_login_credential TO 'auth_app'@'%';
 GRANT SELECT, INSERT, UPDATE ON commerce_db.auth_service_identity TO 'auth_app'@'%';

@@ -148,16 +148,16 @@ class AuthIdentityTest {
 
   @Test
   void jwksPublishesOnlyConfiguredCurrentAndOverlappingPublicMaterial() {
+    Instant activated = Instant.now();
     when(repository.publicKeyMetadata())
         .thenReturn(
             List.of(
-                new AuthRepository.KeyMetadata(
-                    "current-key", "CURRENT", Instant.parse("2026-07-15T00:00:00Z"), null),
+                new AuthRepository.KeyMetadata("current-key", "CURRENT", activated, null),
                 new AuthRepository.KeyMetadata(
                     "overlap-key",
                     "OVERLAP",
-                    Instant.parse("2026-07-15T00:00:00Z"),
-                    Instant.parse("2026-07-15T01:00:00Z"))));
+                    activated.minus(Duration.ofHours(1)),
+                    activated.plus(Duration.ofHours(1)))));
 
     String response = controller.jwks(null).toString();
 
@@ -169,18 +169,70 @@ class AuthIdentityTest {
   }
 
   @Test
-  void jwksRejectsOverlapShorterThanMaximumTokenLifetimeAndClockSkew() {
-    Instant activated = Instant.parse("2026-07-15T00:00:00Z");
+  void jwksRejectsOverlapOneSecondShorterThanCurrentActivationPlusTokenLifetimeAndSkew() {
+    Instant activated = Instant.now();
     when(repository.publicKeyMetadata())
         .thenReturn(
             List.of(
                 new AuthRepository.KeyMetadata("current-key", "CURRENT", activated, null),
                 new AuthRepository.KeyMetadata(
-                    "overlap-key", "OVERLAP", activated, activated.plus(Duration.ofMinutes(5)))));
+                    "overlap-key",
+                    "OVERLAP",
+                    activated.minus(Duration.ofHours(1)),
+                    activated.plusSeconds(929))));
 
     assertThatThrownBy(() -> controller.jwks(null))
         .isInstanceOf(IllegalStateException.class)
         .hasMessageContaining("overlap");
+  }
+
+  @Test
+  void jwksAcceptsOverlapAtExactCurrentActivationPlusTokenLifetimeAndSkew() {
+    Instant activated = Instant.now();
+    when(repository.publicKeyMetadata())
+        .thenReturn(
+            List.of(
+                new AuthRepository.KeyMetadata("current-key", "CURRENT", activated, null),
+                new AuthRepository.KeyMetadata(
+                    "overlap-key",
+                    "OVERLAP",
+                    activated.minus(Duration.ofHours(1)),
+                    activated.plusSeconds(930))));
+
+    assertThat(controller.jwks(null).toString()).contains("current-key", "overlap-key");
+  }
+
+  @Test
+  void jwksValidatesExpiredOverlapBeforeFilteringItFromPublication() {
+    Instant now = Instant.now();
+    when(repository.publicKeyMetadata())
+        .thenReturn(
+            List.of(
+                new AuthRepository.KeyMetadata(
+                    "current-key", "CURRENT", now.minus(Duration.ofMinutes(1)), null),
+                new AuthRepository.KeyMetadata(
+                    "overlap-key",
+                    "OVERLAP",
+                    now.minus(Duration.ofHours(1)),
+                    now.minusSeconds(1))));
+
+    assertThatThrownBy(() -> controller.jwks(null))
+        .isInstanceOf(IllegalStateException.class)
+        .hasMessageContaining("overlap");
+  }
+
+  @Test
+  void jwksRequiresExactlyOneConfiguredCurrentKey() {
+    Instant activated = Instant.now();
+    when(repository.publicKeyMetadata())
+        .thenReturn(
+            List.of(
+                new AuthRepository.KeyMetadata("current-key", "CURRENT", activated, null),
+                new AuthRepository.KeyMetadata("other-current", "CURRENT", activated, null)));
+
+    assertThatThrownBy(() -> controller.jwks(null))
+        .isInstanceOf(IllegalStateException.class)
+        .hasMessageContaining("Exactly one configured current");
   }
 
   @Test
@@ -537,7 +589,10 @@ class AuthIdentityTest {
                 .tokenType())
         .isEqualTo("Bearer");
 
-    when(repository.publicKeyMetadata()).thenReturn(List.of(current));
+    AuthRepository.KeyMetadata retiredOverlap =
+        new AuthRepository.KeyMetadata(
+            "overlap-key", "OVERLAP", now.minus(Duration.ofHours(1)), now.minusSeconds(1));
+    when(repository.publicKeyMetadata()).thenReturn(List.of(current, retiredOverlap));
     assertThatThrownBy(
             () ->
                 controller.exchange(

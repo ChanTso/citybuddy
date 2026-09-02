@@ -276,6 +276,9 @@ if grep -Eq 'MySQL TCP is not ready|mysql-tcp-ready-after-attempt' "$tmp_dir/rej
   exit 1
 fi
 echo "Verified grant authentication failures are not retried."
+assert_fails "migrate-auth propagates its grant job failure" \
+  "Access denied for user 'bootstrap_admin'" \
+  make ENV_FILE="$env_file" COMPOSE_PROJECT_NAME="$project" migrate-auth
 printf '%s\n' "ALTER USER 'bootstrap_admin'@'%' IDENTIFIED BY '$bootstrap_password';" | \
   "${compose[@]}" exec -T -e MYSQL_PWD="$bootstrap_password" mysql \
     mysql --protocol=socket --user=root
@@ -297,5 +300,44 @@ failed_history="$(mysql_query auth_migration "$auth_migration_password" commerce
 test "$failed_history" = "0"
 assert_fails "failed migration history blocks automatic retry" 'previously failed or is incomplete' \
   "${compose[@]}" run --rm --volume "$failure_dir:/opt/citybuddy/migrations:ro" auth-migrate
+mysql_query auth_migration "$auth_migration_password" commerce_db \
+  "DELETE FROM auth_schema_history WHERE version = '999'"
+
+missing_v004_dir="$tmp_dir/missing-auth-v004"
+mkdir -p "$missing_v004_dir"
+cp infra/mysql/migrations/auth/V001__validate_auth_target.sql "$missing_v004_dir/"
+cp infra/mysql/migrations/auth/V002__identity_foundation.sql "$missing_v004_dir/"
+cp infra/mysql/migrations/auth/V003__evaluation_test_principal.sql "$missing_v004_dir/"
+assert_fails "auth prepare rejects a migration bundle missing V004" \
+  'Auth V004 signing-key migration is missing' \
+  "${compose[@]}" run --rm -e MIGRATION_PREPARE_AUTH_V004=true \
+    --volume "$missing_v004_dir:/opt/citybuddy/migrations:ro" auth-migrate
+
+test "$(mysql_query auth_app "$auth_app_password" commerce_db \
+  "SELECT COUNT(*) FROM auth_signing_key_metadata")" = 0
+printf '%s\n' \
+  "ALTER TABLE commerce_db.auth_signing_key_metadata DROP INDEX uq_auth_signing_key_one_current;" \
+  "DELETE FROM commerce_db.auth_schema_history WHERE version = '004';" \
+  "REVOKE INDEX ON commerce_db.auth_signing_key_metadata FROM 'auth_migration'@'%';" | \
+  "${compose[@]}" exec -T -e MYSQL_PWD="$bootstrap_password" mysql \
+    mysql --protocol=socket --user=root
+make ENV_FILE="$env_file" COMPOSE_PROJECT_NAME="$project" migrate-auth
+test "$(mysql_query auth_migration "$auth_migration_password" commerce_db \
+  "SELECT COUNT(*) FROM auth_schema_history WHERE version = '004' AND success = TRUE")" = 1
+test "$(mysql_query auth_migration "$auth_migration_password" commerce_db \
+  "SELECT COUNT(*) FROM information_schema.statistics WHERE table_schema = 'commerce_db' AND table_name = 'auth_signing_key_metadata' AND index_name = 'uq_auth_signing_key_one_current'")" = 1
+echo "Verified a mature schema receives the table-scoped INDEX grant before V004."
+printf '%s\n' \
+  "ALTER TABLE commerce_db.auth_signing_key_metadata DROP INDEX uq_auth_signing_key_one_current;" \
+  "DELETE FROM commerce_db.auth_schema_history WHERE version = '004';" \
+  "INSERT INTO commerce_db.auth_signing_key_metadata (kid, state, activated_at, retire_after) VALUES ('legacy-current-a', 'CURRENT', CURRENT_TIMESTAMP(6), NULL), ('legacy-current-b', 'CURRENT', CURRENT_TIMESTAMP(6), NULL);" | \
+  "${compose[@]}" exec -T -e MYSQL_PWD="$bootstrap_password" mysql \
+    mysql --protocol=socket --user=root
+assert_fails "multiple legacy CURRENT keys fail before migration history is written" \
+  'Duplicate entry.*uq_auth_signing_key_one_current' \
+  "${compose[@]}" run --rm auth-migrate
+test "$(mysql_query auth_migration "$auth_migration_password" commerce_db \
+  "SELECT COUNT(*) FROM auth_schema_history WHERE version = '004'")" = 0
+echo "Verified signing-key uniqueness fails closed before migration history mutation."
 
 echo "CB-010 MySQL integration checks passed."

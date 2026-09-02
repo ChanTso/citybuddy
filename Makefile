@@ -87,6 +87,12 @@ revoke-v013-migration-access:
 
 migrate-auth:
 	ENV_FILE="$(ENV_FILE)" ./scripts/require_local_env.sh
+	@prepare_status=0; \
+	$(COMPOSE) run --rm -e MIGRATION_PREPARE_AUTH_V004=true auth-migrate || prepare_status=$$?; \
+	if (( prepare_status != 0 )); then exit $$prepare_status; fi; \
+	grant_status=0; \
+	$(MAKE) ENV_FILE=$(ENV_FILE) COMPOSE_PROJECT_NAME=$(COMPOSE_PROJECT_NAME) grant-access || grant_status=$$?; \
+	if (( grant_status != 0 )); then exit $$grant_status; fi; \
 	$(COMPOSE) run --rm auth-migrate
 
 migrate-commerce:

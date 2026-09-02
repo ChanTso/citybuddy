@@ -240,12 +240,14 @@ that the split was right.
 
 ## Operations
 
-### JWKS publishes all keys or none
+### JWKS publishes a valid rotation set or none
 
 Standing the local stack up produced a JWKS endpoint returning 500 for every request. auth-service
-publishes every signing-key row that is `CURRENT`, plus any `OVERLAP` row not yet past its
-retirement time, and throws if *any* published `kid` has no configured runtime key — so one
-leftover row from a different local fixture takes down the whole document, not just its own
+requires exactly one `CURRENT` row matching the configured signer, validates every `OVERLAP`
+retirement against that current key's activation plus the longest token lifetime and clock skew,
+then publishes the current key and overlaps not yet retired by the application clock. Ambiguous or
+undersized metadata fails closed, as does any published `kid` with no configured runtime key — so
+one leftover row from a different local fixture can take down the whole document, not just its own
 entry.
 
 Two consequences, both real: the failure looks nothing like its cause, and any fixture that seeds a

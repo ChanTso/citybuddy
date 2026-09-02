@@ -28,6 +28,16 @@ if [[ "$prepare_v013" == true && "$MIGRATION_STREAM" != commerce ]]; then
   exit 1
 fi
 
+prepare_auth_v004="${MIGRATION_PREPARE_AUTH_V004:-false}"
+if [[ "$prepare_auth_v004" != true && "$prepare_auth_v004" != false ]]; then
+  echo "MIGRATION_PREPARE_AUTH_V004 must be true or false." >&2
+  exit 1
+fi
+if [[ "$prepare_auth_v004" == true && "$MIGRATION_STREAM" != auth ]]; then
+  echo "The V004 signing-key grant barrier is available only to the auth migration stream." >&2
+  exit 1
+fi
+
 migration_dir="/opt/citybuddy/migrations"
 if [[ ! -d "$migration_dir" ]]; then
   echo "Missing migration directory: $migration_dir" >&2
@@ -77,8 +87,13 @@ if (( ${#migrations[@]} == 0 )); then
   echo "Migration stream '$MIGRATION_STREAM' contains no versioned migrations." >&2
   exit 1
 fi
+if [[ "$prepare_auth_v004" == true && ! -f "$migration_dir/V004__single_current_signing_key.sql" ]]; then
+  echo "Auth V004 signing-key migration is missing from the migration bundle." >&2
+  exit 1
+fi
 
 prepared_v013=false
+prepared_auth_v004=false
 
 for migration in "${migrations[@]}"; do
   filename="$(basename "$migration")"
@@ -124,9 +139,39 @@ for migration in "${migrations[@]}"; do
       exit 1
     fi
     echo "[$MIGRATION_STREAM] already applied: $filename"
+    if [[ "$prepare_auth_v004" == true && "$MIGRATION_STREAM" == auth && "$version" == 004 ]]; then
+      prepared_auth_v004=true
+      break
+    fi
     if [[ "$prepare_v013" == true && "$MIGRATION_STREAM" == commerce && "$version" == 013 ]]; then
       break
     fi
+    continue
+  fi
+
+  if [[ "$prepare_auth_v004" == true && "$MIGRATION_STREAM" == auth && "$version" == 004 ]]; then
+    echo "[auth] prepared table-scoped INDEX grant barrier: $filename"
+    prepared_auth_v004=true
+    break
+  fi
+
+  if [[ "$MIGRATION_STREAM" == auth && "$version" == 004 ]]; then
+    orphaned_index="$(mysql "${mysql_args[@]}" --execute="
+      SELECT COUNT(*) FROM information_schema.statistics
+       WHERE table_schema = 'commerce_db'
+         AND table_name = 'auth_signing_key_metadata'
+         AND index_name = 'uq_auth_signing_key_one_current'")"
+    if [[ "$orphaned_index" != "0" ]]; then
+      echo "Auth signing-key uniqueness index exists without migration history; refusing automatic adoption." >&2
+      exit 1
+    fi
+    echo "[$MIGRATION_STREAM] preflighting before history: $filename"
+    # This migration is one CREATE UNIQUE INDEX statement. Running that DDL before inserting
+    # history makes legacy duplicate CURRENT rows fail closed without leaving a false history row.
+    mysql "${mysql_args[@]}" <"$migration"
+    mysql "${mysql_args[@]}" --execute="
+      INSERT INTO ${history_table} (version, description, checksum, success)
+      VALUES ('${version}', '${description}', '${checksum}', TRUE);"
     continue
   fi
 
@@ -160,6 +205,11 @@ done
 
 if [[ "$prepared_v013" == true ]]; then
   echo "[commerce] V013 schema prepared; exact table grants are required before commitment."
+  exit 0
+fi
+
+if [[ "$prepared_auth_v004" == true ]]; then
+  echo "[auth] V004 is ready for the table-scoped INDEX grant."
   exit 0
 fi
 

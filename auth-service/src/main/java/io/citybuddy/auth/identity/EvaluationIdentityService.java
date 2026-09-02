@@ -135,14 +135,14 @@ public class EvaluationIdentityService {
         principal.expiresAt().isBefore(now.plus(properties.directTtl()))
             ? principal.expiresAt()
             : now.plus(properties.directTtl());
-    boolean currentSigningKey =
+    var currentSigningKeys =
         repository.publicKeyMetadata().stream()
-            .anyMatch(
-                metadata ->
-                    properties.currentKid().equals(metadata.kid())
-                        && "CURRENT".equals(metadata.state()));
-    if (!currentSigningKey) {
-      throw new IllegalStateException("Current signing key is not published");
+            .filter(metadata -> "CURRENT".equals(metadata.state()))
+            .toList();
+    if (currentSigningKeys.size() != 1
+        || !properties.currentKid().equals(currentSigningKeys.getFirst().kid())) {
+      throw new IllegalStateException(
+          "Exactly one configured current signing key must be published");
     }
     String token =
         keys.evaluationDirectToken(
