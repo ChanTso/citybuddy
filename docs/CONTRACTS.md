@@ -215,23 +215,27 @@ direct-user downgrade.
 
 ### 4.2 Agent OBO
 
-5. Conversation and public FAQ paths do not acquire commerce authority. On the first internal
-   commerce tool call, `agent-service` requests a short-lived OBO just in time.
+5. Conversation and public FAQ paths do not acquire commerce authority. Before an internal
+   commerce tool invocation, `agent-service` requests a short-lived OBO just in time.
 6. `POST /api/sessions` is the only support-session bootstrap. It requires a direct user JWT;
    `agent-service` generates an opaque session id and binds it to the validated token subject. In
    evaluation it also binds the sandbox context. The client cannot choose the owner. Wrong token
    type, cross-user substitution, or sandbox mismatch rejects. `X-Session-Id` identifies this
    support session, not a login-token session, and every use is rechecked against the validated user
    and sandbox context in `cs_db`.
-7. On first tool use, `agent-service` submits the validated user JWT, its independently
+7. For that tool invocation, `agent-service` submits the validated user JWT, its independently
    authenticated service credential, the verified support-session binding, and the exact
    server-side ToolSpec scope to token exchange. `auth-service` trusts the authenticated service's
-   session-binding assertion and writes that support session into the OBO.
+   session-binding assertion and writes that support session into the OBO. Service authentication
+   reads current state, scope, and the exact persisted BCrypt hash on every exchange. A process-local
+   verifier may reuse only a successful HMAC fingerprint bound to client id and that exact hash;
+   cache misses and invalid candidates still execute BCrypt, while a changed hash or non-ACTIVE row
+   cannot use the proof. Human login always executes BCrypt directly.
 8. The OBO contains at least an explicit OBO purpose/type, `sub`, `user_id`, support `session`,
    `aud=commerce-service`, exact `scope`, `act.azp=agent-service`, `jti`, `exp`, and applicable
    not-before/issued-at metadata. Scope is fixed by ToolSpec; neither model nor request payload can
-   widen it. Cache keys are limited to `user + support session + exact scope` and never outlive the
-   token.
+   widen it. `jti` is required but is not consumed: the OBO is a bearer token, not a server-enforced
+   single-use capability, and remains subject to every validation above until expiry.
 9. `commerce-service` accepts internal tool identity only from the validated OBO. It validates
    signature, fixed issuer, OBO purpose/type, audience, exact required scope, actor, user subject,
    support session, expiry/not-before/skew, and resource ownership. It never trusts identity fields
