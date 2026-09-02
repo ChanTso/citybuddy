@@ -38,6 +38,21 @@ public final class SeckillActivityRepository {
         .findFirst();
   }
 
+  /**
+   * Shared current read used while creating reservation intent. It keeps intent creation mutually
+   * exclusive with projection rebuilds, which take an exclusive activity lock, without serializing
+   * independent reservations for the same activity.
+   */
+  public Optional<SeckillActivity> findForShare(String activityId) {
+    return jdbc
+        .query(
+            "SELECT " + ACTIVITY_COLUMNS + " FROM seckill_activity WHERE activity_id = ? FOR SHARE",
+            SeckillActivityRepository::mapActivity,
+            activityId)
+        .stream()
+        .findFirst();
+  }
+
   public Optional<SeckillActivity> find(String activityId) {
     return jdbc
         .query(

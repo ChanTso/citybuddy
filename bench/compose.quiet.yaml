@@ -1,0 +1,10 @@
+services:
+  rocketmq-namesrv:
+    healthcheck:
+      disable: true
+  rocketmq-broker-proxy:
+    depends_on:
+      rocketmq-namesrv:
+        condition: service_started
+    healthcheck:
+      disable: true

@@ -13,6 +13,43 @@ BENCH_STOCK="${BENCH_STOCK:-2000000}"
 out_dir="$repo_root/bench/results"
 run_dir="$repo_root/bench/.run"
 mkdir -p "$out_dir" "$run_dir"
+bench_env="$run_dir/bench.env"
+auth_jar="$repo_root/auth-service/target/auth-service-0.0.1-SNAPSHOT.jar"
+commerce_jar="$repo_root/commerce-service/target/commerce-service-0.0.1-SNAPSHOT.jar"
+setup_started_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+
+clear_synthetic_redis_keys() {
+  local prefix
+  for prefix in activity user rebuild; do
+    docker exec citybuddy-redis-commerce-1 redis-cli -a "$redis_pw" --no-auth-warning EVAL \
+      "local c='0' repeat local p=redis.call('SCAN',c,'MATCH',ARGV[1],'COUNT',200) c=p[1] if #p[2]>0 then redis.call('UNLINK',unpack(p[2])) end until c=='0' return 1" \
+      0 "commerce:seckill:${prefix}:bench-activity-*" >/dev/null
+  done
+}
+
+rm -f "$bench_env"
+for value in "$BENCH_USERS" "$BENCH_ACTIVITIES" "$BENCH_QUOTA" "$BENCH_STOCK"; do
+  if [[ ! "$value" =~ ^[1-9][0-9]*$ ]]; then
+    echo "Benchmark fixture sizes must be positive ASCII integers." >&2
+    exit 2
+  fi
+done
+
+citybuddy_commit="$(git rev-parse --verify HEAD)"
+if [ ! -f "$auth_jar" ] || [ ! -f "$commerce_jar" ]; then
+  echo "Build auth-service and commerce-service JARs before benchmark setup." >&2
+  exit 1
+fi
+auth_jar_sha256="$(openssl dgst -sha256 "$auth_jar" | awk '{print $NF}')"
+commerce_jar_sha256="$(openssl dgst -sha256 "$commerce_jar" | awk '{print $NF}')"
+source_changes="$(git status --porcelain --untracked-files=all -- . \
+  ':(exclude)bench/results/**' \
+  ':(exclude)bench/.run/**')"
+if [ -n "$source_changes" ]; then
+  echo "Seckill benchmark setup requires a source-clean checkout." >&2
+  printf '%s\n' "$source_changes" >&2
+  exit 1
+fi
 
 read_value() { grep -E "^$1=" .env | head -1 | cut -d= -f2-; }
 commerce_pw="$(read_value MYSQL_COMMERCE_APP_PASSWORD)"
@@ -29,6 +66,10 @@ sql() { MYSQL_PWD="$2" mysql --protocol=TCP -h 127.0.0.1 -P "$mysql_port" -u "$1
 # A fresh suffix gives a clean queue; reusing one leaves a prior run's backlog in front
 # of the next run's messages.
 topic_suffix="${TOPIC_SUFFIX:-bench}"
+if [[ ! "$topic_suffix" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]] || [ "${#topic_suffix}" -gt 64 ]; then
+  echo "TOPIC_SUFFIX must be 1-64 safe characters and start with an alphanumeric." >&2
+  exit 2
+fi
 tx_topic="cb060-seckill-transaction-$topic_suffix"
 tx_group="cb060-seckill-order-consumer-$topic_suffix"
 to_topic="cb061-seckill-timeout-$topic_suffix"
@@ -91,6 +132,8 @@ DELETE FROM seckill_order WHERE activity_id LIKE 'bench-%';
 DELETE FROM seckill_reservation WHERE activity_id LIKE 'bench-%';
 DELETE FROM seckill_activity WHERE activity_id LIKE 'bench-%';
 DELETE FROM product WHERE product_id = 'bench-product';"
+echo "== clearing prior synthetic Redis activity and user markers =="
+clear_synthetic_redis_keys
 sql commerce_app "$commerce_pw" commerce_db "
 INSERT INTO product (product_id, name, description, price_minor, currency, stock_quantity, available, publication_state, publication_version)
 VALUES ('bench-product','Bench Product','seckill benchmark fixture',1990,'CNY',$BENCH_STOCK,TRUE,'PUBLISHED',1);"
@@ -118,7 +161,7 @@ docker rm -f citybuddy-bench-auth citybuddy-bench-commerce >/dev/null 2>&1 || tr
 docker run --detach --name citybuddy-bench-auth \
   --network citybuddy_default \
   --publish 127.0.0.1:18080:8080 \
-  --volume "$repo_root/auth-service/target/auth-service-0.0.1-SNAPSHOT.jar:/opt/citybuddy/auth.jar:ro" \
+  --volume "$auth_jar:/opt/citybuddy/auth.jar:ro" \
   --volume "$run_dir/bench-private.pem:/opt/citybuddy/bench-private.pem:ro" \
   --volume "$run_dir/bench-public.pem:/opt/citybuddy/bench-public.pem:ro" \
   --env SPRING_DATASOURCE_PASSWORD="$auth_pw" \
@@ -148,7 +191,7 @@ docker run --detach --name citybuddy-bench-commerce \
   --network citybuddy_default \
   --publish 127.0.0.1:18081:8080 \
   --cpus 4 \
-  --volume "$repo_root/commerce-service/target/commerce-service-0.0.1-SNAPSHOT.jar:/opt/citybuddy/commerce.jar:ro" \
+  --volume "$commerce_jar:/opt/citybuddy/commerce.jar:ro" \
   --env SPRING_DATASOURCE_PASSWORD="$commerce_pw" \
   eclipse-temurin:21.0.8_9-jre-noble@sha256:20e7f7288e1c18eebe8f06a442c9f7183342d9b022d3b9a9677cae2b558ddddd \
   java -XX:MaxRAMPercentage=70 -jar /opt/citybuddy/commerce.jar \
@@ -214,7 +257,14 @@ json.dump(tokens, open(out, "w"))
 print(f"minted {len(tokens)} tokens")
 PY
 
-cat > "$run_dir/bench.env" <<EOF
+if [ "$(git rev-parse --verify HEAD)" != "$citybuddy_commit" ]; then
+  echo "CityBuddy HEAD changed during benchmark setup." >&2
+  exit 1
+fi
+setup_completed_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+docker_cpus="$(docker info --format '{{.NCPU}}')"
+docker_memory_bytes="$(docker info --format '{{.MemTotal}}')"
+cat > "$bench_env" <<EOF
 MYSQL_PORT=$mysql_port
 REDIS_PORT=$redis_port
 PROXY_PORT=$proxy_port
@@ -223,5 +273,16 @@ AUTH_URL=http://127.0.0.1:18080
 BENCH_USERS=$BENCH_USERS
 BENCH_ACTIVITIES=$BENCH_ACTIVITIES
 BENCH_QUOTA=$BENCH_QUOTA
+BENCH_STOCK=$BENCH_STOCK
+TOPIC_SUFFIX=$topic_suffix
+CITYBUDDY_COMMIT=$citybuddy_commit
+IDENTITY_JAR_SHA256=$auth_jar_sha256
+COMMERCE_JAR_SHA256=$commerce_jar_sha256
+SETUP_STARTED_AT_UTC=$setup_started_at
+SETUP_COMPLETED_AT_UTC=$setup_completed_at
+DOCKER_CPUS=$docker_cpus
+DOCKER_MEMORY_BYTES=$docker_memory_bytes
+COMMERCE_CPU_LIMIT=4
 EOF
 echo "== bench environment ready =="
+echo "setup record: $bench_env"

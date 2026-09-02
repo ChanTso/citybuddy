@@ -1,0 +1,11 @@
+citybuddy_commit=c049ac305b607b46c9e545473d01063f7ea96339
+setup_window_utc=2026-09-02T11:46:25Z/2026-09-02T11:47:09Z
+run_started_at_utc=2026-09-02T11:50:31Z
+label=seckill_s1_c049ac3_20260902T114422Z_correctness activity=bench-correctness allocated_quota=100 attempts=600
+fixture_users=25000 fixture_activities=32 fixture_quota=1000000 fixture_stock=2000000 topic_suffix=s1-contended-c049ac3-20260902T114422Z
+docker_cpus=8 docker_memory_bytes=14638391296 commerce_cpu_limit=4
+
+wall_seconds=2.17
+HTTP 409 decision=EXHAUSTED: 500
+HTTP 201 decision=ADMITTED: 100
+run_completed_at_utc=2026-09-02T11:50:53Z
