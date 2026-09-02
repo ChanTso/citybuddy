@@ -370,7 +370,8 @@ class CatalogIntegrationTest {
         new OrderService(
             barrierRepository,
             new TransactionTemplate(new DataSourceTransactionManager(dataSource)),
-            new OrderProperties("order:create", 100, 3, 1));
+            new OrderProperties("order:create", 100, 3, 1),
+            io.citybuddy.commerce.order.OrderStockRaceMetrics.noop());
     var executor = Executors.newFixedThreadPool(2);
     Future<OrderResult> first = null;
     Future<OrderResult> second = null;
@@ -679,7 +680,8 @@ class CatalogIntegrationTest {
           new OrderService(
               probe,
               new TransactionTemplate(new DataSourceTransactionManager(targetDataSource)),
-              new OrderProperties("order:create", 100, 1, 1));
+              new OrderProperties("order:create", 100, 1, 1),
+              io.citybuddy.commerce.order.OrderStockRaceMetrics.noop());
       sibling.setAutoCommit(false);
       var siblingJdbc = new JdbcTemplate(new SingleConnectionDataSource(sibling, true));
       OrderRepository siblingRepository = new OrderRepository(siblingJdbc, objectMapper);
@@ -780,7 +782,8 @@ class CatalogIntegrationTest {
         new OrderService(
             probe,
             new TransactionTemplate(new DataSourceTransactionManager(targetDataSource)),
-            new OrderProperties("order:create", 100, 1, 1));
+            new OrderProperties("order:create", 100, 1, 1),
+            io.citybuddy.commerce.order.OrderStockRaceMetrics.noop());
     OrderRequest request = orderRequest(productId, quantity);
     var executor = Executors.newSingleThreadExecutor();
     Future<OrderResult> target = null;

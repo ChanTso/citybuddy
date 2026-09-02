@@ -216,12 +216,22 @@ npm --prefix web ci && cp web/.env.example web/.env.local && npm --prefix web ru
 ## Local demo observability
 
 The local demo opts in to Agent Prometheus metrics only inside `scripts/demo.sh`; the normal Agent
-defaults remain metrics disabled and an empty trace-export URL. Without an explicit opt-in,
-`GET /internal/metrics/prometheus` is a 404. The demo Agent binds to loopback, but the metrics
-endpoint has no application authentication and is omitted from OpenAPI, so do not expose demo
-port 8000 or proxy it to an untrusted network without an access-control boundary. The demo also
-sets `CITYBUDDY_TRACE_EXPORT_URL` to empty explicitly, overriding any value inherited from the
-calling shell.
+defaults remain metrics disabled and an empty trace-export URL. Commerce has a separate opt-in on
+its own process with `--citybuddy.metrics.enabled=true`; the demo does not enable it. Without the
+corresponding explicit opt-in, `GET /internal/metrics/prometheus` is a 404 on either service. Both
+metrics endpoints have no application authentication and are omitted from OpenAPI. The demo ports
+bind to loopback, but neither endpoint may be exposed or proxied to an untrusted network without an
+access-control boundary. The demo also sets `CITYBUDDY_TRACE_EXPORT_URL` to empty explicitly,
+overriding any value inherited from the calling shell.
+
+The Commerce registry is local to its process and contains only the unlabelled
+`citybuddy_commerce_order_stock_races_total` counter. One increment means one conditional standard-
+order product decrement matched no row after the transaction had read an orderable product with
+sufficient stock; it is not a request count and does not distinguish stock, availability,
+publication-state or product-version changes. A request can contribute more than one increment
+through bounded retries. The registry resets on restart. Historical order evidence that did not
+scrape this counter, including the 6,000-order 16.9-second run below, cannot establish how many such
+retries occurred.
 
 After `uv run python scripts/demo_story.py --pace 0`, the following was captured with
 `curl --fail --silent http://127.0.0.1:8000/internal/metrics/prometheus` from committed code

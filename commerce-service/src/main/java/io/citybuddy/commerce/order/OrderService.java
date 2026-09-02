@@ -17,13 +17,18 @@ public final class OrderService {
   private final OrderRepository repository;
   private final OrderTransactions transactions;
   private final OrderProperties properties;
+  private final OrderStockRaceMetrics stockRaceMetrics;
 
   public OrderService(
-      OrderRepository repository, TransactionTemplate transactions, OrderProperties properties) {
+      OrderRepository repository,
+      TransactionTemplate transactions,
+      OrderProperties properties,
+      OrderStockRaceMetrics stockRaceMetrics) {
     this.repository = repository;
     this.transactions =
         new OrderTransactions(repository, transactions, properties.lockWaitTimeoutSeconds());
     this.properties = properties;
+    this.stockRaceMetrics = stockRaceMetrics;
   }
 
   public OrderResult create(
@@ -84,6 +89,7 @@ public final class OrderService {
     }
     Math.multiplyExact(product.priceMinor(), request.quantity());
     if (!repository.decrementStock(product, request.quantity())) {
+      stockRaceMetrics.recordMiss();
       throw new StockRaceException();
     }
     repository.insertOrder(user, orderId, product, request.quantity());

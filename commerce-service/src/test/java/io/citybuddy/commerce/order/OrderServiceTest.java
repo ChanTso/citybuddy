@@ -14,6 +14,7 @@ import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.when;
 
+import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
@@ -35,12 +36,14 @@ import org.springframework.transaction.support.TransactionTemplate;
 class OrderServiceTest {
   private OrderRepository repository;
   private PlatformTransactionManager transactionManager;
+  private SimpleMeterRegistry meterRegistry;
   private OrderService service;
 
   @BeforeEach
   void setUp() {
     repository = mock(OrderRepository.class);
     transactionManager = mock(PlatformTransactionManager.class);
+    meterRegistry = new SimpleMeterRegistry();
     when(transactionManager.getTransaction(any())).thenReturn(mock(TransactionStatus.class));
     when(repository.withLockWaitTimeout(eq(1), any()))
         .thenAnswer(invocation -> invocation.<Supplier<?>>getArgument(1).get());
@@ -48,7 +51,8 @@ class OrderServiceTest {
         new OrderService(
             repository,
             new TransactionTemplate(transactionManager),
-            new OrderProperties("order:create", 5, 3, 1));
+            new OrderProperties("order:create", 5, 3, 1),
+            OrderStockRaceMetrics.instrumented(meterRegistry));
   }
 
   @Test
@@ -169,6 +173,59 @@ class OrderServiceTest {
     verify(repository).findProduct("product-1");
     verify(transactionManager).rollback(any());
     verify(transactionManager).commit(any());
+    assertThat(stockRaceCount()).isZero();
+  }
+
+  @Test
+  void countsEachConditionalStockMissBeforeARecoveredAttempt() {
+    when(repository.findIdempotency("user-1", "key-1")).thenReturn(Optional.empty());
+    OrderRepository.ProductSnapshot product = product(2, 7);
+    when(repository.findProduct("product-1")).thenReturn(Optional.of(product));
+    when(repository.decrementStock(product, 1)).thenReturn(false, false, true);
+    when(repository.findOwnedOrder(eq("user-1"), anyString(), eq("corr")))
+        .thenReturn(result("corr", false));
+
+    OrderResult result = service.create("user-1", "key-1", request("product-1", 1, 7), "corr");
+
+    assertThat(result.replayed()).isFalse();
+    assertThat(stockRaceCount()).isEqualTo(2);
+    verify(repository, times(3)).decrementStock(product, 1);
+  }
+
+  @Test
+  void countsTheFinalRecoveryMutationAsAFourthConditionalStockMiss() {
+    when(repository.findIdempotency("user-1", "key-1")).thenReturn(Optional.empty());
+    when(repository.findIdempotencyForUpdate("user-1", "key-1")).thenReturn(Optional.empty());
+    OrderRepository.ProductSnapshot product = product(2, 7);
+    when(repository.findProduct("product-1")).thenReturn(Optional.of(product));
+    when(repository.decrementStock(product, 1)).thenReturn(false);
+
+    assertThatThrownBy(() -> service.create("user-1", "key-1", request("product-1", 1, 7), "corr"))
+        .isInstanceOfSatisfying(
+            OrderException.class,
+            exception -> {
+              assertThat(exception.status()).isEqualTo(429);
+              assertThat(exception.category()).isEqualTo(OrderCategory.CONCURRENCY_EXHAUSTED);
+            });
+
+    assertThat(stockRaceCount()).isEqualTo(4);
+    verify(repository, times(4)).decrementStock(product, 1);
+    verify(repository, times(2)).findIdempotencyForUpdate("user-1", "key-1");
+  }
+
+  @Test
+  void insufficientStockDoesNotCountAsAConditionalStockMiss() {
+    when(repository.findIdempotency("user-1", "key-1")).thenReturn(Optional.empty());
+    when(repository.findProduct("product-1")).thenReturn(Optional.of(product(0, 7)));
+
+    assertThatThrownBy(() -> service.create("user-1", "key-1", request("product-1", 1, 7), "corr"))
+        .isInstanceOfSatisfying(
+            OrderException.class,
+            exception ->
+                assertThat(exception.category()).isEqualTo(OrderCategory.INSUFFICIENT_STOCK));
+
+    assertThat(stockRaceCount()).isZero();
+    verify(repository, never()).decrementStock(any(), eq(1));
   }
 
   @Test
@@ -401,6 +458,10 @@ class OrderServiceTest {
     request.setQuantity(quantity);
     request.setExpectedProductVersion(version);
     return request;
+  }
+
+  private double stockRaceCount() {
+    return meterRegistry.get(OrderStockRaceMetrics.METER_NAME).counter().count();
   }
 
   private static OrderRepository.ProductSnapshot product(long stock, long version) {

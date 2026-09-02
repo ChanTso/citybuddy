@@ -22,7 +22,9 @@ public class OrderConfiguration {
   OrderService orderService(
       OrderRepository repository,
       PlatformTransactionManager transactionManager,
-      OrderProperties properties) {
-    return new OrderService(repository, new TransactionTemplate(transactionManager), properties);
+      OrderProperties properties,
+      OrderStockRaceMetrics stockRaceMetrics) {
+    return new OrderService(
+        repository, new TransactionTemplate(transactionManager), properties, stockRaceMetrics);
   }
 }

@@ -329,7 +329,7 @@ def test_metrics_boolean_rejects_other_nonempty_values(monkeypatch: pytest.Monke
         _strict_bool("CITYBUDDY_METRICS_ENABLED")
 
 
-def test_dependency_boundary_adds_only_prometheus_to_agent_and_preserves_otel_owner() -> None:
+def test_dependency_boundary_limits_prometheus_and_preserves_otel_owner() -> None:
     agent = tomllib.loads((REPOSITORY / "agent-service" / "pyproject.toml").read_text("utf-8"))
     indexer = tomllib.loads(
         (REPOSITORY / "knowledge-indexer" / "pyproject.toml").read_text("utf-8")
@@ -347,12 +347,14 @@ def test_dependency_boundary_adds_only_prometheus_to_agent_and_preserves_otel_ow
     assert 'name = "opentelemetry-sdk"\nversion = "1.43.0"' in lock
     for path in (REPOSITORY / "agent-service" / "src").rglob("*.py"):
         assert "opentelemetry" not in path.read_text("utf-8").casefold()
-    java_builds = [
-        REPOSITORY / "pom.xml",
-        REPOSITORY / "auth-service" / "pom.xml",
-        REPOSITORY / "commerce-service" / "pom.xml",
-    ]
-    for path in java_builds:
-        java_build = path.read_text("utf-8").casefold()
-        assert "micrometer-registry-prometheus" not in java_build
+    java_builds = {
+        "root": (REPOSITORY / "pom.xml").read_text("utf-8").casefold(),
+        "auth": (REPOSITORY / "auth-service" / "pom.xml").read_text("utf-8").casefold(),
+        "commerce": (REPOSITORY / "commerce-service" / "pom.xml").read_text("utf-8").casefold(),
+    }
+    assert java_builds["commerce"].count("micrometer-registry-prometheus") == 1
+    assert "micrometer-registry-prometheus" not in java_builds["root"]
+    assert "micrometer-registry-prometheus" not in java_builds["auth"]
+    for java_build in java_builds.values():
+        assert "spring-boot-starter-actuator" not in java_build
         assert "opentelemetry" not in java_build
