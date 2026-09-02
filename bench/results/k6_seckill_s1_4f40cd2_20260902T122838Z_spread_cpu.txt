@@ -1,0 +1,90 @@
+citybuddy_commit=4f40cd2f0159b4c4118b9b3724235a0b3ddbd390
+setup_window_utc=2026-09-02T12:28:55Z/2026-09-02T12:29:39Z
+run_started_at_utc=2026-09-02T12:32:42Z
+label=seckill_s1_4f40cd2_20260902T122838Z_spread activities=32 rates=50,100,200,400,800 step_seconds=15 gap_seconds=5 nominal_iterations=23250
+fixture_users=25000 fixture_activities=32 fixture_quota=1000000 fixture_stock=2000000 topic_suffix=s1-spread-4f40cd2-20260902T122838Z
+docker_cpus=8 docker_memory_bytes=14638391296 commerce_cpu_limit=4
+k6_image=grafana/k6@sha256:5221b620a4f874faff6e32ba597aa667c058391fe4898b1c6f6377f062c6cdec
+
+12:32:43 citybuddy-bench-k6 cpu=3.83% mem=234.9MiB / 13.63GiB
+12:32:43 citybuddy-bench-commerce cpu=77.87% mem=346.6MiB / 13.63GiB
+12:32:43 citybuddy-mysql-1 cpu=10.23% mem=914.3MiB / 13.63GiB
+12:32:43 citybuddy-redis-commerce-1 cpu=0.51% mem=60.36MiB / 13.63GiB
+12:32:48 citybuddy-bench-k6 cpu=3.07% mem=243.1MiB / 13.63GiB
+12:32:48 citybuddy-bench-commerce cpu=38.60% mem=354.7MiB / 13.63GiB
+12:32:48 citybuddy-mysql-1 cpu=9.11% mem=914.4MiB / 13.63GiB
+12:32:48 citybuddy-redis-commerce-1 cpu=0.62% mem=60.36MiB / 13.63GiB
+12:32:53 citybuddy-bench-k6 cpu=3.41% mem=263.6MiB / 13.63GiB
+12:32:53 citybuddy-bench-commerce cpu=32.32% mem=357.5MiB / 13.63GiB
+12:32:53 citybuddy-mysql-1 cpu=8.85% mem=914.4MiB / 13.63GiB
+12:32:53 citybuddy-redis-commerce-1 cpu=0.65% mem=60.34MiB / 13.63GiB
+12:32:58 citybuddy-bench-k6 cpu=0.41% mem=278MiB / 13.63GiB
+12:32:58 citybuddy-bench-commerce cpu=3.40% mem=366.3MiB / 13.63GiB
+12:32:58 citybuddy-mysql-1 cpu=4.10% mem=914.4MiB / 13.63GiB
+12:32:58 citybuddy-redis-commerce-1 cpu=0.20% mem=60.33MiB / 13.63GiB
+12:33:03 citybuddy-bench-k6 cpu=5.35% mem=300.9MiB / 13.63GiB
+12:33:03 citybuddy-bench-commerce cpu=45.35% mem=372MiB / 13.63GiB
+12:33:03 citybuddy-mysql-1 cpu=11.56% mem=914.7MiB / 13.63GiB
+12:33:03 citybuddy-redis-commerce-1 cpu=1.09% mem=60.34MiB / 13.63GiB
+12:33:08 citybuddy-bench-k6 cpu=5.47% mem=317.8MiB / 13.63GiB
+12:33:08 citybuddy-bench-commerce cpu=40.94% mem=381.6MiB / 13.63GiB
+12:33:08 citybuddy-mysql-1 cpu=12.98% mem=914.4MiB / 13.63GiB
+12:33:08 citybuddy-redis-commerce-1 cpu=11.43% mem=60.34MiB / 13.63GiB
+12:33:13 citybuddy-bench-k6 cpu=5.35% mem=318.2MiB / 13.63GiB
+12:33:13 citybuddy-bench-commerce cpu=18.52% mem=374.5MiB / 13.63GiB
+12:33:13 citybuddy-mysql-1 cpu=10.30% mem=914.5MiB / 13.63GiB
+12:33:13 citybuddy-redis-commerce-1 cpu=2.04% mem=60.34MiB / 13.63GiB
+12:33:18 citybuddy-bench-k6 cpu=0.48% mem=317.9MiB / 13.63GiB
+12:33:18 citybuddy-bench-commerce cpu=0.27% mem=374.2MiB / 13.63GiB
+12:33:18 citybuddy-mysql-1 cpu=1.14% mem=914.7MiB / 13.63GiB
+12:33:18 citybuddy-redis-commerce-1 cpu=1.60% mem=60.34MiB / 13.63GiB
+12:33:23 citybuddy-bench-k6 cpu=11.17% mem=327.3MiB / 13.63GiB
+12:33:23 citybuddy-bench-commerce cpu=82.55% mem=387.4MiB / 13.63GiB
+12:33:23 citybuddy-mysql-1 cpu=18.92% mem=914.8MiB / 13.63GiB
+12:33:23 citybuddy-redis-commerce-1 cpu=2.02% mem=60.35MiB / 13.63GiB
+12:33:28 citybuddy-bench-k6 cpu=18.87% mem=333.7MiB / 13.63GiB
+12:33:28 citybuddy-bench-commerce cpu=23.01% mem=382.7MiB / 13.63GiB
+12:33:28 citybuddy-mysql-1 cpu=13.95% mem=914.6MiB / 13.63GiB
+12:33:28 citybuddy-redis-commerce-1 cpu=2.47% mem=60.34MiB / 13.63GiB
+12:33:33 citybuddy-bench-k6 cpu=8.66% mem=333.8MiB / 13.63GiB
+12:33:33 citybuddy-bench-commerce cpu=29.72% mem=393.4MiB / 13.63GiB
+12:33:33 citybuddy-mysql-1 cpu=15.85% mem=914.6MiB / 13.63GiB
+12:33:33 citybuddy-redis-commerce-1 cpu=2.39% mem=60.43MiB / 13.63GiB
+12:33:38 citybuddy-bench-k6 cpu=0.45% mem=336.1MiB / 13.63GiB
+12:33:38 citybuddy-bench-commerce cpu=1.80% mem=396.3MiB / 13.63GiB
+12:33:38 citybuddy-mysql-1 cpu=3.23% mem=914.6MiB / 13.63GiB
+12:33:38 citybuddy-redis-commerce-1 cpu=1.98% mem=60.72MiB / 13.63GiB
+12:33:43 citybuddy-bench-k6 cpu=18.53% mem=358.3MiB / 13.63GiB
+12:33:43 citybuddy-bench-commerce cpu=85.51% mem=404.8MiB / 13.63GiB
+12:33:43 citybuddy-mysql-1 cpu=36.85% mem=915MiB / 13.63GiB
+12:33:43 citybuddy-redis-commerce-1 cpu=2.98% mem=60.57MiB / 13.63GiB
+12:33:48 citybuddy-bench-k6 cpu=23.85% mem=388.9MiB / 13.63GiB
+12:33:48 citybuddy-bench-commerce cpu=134.17% mem=451.4MiB / 13.63GiB
+12:33:48 citybuddy-mysql-1 cpu=45.87% mem=915.2MiB / 13.63GiB
+12:33:48 citybuddy-redis-commerce-1 cpu=4.04% mem=61.68MiB / 13.63GiB
+12:33:53 citybuddy-bench-k6 cpu=15.40% mem=408.3MiB / 13.63GiB
+12:33:53 citybuddy-bench-commerce cpu=41.10% mem=461.5MiB / 13.63GiB
+12:33:53 citybuddy-mysql-1 cpu=26.39% mem=915.5MiB / 13.63GiB
+12:33:53 citybuddy-redis-commerce-1 cpu=3.63% mem=63.39MiB / 13.63GiB
+12:33:59 citybuddy-bench-k6 cpu=0.52% mem=408.4MiB / 13.63GiB
+12:33:59 citybuddy-bench-commerce cpu=0.33% mem=464.8MiB / 13.63GiB
+12:33:59 citybuddy-mysql-1 cpu=1.48% mem=915.2MiB / 13.63GiB
+12:33:59 citybuddy-redis-commerce-1 cpu=1.98% mem=64.06MiB / 13.63GiB
+12:34:04 citybuddy-bench-k6 cpu=49.11% mem=424.6MiB / 13.63GiB
+12:34:04 citybuddy-bench-commerce cpu=167.58% mem=513.8MiB / 13.63GiB
+12:34:04 citybuddy-mysql-1 cpu=91.57% mem=916.8MiB / 13.63GiB
+12:34:04 citybuddy-redis-commerce-1 cpu=6.12% mem=65.29MiB / 13.63GiB
+12:34:09 citybuddy-bench-k6 cpu=37.84% mem=447.4MiB / 13.63GiB
+12:34:09 citybuddy-bench-commerce cpu=103.19% mem=535.7MiB / 13.63GiB
+12:34:09 citybuddy-mysql-1 cpu=72.74% mem=916.9MiB / 13.63GiB
+12:34:09 citybuddy-redis-commerce-1 cpu=7.13% mem=68.85MiB / 13.63GiB
+12:34:14 citybuddy-bench-k6 cpu=54.94% mem=449.4MiB / 13.63GiB
+12:34:14 citybuddy-bench-commerce cpu=108.56% mem=525.9MiB / 13.63GiB
+12:34:14 citybuddy-mysql-1 cpu=80.27% mem=917.3MiB / 13.63GiB
+12:34:14 citybuddy-redis-commerce-1 cpu=5.81% mem=72.38MiB / 13.63GiB
+12:34:19 citybuddy-bench-k6 cpu=0.00% mem=0B / 0B
+12:34:19 citybuddy-bench-commerce cpu=10.14% mem=523.8MiB / 13.63GiB
+12:34:19 citybuddy-mysql-1 cpu=3.48% mem=917.1MiB / 13.63GiB
+12:34:19 citybuddy-redis-commerce-1 cpu=1.94% mem=75.19MiB / 13.63GiB
+
+run_completed_at_utc=2026-09-02T12:34:24Z

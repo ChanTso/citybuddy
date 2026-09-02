@@ -158,6 +158,78 @@ lock was never the constraint when one row already serialized every entrant.
 Correctness was re-verified on the fixed build: 10/10 checks pass, exactly 100 admitted and 500
 exhausted, ledger and stock conserved (`results/correctness_sql.txt`).
 
+## Shared activity lock result
+
+The hot activity read was then changed from `FOR UPDATE` to `FOR SHARE`. Reservation intent
+transactions for the same activity can now overlap, while projection rebuilds retain their
+exclusive activity lock. The formal same-session comparison measured these exact commits:
+
+- before: `c049ac305b607b46c9e545473d01063f7ea96339`
+- after: `4f40cd2f0159b4c4118b9b3724235a0b3ddbd390`
+
+Both commits passed the fixed 600-request correctness workload: exactly 100 `ADMITTED`, 500
+`EXHAUSTED`, and Q01 through Q10 all PASS. The request wall time was 2.17 s before and 1.57 s
+after. The raw HTTP and SQL evidence is in
+[`correctness_seckill_s1_c049ac3_20260902T114422Z_correctness_*`](results/correctness_seckill_s1_c049ac3_20260902T114422Z_correctness_http.txt)
+and
+[`correctness_seckill_s1_4f40cd2_20260902T121356Z_correctness_*`](results/correctness_seckill_s1_4f40cd2_20260902T121356Z_correctness_http.txt).
+
+**One activity:**
+
+| Target | Before achieved/s | Before p99 | Before dropped | After achieved/s | After p99 | After dropped |
+|---:|---:|---:|---:|---:|---:|---:|
+| 50 | 50.1 | 213.6 ms | 0 | 50.1 | 279.0 ms | 0 |
+| 100 | 100.0 | 8.4 ms | 0 | 100.1 | 8.9 ms | 0 |
+| 200 | 200.1 | 10.5 ms | 0 | 200.1 | 10.6 ms | 0 |
+| 400 | 400.1 | 21.3 ms | 0 | 400.1 | 28.4 ms | 0 |
+| 800 | 736.7 | 2080.3 ms | 949 | 800.1 | 26.0 ms | 0 |
+
+At the 800 target, p50 fell from 1535.1 ms to 6.1 ms and p99 fell by about 80x. The after run
+kept up with the offered rate with zero failed requests, zero dropped iterations, and only
+`ADMITTED` decisions. The exact rows are in
+[`ladder_seckill_s1_c049ac3_20260902T115646Z_contended_steps.txt`](results/ladder_seckill_s1_c049ac3_20260902T115646Z_contended_steps.txt)
+and
+[`ladder_seckill_s1_4f40cd2_20260902T121945Z_contended_steps.txt`](results/ladder_seckill_s1_4f40cd2_20260902T121945Z_contended_steps.txt).
+
+**Traffic spread over 32 activities:**
+
+| Target | Before achieved/s | Before p99 | After achieved/s | After p99 |
+|---:|---:|---:|---:|---:|
+| 50 | 50.0 | 240.7 ms | 50.0 | 250.5 ms |
+| 100 | 100.0 | 8.3 ms | 100.0 | 9.4 ms |
+| 200 | 200.1 | 9.5 ms | 200.1 | 10.5 ms |
+| 400 | 400.1 | 16.2 ms | 400.0 | 20.0 ms |
+| 800 | 800.1 | 45.5 ms | 800.1 | 70.0 ms |
+
+Every spread point had zero failures, zero dropped iterations, and only `ADMITTED` decisions.
+The after change therefore removed the single-activity cliff without reducing achieved spread
+throughput. The exact rows are in
+[`ladder_seckill_s1_c049ac3_20260902T120426Z_spread_steps.txt`](results/ladder_seckill_s1_c049ac3_20260902T120426Z_spread_steps.txt)
+and
+[`ladder_seckill_s1_4f40cd2_20260902T122838Z_spread_steps.txt`](results/ladder_seckill_s1_4f40cd2_20260902T122838Z_spread_steps.txt).
+
+The 50/s point includes the first post-start request tail on both builds; the sustained curve is
+the 100/s-and-above sequence. Across all four ladders, peak generator CPU was 63.10% of one core,
+commerce peaked at 186.07% of its 400% allowance, and MySQL peaked at 91.57% of one core.
+
+The default Compose topology was first brought fully healthy. Before timed runs, the user paused
+host activity, the standalone RocketMQ probe was stopped, and the periodic NameServer and
+Broker/Proxy healthchecks were disabled with [`compose.quiet.yaml`](compose.quiet.yaml). Those
+checks each launched a full `mqadmin` JVM every three seconds and were control-plane noise; the
+override does not change the RocketMQ image, command, port, network, broker configuration, or
+store volume. Its SHA-256 is
+`2d6c652bb20cfa61a8365d10b3cd7429c8b3cda9bea0aa39737a55a1c8988246`.
+
+Each formal runner used a fresh Broker/Proxy process on the same image and store, a unique topic
+suffix, a fresh fixture, one-shot cluster and route checks, and three accepted idle samples. Five
+of the six setup files record zero due `PENDING` reservations before the run. The baseline
+correctness setup file does not contain that field, so its post-run HTTP and SQL closure—not an
+unrecorded pre-run value—is the retained correctness evidence. The setup evidence also records
+the Compose and override hashes, image, container start time, restart count, and Docker boundary.
+These absolute numbers describe that healthcheck-disabled local measurement boundary and are not
+directly interchangeable with the older default-Compose results above or with production
+capacity.
+
 ## Reproducing
 
 Build the exact clean commit that will be measured; setup mounts these host JARs.
@@ -168,13 +240,51 @@ make init-local && make up
   -pl auth-service,commerce-service -am clean package
 ```
 
+After the default topology has reached healthy once, remove the periodic RocketMQ control-plane
+checks outside the measured window. Validate both data-plane hops once, then let the host settle:
+
+```bash
+docker stop citybuddy-rocketmq-probe-1
+docker compose --project-name citybuddy --env-file .env \
+  --file compose.yaml --file bench/compose.quiet.yaml \
+  up --detach --no-deps --force-recreate rocketmq-namesrv
+docker exec citybuddy-rocketmq-namesrv-1 sh mqadmin getNamesrvConfig \
+  --namesrvAddr localhost:9876
+docker compose --project-name citybuddy --env-file .env \
+  --file compose.yaml --file bench/compose.quiet.yaml \
+  up --detach --no-deps --force-recreate rocketmq-broker-proxy
+docker exec citybuddy-rocketmq-broker-proxy-1 sh mqadmin clusterList \
+  --namesrvAddr rocketmq-namesrv:9876 --clusterName DefaultCluster
+docker run --rm --network citybuddy_default citybuddy-rocketmq-probe:5.2.1 \
+  route rocketmq-broker-proxy:8081 cb013-readiness
+```
+
 Before the formal commands below, stop other builds and workloads, ask the machine's user to pause
 their work, and wait for confirmation. After confirmation, let the host settle and record three
 idle CPU/process/container samples plus `pmset -g therm`. Confirm Docker Desktop still exposes 8
 CPUs and about 14 GB; do not change its allocation.
 
 Use a new `TOPIC_SUFFIX` for every setup so prior asynchronous work cannot enter the run.
-`BENCH_USERS=25000` covers the five default rate steps.
+`BENCH_USERS=25000` covers the five default rate steps. The formal evidence above used a separate
+setup for every runner. Before each setup, remove the prior benchmark auth/commerce containers,
+recreate only `rocketmq-broker-proxy` through `compose.quiet.yaml`, perform the one-shot cluster
+check, and wait for another three-sample idle gate. This prevents one runner's asynchronous tail
+from entering the next runner.
+
+```bash
+SHORT="$(git rev-parse --short=7 HEAD)"
+STAMP="$(date -u +%Y%m%dT%H%M%SZ)"
+
+TOPIC_SUFFIX="s1-correctness-${SHORT}-${STAMP}" \
+  BENCH_USERS=25000 BENCH_ACTIVITIES=32 \
+  ./bench/setup_bench_env.sh
+
+CORRECTNESS_LABEL="seckill_s1_${SHORT}_${STAMP}_correctness"
+./bench/run_correctness.sh "$CORRECTNESS_LABEL"
+```
+
+After the correctness post-check, recreate Broker/Proxy through the quiet override as described
+above, use another timestamp and topic, rerun setup, then measure the contended path:
 
 ```bash
 SHORT="$(git rev-parse --short=7 HEAD)"
@@ -183,9 +293,6 @@ STAMP="$(date -u +%Y%m%dT%H%M%SZ)"
 TOPIC_SUFFIX="s1-contended-${SHORT}-${STAMP}" \
   BENCH_USERS=25000 BENCH_ACTIVITIES=32 \
   ./bench/setup_bench_env.sh
-
-CORRECTNESS_LABEL="seckill_s1_${SHORT}_${STAMP}_correctness"
-./bench/run_correctness.sh "$CORRECTNESS_LABEL"
 
 CONTENDED_LABEL="seckill_s1_${SHORT}_${STAMP}_contended"
 RATES=50,100,200,400,800 STEP_SECONDS=15 \

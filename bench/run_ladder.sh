@@ -43,7 +43,7 @@ source_changes="$(git status --porcelain --untracked-files=all -- . \
   ':(exclude)bench/results/**' \
   ':(exclude)bench/.run/**')"
 if [ -n "$source_changes" ] || [ "$(git rev-parse --verify HEAD)" != "$CITYBUDDY_COMMIT" ] \
-  || [ "$(openssl dgst -sha256 "$auth_jar" | awk '{print $NF}')" != "$AUTH_JAR_SHA256" ] \
+  || [ "$(openssl dgst -sha256 "$auth_jar" | awk '{print $NF}')" != "$IDENTITY_JAR_SHA256" ] \
   || [ "$(openssl dgst -sha256 "$commerce_jar" | awk '{print $NF}')" != "$COMMERCE_JAR_SHA256" ]; then
   echo "Seckill ladder requires the clean checkout and JARs recorded by setup." >&2
   [ -z "$source_changes" ] || printf '%s\n' "$source_changes" >&2
