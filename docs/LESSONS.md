@@ -77,8 +77,10 @@ freshly committed, entirely legitimate ledger movement as a contradiction.
 The immediate fix summed the reserved amount from a `SELECT … FOR UPDATE` current read of that
 attempt's refund rows, and moved the reconciliation reads to `FOR SHARE`. `FOR UPDATE` and
 `FOR SHARE` do not only mean "take a lock" — in InnoDB they also mean "read the committed version
-as of now". The reconciliation reads are still `FOR SHARE`; the reserved total later moved into the
-database as a single aggregate, for the reason in *Bounds apply before materialization* below.
+as of now". The reconciliation reads are still `FOR SHARE`; the reserved total later moved into one
+exact database `SUM`, for the reason in *Bounds apply before materialization* below, while retaining
+`FOR UPDATE` so an Action transaction with an earlier receipt or sandbox snapshot still sees a
+refund committed while it waited on the payment-attempt lock.
 
 **After any lock wait, every derived aggregate or related fact has to be audited individually.**
 Fixing the first query is not fixing the pattern.
