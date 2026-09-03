@@ -8,9 +8,15 @@ from typing import Any
 import httpx
 import pytest
 from citybuddy_agent import http_client
+from citybuddy_agent.actions import (
+    MAX_ACTION_JSON_BYTES,
+    ActionReceiptResponse,
+    PendingActionReference,
+)
 from citybuddy_agent.agent_control import (
     CATALOG_PRODUCT_SPEC,
     KNOWLEDGE_SEARCH_SPEC,
+    REFUND_CONFIRM_OPERATION,
     REFUND_PREPARE_SPEC,
     SESSION_CONTEXT_MAX_TURNS,
     SESSION_CONTEXT_TOKEN_BUDGET,
@@ -1137,6 +1143,7 @@ def test_half_open_non_transient_outcome_releases_probe(
 class RecordingObo:
     def __init__(self) -> None:
         self.calls: list[tuple[str, str, str, str]] = []
+        self.sandbox_calls: list[str | None] = []
 
     def exchange(
         self,
@@ -1146,8 +1153,8 @@ class RecordingObo:
         scope: str,
         sandbox_id: str | None = None,
     ) -> str:
-        del sandbox_id
         self.calls.append((direct_token, subject, session_id, scope))
+        self.sandbox_calls.append(sandbox_id)
         return "signed-obo"
 
 
@@ -2269,6 +2276,353 @@ def test_refund_prepare_malformed_rejection_is_response_invalid(
             events=[],
         )
     assert failure.value.reason == "ACTION_PREPARATION_RESPONSE_INVALID"
+
+
+def confirm_pending(*, sandbox_id: str | None = None) -> PendingActionReference:
+    return PendingActionReference(
+        pending_action_id="00000000-0000-0000-0000-000000000121",
+        source_turn_id="00000000-0000-0000-0000-000000000122",
+        source_trace_id="00000000-0000-0000-0000-000000000123",
+        conversation_id="00000000-0000-0000-0000-000000000124",
+        session_id="session-1",
+        user_subject="user-1",
+        sandbox_id=sandbox_id,
+        action_type="REFUND_REQUEST",
+        argument_commitment="a" * 64,
+        order_id="00000000-0000-0000-0000-000000000040",
+        target_version=1,
+        amount_minor=400,
+        currency="CNY",
+        expires_at=datetime.now(UTC) + timedelta(hours=1),
+    )
+
+
+def confirm_receipt(pending: PendingActionReference, **overrides: object) -> dict[str, object]:
+    payload: dict[str, object] = {
+        "receiptId": "00000000-0000-0000-0000-0000000001a1",
+        "pendingActionId": pending.pending_action_id,
+        "actionType": pending.action_type,
+        "status": "REQUESTED",
+        "orderId": pending.order_id,
+        "refundId": "00000000-0000-0000-0000-0000000001b1",
+        "resourceVersion": 2,
+        "amountMinor": pending.amount_minor,
+        "currency": pending.currency,
+        "committedAt": "2030-07-29T12:00:00.123456Z",
+        "replayed": False,
+    }
+    payload.update(overrides)
+    return payload
+
+
+def assert_no_confirmation_success(events: list[AgentEvent]) -> None:
+    assert (
+        AgentEvent(
+            "TOOL_LIFECYCLE",
+            {"tool": REFUND_CONFIRM_OPERATION, "state": "succeeded"},
+        )
+        not in events
+    )
+
+
+@pytest.mark.parametrize("sandbox_id", [None, "sandbox-1"])
+def test_confirm_action_uses_exact_obo_http_headers_budget_and_success_event(
+    sandbox_id: str | None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    pending = confirm_pending(sandbox_id=sandbox_id)
+    requests: list[dict[str, object]] = []
+
+    @contextmanager
+    def stream(method: str, url: str, **kwargs: Any) -> Iterator[httpx.Response]:
+        requests.append({"method": method, "url": url, **kwargs})
+        yield httpx.Response(
+            200,
+            content=json.dumps(confirm_receipt(pending)).encode(),
+            request=httpx.Request(method, url),
+        )
+
+    monkeypatch.setattr(http_client, "stream", stream)
+    obo = RecordingObo()
+    events: list[AgentEvent] = []
+    budget = AttemptBudget(2, events)
+
+    receipt = ToolAdapter("https://commerce.test/", obo).confirm_action(
+        pending=pending,
+        direct_token="direct",
+        subject="user-1",
+        session_id="session-1",
+        sandbox_id=sandbox_id,
+        budget=budget,
+        events=events,
+    )
+
+    headers = {
+        "Authorization": "Bearer signed-obo",
+        "X-Support-Session-Id": "session-1",
+        "X-Agent-Trace-Id": pending.source_trace_id,
+        "X-Agent-Turn-Id": pending.source_turn_id,
+    }
+    if sandbox_id is not None:
+        headers["X-Eval-Sandbox-Id"] = sandbox_id
+    assert receipt.pending_action_id == pending.pending_action_id
+    assert obo.calls == [("direct", "user-1", "session-1", "refund:create")]
+    assert obo.sandbox_calls == [sandbox_id]
+    assert requests == [
+        {
+            "method": "POST",
+            "url": (
+                f"https://commerce.test/internal/tools/actions/{pending.pending_action_id}/confirm"
+            ),
+            "headers": headers,
+            "json": {},
+            "timeout": 3.0,
+        }
+    ]
+    assert budget.used == 2
+    assert events == [
+        AgentEvent(
+            "BUDGET_CHARGED",
+            {"attempt": 1, "limit": 2, "kind": "identity_http", "target": "refund:create"},
+        ),
+        AgentEvent(
+            "BUDGET_CHARGED",
+            {
+                "attempt": 2,
+                "limit": 2,
+                "kind": "tool_http",
+                "target": REFUND_CONFIRM_OPERATION,
+            },
+        ),
+        AgentEvent(
+            "TOOL_LIFECYCLE",
+            {"tool": REFUND_CONFIRM_OPERATION, "state": "succeeded"},
+        ),
+    ]
+
+
+@pytest.mark.parametrize(
+    ("obo", "status", "reason"),
+    [
+        (StatusObo(401), 403, "ACTION_CONFIRMATION_IDENTITY_UNAUTHENTICATED"),
+        (StatusObo(403), 403, "ACTION_CONFIRMATION_IDENTITY_FORBIDDEN"),
+        (StatusObo(502), 503, "ACTION_CONFIRMATION_IDENTITY_UNAVAILABLE"),
+        (UnavailableObo(), 503, "ACTION_CONFIRMATION_IDENTITY_UNAVAILABLE"),
+    ],
+)
+def test_confirm_action_fails_before_commerce_when_obo_fails(
+    obo: Any,
+    status: int,
+    reason: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def forbidden(*args: Any, **kwargs: Any) -> Any:
+        del args, kwargs
+        raise AssertionError("confirmation crossed the Commerce boundary")
+
+    monkeypatch.setattr(http_client, "stream", forbidden)
+    events: list[AgentEvent] = []
+    budget = AttemptBudget(2, events)
+
+    with pytest.raises(ToolBoundaryFailure) as failure:
+        ToolAdapter("https://commerce.test", obo).confirm_action(
+            pending=confirm_pending(),
+            direct_token="direct",
+            subject="user-1",
+            session_id="session-1",
+            sandbox_id=None,
+            budget=budget,
+            events=events,
+        )
+
+    assert failure.value.status_code == status
+    assert failure.value.reason == reason
+    assert budget.used == 1
+    assert_no_confirmation_success(events)
+
+
+@pytest.mark.parametrize("limit", [0, 1])
+def test_confirm_action_budget_stops_before_the_next_network_boundary(
+    limit: int, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    obo = RecordingObo()
+
+    def forbidden(*args: Any, **kwargs: Any) -> Any:
+        del args, kwargs
+        raise AssertionError("confirmation crossed the Commerce boundary")
+
+    monkeypatch.setattr(http_client, "stream", forbidden)
+    budget = AttemptBudget(limit, [])
+
+    with pytest.raises(AttemptBudgetExhausted):
+        ToolAdapter("https://commerce.test", obo).confirm_action(
+            pending=confirm_pending(),
+            direct_token="direct",
+            subject="user-1",
+            session_id="session-1",
+            sandbox_id=None,
+            budget=budget,
+            events=[],
+        )
+
+    assert budget.used == limit
+    assert len(obo.calls) == limit
+
+
+@pytest.mark.parametrize(
+    ("exception", "reason"),
+    [
+        (httpx.ReadTimeout("timeout"), "ACTION_CONFIRMATION_COMMERCE_TIMEOUT"),
+        (httpx.ConnectError("unavailable"), "ACTION_CONFIRMATION_COMMERCE_UNAVAILABLE"),
+        (
+            httpx.RemoteProtocolError("disconnected"),
+            "ACTION_CONFIRMATION_COMMERCE_UNAVAILABLE",
+        ),
+    ],
+)
+def test_confirm_action_classifies_commerce_transport_failures(
+    exception: Exception, reason: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    @contextmanager
+    def stream(method: str, url: str, **kwargs: Any) -> Iterator[httpx.Response]:
+        del method, url, kwargs
+        raise exception
+        yield  # pragma: no cover
+
+    monkeypatch.setattr(http_client, "stream", stream)
+    events: list[AgentEvent] = []
+
+    with pytest.raises(ToolBoundaryFailure) as failure:
+        ToolAdapter("https://commerce.test", RecordingObo()).confirm_action(
+            pending=confirm_pending(),
+            direct_token="direct",
+            subject="user-1",
+            session_id="session-1",
+            sandbox_id=None,
+            budget=AttemptBudget(2, events),
+            events=events,
+        )
+
+    assert failure.value.status_code == 503
+    assert failure.value.reason == reason
+    assert_no_confirmation_success(events)
+
+
+@pytest.mark.parametrize(
+    ("commerce_status", "public_status", "reason"),
+    [
+        (400, 409, "ACTION_CONFIRMATION_COMMERCE_VALIDATION_REJECTED"),
+        (401, 409, "ACTION_CONFIRMATION_COMMERCE_UNAUTHENTICATED"),
+        (403, 409, "ACTION_CONFIRMATION_COMMERCE_FORBIDDEN"),
+        (404, 409, "ACTION_CONFIRMATION_TARGET_NOT_FOUND"),
+        (409, 409, "ACTION_CONFIRMATION_INTENT_CONFLICT"),
+        (422, 409, "ACTION_CONFIRMATION_COMMERCE_VALIDATION_REJECTED"),
+        (429, 429, "ACTION_CONFIRMATION_COMMERCE_INDETERMINATE"),
+        (408, 503, "ACTION_CONFIRMATION_COMMERCE_TIMEOUT"),
+        (504, 503, "ACTION_CONFIRMATION_COMMERCE_TIMEOUT"),
+        (500, 503, "ACTION_CONFIRMATION_COMMERCE_UNAVAILABLE"),
+    ],
+)
+def test_confirm_action_status_classification_is_exact(
+    commerce_status: int,
+    public_status: int,
+    reason: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    @contextmanager
+    def stream(method: str, url: str, **kwargs: Any) -> Iterator[httpx.Response]:
+        del kwargs
+        yield httpx.Response(commerce_status, request=httpx.Request(method, url))
+
+    monkeypatch.setattr(http_client, "stream", stream)
+    events: list[AgentEvent] = []
+
+    with pytest.raises(ToolBoundaryFailure) as failure:
+        ToolAdapter("https://commerce.test", RecordingObo()).confirm_action(
+            pending=confirm_pending(),
+            direct_token="direct",
+            subject="user-1",
+            session_id="session-1",
+            sandbox_id=None,
+            budget=AttemptBudget(2, events),
+            events=events,
+        )
+
+    assert failure.value.status_code == public_status
+    assert failure.value.reason == reason
+    assert_no_confirmation_success(events)
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        b"not-json",
+        b"{}",
+        b"{" + b" " * MAX_ACTION_JSON_BYTES + b"}",
+    ],
+)
+def test_confirm_action_rejects_untrusted_or_oversized_json_before_success(
+    body: bytes, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    @contextmanager
+    def stream(method: str, url: str, **kwargs: Any) -> Iterator[httpx.Response]:
+        del kwargs
+        yield httpx.Response(200, content=body, request=httpx.Request(method, url))
+
+    monkeypatch.setattr(http_client, "stream", stream)
+    events: list[AgentEvent] = []
+
+    with pytest.raises(ToolBoundaryFailure) as failure:
+        ToolAdapter("https://commerce.test", RecordingObo()).confirm_action(
+            pending=confirm_pending(),
+            direct_token="direct",
+            subject="user-1",
+            session_id="session-1",
+            sandbox_id=None,
+            budget=AttemptBudget(2, events),
+            events=events,
+        )
+
+    assert failure.value.status_code == 502
+    assert failure.value.reason == "ACTION_CONFIRMATION_RESPONSE_INVALID"
+    assert_no_confirmation_success(events)
+
+
+def test_confirm_action_rejects_a_schema_valid_receipt_for_another_pending_action(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    pending = confirm_pending()
+    payload = confirm_receipt(
+        pending,
+        pendingActionId="00000000-0000-0000-0000-000000000999",
+    )
+    ActionReceiptResponse.model_validate(payload)
+
+    @contextmanager
+    def stream(method: str, url: str, **kwargs: Any) -> Iterator[httpx.Response]:
+        del kwargs
+        yield httpx.Response(
+            200,
+            content=json.dumps(payload).encode(),
+            request=httpx.Request(method, url),
+        )
+
+    monkeypatch.setattr(http_client, "stream", stream)
+    events: list[AgentEvent] = []
+
+    with pytest.raises(ToolBoundaryFailure) as failure:
+        ToolAdapter("https://commerce.test", RecordingObo()).confirm_action(
+            pending=pending,
+            direct_token="direct",
+            subject="user-1",
+            session_id="session-1",
+            sandbox_id=None,
+            budget=AttemptBudget(2, events),
+            events=events,
+        )
+
+    assert failure.value.status_code == 502
+    assert failure.value.reason == "ACTION_CONFIRMATION_RESPONSE_INVALID"
+    assert_no_confirmation_success(events)
 
 
 def test_sensitive_tool_failure_producer_inventory_is_closed() -> None:
