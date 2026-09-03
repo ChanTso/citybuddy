@@ -383,10 +383,13 @@ not by treating the product cache-invalidation consumer as a knowledge-indexer f
   drop, not-found, or another terminal decision. Each stateful consumer must preserve this
   classification across its persisted state classes and mutation phases, including the indeterminate
   window after an authoritative mutation but before owner-local projection finalization.
-- MySQL-derived product, FAQ, order, refund, and retained ticket events use an Outbox row
-  written in the same local transaction as the business change. A retained authoritative ticket
-  capability would produce its own state, SLA event, and Outbox in `commerce-service`; the agent
-  would only request handoff and store a projection.
+- MySQL-derived product and FAQ events use delivery Outbox rows selected by the current publisher
+  workers. Standard-order and refund mutations also write same-transaction rows, but no runtime
+  publisher selects them; they are owner-local commitments, and refund confirmation also validates
+  the retained refund-event closure. The current runtime does not delete these rows, but no
+  permanent-retention or archival policy is implemented. A retained authoritative ticket capability
+  would produce its own state, SLA event, and Outbox in `commerce-service`; the agent would only
+  request handoff and store a projection.
 - Transaction messages, delay messages, domain events, and FAQ knowledge-sync events are distinct
   responsibilities. Request threads do not dual-write MySQL, Redis caches, and Elasticsearch as
   independent truths.
@@ -413,7 +416,7 @@ not by treating the product cache-invalidation consumer as a knowledge-indexer f
 |---|---|---|---|---|---|
 | Seckill order transaction | Commerce producer → commerce order consumer | Transaction | Reservation/activity/user ids, event id, version; current production payload carries no sandbox and consumer rejects the reserved sandbox property | Half message commits only after Lua admission; `UNKNOWN` is temporary; configured broker bounds define terminal window; uniqueness and ledger movements make replay harmless | Implemented |
 | Order/payment timeout | `commerce-service` → commerce timeout consumer | Delay | Order id, expected state/version, due time, event id; current production payload carries no sandbox and consumer rejects the reserved sandbox property | Re-read MySQL; conditional cancellation and ledger restoration are idempotent; paid/final orders are not cancelled | Implemented |
-| Commerce domain events | Commerce Outbox publisher → authorized consumers | Normal | Event id, aggregate/version, occurred time; current payloads carry no sandbox and production consumers reject the reserved sandbox property | Mutation and Outbox commit together; consumers are idempotent; late events cannot reverse newer state | Implemented; current product event consumer is commerce cache invalidation |
+| Product publication event | PRODUCT Outbox publisher → commerce cache-invalidation consumer | Normal | Event id, product id/version, catalog generation, publication state; current payload carries no sandbox and the production consumer rejects the reserved sandbox property | Mutation and Outbox commit together; consumers are idempotent; late events cannot reverse newer state | Implemented |
 
 <a id="contract-sequence-rocketmq"></a>
 

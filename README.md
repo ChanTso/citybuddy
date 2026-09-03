@@ -14,7 +14,7 @@ no in-memory substitutes and no mocked infrastructure in the integration suite.
 |---|---|---|
 | [Transactional ownership binding](https://github.com/ChanTso/state-eval/tree/main/results/ownership-campaign-v1) | In this fixed 600-trial evaluation, commerce's in-transaction ownership binding reduced unauthorized refund requests observed by independent terminal SQL from 55/300 (18.33%; 95% Wilson CI 14.36%–23.10%) with the binding off to 0/300 (0%; 95% Wilson CI approximately 0%–1.264%) with it on. | 5 phrasings × 2 arms × 60 in 60 balanced randomized blocks (seed `2026083102`); 600/600 planned trials measured, the activation check passed, and operationally inconclusive, interrupted, and extra trial counts were each 0. StateEval `38cdde3aec1c4b8044d535fcdb7a7616dc81722b`; CityBuddy SUT `09130fa3c0209648f98781ff0892c3d07a55e59f`; one operator-attested proxy-exposed `gpt-5.4` alias, not an immutable upstream model pin; two 100-trial calibration runs excluded. |
 | [Seckill reservation contention](bench/README.md#finding-and-fix-the-serializing-lock-was-also-suppressing-a-deadlock) | The pre-fix 32-activity ladder logged roughly 6,200 deadlock events; the fixed run logged 0. At the 800 req/s target, 12,003 admissions completed at 799.9 req/s with p99 39.4 ms and 0 drops or failed requests. | One MacBook Pro M4 (10 cores, 24 GB), Docker Desktop (8 CPUs, 14 GB), authenticated requests across Redis Lua and real MySQL transactions; 32 activities, a 15 s fixed-arrival-rate step, setup excluded. This is a local workload result, not a capacity claim. |
-| [Concurrent standard-order creation](bench/results/order_idempotency_parallel_creation_fix.txt) | Four workers created 6,000/6,000 distinct orders with 6,000 matched idempotency rows and outbox events, 0 orphan idempotency rows, and MySQL 1205/1213 counter deltas of 0. | One Apple M4 (10 cores, 24 GB), Docker (8 CPUs, 14 GB), real MySQL 8.4.10; 6,000 unique users and order intents. The 16.9 s window included per-user login and `POST /api/orders`; seeding and service startup were excluded. |
+| [Concurrent standard-order creation](bench/results/order_idempotency_parallel_creation_fix.txt) | Four workers created 6,000/6,000 distinct orders with 6,000 matched idempotency rows and retained outbox rows, 0 orphan idempotency rows, and MySQL 1205/1213 counter deltas of 0. | One Apple M4 (10 cores, 24 GB), Docker (8 CPUs, 14 GB), real MySQL 8.4.10; 6,000 unique users and order intents. The 16.9 s window included per-user login and `POST /api/orders`; seeding and service startup were excluded. |
 
 ```mermaid
 flowchart LR
@@ -331,6 +331,11 @@ handling, cross-session memory, and human handoff are out of scope. The payment 
 committed receipt means the refund request is durably recorded and owned by commerce, not that
 money moved.
 
+Runtime Outbox publishers select only product-publication and FAQ knowledge-sync rows. Standard
+order and refund rows are same-transaction retained commitments and remain `PENDING`: this
+repository defines no delivery contract for them and makes no permanent audit-retention promise.
+A whole-table `PENDING` count is therefore not a delivery backlog across aggregate types.
+
 The sporadic preparation HTTP 502 measured by the benchmark was a variable-width timestamp
 mismatch: commerce sometimes rendered millisecond-aligned instants with three fractional digits,
 while the agent requires canonical six-digit UTC microseconds. Commerce now pins both preparation
@@ -352,8 +357,8 @@ new orders could hold compatible gaps in the composite primary key and deadlock 
 Order creation now leaves an absent key unlocked, lets the primary key adjudicate a competing
 insert, and locks only a positive reread or a recovery observation. The deterministic real-MySQL
 race commits both orders without 1213, and a four-worker 6,000-order acceptance run moved neither
-the 1205 nor 1213 counter while leaving 6,000 matched orders, idempotency rows and outbox events.
-The exact boundary and raw SQL are recorded in
+the 1205 nor 1213 counter while leaving 6,000 matched orders, idempotency rows and retained outbox
+rows. The exact boundary and raw SQL are recorded in
 [bench/results/order_idempotency_parallel_creation_fix.txt](bench/results/order_idempotency_parallel_creation_fix.txt).
 
 Development rules are in [AGENTS.md](AGENTS.md). Retired process records are in
