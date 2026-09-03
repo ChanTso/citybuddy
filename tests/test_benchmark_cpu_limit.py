@@ -218,6 +218,47 @@ def test_dependency_container_rejects_recreation_or_restart(
     assert "Benchmark container identity drifted (test): dependency" in result.stderr
 
 
+@pytest.mark.parametrize(
+    ("runner", "stage_name"),
+    [
+        (SECKILL_CORRECTNESS, ".correctness.runner.test"),
+        (SECKILL_LADDER, ".ladder.runner.test"),
+    ],
+)
+def test_seckill_failure_cleanup_retains_claim_and_original_status(
+    tmp_path: Path, runner: Path, stage_name: str
+) -> None:
+    source = runner.read_text(encoding="utf-8")
+    cleanup_start = source.index("cleanup() {")
+    cleanup_end = source.index("\n}\ntrap cleanup EXIT", cleanup_start) + 2
+    cleanup_function = source[cleanup_start:cleanup_end]
+    claim = tmp_path / ".claim.seckill"
+    claim.mkdir()
+    stage = tmp_path / stage_name
+    stage.mkdir()
+
+    result = subprocess.run(
+        [
+            "/bin/bash",
+            "-u",
+            "-c",
+            'out="$1"; claim_dir="$2"; stage_dir="$3"; LABEL=runner; '
+            f"k6_container_id=; {cleanup_function}; trap cleanup EXIT; exit 7",
+            "cleanup-test",
+            str(tmp_path),
+            str(claim),
+            str(stage),
+        ],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode == 7, result.stderr
+    assert claim.is_dir()
+    assert not stage.exists()
+
+
 def test_both_harnesses_use_one_requested_limit_and_gate_the_live_container() -> None:
     helper = CPU_LIMIT.read_text(encoding="utf-8")
     seckill_setup = SECKILL_SETUP.read_text(encoding="utf-8")
@@ -290,22 +331,35 @@ def test_both_harnesses_use_one_requested_limit_and_gate_the_live_container() ->
     ladder = SECKILL_LADDER.read_text(encoding="utf-8")
     correctness = SECKILL_CORRECTNESS.read_text(encoding="utf-8")
     assert 'bundle_dir="$out/ladder_${LABEL}"' in ladder
-    assert 'claim_dir="$out/.claim.ladder_${LABEL}"' in ladder
+    assert 'claim_dir="$out/.claim.seckill"' in ladder
     assert 'stage_dir="$(mktemp -d "$out/.ladder.${LABEL}.XXXXXX")"' in ladder
     assert '--volume "$stage_dir:/out"' in ladder
+    assert 'k6_container_id="$(docker run --detach --name citybuddy-bench-k6' in ladder
     assert 'bundle_dir="$out/correctness_${LABEL}"' in correctness
-    assert 'claim_dir="$out/.claim.correctness_${LABEL}"' in correctness
+    assert 'claim_dir="$out/.claim.seckill"' in correctness
     assert 'stage_dir="$(mktemp -d "$out/.correctness.${LABEL}.XXXXXX")"' in correctness
     assert 'tee -a "$stage_dir/$http_name"' in correctness
     for source in (ladder, correctness):
         assert 'cp "$bench_env" "$stage_dir/$setup_name"' in source
         assert "trap cleanup EXIT" in source
         assert 'rm -rf -- "$stage_dir"' in source
-        assert source.count('mv -- "$stage_dir" "$bundle_dir"') == 1
-        assert source.index('verify_run_boundary "after') < source.index(
-            'mv -- "$stage_dir" "$bundle_dir"'
+        assert 'if ! mkdir "$claim_dir" 2>/dev/null; then' in source
+        cleanup_start = source.index("cleanup() {")
+        cleanup_end = source.index("\n}\ntrap cleanup EXIT", cleanup_start) + 2
+        cleanup = source[cleanup_start:cleanup_end]
+        assert cleanup.startswith(
+            "cleanup() {\n  local exit_status=\"$?\"\n  trap - EXIT\n  trap '' HUP INT TERM\n"
         )
-        before_publication = source[: source.index('mv -- "$stage_dir" "$bundle_dir"')]
+        assert 'rmdir "$claim_dir"' not in cleanup
+        assert source.count('mv -- "$stage_dir" "$bundle_dir"') == 1
+        publication = source.index('mv -- "$stage_dir" "$bundle_dir"')
+        assert source.index('verify_run_boundary "after') < publication
+        disarm = source.index("trap - EXIT", publication)
+        ignore_signals = source.index("trap '' HUP INT TERM", disarm)
+        release = source.index('rmdir "$claim_dir"', ignore_signals)
+        assert publication < disarm < ignore_signals < release
+        assert source.count('rmdir "$claim_dir"') == 1
+        before_publication = source[:publication]
         assert '> "$out/' not in before_publication
         assert '>> "$out/' not in before_publication
         assert 'tee -a "$out/' not in before_publication

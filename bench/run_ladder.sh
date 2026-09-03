@@ -134,7 +134,7 @@ console_name="k6_${LABEL}_console.txt"
 steps_name="ladder_${LABEL}_steps.txt"
 setup_name="seckill_${LABEL}_setup.txt"
 bundle_dir="$out/ladder_${LABEL}"
-claim_dir="$out/.claim.ladder_${LABEL}"
+claim_dir="$out/.claim.seckill"
 if [ -e "$bundle_dir" ]; then
   echo "Refusing to overwrite existing seckill benchmark bundle: $bundle_dir" >&2
   exit 1
@@ -145,28 +145,28 @@ if docker inspect citybuddy-bench-k6 >/dev/null 2>&1; then
 fi
 
 stage_dir=""
-claim_owned=false
 k6_container_id=""
+
 cleanup() {
+  local exit_status="$?"
+  trap - EXIT
+  trap '' HUP INT TERM
   if [ -n "$k6_container_id" ]; then
     docker rm -f "$k6_container_id" >/dev/null 2>&1 || true
   fi
   if [ -n "$stage_dir" ] && [[ "$stage_dir" == "$out/.ladder.${LABEL}."* ]]; then
-    rm -rf -- "$stage_dir"
+    rm -rf -- "$stage_dir" || true
   fi
-  if [ "$claim_owned" = true ]; then
-    rmdir "$claim_dir" >/dev/null 2>&1 || true
-  fi
+  exit "$exit_status"
 }
 trap cleanup EXIT
 trap 'exit 129' HUP
 trap 'exit 130' INT
 trap 'exit 143' TERM
 if ! mkdir "$claim_dir" 2>/dev/null; then
-  echo "Another seckill ladder owns label '$LABEL': $claim_dir" >&2
+  echo "Another seckill evidence run owns the global fixture: $claim_dir" >&2
   exit 1
 fi
-claim_owned=true
 stage_dir="$(mktemp -d "$out/.ladder.${LABEL}.XXXXXX")"
 cp "$bench_env" "$stage_dir/$setup_name"
 
@@ -258,9 +258,9 @@ if [ -e "$bundle_dir" ]; then
   exit 1
 fi
 mv -- "$stage_dir" "$bundle_dir"
-stage_dir=""
+trap - EXIT
+trap '' HUP INT TERM
 rmdir "$claim_dir"
-claim_owned=false
 
 echo "-- peak generator CPU --"
 awk '/citybuddy-bench-k6/ {value=$3; sub(/^cpu=/,"",value); sub(/%$/,"",value); print value}' \

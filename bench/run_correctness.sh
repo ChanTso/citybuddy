@@ -30,7 +30,7 @@ http_name="correctness_${LABEL}_http.txt"
 sql_name="correctness_${LABEL}_sql.txt"
 setup_name="seckill_${LABEL}_setup.txt"
 bundle_dir="$out/correctness_${LABEL}"
-claim_dir="$out/.claim.correctness_${LABEL}"
+claim_dir="$out/.claim.seckill"
 if [ -e "$bundle_dir" ]; then
   echo "Refusing to overwrite existing seckill correctness bundle: $bundle_dir" >&2
   exit 1
@@ -111,24 +111,23 @@ if [ "$BENCH_USERS" -lt "$ATTEMPTS" ]; then
 fi
 
 stage_dir=""
-claim_owned=false
 cleanup() {
+  local exit_status="$?"
+  trap - EXIT
+  trap '' HUP INT TERM
   if [ -n "$stage_dir" ] && [[ "$stage_dir" == "$out/.correctness.${LABEL}."* ]]; then
-    rm -rf -- "$stage_dir"
+    rm -rf -- "$stage_dir" || true
   fi
-  if [ "$claim_owned" = true ]; then
-    rmdir "$claim_dir" >/dev/null 2>&1 || true
-  fi
+  exit "$exit_status"
 }
 trap cleanup EXIT
 trap 'exit 129' HUP
 trap 'exit 130' INT
 trap 'exit 143' TERM
 if ! mkdir "$claim_dir" 2>/dev/null; then
-  echo "Another seckill correctness run owns label '$LABEL': $claim_dir" >&2
+  echo "Another seckill evidence run owns the global fixture: $claim_dir" >&2
   exit 1
 fi
-claim_owned=true
 stage_dir="$(mktemp -d "$out/.correctness.${LABEL}.XXXXXX")"
 cp "$bench_env" "$stage_dir/$setup_name"
 
@@ -265,7 +264,7 @@ if [ -e "$bundle_dir" ]; then
   exit 1
 fi
 mv -- "$stage_dir" "$bundle_dir"
-stage_dir=""
+trap - EXIT
+trap '' HUP INT TERM
 rmdir "$claim_dir"
-claim_owned=false
 cat "$bundle_dir/$sql_name"

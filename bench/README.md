@@ -49,10 +49,14 @@ CPUs, so results at that boundary do not establish a production resource require
    dependency; and clears only synthetic activity, user and rebuild Redis keys. Runners check the
    source, artifacts, containers and CPU controls before and after load.
 7. **A result bundle publishes atomically.** Every run needs a unique safe `LABEL`. A hidden staging
-   directory and a same-label claim live on the `bench/results` filesystem. Only after k6 or SQL
+   directory and one global seckill-fixture claim live on the `bench/results` filesystem, so
+   correctness and ladder runs cannot mutate the shared fixture concurrently. Only after k6 or SQL
    validation and the final boundary gate passes is that directory renamed once to
-   `results/ladder_${LABEL}` or `results/correctness_${LABEL}`. Failure removes the hidden staging
-   directory and claim, so no partial bundle looks published and the label remains reusable.
+   `results/ladder_${LABEL}` or `results/correctness_${LABEL}`. A failed or interrupted run before
+   publication leaves no public bundle. Cleanup is best effort: a hidden stage or the fixed-name k6
+   container can remain, and the global claim is intentionally retained. Before another seckill
+   evidence run, an operator must confirm that no runner is active, inspect and remove any leftover
+   stage or container, and only then remove the claim.
 
 ### CPU artifact boundary
 
@@ -445,7 +449,7 @@ The ladder runner atomically publishes `results/ladder_${LABEL}/`, containing
 `seckill_${LABEL}_setup.txt`; points remain ignored but available to the automatic calculator.
 Correctness atomically publishes `results/correctness_${LABEL}/`, containing
 `correctness_${LABEL}_{http,sql}.txt` and the setup record. Historical flat artifacts remain in
-place; neither a bundle nor its active same-label claim is replaced.
+place; neither a bundle nor the active global seckill-fixture claim is replaced.
 
 To locate the next ceiling, run one rate at a time from a fresh setup. Inspect the automatically
 generated step row and summary after each command; stop that topology at the first non-zero HTTP
