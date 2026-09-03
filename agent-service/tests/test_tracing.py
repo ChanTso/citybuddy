@@ -47,6 +47,8 @@ class RecordingMetrics(NoopCityBuddyMetrics):
 
 class ExplodingMetrics(RecordingMetrics):
     def record_trace_export(self, outcome: TraceExportOutcome) -> None:
+        with self._lock:
+            self.trace_exports.append(outcome)
         raise RuntimeError("private recorder failure")
 
 
@@ -335,7 +337,13 @@ def test_trace_metrics_failure_never_escapes_worker_or_close(
         yield FakeStreamResponse(204, b"")
 
     monkeypatch.setattr(http_client, "stream", stream)
-    sink = BoundedHttpTraceSink("http://trace.test/export", ExplodingMetrics())
-    sink.emit(envelope())
-    time.sleep(0.03)
-    sink.close()
+    metrics = ExplodingMetrics()
+    sink = BoundedHttpTraceSink("http://trace.test/export", metrics)
+    try:
+        sink.emit(envelope())
+        sink.emit(envelope())
+        wait_for(
+            lambda: metrics.trace_exports == [TraceExportOutcome.SENT, TraceExportOutcome.SENT]
+        )
+    finally:
+        sink.close()
