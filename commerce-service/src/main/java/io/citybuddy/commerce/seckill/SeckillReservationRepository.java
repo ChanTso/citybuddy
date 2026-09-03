@@ -86,6 +86,21 @@ public final class SeckillReservationRepository {
         reservationId);
   }
 
+  public boolean hasBlockingAdmissionTruthForDifferentIntent(
+      String userSubject, String activityId, String idempotencyKey) {
+    Integer count =
+        jdbc.queryForObject(
+            "SELECT COUNT(*) FROM seckill_reservation "
+                + "WHERE user_subject = ? AND activity_id = ? "
+                + "AND idempotency_key <> ? "
+                + "AND state IN ('ADMITTED', 'ORDERED', 'CANCELLED', 'UNFULFILLED')",
+            Integer.class,
+            userSubject,
+            activityId,
+            idempotencyKey);
+    return count != null && count > 0;
+  }
+
   public List<SeckillReservation> findAllForActivityForUpdate(String activityId) {
     return jdbc.query(
         "SELECT "
@@ -123,7 +138,8 @@ public final class SeckillReservationRepository {
     Long quantity =
         jdbc.queryForObject(
             "SELECT COALESCE(SUM(quantity), 0) FROM seckill_reservation "
-                + "WHERE activity_id = ? AND state IN ('ADMITTED', 'ORDERED')",
+                + "WHERE activity_id = ? "
+                + "AND state IN ('ADMITTED', 'ORDERED', 'UNFULFILLED')",
             Long.class,
             activityId);
     return quantity == null ? 0 : quantity;
@@ -185,6 +201,35 @@ public final class SeckillReservationRepository {
         current.decisionCode(),
         3,
         orderId,
+        current.transactionResolutionDueAt());
+  }
+
+  public SeckillReservation markUnfulfilled(SeckillReservation current) {
+    int changed =
+        jdbc.update(
+            """
+            UPDATE seckill_reservation
+            SET state = 'UNFULFILLED', projection_version = 3
+            WHERE reservation_id = ? AND state = 'ADMITTED'
+              AND projection_version = 2 AND order_id IS NULL
+            """,
+            current.reservationId());
+    if (changed != 1) {
+      throw new IllegalStateException(
+          "Reservation changed during its locked unfulfilled transition");
+    }
+    return new SeckillReservation(
+        current.reservationId(),
+        current.userSubject(),
+        current.activityId(),
+        current.idempotencyKey(),
+        current.intentHash(),
+        current.quantity(),
+        current.activityProjectionVersion(),
+        ReservationState.UNFULFILLED,
+        current.decisionCode(),
+        3,
+        null,
         current.transactionResolutionDueAt());
   }
 

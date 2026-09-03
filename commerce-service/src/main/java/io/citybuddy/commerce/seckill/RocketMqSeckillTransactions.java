@@ -25,18 +25,18 @@ public final class RocketMqSeckillTransactions implements AutoCloseable {
   private final ClientServiceProvider provider;
   private final ObjectMapper objectMapper;
   private final SeckillOrderProperties properties;
-  private final ReservationAdmissionStore admissionStore;
+  private final SeckillReservationService reservationService;
   private final Producer producer;
   private final SimpleConsumer consumer;
 
   public RocketMqSeckillTransactions(
       ObjectMapper objectMapper,
       SeckillOrderProperties properties,
-      ReservationAdmissionStore admissionStore)
+      SeckillReservationService reservationService)
       throws ClientException {
     this.objectMapper = objectMapper;
     this.properties = properties;
-    this.admissionStore = admissionStore;
+    this.reservationService = reservationService;
     provider = ClientServiceProvider.loadService();
     ClientConfiguration configuration =
         ClientConfiguration.newBuilder()
@@ -91,7 +91,7 @@ public final class RocketMqSeckillTransactions implements AutoCloseable {
         throw new IllegalStateException("Lua decision did not produce a terminal marker");
       }
     } catch (ClientException exception) {
-      // The durable marker remains the sole checker authority after an uncertain second phase.
+      // The checker reads the durable MySQL reservation after an uncertain second phase.
     }
     return result;
   }
@@ -111,7 +111,7 @@ public final class RocketMqSeckillTransactions implements AutoCloseable {
 
   TransactionResolution check(MessageView message) {
     try {
-      return admissionStore.transactionResolution(singleKey(message));
+      return reservationService.transactionResolution(singleKey(message));
     } catch (RuntimeException exception) {
       return TransactionResolution.UNKNOWN;
     }

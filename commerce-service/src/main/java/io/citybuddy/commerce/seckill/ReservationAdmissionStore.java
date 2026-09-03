@@ -1,16 +1,13 @@
 package io.citybuddy.commerce.seckill;
 
 import com.fasterxml.jackson.core.JsonProcessingException;
-import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import java.time.Clock;
 import java.util.ArrayList;
 import java.util.HashMap;
-import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.UUID;
-import org.apache.rocketmq.client.apis.producer.TransactionResolution;
 import org.springframework.data.redis.core.StringRedisTemplate;
 import org.springframework.data.redis.core.script.DefaultRedisScript;
 
@@ -272,26 +269,6 @@ public final class ReservationAdmissionStore {
             return decoded
           end
 
-          local function same_activity(left, right)
-            return left.activityId == right.activityId
-              and left.projectionVersion == right.projectionVersion
-              and left.startsAt == right.startsAt
-              and left.endsAt == right.endsAt
-              and left.state == right.state
-          end
-
-          local function same_reservation(left, right)
-            return left.reservationId == right.reservationId
-              and left.activityId == right.activityId
-              and left.userHash == right.userHash
-              and left.quantity == right.quantity
-              and left.activityProjectionVersion == right.activityProjectionVersion
-              and left.reservationVersion == right.reservationVersion
-              and left.state == right.state
-              and left.decisionCode == right.decisionCode
-              and left.durableOrderCreated == right.durableOrderCreated
-          end
-
           if redis.call('GET', KEYS[2]) ~= ARGV[1] then return -20 end
           local incoming_activity = decode(ARGV[2])
           if not incoming_activity then return -11 end
@@ -309,14 +286,11 @@ public final class ReservationAdmissionStore {
           local existing_activity_value = redis.call('GET', KEYS[1])
           if existing_activity_value then
             local existing_activity = decode(existing_activity_value)
-            if not existing_activity then return -11 end
-            local existing_version = tonumber(existing_activity.projectionVersion)
-            if not existing_version or existing_version < 1
-                or existing_version > MAX_JSON_INTEGER then return -11 end
-            if existing_version > incoming_activity_version then return 0 end
-            if existing_version == incoming_activity_version
-                and not same_activity(existing_activity, incoming_activity) then
-              return -12
+            if existing_activity then
+              local existing_version = tonumber(existing_activity.projectionVersion)
+              if existing_version and existing_version >= 1
+                  and existing_version <= MAX_JSON_INTEGER
+                  and existing_version > incoming_activity_version then return 0 end
             end
           end
 
@@ -335,7 +309,8 @@ public final class ReservationAdmissionStore {
                 or tonumber(incoming.reservationVersion) ~= version
                 or not version or version < 1 or version > MAX_JSON_INTEGER
                 or (state ~= 'ADMITTED' and state ~= 'REJECTED'
-                  and state ~= 'ORDERED' and state ~= 'CANCELLED') then
+                  and state ~= 'ORDERED' and state ~= 'CANCELLED'
+                  and state ~= 'UNFULFILLED') then
               return -12
             end
             local quantity = tonumber(incoming.quantity)
@@ -344,61 +319,26 @@ public final class ReservationAdmissionStore {
                 or not activity_version or activity_version < 1
                 or activity_version > MAX_JSON_INTEGER then return -12 end
 
-            for offset = 1, 2 do
-              local existing_value = redis.call('GET', KEYS[key_base + offset])
-              if existing_value then
-                local existing = decode(existing_value)
-                if not existing then return -11 end
-                local existing_version = tonumber(existing.reservationVersion)
-                local existing_quantity = tonumber(existing.quantity)
-                local existing_activity_version = tonumber(existing.activityProjectionVersion)
-                if not existing_version or existing_version < 1
-                    or existing_version > MAX_JSON_INTEGER
-                    or not existing_quantity or existing_quantity < 1
-                    or existing_quantity > MAX_JSON_INTEGER
-                    or not existing_activity_version or existing_activity_version < 1
-                    or existing_activity_version > MAX_JSON_INTEGER then return -11 end
-                if existing_version > version then return 0 end
-                if existing_version == version and not same_reservation(existing, incoming) then
-                  return -12
-                end
-              end
-            end
-
-            local existing_user = redis.call('GET', KEYS[key_base])
-            if (state == 'ADMITTED' or state == 'ORDERED' or state == 'CANCELLED')
-                and expected_user_marker ~= reservation_id then return -12 end
-            if expected_user_marker == '' then
-              if existing_user then return -12 end
-            elseif existing_user and existing_user ~= expected_user_marker then
-              return -12
-            end
           end
 
-          local writes = {KEYS[1], ARGV[2]}
+          redis.call('SET', KEYS[1], ARGV[2])
           for index = 0, count - 1 do
             local key_base = 3 + index * 3
             local argument_base = 7 + index * 5
             local payload = ARGV[argument_base]
-            local state = ARGV[argument_base + 1]
-            local reservation_id = ARGV[argument_base + 2]
-            if state == 'ADMITTED' or state == 'ORDERED' or state == 'CANCELLED' then
-              table.insert(writes, KEYS[key_base])
-              table.insert(writes, reservation_id)
+            local expected_user_marker = ARGV[argument_base + 4]
+            if expected_user_marker == '' then
+              redis.call('DEL', KEYS[key_base])
+            else
+              redis.call('SET', KEYS[key_base], expected_user_marker)
             end
-            table.insert(writes, KEYS[key_base + 1])
-            table.insert(writes, payload)
-            table.insert(writes, KEYS[key_base + 2])
-            table.insert(writes, payload)
+            redis.call('MSET', KEYS[key_base + 1], payload, KEYS[key_base + 2], payload)
           end
-          redis.call('MSET', unpack(writes))
 
           for index = 0, count - 1 do
             local key_base = 3 + index * 3
             local argument_base = 7 + index * 5
-            if ARGV[argument_base + 1] == 'ADMITTED'
-                or ARGV[argument_base + 1] == 'ORDERED'
-                or ARGV[argument_base + 1] == 'CANCELLED' then
+            if ARGV[argument_base + 4] ~= '' then
               redis.call('PEXPIRE', KEYS[key_base], ARGV[4])
             end
             redis.call('PEXPIRE', KEYS[key_base + 1], ARGV[4])
@@ -576,89 +516,6 @@ public final class ReservationAdmissionStore {
     }
   }
 
-  public TransactionResolution transactionResolution(String reservationId) {
-    final String marker;
-    try {
-      marker = redis.opsForValue().get(decisionKey(reservationId));
-    } catch (RuntimeException exception) {
-      return TransactionResolution.UNKNOWN;
-    }
-    if (marker == null) {
-      return TransactionResolution.UNKNOWN;
-    }
-    try {
-      var payload = objectMapper.readTree(marker);
-      if (!hasCompleteDecisionIdentity(payload, reservationId)) {
-        return TransactionResolution.UNKNOWN;
-      }
-      String state = payload.path("state").asText();
-      String code = payload.path("decisionCode").asText();
-      long version = payload.path("reservationVersion").asLong();
-      boolean durableOrderCreated = payload.path("durableOrderCreated").asBoolean();
-      if ("ADMITTED".equals(state)
-          && "ADMITTED".equals(code)
-          && version == 2
-          && !durableOrderCreated) {
-        return TransactionResolution.COMMIT;
-      }
-      if ("ORDERED".equals(state)
-          && "ADMITTED".equals(code)
-          && version == 3
-          && durableOrderCreated) {
-        return TransactionResolution.COMMIT;
-      }
-      if ("CANCELLED".equals(state)
-          && "ADMITTED".equals(code)
-          && version == 4
-          && durableOrderCreated) {
-        return TransactionResolution.COMMIT;
-      }
-      if ("REJECTED".equals(state) && version == 2 && !durableOrderCreated) {
-        try {
-          return ReservationDecisionCode.valueOf(code) == ReservationDecisionCode.ADMITTED
-              ? TransactionResolution.UNKNOWN
-              : TransactionResolution.ROLLBACK;
-        } catch (IllegalArgumentException exception) {
-          return TransactionResolution.UNKNOWN;
-        }
-      }
-      return TransactionResolution.UNKNOWN;
-    } catch (JsonProcessingException exception) {
-      return TransactionResolution.UNKNOWN;
-    }
-  }
-
-  private static boolean hasCompleteDecisionIdentity(JsonNode payload, String reservationId) {
-    JsonNode activityId = payload.path("activityId");
-    JsonNode userHash = payload.path("userHash");
-    JsonNode quantity = payload.path("quantity");
-    JsonNode activityVersion = payload.path("activityProjectionVersion");
-    JsonNode reservationVersion = payload.path("reservationVersion");
-    JsonNode state = payload.path("state");
-    JsonNode decisionCode = payload.path("decisionCode");
-    JsonNode durableOrderCreated = payload.path("durableOrderCreated");
-    return payload.isObject()
-        && reservationId.equals(payload.path("reservationId").textValue())
-        && activityId.isTextual()
-        && !activityId.textValue().isBlank()
-        && activityId.textValue().length() <= 64
-        && activityId.textValue().equals(activityId.textValue().strip())
-        && userHash.isTextual()
-        && userHash.textValue().matches("[0-9a-f]{64}")
-        && quantity.isIntegralNumber()
-        && quantity.canConvertToInt()
-        && quantity.intValue() > 0
-        && activityVersion.isIntegralNumber()
-        && activityVersion.canConvertToLong()
-        && activityVersion.longValue() > 0
-        && activityVersion.longValue() <= SeckillLuaNumber.MAX_EXACT_INTEGER
-        && reservationVersion.isIntegralNumber()
-        && reservationVersion.canConvertToLong()
-        && state.isTextual()
-        && decisionCode.isTextual()
-        && durableOrderCreated.isBoolean();
-  }
-
   public String acquireRebuild(String activityId) {
     String token = UUID.randomUUID().toString();
     final Boolean acquired;
@@ -707,32 +564,17 @@ public final class ReservationAdmissionStore {
     arguments.add(Long.toString(properties.reservationTtl().toMillis()));
     arguments.add(Long.toString(properties.decisionMarkerTtl().toMillis()));
     arguments.add(Integer.toString(reservations.size()));
-    var admittedUsers = new HashSet<String>();
     Map<String, String> admittedReservationByUser = new HashMap<>();
     for (SeckillReservation reservation : reservations) {
       if (reservation.state() == ReservationState.PENDING
           || reservation.decisionCode() == null
-          || ((reservation.state() == ReservationState.ORDERED
-                  || reservation.state() == ReservationState.CANCELLED)
-              ? reservation.projectionVersion()
-                      != (reservation.state() == ReservationState.ORDERED ? 3 : 4)
-                  || reservation.orderId() == null
-              : reservation.projectionVersion() != 2)) {
+          || !hasValidTerminalShape(reservation)) {
         throw new AdmissionIndeterminateException(
             "Pending reservation prevents projection rebuild");
       }
       String userHash = SeckillReservationService.sha256(reservation.userSubject());
-      if ((reservation.state() == ReservationState.ADMITTED
-              || reservation.state() == ReservationState.ORDERED
-              || reservation.state() == ReservationState.CANCELLED)
-          && !admittedUsers.add(userHash)) {
-        throw new AdmissionIndeterminateException(
-            "MySQL truth contains repeated admitted reservations for one user");
-      }
-      if (reservation.state() == ReservationState.ADMITTED
-          || reservation.state() == ReservationState.ORDERED
-          || reservation.state() == ReservationState.CANCELLED) {
-        admittedReservationByUser.put(userHash, reservation.reservationId());
+      if (SeckillReservationService.blocksAnotherAdmission(reservation.state())) {
+        admittedReservationByUser.putIfAbsent(userHash, reservation.reservationId());
       }
     }
     for (SeckillReservation reservation : reservations) {
@@ -810,6 +652,17 @@ public final class ReservationAdmissionStore {
       throw new AdmissionIndeterminateException(
           "Reservation projection serialization failed", exception);
     }
+  }
+
+  private static boolean hasValidTerminalShape(SeckillReservation reservation) {
+    return switch (reservation.state()) {
+      case ADMITTED, REJECTED ->
+          reservation.projectionVersion() == 2 && reservation.orderId() == null;
+      case ORDERED -> reservation.projectionVersion() == 3 && reservation.orderId() != null;
+      case UNFULFILLED -> reservation.projectionVersion() == 3 && reservation.orderId() == null;
+      case CANCELLED -> reservation.projectionVersion() == 4 && reservation.orderId() != null;
+      case PENDING -> false;
+    };
   }
 
   private static AdmissionDecision rejected(ReservationDecisionCode code) {

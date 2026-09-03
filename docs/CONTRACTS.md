@@ -352,22 +352,27 @@ not by treating the product cache-invalidation consumer as a knowledge-indexer f
   then commit, roll back, or temporarily return `UNKNOWN`. A deterministic result writes a durable
   transaction decision marker; admission also writes the reservation projection required by the
   order path.
-- `UNKNOWN` is an intermediate checker result only when the durable decision marker is missing or
-  temporarily indeterminate. It is not a permanent application terminal state. The application
-  persists one stable transaction-resolution deadline derived from configured transaction
+- `UNKNOWN` is an intermediate checker result only when the MySQL reservation is missing, still
+  `PENDING`, or temporarily unreadable. It is not a permanent application terminal state. The
+  application persists one stable transaction-resolution deadline derived from configured transaction
   timeout, check interval, maximum check count, and bounded safety margin; restart never recomputes
   it. An indexed, bounded deadline-decision worker atomically creates a timeout marker only when no
   durable decision exists, then idempotently converges MySQL to that marker. This
   state-machine-specific resolver is not a generalized recovery scanner.
-- The checker reads only the durable marker. Marker and reservation TTL cover the complete
-  configured timeout/check interval/maximum-check window. Application terminal convergence is
+- The checker reads only the durable MySQL reservation. Redis marker and reservation TTL cover the
+  complete configured timeout/check interval/maximum-check window for Lua admission and deadline
+  recovery. Application terminal convergence is
   proven through the persisted deadline plus durable-marker compare-and-set and MySQL convergence.
   Broker terminal behavior is proven independently with `mqadmin` evidence against the transaction
   terminal system topic; the application does not subscribe to that system topic and does not
   treat observed callback count as protocol truth.
 - Downstream order creation is idempotent. Database unique constraints, an inventory-ledger
   movement keyed by the business event, and conditional transitions handle repeated delivery; a
-  duplicate returns or projects the existing result.
+  duplicate returns or projects the existing result. Lua admission reserves per-activity quota,
+  while locked MySQL rows are final for stock shared by overlapping activities and the
+  activity-user uniqueness key. A positive stock shortfall or an order held by another reservation
+  on that key records terminal `UNFULFILLED` with the original `ADMITTED` decision, projection
+  version 3, no durable order, and no activity-quota refund; retries replay that result.
 - The inventory ledger covers seckill order creation and replay idempotency, atomic unpaid
   cancellation with inventory/activity-quota restoration, payment movements, refund movements,
   and full reconciliation.
@@ -396,7 +401,7 @@ not by treating the product cache-invalidation consumer as a knowledge-indexer f
 | Entity | Owner/store | Unique invariant | State or transaction boundary | Executable source |
 |---|---|---|---|---|
 | `seckill_activity` | `commerce-service`; `commerce_db` | Stable activity id; allocation cannot exceed inventory assigned to it | Quota allocation is a MySQL transaction; Redis receives only admission projection | Seckill activity migration |
-| Reservation | `commerce-service`; truth in `commerce_db`, hot projection in Commerce Redis | Unique `reservation_id`; projection is not authoritative | Admission records `PENDING/ADMITTED/REJECTED`; order consumer transitions durable reservation conditionally | Reservation and transaction-order migrations |
+| Reservation | `commerce-service`; truth in `commerce_db`, hot projection in Commerce Redis | Unique `reservation_id`; projection is not authoritative | Admission records `PENDING/ADMITTED/REJECTED`; order consumption records `ORDERED` or admission-consuming `UNFULFILLED`; unpaid timeout may later record `CANCELLED` | Reservation and transaction-order migrations |
 | One-user-one-order | `commerce-service`; `commerce_db` plus Lua marker | Database uniqueness on `(activity_id, user_id)` and `reservation_id` | Lua blocks obvious duplicates; database uniqueness is final and repeated messages resolve to existing result | Transaction-order migration and consumer |
 | `inventory_ledger` | `commerce-service`; `commerce_db` | Unique business event/idempotency key per movement | Order creation, cancellation/restoration, payment, and refund movements reconcile against authoritative order/payment state | Commerce transaction migrations |
 
@@ -405,7 +410,7 @@ not by treating the product cache-invalidation consumer as a knowledge-indexer f
 | Caller → owner | Method and path | Authentication | Required boundary | Success semantics | Rejection semantics |
 |---|---|---|---|---|---|
 | `web` → `commerce-service` | `POST /api/seckill/activities/{activityId}/reservations` | Production direct-user JWT | Direct-user claims, ownership, idempotency; evaluation tokens/headers are not accepted | Starts transaction-message admission and returns reservation status, never a false completed-order claim | Identity/type/audience failure, evaluation context, no quota, duplicate user, inactive activity, or bounded indeterminate result rejects or returns explicit status |
-| `web` → `commerce-service` | `GET /api/reservations/{reservationId}` | Production direct-user JWT | Direct-user claims and ownership; evaluation tokens/headers are not accepted | Returns durable/projection status distinguishing admitted, ordered, rejected, and expired | Cross-user access, evaluation context, or unknown reservation rejects |
+| `web` → `commerce-service` | `GET /api/reservations/{reservationId}` | Production direct-user JWT | Direct-user claims and ownership; evaluation tokens/headers are not accepted | Returns owned `PENDING`, `ADMITTED`, `REJECTED` (including expiry), `ORDERED`, `UNFULFILLED`, or `CANCELLED` status without inventing an order | Cross-user access, evaluation context, or unknown reservation rejects |
 
 ### 6.4 Asynchronous contracts
 
@@ -443,7 +448,10 @@ sequenceDiagram
         C->>M: Commit half message
         M-->>W: Deliver committed transaction message
         W->>D: Conditional order insert and reservation transition
-        alt Unique activity-user or reservation key already exists
+        alt Locked stock is short or another reservation owns the activity-user order
+            D-->>W: Reservation UNFULFILLED at projection version 3; no order
+            W-->>M: Acknowledge terminal disposition
+        else Unique activity-user or reservation key already exists
             D-->>W: Existing order/result
             W-->>M: Acknowledge duplicate safely
         else Insert and transition succeed
@@ -462,12 +470,12 @@ sequenceDiagram
 
     opt Second-phase acknowledgement is missing or result is UNKNOWN
         M->>C: Transaction checkback
-        C->>R: Read transaction decision marker only
-        alt Marker says admitted
+        C->>D: Read durable reservation only
+        alt MySQL state consumed admission
             C-->>M: COMMIT
-        else Marker says rejected
+        else MySQL state is REJECTED
             C-->>M: ROLLBACK
-        else Marker absent or temporarily indeterminate
+        else MySQL state missing, PENDING, or temporarily unreadable
             C-->>M: UNKNOWN
             Note over M,C: UNKNOWN is intermediate only. Broker timeout, check interval, and maximum check count define the terminal boundary.
         end
@@ -901,7 +909,7 @@ in build files, image references, and lockfiles.
 | MyBatis-Plus on Java transaction service | Boot 3 starter is supported and warns against adding raw MyBatis starter alongside it | Implemented | Use only `mybatis-plus-spring-boot3-starter`; exact patch in Maven | [MyBatis-Plus installation](https://baomidou.com/en/getting-started/install/) |
 | Java multi-module build | Maven reactor aggregates/orders modules; Maven Wrapper pins entry point | Implemented | One root reactor for auth, commerce, and RocketMQ probe; no Gradle | [Maven reactor](https://maven.apache.org/guides/mini/guide-multiple-modules.html); [Maven Wrapper](https://maven.apache.org/tools/wrapper/) |
 | <a id="contract-preflight-rocketmq-runtime"></a> RocketMQ 5 runtime and Java client | Broker plus Proxy, 5.x clients, transaction and delay message mechanisms are implemented and integration-tested | Implemented | Proxy endpoint explicit; message types explicit; consumer idempotency remains application obligation | [RocketMQ quick start](https://rocketmq.apache.org/docs/quickStart/01quickstart/); [transaction messages](https://rocketmq.apache.org/docs/featureBehavior/04transactionmessage/); [delay messages](https://rocketmq.apache.org/docs/featureBehavior/02delaymessage/); [official clients](https://github.com/apache/rocketmq-clients) |
-| RocketMQ transaction failure behavior | Project-specific Lua rejection, duplicate delivery, checkback, bounded `UNKNOWN`, and terminal evidence were drilled against selected runtime | Resolved | Checker reads durable marker only; configured transaction bounds define terminal window | [RocketMQ transaction lifecycle](https://rocketmq.apache.org/docs/featureBehavior/04transactionmessage/) |
+| RocketMQ transaction failure behavior | Project-specific Lua rejection, duplicate delivery, checkback, bounded `UNKNOWN`, and terminal evidence were drilled against selected runtime | Resolved | Checker reads the durable MySQL reservation only; configured transaction bounds define terminal window | [RocketMQ transaction lifecycle](https://rocketmq.apache.org/docs/featureBehavior/04transactionmessage/) |
 | Python RocketMQ consumption | Selected simple-consumer/manual-ack path proves consumption, retry/redelivery, long processing, source-version ordering, tombstones, and rebuild handoff | Resolved | Keep indexer behind messaging adapter and preserve explicit ACK/retry classification | [client matrix](https://github.com/apache/rocketmq-clients); [Python examples](https://github.com/apache/rocketmq-clients/tree/master/python/example); [client issue #1198](https://github.com/apache/rocketmq-clients/issues/1198) |
 | <a id="contract-preflight-mysql-redis"></a> MySQL 8 and Redis 7 dual-instance semantics | InnoDB transaction truth plus separate Redis durability/eviction policies are implemented | Implemented | One MySQL instance with two databases; Commerce Redis `noeviction` + AOF; Support Redis TTL + LFU; Redis never business truth | [InnoDB transaction model](https://dev.mysql.com/doc/refman/8.0/en/innodb-transaction-model.html); [Redis eviction](https://redis.io/docs/latest/develop/reference/eviction/); [Redis persistence](https://redis.io/docs/latest/operate/oss_and_stack/management/persistence/) |
 | MySQL delegated grants through non-default role | Grantor requires delegated privilege with `GRANT OPTION`; roles require explicit activation | Implemented | Dedicated non-default role, `activate_all_roles_on_login=OFF`, fixed one-shot grant job, explicit clear to `NONE` | [MySQL `GRANT`](https://dev.mysql.com/doc/refman/8.4/en/grant.html); [roles](https://dev.mysql.com/doc/refman/8.4/en/roles.html); [`SET ROLE`](https://dev.mysql.com/doc/refman/8.4/en/set-role.html); [role activation variable](https://dev.mysql.com/doc/refman/8.4/en/server-system-variables.html#sysvar_activate_all_roles_on_login) |
@@ -924,7 +932,7 @@ relevant real integration evidence rather than relying on this prose.
 |---|---:|---|---|
 | Python RocketMQ consumer viability | Resolved | Against pinned Broker/Proxy/client: connection, subscription/filtering, consumption, explicit acknowledgement, retry/redelivery, long processing/invisible duration, source-version out-of-order rejection, tombstones, rebuild and alias switch; reruns record client mode, exceptions, timing, and duplicate behavior | Block the indexer messaging change. No language/protocol fallback is pre-approved; changing the service/language boundary requires explicit contract and evidence updates. |
 | <a id="contract-spike-elasticsearch-ik"></a> Elasticsearch/IK version pair | Resolved | Matching pinned artifact installs reproducibly and passes startup/analyzer tests with provenance in executable configuration | Block the version change. Do not silently omit IK or change analysis behavior. |
-| RocketMQ transaction failure drill | Resolved | Lua rejection rolls back without delivery; duplicate delivery creates one durable order; missing second-phase result checkbacks from durable marker; `UNKNOWN` is bounded; marker/reservation TTL covers configured window | Block changes to transaction-message behavior until equivalent real evidence passes. Moving away from this mainline requires explicit invariant, migration, and test updates. |
+| RocketMQ transaction failure drill | Resolved | Lua rejection rolls back without delivery; duplicate delivery creates one durable order; missing second-phase result checkbacks from the durable MySQL reservation; `UNKNOWN` is bounded; marker/reservation TTL covers the Lua/deadline-recovery window | Block changes to transaction-message behavior until equivalent real evidence passes. Moving away from this mainline requires explicit invariant, migration, and test updates. |
 
 <a id="contract-risk-register"></a>
 

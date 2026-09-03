@@ -1,9 +1,9 @@
 SELECT 'Q01 no oversell: admitted reservations must not exceed allocated quota' AS check_name;
 SELECT a.allocated_quota,
        (SELECT COUNT(*) FROM seckill_reservation r
-         WHERE r.activity_id = a.activity_id AND r.state IN ('ADMITTED','ORDERED')) AS admitted,
+         WHERE r.activity_id = a.activity_id AND r.state IN ('ADMITTED','ORDERED','UNFULFILLED')) AS admitted,
        CASE WHEN (SELECT COUNT(*) FROM seckill_reservation r
-                   WHERE r.activity_id = a.activity_id AND r.state IN ('ADMITTED','ORDERED'))
+                   WHERE r.activity_id = a.activity_id AND r.state IN ('ADMITTED','ORDERED','UNFULFILLED'))
                  <= a.allocated_quota THEN 'PASS' ELSE 'FAIL' END AS verdict
 FROM seckill_activity a WHERE a.activity_id = '${ACTIVITY}';
 
@@ -64,6 +64,7 @@ SELECT 'Q09 reservation state machine is closed and consistent with decision cod
 SELECT state, decision_code, COUNT(*) AS rows_found,
        CASE WHEN (state='ADMITTED' AND decision_code='ADMITTED')
               OR (state='ORDERED'  AND decision_code='ADMITTED')
+              OR (state='UNFULFILLED' AND decision_code='ADMITTED')
               OR (state='REJECTED' AND decision_code <> 'ADMITTED')
               OR (state='CANCELLED')
             THEN 'PASS' ELSE 'FAIL' END AS verdict
@@ -73,5 +74,5 @@ SELECT 'Q10 no admitted reservation was left without a durable outcome' AS check
 SELECT COUNT(*) AS admitted_without_order,
        CASE WHEN COUNT(*) = 0 THEN 'PASS' ELSE 'FAIL' END AS verdict
 FROM seckill_reservation r
-WHERE r.activity_id = '${ACTIVITY}' AND r.decision_code = 'ADMITTED'
+WHERE r.activity_id = '${ACTIVITY}' AND r.state = 'ADMITTED'
   AND NOT EXISTS (SELECT 1 FROM seckill_order o WHERE o.reservation_id = r.reservation_id);

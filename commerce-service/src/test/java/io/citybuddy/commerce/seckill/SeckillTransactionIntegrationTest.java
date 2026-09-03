@@ -249,7 +249,7 @@ class SeckillTransactionIntegrationTest {
 
   @Test
   @Order(3)
-  void checkerMapsOnlyDurableMarkersAndUnknownStopsAtBrokerBoundary() throws Exception {
+  void checkerUsesOnlyMysqlTerminalTruth() throws Exception {
     String pendingActivityId = "cb060-public-pending";
     seedActivity(
         pendingActivityId, "cb060-product-public-pending", SeckillActivityState.ACTIVE, 1, 1);
@@ -261,10 +261,38 @@ class SeckillTransactionIntegrationTest {
             "cb060-key-public-pending",
             Map.of("quantity", 1, "expectedActivityVersion", 1));
     assertThat(pendingResponse.getStatusCode()).isEqualTo(HttpStatus.ACCEPTED);
-    ReservationResult pending = pendingResponse.getBody();
-    assertThat(pending).isNotNull();
+    ReservationResult pendingResult = pendingResponse.getBody();
+    assertThat(pendingResult).isNotNull();
+    SeckillReservation pending =
+        reservationRepository.find(pendingResult.reservationId()).orElseThrow();
     assertThat(pending.state()).isEqualTo(ReservationState.PENDING);
-    assertThat(pending.durableOrderCreated()).isFalse();
+    assertThat(pendingResult.durableOrderCreated()).isFalse();
+    redis
+        .opsForValue()
+        .set(
+            admissionStore.decisionKey(pending.reservationId()),
+            objectMapper.writeValueAsString(
+                Map.of(
+                    "reservationId",
+                    pending.reservationId(),
+                    "activityId",
+                    pendingActivityId,
+                    "userHash",
+                    SeckillReservationService.sha256(pending.userSubject()),
+                    "quantity",
+                    pending.quantity(),
+                    "activityProjectionVersion",
+                    pending.activityProjectionVersion(),
+                    "reservationVersion",
+                    2,
+                    "state",
+                    "ADMITTED",
+                    "decisionCode",
+                    "ADMITTED",
+                    "durableOrderCreated",
+                    false)));
+    assertThat(reservationService.transactionResolution(pending.reservationId()).name())
+        .isEqualTo("UNKNOWN");
 
     String activityId = "cb060-checkback";
     seedActivity(activityId, "cb060-product-checkback", SeckillActivityState.ACTIVE, 2, 5);
@@ -280,7 +308,8 @@ class SeckillTransactionIntegrationTest {
       producer.send(message(SeckillTransactionMessage.from(prepared.reservation())), unresolved);
       ReservationResult admitted = reservationService.admit(prepared.reservation().reservationId());
       assertThat(admitted.state()).isEqualTo(ReservationState.ADMITTED);
-      assertThat(admissionStore.transactionResolution(admitted.reservationId()).name())
+      redis.delete(admissionStore.decisionKey(admitted.reservationId()));
+      assertThat(reservationService.transactionResolution(admitted.reservationId()).name())
           .isEqualTo("COMMIT");
       assertThat(consumeEventually()).isEqualTo(1);
       assertThat(admittedChecks.get()).isGreaterThanOrEqualTo(1);
@@ -298,62 +327,36 @@ class SeckillTransactionIntegrationTest {
     ReservationResult rejected =
         reservationService.admit(rejectedPrepared.reservation().reservationId());
     assertThat(rejected.state()).isEqualTo(ReservationState.REJECTED);
-    assertThat(admissionStore.transactionResolution(rejected.reservationId()).name())
-        .isEqualTo("ROLLBACK");
-
-    String unreadableReservationId = "00000000-0000-0000-0000-000000000061";
-    redis.opsForValue().set(admissionStore.decisionKey(unreadableReservationId), "{unreadable");
-    assertThat(admissionStore.transactionResolution(unreadableReservationId).name())
-        .isEqualTo("UNKNOWN");
-    redis.delete(admissionStore.decisionKey(unreadableReservationId));
-
-    String incompleteReservationId = "00000000-0000-0000-0000-000000000062";
     redis
         .opsForValue()
         .set(
-            admissionStore.decisionKey(incompleteReservationId),
+            admissionStore.decisionKey(rejected.reservationId()),
             objectMapper.writeValueAsString(
                 Map.of(
                     "reservationId",
-                    incompleteReservationId,
-                    "state",
-                    "ADMITTED",
-                    "decisionCode",
-                    "ADMITTED")));
-    assertThat(admissionStore.transactionResolution(incompleteReservationId).name())
-        .isEqualTo("UNKNOWN");
-    redis.delete(admissionStore.decisionKey(incompleteReservationId));
-
-    String unknownCodeReservationId = "00000000-0000-0000-0000-000000000063";
-    redis
-        .opsForValue()
-        .set(
-            admissionStore.decisionKey(unknownCodeReservationId),
-            objectMapper.writeValueAsString(
-                Map.of(
-                    "reservationId",
-                    unknownCodeReservationId,
+                    rejected.reservationId(),
                     "activityId",
-                    rejectedActivityId,
+                    rejected.activityId(),
                     "userHash",
-                    "0".repeat(64),
+                    SeckillReservationService.sha256(rejectedPrepared.reservation().userSubject()),
                     "quantity",
-                    1,
+                    rejected.quantity(),
                     "activityProjectionVersion",
-                    1,
+                    rejected.activityProjectionVersion(),
                     "reservationVersion",
                     2,
                     "state",
-                    "REJECTED",
+                    "ADMITTED",
                     "decisionCode",
-                    "UNKNOWN_REJECTION",
+                    "ADMITTED",
                     "durableOrderCreated",
                     false)));
-    assertThat(admissionStore.transactionResolution(unknownCodeReservationId).name())
-        .isEqualTo("UNKNOWN");
-    redis.delete(admissionStore.decisionKey(unknownCodeReservationId));
+    assertThat(reservationService.transactionResolution(rejected.reservationId()).name())
+        .isEqualTo("ROLLBACK");
 
     String missingReservationId = "00000000-0000-0000-0000-000000000060";
+    assertThat(reservationService.transactionResolution(missingReservationId).name())
+        .isEqualTo("UNKNOWN");
     SeckillTransactionMessage unknown =
         new SeckillTransactionMessage(
             missingReservationId, missingReservationId, "missing", "missing-user", 1, 1);
@@ -370,8 +373,6 @@ class SeckillTransactionIntegrationTest {
       assertThat(terminalCount).isBetween(1, reservationProperties.brokerMaximumChecks());
       assertThat(messaging.consumeOnce(orderService)).isZero();
     }
-    assertThat(admissionStore.transactionResolution(missingReservationId).name())
-        .isEqualTo("UNKNOWN");
     assertThat(poll(directToken(), pending.reservationId()).getBody().state())
         .isEqualTo(ReservationState.PENDING);
     assertThat(
@@ -384,10 +385,159 @@ class SeckillTransactionIntegrationTest {
 
   @Test
   @Order(4)
-  void consumerDatabaseFailureIsNotAcknowledgedAndRetryCommitsAtomically() throws Exception {
+  void overlappingActivitiesConvergeSharedStockLoserWithoutQuotaRefund() throws Exception {
+    String productId = "cb060-product-overlap";
+    String winnerActivity = "cb060-overlap-winner";
+    String loserActivity = "cb060-overlap-loser";
+    seedActivity(winnerActivity, productId, SeckillActivityState.ACTIVE, 1, 1);
+    seedActivityForProduct(loserActivity, productId, SeckillActivityState.ACTIVE, 1);
+
+    ResponseEntity<ReservationResult> firstResponse =
+        reserve(
+            directToken(),
+            winnerActivity,
+            "cb060-winner-key",
+            Map.of("quantity", 1, "expectedActivityVersion", 1));
+    ResponseEntity<ReservationResult> secondResponse =
+        reserve(
+            otherDirectToken(),
+            loserActivity,
+            "cb060-loser-key",
+            Map.of("quantity", 1, "expectedActivityVersion", 1));
+    assertThat(firstResponse.getStatusCode()).isEqualTo(HttpStatus.CREATED);
+    assertThat(secondResponse.getStatusCode()).isEqualTo(HttpStatus.CREATED);
+    ReservationResult first = firstResponse.getBody();
+    ReservationResult second = secondResponse.getBody();
+    assertThat(first).isNotNull();
+    assertThat(second).isNotNull();
+
+    int consumed = 0;
+    long consumeDeadline = System.nanoTime() + Duration.ofSeconds(20).toNanos();
+    while (consumed < 2 && System.nanoTime() < consumeDeadline) {
+      consumed += messaging.consumeOnce(orderService);
+    }
+    assertThat(consumed).isEqualTo(2);
+
+    SeckillReservation firstTerminal =
+        reservationRepository.find(first.reservationId()).orElseThrow();
+    SeckillReservation secondTerminal =
+        reservationRepository.find(second.reservationId()).orElseThrow();
+    assertThat(java.util.List.of(firstTerminal.state(), secondTerminal.state()))
+        .containsExactlyInAnyOrder(ReservationState.ORDERED, ReservationState.UNFULFILLED);
+    SeckillReservation unfulfilled =
+        firstTerminal.state() == ReservationState.UNFULFILLED ? firstTerminal : secondTerminal;
+    assertThat(unfulfilled.state()).isEqualTo(ReservationState.UNFULFILLED);
+    assertThat(unfulfilled.decisionCode()).isEqualTo(ReservationDecisionCode.ADMITTED);
+    assertThat(unfulfilled.projectionVersion()).isEqualTo(3);
+    assertThat(unfulfilled.orderId()).isNull();
+    assertThat(productStock(productId)).isZero();
+    assertThat(
+            jdbc.queryForObject(
+                "SELECT COUNT(*) FROM seckill_order WHERE product_id = ?",
+                Integer.class,
+                productId))
+        .isEqualTo(1);
+    assertThat(
+            jdbc.queryForObject(
+                "SELECT COUNT(*) FROM inventory_ledger WHERE product_id = ? AND movement_type = 'SECKILL_ORDER_CREATE'",
+                Integer.class,
+                productId))
+        .isEqualTo(1);
+    assertThat(projectionRemaining(winnerActivity)).isZero();
+    assertThat(projectionRemaining(loserActivity)).isZero();
+    assertThat(reservationRepository.admittedQuantity(winnerActivity)).isEqualTo(1);
+    assertThat(reservationRepository.admittedQuantity(loserActivity)).isEqualTo(1);
+
+    try (Producer duplicateProducer = producer(new AtomicInteger())) {
+      Transaction duplicate = duplicateProducer.beginTransaction();
+      duplicateProducer.send(message(SeckillTransactionMessage.from(unfulfilled)), duplicate);
+      duplicate.commit();
+      assertThat(consumeEventually()).isEqualTo(1);
+    }
+    assertThat(reservationRepository.find(unfulfilled.reservationId()).orElseThrow().state())
+        .isEqualTo(ReservationState.UNFULFILLED);
+    assertThat(
+            jdbc.queryForObject(
+                "SELECT COUNT(*) FROM seckill_order WHERE product_id = ?",
+                Integer.class,
+                productId))
+        .isEqualTo(1);
+
+    assertThat(reservationService.rebuildActivityState(unfulfilled.activityId()))
+        .isEqualTo(ReservationAdmissionStore.RebuildResult.APPLIED);
+    String loserMarker =
+        admissionStore.userKey(
+            unfulfilled.activityId(), SeckillReservationService.sha256(unfulfilled.userSubject()));
+    redis.delete(loserMarker);
+    ReservationResult repeated =
+        reservationService.reserve(
+            unfulfilled.userSubject(),
+            unfulfilled.activityId(),
+            "cb060-loser-key-2",
+            request(Map.of("quantity", 1, "expectedActivityVersion", 1)));
+    assertThat(repeated.state()).isEqualTo(ReservationState.REJECTED);
+    assertThat(repeated.decisionCode()).isEqualTo(ReservationDecisionCode.DUPLICATE_USER);
+    assertThat(projectionRemaining(unfulfilled.activityId())).isZero();
+
+    String legacyActivity = "cb060-legacy-duplicate-user";
+    String legacyProduct = "cb060-product-legacy-duplicate-user";
+    String legacyUser = "cb060-legacy-user";
+    seedActivity(legacyActivity, legacyProduct, SeckillActivityState.ACTIVE, 2, 2);
+    ReservationResult canonical =
+        reservationService.reserve(
+            legacyUser,
+            legacyActivity,
+            "cb060-legacy-key-1",
+            request(Map.of("quantity", 1, "expectedActivityVersion", 1)));
+    SeckillReservation legacyPending =
+        new SeckillReservation(
+            UUID.randomUUID().toString(),
+            legacyUser,
+            legacyActivity,
+            "cb060-legacy-key-2",
+            "0".repeat(64),
+            1,
+            1,
+            ReservationState.PENDING,
+            null,
+            1);
+    reservationRepository.reservePending(
+        legacyPending, reservationProperties.minimumBrokerCoverage());
+    SeckillReservation legacyAdmitted =
+        reservationRepository.applyDecision(
+            reservationRepository.find(legacyPending.reservationId()).orElseThrow(),
+            ReservationState.ADMITTED,
+            ReservationDecisionCode.ADMITTED);
+    orderService.create(
+        SeckillTransactionMessage.from(
+            reservationRepository.find(canonical.reservationId()).orElseThrow()));
+    orderService.create(SeckillTransactionMessage.from(legacyAdmitted));
+    assertThat(reservationRepository.find(legacyAdmitted.reservationId()).orElseThrow().state())
+        .isEqualTo(ReservationState.UNFULFILLED);
+    assertThat(productStock(legacyProduct)).isEqualTo(1);
+    assertThat(
+            jdbc.queryForObject(
+                "SELECT COUNT(*) FROM seckill_order WHERE activity_id = ?",
+                Integer.class,
+                legacyActivity))
+        .isEqualTo(1);
+    assertThat(
+            jdbc.queryForObject(
+                "SELECT COUNT(*) FROM inventory_ledger WHERE activity_id = ? "
+                    + "AND movement_type = 'SECKILL_ORDER_CREATE'",
+                Integer.class,
+                legacyActivity))
+        .isEqualTo(1);
+  }
+
+  @Test
+  @Order(4)
+  void consumerDoesNotAcknowledgeNonterminalFailureAndRetryCommitsAtomically() throws Exception {
     String activityId = "cb060-consumer-retry";
     String productId = "cb060-product-consumer-retry";
-    seedActivity(activityId, productId, SeckillActivityState.ACTIVE, 1, 0);
+    seedActivity(activityId, productId, SeckillActivityState.ACTIVE, 1, 1);
+    assertThat(jdbc.update("UPDATE product SET available = FALSE WHERE product_id = ?", productId))
+        .isEqualTo(1);
     ResponseEntity<ReservationResult> response =
         reserve(
             directToken(),
@@ -400,7 +550,7 @@ class SeckillTransactionIntegrationTest {
 
     assertThatThrownBy(() -> messaging.consumeOnce(orderService))
         .isInstanceOf(IllegalStateException.class)
-        .hasMessage("Authoritative inventory cannot satisfy admitted reservation");
+        .hasMessage("Seckill product is not orderable");
     assertThat(
             jdbc.queryForObject(
                 "SELECT COUNT(*) FROM seckill_order WHERE reservation_id = ?",
@@ -416,7 +566,7 @@ class SeckillTransactionIntegrationTest {
     assertThat(reservationRepository.find(admitted.reservationId()).orElseThrow().state())
         .isEqualTo(ReservationState.ADMITTED);
 
-    assertThat(jdbc.update("UPDATE product SET stock_quantity = 1 WHERE product_id = ?", productId))
+    assertThat(jdbc.update("UPDATE product SET available = TRUE WHERE product_id = ?", productId))
         .isEqualTo(1);
     assertThat(consumeEventually(Duration.ofSeconds(20))).isEqualTo(1);
     ReservationResult ordered = poll(directToken(), admitted.reservationId()).getBody();
@@ -1230,6 +1380,11 @@ class SeckillTransactionIntegrationTest {
         productId,
         productId,
         stock);
+    seedActivityForProduct(activityId, productId, state, quota);
+  }
+
+  private void seedActivityForProduct(
+      String activityId, String productId, SeckillActivityState state, long quota) {
     SeckillActivity activity =
         new SeckillActivity(
             activityId,
@@ -1311,7 +1466,7 @@ class SeckillTransactionIntegrationTest {
                 if (view.getKeys().size() != 1) {
                   return org.apache.rocketmq.client.apis.producer.TransactionResolution.UNKNOWN;
                 }
-                return admissionStore.transactionResolution(view.getKeys().iterator().next());
+                return reservationService.transactionResolution(view.getKeys().iterator().next());
               } catch (Exception exception) {
                 return org.apache.rocketmq.client.apis.producer.TransactionResolution.UNKNOWN;
               }

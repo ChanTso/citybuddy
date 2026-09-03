@@ -189,6 +189,64 @@ class SeckillReservationIntegrationTest {
   }
 
   @Test
+  void restoresAnExpiredAdmissionMarkerBeforeRejectingAnotherIntent() throws Exception {
+    String activityId = "reservation-expired-marker";
+    String subject = "expired-marker-subject";
+    createActivity(
+        activityId, "reservation-product-expired-marker", SeckillActivityState.ACTIVE, 5);
+    ReservationResult admitted =
+        reservationService.reserve(subject, activityId, "expired-marker-first", request(2, 1));
+    String userKey = admissionStore.userKey(activityId, SeckillReservationService.sha256(subject));
+    assertThat(redis.delete(userKey)).isTrue();
+
+    ReservationResult duplicate =
+        reservationService.reserve(subject, activityId, "expired-marker-second", request(1, 1));
+
+    assertThat(duplicate.state()).isEqualTo(ReservationState.REJECTED);
+    assertThat(duplicate.decisionCode()).isEqualTo(ReservationDecisionCode.DUPLICATE_USER);
+    assertThat(reservationRepository.admittedQuantity(activityId)).isEqualTo(2);
+    assertRemaining(activityId, 3);
+    assertThat(redis.opsForValue().get(userKey)).isEqualTo(admitted.reservationId());
+  }
+
+  @Test
+  void rebuildsLegacyRepeatedAdmissionsWithAStableCanonicalMarker() throws Exception {
+    String activityId = "reservation-legacy-repeated";
+    String subject = "legacy-repeated-subject";
+    createActivity(
+        activityId, "reservation-product-legacy-repeated", SeckillActivityState.ACTIVE, 5);
+    List<String> reservationIds =
+        new ArrayList<>(List.of(UUID.randomUUID().toString(), UUID.randomUUID().toString()));
+    reservationIds.sort(String::compareTo);
+    insertLegacyAdmittedReservation(
+        reservationIds.get(1), subject, activityId, "legacy-repeated-second", 2);
+    insertLegacyAdmittedReservation(
+        reservationIds.get(0), subject, activityId, "legacy-repeated-first", 1);
+
+    assertThat(reservationService.rebuildActivityState(activityId))
+        .isEqualTo(ReservationAdmissionStore.RebuildResult.APPLIED);
+
+    assertThat(reservationRepository.admittedQuantity(activityId)).isEqualTo(3);
+    assertRemaining(activityId, 2);
+    String userKey = admissionStore.userKey(activityId, SeckillReservationService.sha256(subject));
+    assertThat(redis.opsForValue().get(userKey)).isEqualTo(reservationIds.get(0));
+    for (String reservationId : reservationIds) {
+      JsonNode reservation =
+          objectMapper.readTree(
+              redis.opsForValue().get(admissionStore.reservationKey(reservationId)));
+      JsonNode decision =
+          objectMapper.readTree(redis.opsForValue().get(admissionStore.decisionKey(reservationId)));
+      assertThat(reservation).isEqualTo(decision);
+      assertThat(reservation.get("reservationId").asText()).isEqualTo(reservationId);
+      assertThat(reservation.get("state").asText()).isEqualTo(ReservationState.ADMITTED.name());
+    }
+
+    assertThat(reservationService.rebuildActivityState(activityId))
+        .isEqualTo(ReservationAdmissionStore.RebuildResult.APPLIED);
+    assertThat(redis.opsForValue().get(userKey)).isEqualTo(reservationIds.get(0));
+  }
+
+  @Test
   void constrainsConcurrentQuotaAndOneAdmissionPerUser() throws Exception {
     createActivity(
         "reservation-concurrent", "reservation-product-concurrent", SeckillActivityState.ACTIVE, 5);
@@ -689,11 +747,61 @@ class SeckillReservationIntegrationTest {
         admissionStore.userKey(
             "reservation-rebuild", SeckillReservationService.sha256("rebuild-three"));
     redis.opsForValue().set(rejectedOnlyUserKey, "non-authoritative-marker");
-    assertThatThrownBy(() -> reservationService.rebuildActivityState("reservation-rebuild"))
-        .isInstanceOf(ReservationAdmissionStore.AdmissionIndeterminateException.class)
-        .hasMessageContaining("projection conflicts");
+    assertThat(reservationService.rebuildActivityState("reservation-rebuild"))
+        .isEqualTo(ReservationAdmissionStore.RebuildResult.APPLIED);
+    assertThat(redis.hasKey(rejectedOnlyUserKey)).isFalse();
     assertThat(redis.hasKey(admissionStore.rebuildKey("reservation-rebuild"))).isFalse();
-    redis.delete(rejectedOnlyUserKey);
+
+    String admittedUserKey =
+        admissionStore.userKey(
+            "reservation-rebuild", SeckillReservationService.sha256("rebuild-one"));
+    redis.opsForValue().set(projectionStore.key("reservation-rebuild"), "{malformed");
+    redis.opsForValue().set(admissionStore.reservationKey(first.reservationId()), "{malformed");
+    redis.delete(admissionStore.decisionKey(first.reservationId()));
+    redis.opsForValue().set(admittedUserKey, "bogus-admitted-marker");
+    redis.opsForValue().set(rejectedOnlyUserKey, "bogus-rejected-marker");
+
+    assertThat(reservationService.rebuildActivityState("reservation-rebuild"))
+        .isEqualTo(ReservationAdmissionStore.RebuildResult.APPLIED);
+    assertRemaining("reservation-rebuild", 3);
+    assertTerminalProjection(first, "rebuild-one");
+    assertThat(redis.opsForValue().get(admittedUserKey)).isEqualTo(first.reservationId());
+    assertThat(redis.hasKey(rejectedOnlyUserKey)).isFalse();
+
+    com.fasterxml.jackson.databind.node.ObjectNode conflictingActivity =
+        (com.fasterxml.jackson.databind.node.ObjectNode)
+            objectMapper.readTree(
+                redis.opsForValue().get(projectionStore.key("reservation-rebuild")));
+    conflictingActivity.put("state", SeckillActivityState.DRAFT.name());
+    redis
+        .opsForValue()
+        .set(
+            projectionStore.key("reservation-rebuild"),
+            objectMapper.writeValueAsString(conflictingActivity));
+    com.fasterxml.jackson.databind.node.ObjectNode conflictingReservation =
+        (com.fasterxml.jackson.databind.node.ObjectNode)
+            objectMapper.readTree(
+                redis.opsForValue().get(admissionStore.reservationKey(first.reservationId())));
+    conflictingReservation.put("quantity", 1);
+    String conflictingReservationJson = objectMapper.writeValueAsString(conflictingReservation);
+    redis
+        .opsForValue()
+        .set(admissionStore.reservationKey(first.reservationId()), conflictingReservationJson);
+    redis
+        .opsForValue()
+        .set(admissionStore.decisionKey(first.reservationId()), conflictingReservationJson);
+
+    assertThat(reservationService.rebuildActivityState("reservation-rebuild"))
+        .isEqualTo(ReservationAdmissionStore.RebuildResult.APPLIED);
+    JsonNode restoredActivity =
+        objectMapper.readTree(redis.opsForValue().get(projectionStore.key("reservation-rebuild")));
+    assertThat(restoredActivity.get("state").asText())
+        .isEqualTo(SeckillActivityState.ACTIVE.name());
+    JsonNode restoredReservation =
+        objectMapper.readTree(
+            redis.opsForValue().get(admissionStore.reservationKey(first.reservationId())));
+    assertThat(restoredReservation.get("quantity").asInt()).isEqualTo(2);
+    assertTerminalProjection(first, "rebuild-one");
 
     Duration minimum = properties.minimumBrokerCoverage();
     assertThat(properties.reservationTtl()).isGreaterThanOrEqualTo(minimum);
@@ -880,6 +988,31 @@ class SeckillReservationIntegrationTest {
         productId,
         productId,
         stock);
+  }
+
+  private void insertLegacyAdmittedReservation(
+      String reservationId,
+      String subject,
+      String activityId,
+      String idempotencyKey,
+      int quantity) {
+    assertThat(
+            jdbc.update(
+                """
+                INSERT INTO seckill_reservation
+                  (reservation_id, user_subject, activity_id, idempotency_key, intent_hash,
+                   quantity, activity_projection_version, state, decision_code,
+                   projection_version, transaction_resolution_due_at)
+                VALUES (?, ?, ?, ?, ?, ?, 1, 'ADMITTED', 'ADMITTED', 2,
+                        CURRENT_TIMESTAMP(6))
+                """,
+                reservationId,
+                subject,
+                activityId,
+                idempotencyKey,
+                SeckillReservationService.sha256(idempotencyKey),
+                quantity))
+        .isEqualTo(1);
   }
 
   private ReservationRequest request(int quantity, long expectedVersion) {

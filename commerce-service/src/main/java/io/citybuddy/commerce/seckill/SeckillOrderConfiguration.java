@@ -40,9 +40,9 @@ public class SeckillOrderConfiguration {
   RocketMqSeckillTransactions rocketMqSeckillTransactions(
       ObjectMapper objectMapper,
       SeckillOrderProperties properties,
-      ReservationAdmissionStore admissionStore)
+      SeckillReservationService reservationService)
       throws Exception {
-    return new RocketMqSeckillTransactions(objectMapper, properties, admissionStore);
+    return new RocketMqSeckillTransactions(objectMapper, properties, reservationService);
   }
 
   @Bean

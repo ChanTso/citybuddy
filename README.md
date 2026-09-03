@@ -79,8 +79,11 @@ agent-evaluation, and database-oracle work is catalogued in its
   [identity and authorization contracts](docs/CONTRACTS.md#contract-identity-authorization).
 - **Seckill admission under contention.** Redis Lua performs atomic quota and one-order-per-user
   admission; MySQL holds authoritative reservation, order, inventory, and ledger truth. A
-  RocketMQ transaction message binds the admission decision to durable order creation, and the
-  transaction checker resolves from a persisted decision marker only.
+  RocketMQ transaction message carries an admitted reservation to durable MySQL resolution, and
+  the transaction checker resolves terminal state from the MySQL reservation only. If overlapping
+  activities have consumed the same product stock, or another durable order already owns the
+  activity-user key, MySQL records the admitted reservation as terminal `UNFULFILLED` without an
+  order instead of claiming success or reusing its activity quota.
 - **Sensitive action truth.** Commerce owns `PendingAction` and an immutable `ActionReceipt`. The
   agent prepares an action and claims it before commerce records the refund request, so a lost
   response cannot leave that request durably recorded in commerce and permanently absent from the

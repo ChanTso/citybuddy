@@ -8,6 +8,8 @@ import java.util.List;
 import java.util.Locale;
 import java.util.Set;
 import java.util.UUID;
+import org.apache.rocketmq.client.apis.producer.TransactionResolution;
+import org.springframework.dao.DataAccessException;
 import org.springframework.dao.DuplicateKeyException;
 import org.springframework.transaction.support.TransactionTemplate;
 
@@ -49,6 +51,10 @@ public final class SeckillReservationService {
   public PreparedReservation prepare(
       String userSubject, String activityId, String idempotencyKey, ReservationRequest request) {
     ValidatedIntent intent = validate(userSubject, activityId, idempotencyKey, request);
+    if (repository.hasBlockingAdmissionTruthForDifferentIntent(
+        userSubject, activityId, idempotencyKey)) {
+      rebuildActivityState(activityId);
+    }
     return requirePreparedReservation(
         transactions.execute(
             status -> reserveIntent(userSubject, activityId, idempotencyKey, intent)));
@@ -85,6 +91,23 @@ public final class SeckillReservationService {
     return ReservationResult.from(reservation, true);
   }
 
+  public TransactionResolution transactionResolution(String reservationId) {
+    try {
+      return repository
+          .find(reservationId)
+          .map(
+              reservation ->
+                  switch (reservation.state()) {
+                    case REJECTED -> TransactionResolution.ROLLBACK;
+                    case ADMITTED, ORDERED, CANCELLED, UNFULFILLED -> TransactionResolution.COMMIT;
+                    case PENDING -> TransactionResolution.UNKNOWN;
+                  })
+          .orElse(TransactionResolution.UNKNOWN);
+    } catch (DataAccessException exception) {
+      return TransactionResolution.UNKNOWN;
+    }
+  }
+
   public ReservationAdmissionStore.RebuildResult rebuildActivityState(String activityId) {
     validateIdentity(activityId, 64, "Activity id");
     String lockToken = admissionStore.acquireRebuild(activityId);
@@ -107,10 +130,7 @@ public final class SeckillReservationService {
                     }
                     long admitted =
                         reservations.stream()
-                            .filter(
-                                reservation ->
-                                    reservation.state() == ReservationState.ADMITTED
-                                        || reservation.state() == ReservationState.ORDERED)
+                            .filter(reservation -> consumesActivityQuota(reservation.state()))
                             .mapToLong(SeckillReservation::quantity)
                             .sum();
                     if (admitted > activity.allocatedQuota()) {
@@ -188,7 +208,8 @@ public final class SeckillReservationService {
             .orElseThrow(() -> new IllegalStateException("Reservation truth is missing"));
     if (current.state() != ReservationState.PENDING) {
       if (current.state() == ReservationState.ORDERED
-          || current.state() == ReservationState.CANCELLED) {
+          || current.state() == ReservationState.CANCELLED
+          || current.state() == ReservationState.UNFULFILLED) {
         if (decision.state() == ReservationState.ADMITTED
             && decision.decisionCode() == ReservationDecisionCode.ADMITTED
             && current.decisionCode() == ReservationDecisionCode.ADMITTED
@@ -253,6 +274,19 @@ public final class SeckillReservationService {
     } catch (NoSuchAlgorithmException exception) {
       throw new IllegalStateException("SHA-256 is unavailable", exception);
     }
+  }
+
+  static boolean blocksAnotherAdmission(ReservationState state) {
+    return state == ReservationState.ADMITTED
+        || state == ReservationState.ORDERED
+        || state == ReservationState.CANCELLED
+        || state == ReservationState.UNFULFILLED;
+  }
+
+  static boolean consumesActivityQuota(ReservationState state) {
+    return state == ReservationState.ADMITTED
+        || state == ReservationState.ORDERED
+        || state == ReservationState.UNFULFILLED;
   }
 
   private static PreparedReservation requirePreparedReservation(PreparedReservation reservation) {
