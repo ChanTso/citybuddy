@@ -493,6 +493,11 @@ describe('CityBuddy portfolio surface', () => {
     fireEvent.change(input, { target: { value: 'stream this' } });
     fireEvent.click(screen.getByRole('button', { name: '流式发送' }));
     expect(await screen.findByText('Streamed answer.')).toBeVisible();
+    expect(
+      screen.getByText(
+        'AI 生成的解释可能不准确；交易状态只以服务端状态和回执为准。',
+      ),
+    ).toBeVisible();
     expect(mockedStreamChat).toHaveBeenCalledTimes(1);
     expect(mockedSendChat).not.toHaveBeenCalled();
     expect(mockedCreateSession).toHaveBeenCalledTimes(1);

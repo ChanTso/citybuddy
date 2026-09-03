@@ -5,6 +5,7 @@ import logging
 import secrets
 import sys
 import time
+import uuid
 from collections.abc import Mapping
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
@@ -189,9 +190,9 @@ class MemoryConversationStore(ConversationStore):
             result = existing[1]
             return TurnStart(result.conversation_id, result.trace_id, result.turn_id, result)
         start = TurnStart(
-            conversation_id=f"server-conversation-{session_id}",
-            trace_id=f"server-trace-{self.calls}",
-            turn_id=f"server-turn-{self.calls}",
+            conversation_id=str(uuid.uuid5(uuid.NAMESPACE_URL, f"conversation:{session_id}")),
+            trace_id=str(uuid.uuid5(uuid.NAMESPACE_URL, f"trace:{session_id}:{self.calls}")),
+            turn_id=str(uuid.uuid5(uuid.NAMESPACE_URL, f"turn:{session_id}:{self.calls}")),
             history=ConversationHistory(tuple(self.turns.get(session_id, ()))),
         )
         self.pending[key] = (message, start)
@@ -2840,7 +2841,8 @@ def test_unexpected_agent_error_is_visible_and_marks_the_reserved_turn_failed() 
 
     assert response.status_code == 500
     assert "private provider configuration detail" not in response.text
-    assert conversations.failures == [("server-turn-1", "agent_execution_failed")]
+    assert len(conversations.failures) == 1
+    assert conversations.failures[0][1] == "agent_execution_failed"
 
 
 def test_stream_projects_durable_result_and_replay_through_fixed_sse_schema() -> None:
@@ -2891,10 +2893,11 @@ def test_stream_projects_durable_result_and_replay_through_fixed_sse_schema() ->
     assert conversations.calls == 1
 
 
-def test_stream_withholds_action_claim_and_private_execution_failure() -> None:
+def test_json_and_stream_project_the_same_replayed_non_authoritative_explanation() -> None:
     class FixedAgent(AgentRunner):
         def __init__(self, result: AgentRunResult | None = None) -> None:
             self.result = result
+            self.calls = 0
 
         def run(
             self,
@@ -2909,6 +2912,7 @@ def test_stream_withholds_action_claim_and_private_execution_failure() -> None:
             sandbox_id: str | None = None,
         ) -> AgentRunResult:
             del message, direct_token, subject, session_id, trace_id, turn_id, history, sandbox_id
+            self.calls += 1
             if self.result is None:
                 raise RuntimeError("private provider stack and credential detail")
             return self.result
@@ -2921,22 +2925,31 @@ def test_stream_withholds_action_claim_and_private_execution_failure() -> None:
         "X-Session-Id": session_id,
         "Idempotency-Key": "unsafe-action",
     }
-    unsafe_conversations = MemoryConversationStore(sessions)
-    unsafe = TestClient(
+    conversations = MemoryConversationStore(sessions)
+    agent = FixedAgent(AgentRunResult("I cancelled it for you.", "completed", tuple()))
+    client = TestClient(
         create_app(
             settings(),
             validator=DirectJwtValidator(settings(), CountingJwksSource([public_jwk])),
             sessions=sessions,
-            conversations=unsafe_conversations,
-            agent=FixedAgent(AgentRunResult("I cancelled it for you.", "completed", tuple())),
+            conversations=conversations,
+            agent=agent,
         )
-    ).post("/api/chat/stream", headers=headers, json={"message": "refund"})
+    )
 
-    assert unsafe.status_code == 200
-    assert unsafe.text.count("event: error\n") == 1
-    assert '"code":"unsafe_output"' in unsafe.text
-    assert "cancelled" not in unsafe.text.lower()
-    assert len(unsafe_conversations.results) == 1
+    json_response = client.post("/api/chat", headers=headers, json={"message": "refund"})
+    stream_response = client.post("/api/chat/stream", headers=headers, json={"message": "refund"})
+
+    assert json_response.status_code == stream_response.status_code == 200
+    assert json_response.json()["reply"] == "I cancelled it for you."
+    assert json_response.json()["outcome"] == "completed"
+    assert json_response.json()["receiptId"] is None
+    assert '"text":"I cancelled it for you."' in stream_response.text
+    assert '"outcome":"completed"' in stream_response.text
+    assert "event: action_receipt" not in stream_response.text
+    assert "event: error" not in stream_response.text
+    assert agent.calls == 1
+    assert len(conversations.results) == 1
 
     failed_conversations = MemoryConversationStore(sessions)
     failed = TestClient(
@@ -2957,7 +2970,57 @@ def test_stream_withholds_action_claim_and_private_execution_failure() -> None:
     assert failed.text.count("event: error\n") == 1
     assert '"code":"stream_unavailable"' in failed.text
     assert "private provider" not in failed.text
-    assert failed_conversations.failures == [("server-turn-1", "agent_execution_failed")]
+    assert len(failed_conversations.failures) == 1
+    assert failed_conversations.failures[0][1] == "agent_execution_failed"
+
+
+def test_retrieval_denied_is_a_normal_bounded_stream_result() -> None:
+    class RetrievalDeniedAgent(AgentRunner):
+        def run(
+            self,
+            *,
+            message: str,
+            direct_token: str,
+            subject: str,
+            session_id: str,
+            trace_id: str,
+            turn_id: str,
+            history: ConversationHistory = EMPTY_CONVERSATION_HISTORY,
+            sandbox_id: str | None = None,
+        ) -> AgentRunResult:
+            del message, direct_token, subject, session_id, trace_id, turn_id, history, sandbox_id
+            return AgentRunResult(
+                "I do not have sufficient grounded evidence to answer that request.",
+                "retrieval_denied",
+                tuple(),
+            )
+
+    private, public_jwk = key_fixture("current-key")
+    sessions = MemorySessionStore()
+    session_id = sessions.create("user-123")
+    response = TestClient(
+        create_app(
+            settings(),
+            validator=DirectJwtValidator(settings(), CountingJwksSource([public_jwk])),
+            sessions=sessions,
+            conversations=MemoryConversationStore(sessions),
+            agent=RetrievalDeniedAgent(),
+        )
+    ).post(
+        "/api/chat/stream",
+        headers={
+            "Authorization": f"Bearer {direct_token(private, 'current-key')}",
+            "X-Session-Id": session_id,
+            "Idempotency-Key": "retrieval-denied",
+        },
+        json={"message": "unknown"},
+    )
+
+    assert response.status_code == 200
+    assert "event: token" in response.text
+    assert "event: done" in response.text
+    assert '"outcome":"retrieval_denied"' in response.text
+    assert "event: error" not in response.text
 
 
 def test_stream_maps_bounded_non_success_outcomes_to_one_terminal_error() -> None:

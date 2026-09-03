@@ -274,12 +274,16 @@ def main() -> None:
     say('the model answers  "Your refund has been issued."')
     claimed = client.say_to_agent("unsafe-action-claim 我的退款到账了吗", "demo-unsafe")
     say(f"JSON path  outcome={claimed['outcome']} receiptId={claimed['receiptId']}")
-    say(f"           the sentence is passed through: {claimed['reply']!r}")
-    say("           it carries no action state and no receipt, so no client can render one")
-    stream = client.stream_to_agent("unsafe-action-claim 我的退款到账了吗", "demo-unsafe-stream")
-    emitted = " ".join(line for line in stream.splitlines() if line)
-    say(f"SSE  path  {emitted}")
-    say("           the egress filter refuses the claim outright rather than tokenising it")
+    say(f"           bounded explanation: {claimed['reply']!r}")
+    stream = client.stream_to_agent("unsafe-action-claim 我的退款到账了吗", "demo-unsafe")
+    if (
+        f'"text":"{claimed["reply"]}"' not in stream
+        or '"outcome":"completed"' not in stream
+        or "event: action_receipt" in stream
+    ):
+        raise SystemExit("JSON and SSE did not project the same durable non-action turn")
+    say(f"SSE  path  token text={claimed['reply']!r} → done outcome=completed")
+    say("same key   replays one durable turn; explanation text carries no action state")
     refunds = database.rows(
         "commerce_db",
         "SELECT COUNT(*) FROM mock_refund WHERE order_id = %s",

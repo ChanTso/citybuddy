@@ -57,15 +57,12 @@ def test_chat_response_is_allowlisted_and_server_ids_are_read_only() -> None:
         "action_declined",
         "action_expired",
     ]
-    assert response["properties"]["receiptId"] == {
-        "type": ["string", "null"],
-        "format": "uuid",
-        "readOnly": True,
-        "description": (
-            "The committed receipt projected from durable action truth for action_completed; "
-            "null for every other outcome."
-        ),
-    }
+    assert response["properties"]["reply"]["minLength"] == 1
+    assert response["properties"]["reply"]["maxLength"] == 256
+    receipt = response["properties"]["receiptId"]
+    assert receipt["type"] == ["string", "null"]
+    assert receipt["format"] == "uuid"
+    assert receipt["readOnly"] is True
     citation = contract()["components"]["schemas"]["RetrievalCitation"]
     assert citation["additionalProperties"] is False
     assert set(citation["properties"]) == {
@@ -104,22 +101,23 @@ def test_stream_contract_fixes_headers_event_names_and_allowlisted_payloads() ->
         assert schema["additionalProperties"] is False
         assert set(schema["properties"]) == fields
         assert set(schema["required"]) == fields
-    assert (
-        "non-authoritative explanation"
-        in payload["components"]["schemas"]["SseTokenData"]["description"]
-    )
-    assert (
-        payload["components"]["schemas"]["SseActionReceiptData"]["description"]
-        == "Projects a committed ActionReceipt from the agent's durable receipt projection; "
-        "clients must treat this event, not token prose, as action-completion truth."
-    )
+    assert payload["components"]["schemas"]["SseActionReceiptData"]["properties"]["status"] == {
+        "type": "string",
+        "enum": ["REQUESTED"],
+    }
     assert payload["components"]["schemas"]["SseDoneData"]["properties"]["outcome"]["enum"] == [
         "completed",
+        "retrieval_denied",
         "action_pending",
         "action_completed",
         "action_clarification",
         "action_declined",
         "action_expired",
+    ]
+    assert payload["components"]["schemas"]["SseErrorData"]["properties"]["code"]["enum"] == [
+        "attempt_budget_exhausted",
+        "provider_unavailable",
+        "stream_unavailable",
     ]
 
     source = (ROOT / "agent-service/src/citybuddy_agent/sse.py").read_text(encoding="utf-8")

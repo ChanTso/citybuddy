@@ -10,7 +10,7 @@ from base64 import b64decode
 from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime
-from typing import Any, Literal, Protocol
+from typing import Any, Literal, Protocol, cast
 
 import httpx
 import jwt
@@ -75,7 +75,7 @@ from .metrics import (
     create_metrics_runtime,
 )
 from .retrieval import load_calibration
-from .sse import SseEgressFilter, SseProjectionError, stream_events
+from .sse import SseEgressFilter, SseProjectionError, stream_events, validate_public_result
 from .tracing import (
     OperationObservation,
     TraceSink,
@@ -354,14 +354,27 @@ class CitationResponse(BaseModel):
     title: str
 
 
+ChatOutcome = Literal[
+    "completed",
+    "budget_exhausted",
+    "provider_denied",
+    "retrieval_denied",
+    "action_pending",
+    "action_completed",
+    "action_clarification",
+    "action_declined",
+    "action_expired",
+]
+
+
 class ChatResponse(BaseModel):
     model_config = ConfigDict(frozen=True)
 
     conversation_id: str = Field(serialization_alias="conversationId")
     trace_id: str = Field(serialization_alias="traceId")
     turn_id: str = Field(serialization_alias="turnId")
-    reply: str
-    outcome: str
+    reply: str = Field(min_length=1, max_length=256)
+    outcome: ChatOutcome
     citations: tuple[CitationResponse, ...] = ()
     # Present only for a committed action, and read from the stored projection so the non-stream
     # client sees the same receipt the stream does.
@@ -1087,6 +1100,12 @@ def _create_app(
                     correlation_key=correlation_key,
                     observation=observation,
                 )
+                validate_public_result(result)
+            except SseProjectionError as exception:
+                observation.outcome = OperationOutcome.CONFLICT
+                raise ConversationIntegrityError(
+                    "Durable turn cannot be projected to the public contract"
+                ) from exception
             except ConversationOwnershipError:
                 observation.outcome = OperationOutcome.DENIED
                 raise
@@ -1182,7 +1201,7 @@ def _create_app(
             trace_id=result.trace_id,
             turn_id=result.turn_id,
             reply=result.response_text,
-            outcome=result.outcome,
+            outcome=cast(ChatOutcome, result.outcome),
             citations=tuple(
                 CitationResponse(
                     source_id=evidence.source_id,
@@ -1249,7 +1268,7 @@ def _create_app(
                 events = sse_filter.project_result(result)
             except SseProjectionError:
                 record_action_request_failure("ACTION_STREAM_PROJECTION_INVALID")
-                events = sse_filter.terminal_error("unsafe_output")
+                events = sse_filter.terminal_error("stream_unavailable")
         return StreamingResponse(
             stream_events(events, http_request.is_disconnected),
             media_type="text/event-stream",

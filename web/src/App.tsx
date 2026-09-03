@@ -666,6 +666,9 @@ export function App() {
                   流式回复
                 </label>
               </div>
+              <p className="notice">
+                AI 生成的解释可能不准确；交易状态只以服务端状态和回执为准。
+              </p>
               <div className="chat-log" aria-live="polite">
                 {chat.length === 0 ? (
                   <p className="empty-chat">

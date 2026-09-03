@@ -86,7 +86,12 @@
                     "conversationId": {"type": "string", "format": "uuid", "readOnly": true},
                     "traceId": {"type": "string", "format": "uuid", "readOnly": true},
                     "turnId": {"type": "string", "format": "uuid", "readOnly": true},
-                    "reply": {"type": "string", "maxLength": 256},
+                    "reply": {
+                      "type": "string",
+                      "minLength": 1,
+                      "maxLength": 256,
+                      "description": "Bounded non-authoritative explanation; clients must use outcome and receiptId for action state."
+                    },
                     "outcome": {
                       "type": "string",
                       "enum": [
@@ -160,7 +165,7 @@
         },
         "responses": {
           "200": {
-            "description": "Bounded filtered projection of one durable support turn",
+            "description": "Bounded structural projection of one durable support turn",
             "content": {
               "text/event-stream": {
                 "schema": {"type": "string"},
@@ -308,9 +313,9 @@
         "properties": {
           "sequence": {"type": "integer", "minimum": 1, "maximum": 5},
           "receiptId": {"type": "string", "format": "uuid", "readOnly": true},
-          "status": {"type": "string", "enum": ["SUCCEEDED"]}
+          "status": {"type": "string", "enum": ["REQUESTED"]}
         },
-        "description": "Projects a committed ActionReceipt from the agent's durable receipt projection; clients must treat this event, not token prose, as action-completion truth."
+        "description": "Projects a committed ActionReceipt whose REQUESTED state means commerce durably recorded the refund request; token prose is not action truth."
       },
       "SseDoneData": {
         "type": "object",
@@ -325,6 +330,7 @@
             "type": "string",
             "enum": [
               "completed",
+              "retrieval_denied",
               "action_pending",
               "action_completed",
               "action_clarification",
@@ -345,8 +351,7 @@
             "enum": [
               "attempt_budget_exhausted",
               "provider_unavailable",
-              "stream_unavailable",
-              "unsafe_output"
+              "stream_unavailable"
             ]
           }
         }

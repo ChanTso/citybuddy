@@ -43,6 +43,13 @@ def main() -> None:
         parsed.append((name, payload))
     if parsed[-1][0] != args.terminal or any(name in {"done", "error"} for name, _ in parsed[:-1]):
         raise ValueError("SSE terminal ordering is invalid")
+    receipts = [payload for name, payload in parsed if name == "action_receipt"]
+    if len(receipts) > 1 or any(receipt["status"] != "REQUESTED" for receipt in receipts):
+        raise ValueError("SSE receipt status is invalid")
+    if args.terminal == "done" and (
+        (parsed[-1][1]["outcome"] == "action_completed") != (len(receipts) == 1)
+    ):
+        raise ValueError("SSE action outcome and receipt disagree")
     text = "".join(str(payload["text"]) for name, payload in parsed if name == "token")
     if any(len(str(payload["text"])) > 64 for name, payload in parsed if name == "token"):
         raise ValueError("SSE token chunk exceeds its bound")

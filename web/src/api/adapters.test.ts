@@ -189,7 +189,7 @@ describe('public API adapters', () => {
 
   it('returns the committed receipt from a POST-SSE stream', async () => {
     const bytes = new TextEncoder().encode(
-      `event: action_receipt\ndata: {"sequence":1,"receiptId":"${UUID}","status":"SUCCEEDED"}\n\n` +
+      `event: action_receipt\ndata: {"sequence":1,"receiptId":"${UUID}","status":"REQUESTED"}\n\n` +
         `event: token\ndata: {"sequence":2,"text":"issued"}\n\n` +
         `event: done\ndata: {"sequence":3,"conversationId":"${UUID}","traceId":"${UUID}","turnId":"${UUID}","outcome":"action_completed"}\n\n`,
     );
