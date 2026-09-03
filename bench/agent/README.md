@@ -916,6 +916,47 @@ Like `profile_agent_cpu.sh`, a fixed-concurrency profile would answer where samp
 not throughput at a fixed arrival rate, and must not be substituted for a ladder. This is a
 feasibility boundary only: no JFR implementation or recording exists, and no Docker CPU file is one.
 
+### Generated-credential extension: 45 and 60 requests/s
+
+A later extension measured `95252754313b59a08933c3121b7ed90ba269134c`, which has the same
+Auth, Commerce and Agent runtime source as the final digest pair above. Each target rebuilt
+10,000 independent users, paid orders and empty sessions; it used one Agent worker, shared
+HTTP clients, attempt budget 16, Docker 8 CPUs / 14,638,391,296 bytes, Commerce 4 CPUs and
+MySQL `max_connections=151`. Model inference remained zero. Setup and idle checks were outside
+the measured window; no builds or other benchmark runs overlapped the measurements.
+
+Each fresh setup ran a fixed 30 requests/s for 30 seconds as warm-up, then a 55-second gap,
+then one target for 30 seconds, with 45 seconds graceful stop. Both warm-ups served all 901
+started requests with no errors, drops or interruptions. Target counts and all-response latency:
+
+| Target | Finished / served | Finished/s | p50 | p99 | Errors / nonserved / dropped / interrupted |
+|---:|---:|---:|---:|---:|---:|
+| 45/s | 1,350 / 1,350 | 45.00 | 11.5 ms | 30.2 ms | 0 / 0 / 0 / 0 |
+| 60/s | 1,800 / 1,800 | 60.00 | 11.3 ms | 34.6 ms | 0 / 0 / 0 / 0 |
+
+The stopping rule was fixed before running: stop on an error, nonserved response, drop,
+interruption, demonstrated generator saturation, or a target p99 at least twice the immediately
+previous clean target's unrounded p99. The first new target is the anchor, not the historical
+30/s result. Neither completed target triggered that rule. Both bundles recorded zero new MySQL
+connection-limit errors; workload SQL found only completed turns with the expected `all` tool
+profile and empty context.
+
+The next planned 90/s target did not execute: execution approval blocked it after setup.
+**This extension is incomplete: 60/s is the highest observed clean target, not a measured knee
+or sustained capacity.** There is no 90/s performance result. The extension is a separate session
+from the historical BCrypt/digest pair, not another before/after comparison, and supplies no new
+bottleneck attribution. It measures local orchestration with a deterministic model fixture, not
+end-to-end model latency.
+
+The [45/s steps](../results/agent_obo_digest_ext_20260903T1900Z_r45_steps.txt),
+[45/s summary](../results/agent_obo_digest_ext_20260903T1900Z_r45_summary.json),
+[45/s setup](../results/agent_obo_digest_ext_20260903T1900Z_r45_setup_environment.json),
+[60/s steps](../results/agent_obo_digest_ext_20260903T1900Z_r60_steps.txt),
+[60/s summary](../results/agent_obo_digest_ext_20260903T1900Z_r60_summary.json) and
+[60/s setup](../results/agent_obo_digest_ext_20260903T1900Z_r60_setup_environment.json)
+have adjacent console, CPU, CPU-error, MySQL and workload-contract files. Each complete bundle
+contains eight files and records the full measured commit.
+
 ## Three things found while building the fixture
 
 **Concurrent mock-payment settlement exposed two deadlocks; both lock paths are now removed.**

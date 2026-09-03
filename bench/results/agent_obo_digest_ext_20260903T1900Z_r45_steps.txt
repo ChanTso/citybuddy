@@ -1,0 +1,8 @@
+citybuddy_commit=95252754313b59a08933c3121b7ed90ba269134c
+sut_commit=95252754313b59a08933c3121b7ed90ba269134c
+benchmark_harness_commit=95252754313b59a08933c3121b7ed90ba269134c
+
+=== obo_digest_ext_20260903T1900Z_r45 (30s steps) ===
+rate nominal_offered started finished served nonserved dropped interrupted 5xx errors finished/s p50_ms p95_ms p99_ms max_ms
+30 900 901 901 901 0 0 0 0 0 30.03 13.4 18.5 28.4 48.7
+45 1350 1350 1350 1350 0 0 0 0 0 45.00 11.5 16.0 30.2 44.1

@@ -1,0 +1,182 @@
+{
+  "benchmarkHarnessCommit": "95252754313b59a08933c3121b7ed90ba269134c",
+  "citybuddyCommit": "95252754313b59a08933c3121b7ed90ba269134c",
+  "configuration": {
+    "agentAttemptBudget": 16,
+    "agentBenchUsers": 10000,
+    "commerceCpuLimit": {
+      "observedCpusetCpus": "",
+      "observedNanoCpus": 4000000000,
+      "requestedCpus": 4
+    },
+    "evaluationSessionPropagationEnabled": true,
+    "httpClientLayout": "shared",
+    "metricsEnabled": true,
+    "observedWorkerCount": 1,
+    "observedWorkerPids": [
+      1
+    ],
+    "observedWorkerStartLogOccurrences": 1,
+    "outboundEndpoints": {
+      "commerceLivenessUrl": "http://citybuddy-bench-commerce:8080",
+      "commerceToolsUrl": "http://citybuddy-bench-commerce:8080",
+      "elasticsearchUrl": "http://citybuddy-bench-elasticsearch:9200",
+      "identityExchangeUrl": "http://citybuddy-bench-auth:8080/auth/token/exchange",
+      "identityJwksUrl": "http://citybuddy-bench-auth:8080/auth/jwks",
+      "modelProxyUrl": "http://127.0.0.1:8000"
+    },
+    "outboundOrigins": {
+      "auth": "http://citybuddy-bench-auth:8080",
+      "commerce": "http://citybuddy-bench-commerce:8080",
+      "elasticsearch": "http://citybuddy-bench-elasticsearch:9200",
+      "model": "http://127.0.0.1:8000"
+    },
+    "requestedWorkers": 1,
+    "traceExportUrl": ""
+  },
+  "containers": {
+    "citybuddy-bench-agent": {
+      "id": "b956b80804b961764d50642622394ba215091537363eab2a377eb85e4ab1ab51",
+      "imageId": "sha256:092325420ab65a571e5e74605be694acdc28b205fe199c8f0625e5ddef81f6de",
+      "labels": {
+        "citybuddy.bench.citybuddy-commit": "95252754313b59a08933c3121b7ed90ba269134c",
+        "citybuddy.bench.setup-nonce": "b5af418d4f24dc380fd985c0919652d2"
+      },
+      "restartCount": 0,
+      "startedAt": "2026-09-03T19:29:08.329682221Z"
+    },
+    "citybuddy-bench-auth": {
+      "id": "0dadb362050dbaa43516d1595d9bf5f0fd3754b90aa4f2f92fc68d96f833654f",
+      "imageId": "sha256:20e7f7288e1c18eebe8f06a442c9f7183342d9b022d3b9a9677cae2b558ddddd",
+      "labels": {
+        "citybuddy.bench.citybuddy-commit": "95252754313b59a08933c3121b7ed90ba269134c",
+        "citybuddy.bench.setup-nonce": "b5af418d4f24dc380fd985c0919652d2"
+      },
+      "restartCount": 0,
+      "startedAt": "2026-09-03T19:29:02.766802052Z"
+    },
+    "citybuddy-bench-commerce": {
+      "id": "9abc4afbb841f13a505871ed06ac4fc2d06290fa65d85869d71af5a1f9e51c8c",
+      "imageId": "sha256:20e7f7288e1c18eebe8f06a442c9f7183342d9b022d3b9a9677cae2b558ddddd",
+      "labels": {
+        "citybuddy.bench.citybuddy-commit": "95252754313b59a08933c3121b7ed90ba269134c",
+        "citybuddy.bench.setup-nonce": "b5af418d4f24dc380fd985c0919652d2"
+      },
+      "restartCount": 0,
+      "startedAt": "2026-09-03T19:29:05.294725761Z"
+    },
+    "citybuddy-bench-elasticsearch": {
+      "id": "f3f1c053f3c4d57bf3ffadad3ba4f9587a9ee9fbbd75f016fb1274108b71f5b6",
+      "imageId": "sha256:ca8f19e3e3b01af87873698a3f8654aeda1cc9caf175e816007dcb47383ddac7",
+      "labels": {
+        "citybuddy.bench.citybuddy-commit": "95252754313b59a08933c3121b7ed90ba269134c",
+        "citybuddy.bench.setup-nonce": "b5af418d4f24dc380fd985c0919652d2"
+      },
+      "restartCount": 0,
+      "startedAt": "2026-09-03T19:28:50.447482963Z"
+    },
+    "citybuddy-bench-model": {
+      "id": "22a6a1aa6f2a2596793e3ade5c66b472ce1a751eb28603c97168b758e9ac9512",
+      "imageId": "sha256:092325420ab65a571e5e74605be694acdc28b205fe199c8f0625e5ddef81f6de",
+      "labels": {
+        "citybuddy.bench.citybuddy-commit": "95252754313b59a08933c3121b7ed90ba269134c",
+        "citybuddy.bench.setup-nonce": "b5af418d4f24dc380fd985c0919652d2"
+      },
+      "restartCount": 0,
+      "startedAt": "2026-09-03T19:29:07.905926096Z"
+    },
+    "citybuddy-bench-net": {
+      "id": "6699e400a375087d9db48dd9952589853bd196499c3e4cfffb9ce84605b569d3",
+      "imageId": "sha256:d9e853e87e55526f6b2917df91a2115c36dd7c696a35be12163d44e6e2a4b6bc",
+      "labels": {
+        "citybuddy.bench.citybuddy-commit": "95252754313b59a08933c3121b7ed90ba269134c",
+        "citybuddy.bench.setup-nonce": "b5af418d4f24dc380fd985c0919652d2"
+      },
+      "restartCount": 0,
+      "startedAt": "2026-09-03T19:29:07.780976971Z"
+    }
+  },
+  "formatVersion": "citybuddy-agent-setup-environment-v2",
+  "hardware": {
+    "docker": {
+      "allocatedCpus": 8,
+      "allocatedMemoryBytes": 14638391296,
+      "architecture": "aarch64",
+      "serverVersion": "29.5.3",
+      "storageDriver": "overlayfs"
+    },
+    "host": {
+      "architecture": "arm64",
+      "cpuCount": 10,
+      "kernel": "Darwin 25.5.0 Darwin Kernel Version 25.5.0: Mon Apr 27 20:41:26 PDT 2026; root:xnu-12377.121.6~2/RELEASE_ARM64_T8132",
+      "memoryBytes": 25769803776,
+      "model": "Mac16,1"
+    }
+  },
+  "java": {
+    "authService": {
+      "artifact": "auth-service/target/auth-service-0.0.1-SNAPSHOT.jar",
+      "hostJarSha256": "6697b7d0295f7b622885b8820bfc171aa5cb1ac01fd8d19700e4cba69d58f69a",
+      "javaRuntimeVersion": "21.0.8+9-LTS",
+      "mountedContainer": "citybuddy-bench-auth",
+      "mountedJar": "/opt/citybuddy/auth.jar",
+      "mountedJarSha256": "6697b7d0295f7b622885b8820bfc171aa5cb1ac01fd8d19700e4cba69d58f69a"
+    },
+    "commerceService": {
+      "artifact": "commerce-service/target/commerce-service-0.0.1-SNAPSHOT.jar",
+      "hostJarSha256": "511349becaa8e1cedd00e0b38eeb25c7b2e889c447c6f7d7f0dfb96f4f7b3323",
+      "javaRuntimeVersion": "21.0.8+9-LTS",
+      "mountedContainer": "citybuddy-bench-commerce",
+      "mountedJar": "/opt/citybuddy/commerce.jar",
+      "mountedJarSha256": "511349becaa8e1cedd00e0b38eeb25c7b2e889c447c6f7d7f0dfb96f4f7b3323"
+    }
+  },
+  "knowledgeBootstrapRawJson": "{\"alias\":\"knowledge_docs_read\",\"documentCount\":4,\"indexVersion\":\"knowledge_docs_v1\"}\n",
+  "migrationCommands": [
+    {
+      "command": "make ENV_FILE=.env COMPOSE_PROJECT_NAME=citybuddy grant-access",
+      "status": "succeeded"
+    },
+    {
+      "command": "make ENV_FILE=.env COMPOSE_PROJECT_NAME=citybuddy migrate-auth",
+      "status": "succeeded"
+    },
+    {
+      "command": "make ENV_FILE=.env COMPOSE_PROJECT_NAME=citybuddy migrate-commerce",
+      "status": "succeeded"
+    },
+    {
+      "command": "make ENV_FILE=.env COMPOSE_PROJECT_NAME=citybuddy migrate-agent",
+      "status": "succeeded"
+    },
+    {
+      "command": "make ENV_FILE=.env COMPOSE_PROJECT_NAME=citybuddy grant-access",
+      "status": "succeeded"
+    }
+  ],
+  "mysql": {
+    "agent": {
+      "latestVersion": "009"
+    },
+    "auth": {
+      "latestVersion": "003"
+    },
+    "commerce": {
+      "latestVersion": "017"
+    },
+    "container": {
+      "configuredImage": "mysql:8.4.10@sha256:c831a0f11348d402b43d77453e17d770be2eef356615a2823fe0f5a0d6c8b9af",
+      "id": "6f12cda634df697553b57e8d2662af2143934841b4b9325a86040c703b33dd2a",
+      "imageId": "sha256:c831a0f11348d402b43d77453e17d770be2eef356615a2823fe0f5a0d6c8b9af",
+      "restartCount": 0,
+      "startedAt": "2026-09-03T19:26:31.575055093Z"
+    },
+    "maxConnections": 151
+  },
+  "setupNonce": "b5af418d4f24dc380fd985c0919652d2",
+  "setupWindowUtc": {
+    "completedAt": "2026-09-03T19:30:36Z",
+    "startedAt": "2026-09-03T19:28:27Z"
+  },
+  "sutCommit": "95252754313b59a08933c3121b7ed90ba269134c"
+}
