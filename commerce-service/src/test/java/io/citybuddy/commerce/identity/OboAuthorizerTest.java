@@ -61,6 +61,53 @@ class OboAuthorizerTest {
   }
 
   @Test
+  void rejectsNonRs256AlgorithmEvenWhenTheSigningKeyIsTrusted() throws Exception {
+    String signed =
+        token(
+            current,
+            current.getKeyID(),
+            JWSAlgorithm.RS384,
+            TokenValues.valid(),
+            "token-123",
+            NOW,
+            Map.of());
+
+    assertThatThrownBy(() -> authorizer.authorize(signed, request(null, null)))
+        .isInstanceOf(OboAuthorizationException.class)
+        .hasMessage("Wrong algorithm");
+  }
+
+  @Test
+  void rejectsForgedSignatureUnderAConfiguredKeyId() throws Exception {
+    RSAKey attacker = key("attacker-key");
+    String forged =
+        token(
+            attacker,
+            current.getKeyID(),
+            JWSAlgorithm.RS256,
+            TokenValues.valid(),
+            "token-123",
+            NOW,
+            Map.of());
+
+    assertThatThrownBy(() -> authorizer.authorize(forged, request(null, null)))
+        .isInstanceOf(OboAuthorizationException.class)
+        .hasMessage("Invalid signature");
+  }
+
+  @Test
+  void rejectsSubjectAndUserIdMismatchWithoutAnExpectedResourceOwner() throws Exception {
+    String mismatched = token(current, TokenValues.valid().withUserId("other-user"));
+    OboAuthorizer.AuthorizationRequest noExpectedOwner =
+        new OboAuthorizer.AuthorizationRequest(
+            "catalog:read", null, "session-123", null, null, null);
+
+    assertThatThrownBy(() -> authorizer.authorize(mismatched, noExpectedOwner))
+        .isInstanceOf(OboAuthorizationException.class)
+        .hasMessage("User mismatch");
+  }
+
+  @Test
   void rejectsEveryIdentityDimensionAndBodySubstitution() throws Exception {
     assertRejected(TokenValues.valid().withIssuer("https://wrong.example"), request(null, null));
     assertRejected(TokenValues.valid().withAudience("citybuddy-web"), request(null, null));
@@ -251,6 +298,18 @@ class OboAuthorizerTest {
   private String token(
       RSAKey key, TokenValues values, String jti, Instant issuedAt, Map<String, Object> extraClaims)
       throws JOSEException {
+    return token(key, key.getKeyID(), JWSAlgorithm.RS256, values, jti, issuedAt, extraClaims);
+  }
+
+  private String token(
+      RSAKey signingKey,
+      String headerKid,
+      JWSAlgorithm algorithm,
+      TokenValues values,
+      String jti,
+      Instant issuedAt,
+      Map<String, Object> extraClaims)
+      throws JOSEException {
     JWTClaimsSet.Builder builder =
         new JWTClaimsSet.Builder()
             .issuer(values.issuer())
@@ -270,9 +329,8 @@ class OboAuthorizerTest {
     extraClaims.forEach(builder::claim);
     JWTClaimsSet claims = builder.build();
     SignedJWT jwt =
-        new SignedJWT(
-            new JWSHeader.Builder(JWSAlgorithm.RS256).keyID(key.getKeyID()).build(), claims);
-    jwt.sign(new RSASSASigner(key.toRSAPrivateKey()));
+        new SignedJWT(new JWSHeader.Builder(algorithm).keyID(headerKid).build(), claims);
+    jwt.sign(new RSASSASigner(signingKey.toRSAPrivateKey()));
     return jwt.serialize();
   }
 
@@ -325,6 +383,11 @@ class OboAuthorizerTest {
     TokenValues withSubject(String value) {
       return new TokenValues(
           issuer, audience, value, userId, session, scope, tokenType, actor, notBefore, expiresAt);
+    }
+
+    TokenValues withUserId(String value) {
+      return new TokenValues(
+          issuer, audience, subject, value, session, scope, tokenType, actor, notBefore, expiresAt);
     }
 
     TokenValues withSession(String value) {
