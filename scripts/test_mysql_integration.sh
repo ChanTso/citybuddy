@@ -178,6 +178,41 @@ assert_no_admin_grants auth_app "$auth_app_password"
 assert_no_admin_grants commerce_app "$commerce_app_password"
 assert_no_admin_grants agent_app "$agent_app_password"
 
+mysql_query commerce_app "$commerce_app_password" commerce_db "
+INSERT INTO product
+  (product_id, name, description, price_minor, currency, stock_quantity, available,
+   publication_state, publication_version)
+VALUES ('correctness-quantity-product', 'Quantity probe', 'correctness SQL probe', 1, 'CNY',
+        1000000, TRUE, 'PUBLISHED', 1);
+INSERT INTO seckill_activity
+  (activity_id, product_id, starts_at, ends_at, state, allocated_quota, projection_version)
+VALUES ('correctness-quantity', 'correctness-quantity-product', '2020-01-01 00:00:00',
+        '2035-01-01 00:00:00', 'ACTIVE', 100, 1);
+INSERT INTO seckill_reservation
+  (reservation_id, user_subject, activity_id, idempotency_key, intent_hash, quantity,
+   activity_projection_version, state, decision_code, projection_version,
+   transaction_resolution_due_at, order_id)
+VALUES ('00000000-0000-0000-0000-000000000070', 'quantity-probe', 'correctness-quantity',
+        'quantity-probe', REPEAT('0', 64), 101, 1, 'ORDERED', 'ADMITTED', 3,
+        CURRENT_TIMESTAMP(6), '00000000-0000-0000-0000-000000000071');
+INSERT INTO seckill_order
+  (order_id, reservation_id, transaction_event_id, timeout_event_id, user_subject, activity_id,
+   product_id, product_name, unit_price_minor, currency, quantity, total_price_minor,
+   unpaid_deadline)
+VALUES ('00000000-0000-0000-0000-000000000071',
+        '00000000-0000-0000-0000-000000000070',
+        '00000000-0000-0000-0000-000000000072',
+        '00000000-0000-0000-0000-000000000073', 'quantity-probe', 'correctness-quantity',
+        'correctness-quantity-product', 'Quantity probe', 1, 'CNY', 101, 101,
+        TIMESTAMPADD(MINUTE, 15, CURRENT_TIMESTAMP(6)));
+"
+quantity_probe_sql="$(ACTIVITY=correctness-quantity PRODUCT=correctness-quantity-product \
+  STOCK_BEFORE=1000000 envsubst < bench/sql/correctness.sql)"
+quantity_probe_output="$(mysql_query commerce_app "$commerce_app_password" commerce_db \
+  "$quantity_probe_sql")"
+test "$(grep -c $'^100\t101\tFAIL$' <<<"$quantity_probe_output")" = 2
+echo "Verified Q01 and Q02 reject one quantity-101 row against allocated quota 100."
+
 assert_fails "bootstrap cannot read migration or business data" '(Access denied|command denied).*bootstrap_admin' \
   mysql_query bootstrap_admin "$bootstrap_password" commerce_db 'SELECT * FROM auth_schema_history'
 assert_fails "auth migration cannot read commerce migration history" 'SELECT command denied' \

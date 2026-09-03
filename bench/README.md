@@ -49,7 +49,8 @@ the shape of the curve and where the ceiling comes from, not the absolute number
 
 ### 1. Correctness under contention — 10/10 PASS
 
-600 concurrent reservations against one activity with `allocated_quota = 100`
+600 concurrent reservations, each with `quantity = 1`, against one activity with
+`allocated_quota = 100`; the SQL checks are a pre-cancellation snapshot
 (`results/correctness_sql.txt`, `results/correctness_http.txt`):
 
 - exactly 100 `ADMITTED`, 500 rejected `EXHAUSTED`; no oversell
@@ -167,9 +168,11 @@ exclusive activity lock. The formal same-session comparison measured these exact
 - before: `c049ac305b607b46c9e545473d01063f7ea96339`
 - after: `4f40cd2f0159b4c4118b9b3724235a0b3ddbd390`
 
-Both commits passed the fixed 600-request correctness workload: exactly 100 `ADMITTED`, 500
-`EXHAUSTED`, and Q01 through Q10 all PASS. The request wall time was 2.17 s before and 1.57 s
-after. The raw HTTP and SQL evidence is in
+Both commits passed the fixed 600-request correctness workload: all 600 requests used
+`quantity = 1`, exactly 100 were `ADMITTED`, 500 were `EXHAUSTED`, and the pre-cancellation
+Q01 through Q10 snapshot was all PASS. The request wall time was 2.17 s before and 1.57 s after.
+Those retained bundles predate the explicit `request_quantity` metadata now emitted by the
+runner and remain unchanged. The raw HTTP and SQL evidence is in
 [`correctness_seckill_s1_c049ac3_20260902T114422Z_correctness_*`](results/correctness_seckill_s1_c049ac3_20260902T114422Z_correctness_http.txt)
 and
 [`correctness_seckill_s1_4f40cd2_20260902T121356Z_correctness_*`](results/correctness_seckill_s1_4f40cd2_20260902T121356Z_correctness_http.txt).

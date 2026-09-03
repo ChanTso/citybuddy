@@ -1,15 +1,15 @@
-SELECT 'Q01 no oversell: admitted reservations must not exceed allocated quota' AS check_name;
+SELECT 'Q01 no oversell at pre-cancellation snapshot: admitted reservation quantity must not exceed allocated quota' AS check_name;
 SELECT a.allocated_quota,
-       (SELECT COUNT(*) FROM seckill_reservation r
-         WHERE r.activity_id = a.activity_id AND r.state IN ('ADMITTED','ORDERED')) AS admitted,
-       CASE WHEN (SELECT COUNT(*) FROM seckill_reservation r
+       (SELECT COALESCE(SUM(r.quantity),0) FROM seckill_reservation r
+         WHERE r.activity_id = a.activity_id AND r.state IN ('ADMITTED','ORDERED')) AS admitted_quantity,
+       CASE WHEN (SELECT COALESCE(SUM(r.quantity),0) FROM seckill_reservation r
                    WHERE r.activity_id = a.activity_id AND r.state IN ('ADMITTED','ORDERED'))
                  <= a.allocated_quota THEN 'PASS' ELSE 'FAIL' END AS verdict
 FROM seckill_activity a WHERE a.activity_id = '${ACTIVITY}';
 
-SELECT 'Q02 no oversell: durable orders must not exceed allocated quota' AS check_name;
-SELECT a.allocated_quota, COUNT(o.order_id) AS orders,
-       CASE WHEN COUNT(o.order_id) <= a.allocated_quota THEN 'PASS' ELSE 'FAIL' END AS verdict
+SELECT 'Q02 no oversell at pre-cancellation snapshot: durable ordered quantity must not exceed allocated quota' AS check_name;
+SELECT a.allocated_quota, COALESCE(SUM(o.quantity),0) AS ordered_quantity,
+       CASE WHEN COALESCE(SUM(o.quantity),0) <= a.allocated_quota THEN 'PASS' ELSE 'FAIL' END AS verdict
 FROM seckill_activity a LEFT JOIN seckill_order o ON o.activity_id = a.activity_id
 WHERE a.activity_id = '${ACTIVITY}' GROUP BY a.allocated_quota;
 

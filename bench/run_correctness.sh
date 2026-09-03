@@ -13,6 +13,7 @@ if [[ ! "$LABEL" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]] || [ "${#LABEL}" -gt 96 ]; t
 fi
 QUOTA="${QUOTA:-100}"
 ATTEMPTS="${ATTEMPTS:-600}"
+readonly REQUEST_QUANTITY=1
 if [ "$QUOTA" != 100 ] || [ "$ATTEMPTS" != 600 ]; then
   echo "The formal correctness workload is fixed at QUOTA=100 and ATTEMPTS=600." >&2
   exit 2
@@ -67,8 +68,8 @@ metadata() {
   printf 'setup_window_utc=%s/%s\n' "$SETUP_STARTED_AT_UTC" "$SETUP_COMPLETED_AT_UTC"
   printf 'run_started_at_utc=%s\n' "$run_started_at"
   [ -z "$run_completed_at" ] || printf 'run_completed_at_utc=%s\n' "$run_completed_at"
-  printf 'label=%s activity=%s allocated_quota=%s attempts=%s\n' \
-    "$LABEL" "$ACTIVITY" "$QUOTA" "$ATTEMPTS"
+  printf 'label=%s activity=%s allocated_quota=%s attempts=%s request_quantity=%s snapshot_phase=pre_cancellation\n' \
+    "$LABEL" "$ACTIVITY" "$QUOTA" "$ATTEMPTS" "$REQUEST_QUANTITY"
   printf 'fixture_users=%s fixture_activities=%s fixture_quota=%s fixture_stock=%s topic_suffix=%s\n' \
     "$BENCH_USERS" "$BENCH_ACTIVITIES" "$BENCH_QUOTA" "$BENCH_STOCK" "$TOPIC_SUFFIX"
   printf 'docker_cpus=%s docker_memory_bytes=%s commerce_cpu_limit=%s\n' \
@@ -112,16 +113,16 @@ stock_before="$(q commerce_app "$commerce_pw" --skip-column-names \
   -e "SELECT stock_quantity FROM product WHERE product_id='$PRODUCT'")"
 
 echo "== firing $ATTEMPTS concurrent reservations =="
-python3 - "$ATTEMPTS" "$ACTIVITY" <<'PY' | tee -a "$out/$http_name"
+python3 - "$ATTEMPTS" "$ACTIVITY" "$REQUEST_QUANTITY" <<'PY' | tee -a "$out/$http_name"
 import collections, concurrent.futures, json, sys, time, urllib.error, urllib.request
-attempts, activity = int(sys.argv[1]), sys.argv[2]
+attempts, activity, request_quantity = int(sys.argv[1]), sys.argv[2], int(sys.argv[3])
 tokens = json.load(open("bench/.run/tokens.json"))
 if len(tokens) < attempts:
     raise SystemExit(f"Correctness needs {attempts} distinct tokens")
 def fire(index):
     request = urllib.request.Request(
         f"http://127.0.0.1:18081/api/seckill/activities/{activity}/reservations",
-        data=json.dumps({"quantity": 1, "expectedActivityVersion": 1}).encode(),
+        data=json.dumps({"quantity": request_quantity, "expectedActivityVersion": 1}).encode(),
         headers={"Content-Type": "application/json", "Authorization": f"Bearer {tokens[index]}",
                  "Idempotency-Key": f"corr-{index}"})
     try:
