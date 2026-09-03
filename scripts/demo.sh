@@ -112,7 +112,7 @@ admin updateTopic --namesrvAddr rocketmq-namesrv:9876 --clusterName DefaultClust
 admin updateSubGroup --namesrvAddr rocketmq-namesrv:9876 --clusterName DefaultCluster --groupName cb030-catalog-consumer-demo --consumeEnable true || true
 
 echo "== seeding the demo identity and catalog fixture =="
-demo_hash="$(uv run python -c "import bcrypt,sys; print(bcrypt.hashpw(sys.argv[1].encode(), bcrypt.gensalt(rounds=10)).decode())" "$demo_password")"
+demo_hash="$(uv run python scripts/hash_test_credential.py "$demo_password")"
 service_hash="$(uv run python scripts/hash_test_credential.py "$agent_secret")"
 
 # The runtime accounts hold no DELETE grant by design, so fixture teardown uses bootstrap.
