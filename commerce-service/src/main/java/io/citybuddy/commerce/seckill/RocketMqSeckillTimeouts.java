@@ -65,6 +65,19 @@ public final class RocketMqSeckillTimeouts implements AutoCloseable, SeckillTime
     }
   }
 
+  RocketMqSeckillTimeouts(
+      ObjectMapper objectMapper,
+      SeckillTimeoutProperties properties,
+      ClientServiceProvider provider,
+      Producer producer,
+      SimpleConsumer consumer) {
+    this.objectMapper = objectMapper;
+    this.properties = properties;
+    this.provider = provider;
+    this.producer = producer;
+    this.consumer = consumer;
+  }
+
   @Override
   public String send(SeckillTimeoutMessage payload) throws ClientException {
     return producer.send(message(payload)).getMessageId().toString();
@@ -74,18 +87,27 @@ public final class RocketMqSeckillTimeouts implements AutoCloseable, SeckillTime
     List<MessageView> messages =
         consumer.receive(properties.receiveBatchSize(), properties.receiveInvisibleDuration());
     int consumed = 0;
+    ClientException firstControlFailure = null;
     for (MessageView message : messages) {
       rejectEvaluationContext(message);
-      if (message.getDeliveryAttempt() > properties.maximumDeliveryAttempts()) {
-        throw new IllegalStateException("Seckill timeout delivery exceeded its configured bound");
-      }
       SeckillCancellationService.CancellationResult result = cancellations.cancel(payload(message));
-      if (result.outcome() == SeckillCancellationService.Outcome.EARLY) {
-        consumer.changeInvisibleDuration(message, result.retryAfter());
-        continue;
+      try {
+        if (result.outcome() == SeckillCancellationService.Outcome.EARLY) {
+          consumer.changeInvisibleDuration(message, result.retryAfter());
+          continue;
+        }
+        consumer.ack(message);
+        consumed++;
+      } catch (ClientException exception) {
+        if (firstControlFailure == null) {
+          firstControlFailure = exception;
+        } else if (firstControlFailure != exception) {
+          firstControlFailure.addSuppressed(exception);
+        }
       }
-      consumer.ack(message);
-      consumed++;
+    }
+    if (firstControlFailure != null) {
+      throw firstControlFailure;
     }
     return consumed;
   }

@@ -2,8 +2,10 @@ package io.citybuddy.commerce.seckill;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
+import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.verifyNoInteractions;
+import static org.mockito.Mockito.when;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
 import java.time.Clock;
@@ -102,7 +104,6 @@ class SeckillTransactionIntegrationTest {
     registry.add("citybuddy.seckill.timeout.receive-invisible-duration", () -> "10s");
     registry.add("citybuddy.seckill.timeout.dispatch-batch-size", () -> "32");
     registry.add("citybuddy.seckill.timeout.maximum-dispatch-attempts", () -> "3");
-    registry.add("citybuddy.seckill.timeout.maximum-delivery-attempts", () -> "3");
   }
 
   @Autowired private TestRestTemplate http;
@@ -643,13 +644,29 @@ class SeckillTransactionIntegrationTest {
     String earlyActivity = "cb061-early";
     String earlyReservation =
         createOrderedReservation(earlyActivity, "cb061-product-early", "cb061-early-key", 1);
-    forceOrderDueIn(earlyReservation, Duration.ofMinutes(1));
+    forceOrderDueIn(earlyReservation, Duration.ofSeconds(12));
     SeckillOrderRepository.OrderRecord earlyOrder =
         orderRepository.findByReservation(earlyReservation).orElseThrow();
-    sendImmediateTimeout(SeckillTimeoutMessage.from(earlyOrder));
-    assertThat(timeoutMessaging.consumeOnce(cancellationService)).isZero();
+    SeckillTimeoutMessage earlyTimeout = SeckillTimeoutMessage.from(earlyOrder);
+    sendImmediateTimeout(earlyTimeout);
+    AtomicInteger earlyDeliveries = new AtomicInteger();
+    SeckillCancellationService observedCancellation = mock(SeckillCancellationService.class);
+    when(observedCancellation.cancel(any(SeckillTimeoutMessage.class)))
+        .thenAnswer(
+            invocation -> {
+              SeckillCancellationService.CancellationResult result =
+                  cancellationService.cancel(invocation.getArgument(0));
+              if (earlyTimeout.equals(invocation.getArgument(0))
+                  && result.outcome() == SeckillCancellationService.Outcome.EARLY) {
+                earlyDeliveries.incrementAndGet();
+              }
+              return result;
+            });
+    assertThat(observeEarlyTimeoutEventually(observedCancellation, earlyDeliveries)).isEqualTo(1);
     assertThat(orderStatus(earlyReservation)).isEqualTo("UNPAID");
     assertThat(cancellationMovementCount(earlyReservation)).isZero();
+    assertThat(consumeTimeoutEventually(Duration.ofSeconds(25))).isEqualTo(1);
+    assertCancelledAndRestored(earlyReservation, 1, 1);
 
     SeckillTimeoutMessage stale =
         new SeckillTimeoutMessage(
@@ -662,7 +679,7 @@ class SeckillTransactionIntegrationTest {
             earlyOrder.transactionEventId());
     assertThat(cancellationService.cancel(stale).outcome())
         .isEqualTo(SeckillCancellationService.Outcome.STALE);
-    assertThat(orderStatus(earlyReservation)).isEqualTo("UNPAID");
+    assertThat(orderStatus(earlyReservation)).isEqualTo("CANCELLED");
 
     String paidActivity = "cb061-paid";
     String paidReservation =
@@ -923,8 +940,7 @@ class SeckillTransactionIntegrationTest {
             timeoutProperties.receiveInvisibleDuration(),
             timeoutProperties.receiveBatchSize(),
             timeoutProperties.dispatchBatchSize(),
-            2,
-            timeoutProperties.maximumDeliveryAttempts());
+            2);
     SeckillTimeoutDispatchService ambiguousDispatch =
         new SeckillTimeoutDispatchService(
             orderRepository,
@@ -1141,6 +1157,16 @@ class SeckillTransactionIntegrationTest {
       }
     }
     return 0;
+  }
+
+  private int observeEarlyTimeoutEventually(
+      SeckillCancellationService observedCancellation, AtomicInteger earlyDeliveries)
+      throws Exception {
+    long deadline = System.nanoTime() + Duration.ofSeconds(5).toNanos();
+    while (System.nanoTime() < deadline && earlyDeliveries.get() == 0) {
+      assertThat(timeoutMessaging.consumeOnce(observedCancellation)).isZero();
+    }
+    return earlyDeliveries.get();
   }
 
   private void sendImmediateTimeout(SeckillTimeoutMessage payload) throws Exception {
