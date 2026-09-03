@@ -148,6 +148,14 @@ class ConversationStore(Protocol):
         response_text: str,
     ) -> ConversationResult: ...
 
+    def complete_action_rejected(
+        self,
+        *,
+        start: TurnStart,
+        pending: PendingActionReference,
+        response_text: str,
+    ) -> ConversationResult: ...
+
     def complete_action_expired(
         self,
         *,
@@ -627,13 +635,15 @@ class MysqlConversationStore:
                 "SELECT COUNT(*), "
                 "COALESCE(SUM(pending_action_reference.state IN ('PENDING', 'CONFIRMING')), 0), "
                 "COALESCE(SUM(pending_action_reference.state "
-                "NOT IN ('PENDING', 'CONFIRMING', 'DECLINED', 'EXPIRED', 'CONFIRMED')), 0), "
+                "NOT IN ('PENDING', 'CONFIRMING', 'DECLINED', 'EXPIRED', 'CONFIRMED', "
+                "'REJECTED')), 0), "
                 "COALESCE(SUM("
                 "(pending_action_reference.state IN ('PENDING', 'CONFIRMING') AND ("
                 "pending_action_reference.resolved_at IS NOT NULL "
                 "OR pending_action_reference.resolution_turn_id IS NOT NULL "
                 "OR pending_action_reference.resolution_trace_id IS NOT NULL)) "
-                "OR (pending_action_reference.state IN ('DECLINED', 'EXPIRED', 'CONFIRMED') AND ("
+                "OR (pending_action_reference.state IN "
+                "('DECLINED', 'EXPIRED', 'CONFIRMED', 'REJECTED') AND ("
                 "pending_action_reference.resolved_at IS NULL "
                 "OR pending_action_reference.resolution_turn_id IS NULL "
                 "OR pending_action_reference.resolution_trace_id IS NULL))), 0), "
@@ -704,6 +714,7 @@ class MysqlConversationStore:
             event_type="ACTION_DECLINED",
             event_outcome="declined",
             require_expired=False,
+            source_state="PENDING",
         )
 
     def complete_action_expired(
@@ -722,6 +733,7 @@ class MysqlConversationStore:
             event_type="ACTION_EXPIRED",
             event_outcome="expired",
             require_expired=True,
+            source_state="PENDING",
         )
 
     def claim_action_confirmation(self, *, pending: PendingActionReference) -> None:
@@ -841,17 +853,38 @@ class MysqlConversationStore:
             receipt_id=receipt.receipt_id,
         )
 
+    def complete_action_rejected(
+        self,
+        *,
+        start: TurnStart,
+        pending: PendingActionReference,
+        response_text: str,
+    ) -> ConversationResult:
+        """Resolve an exact Commerce rejection without claiming whether the mutation happened."""
+        return self._complete_local_action(
+            start=start,
+            pending=pending,
+            response_text=response_text,
+            state="REJECTED",
+            outcome="action_rejected",
+            event_type="ACTION_REJECTED",
+            event_outcome="rejected",
+            require_expired=False,
+            source_state="CONFIRMING",
+        )
+
     def _complete_local_action(
         self,
         *,
         start: TurnStart,
         pending: PendingActionReference,
         response_text: str,
-        state: Literal["DECLINED", "EXPIRED"],
-        outcome: Literal["action_declined", "action_expired"],
-        event_type: Literal["ACTION_DECLINED", "ACTION_EXPIRED"],
-        event_outcome: Literal["declined", "expired"],
+        state: Literal["DECLINED", "EXPIRED", "REJECTED"],
+        outcome: Literal["action_declined", "action_expired", "action_rejected"],
+        event_type: Literal["ACTION_DECLINED", "ACTION_EXPIRED", "ACTION_REJECTED"],
+        event_outcome: Literal["declined", "expired", "rejected"],
         require_expired: bool,
+        source_state: Literal["PENDING", "CONFIRMING"],
     ) -> ConversationResult:
         with self._connect() as connection:
             try:
@@ -861,15 +894,21 @@ class MysqlConversationStore:
                         self._lock_matching_pending(
                             cursor, pending, require_expired=require_expired
                         )
-                        != "PENDING"
+                        != source_state
                     ):
                         raise ActionArbitrationConflictError
                     cursor.execute(
                         "UPDATE pending_action_reference SET state = %s, "
                         "resolved_at = CURRENT_TIMESTAMP(6), resolution_turn_id = %s, "
                         "resolution_trace_id = %s "
-                        "WHERE pending_action_id = %s AND state = 'PENDING'",
-                        (state, start.turn_id, start.trace_id, pending.pending_action_id),
+                        "WHERE pending_action_id = %s AND state = %s",
+                        (
+                            state,
+                            start.turn_id,
+                            start.trace_id,
+                            pending.pending_action_id,
+                            source_state,
+                        ),
                     )
                     if cursor.rowcount != 1:
                         raise ActionArbitrationConflictError
@@ -1029,13 +1068,14 @@ class MysqlConversationStore:
             "DECLINED",
             "EXPIRED",
             "CONFIRMED",
+            "REJECTED",
         } or not isinstance(expires_at, datetime):
             raise ConversationIntegrityError("PendingAction state is inconsistent")
         if (
             state in {"PENDING", "CONFIRMING"}
             and (row[14] is not None or row[15] is not None or row[16] is not None)
         ) or (
-            state in {"DECLINED", "EXPIRED", "CONFIRMED"}
+            state in {"DECLINED", "EXPIRED", "CONFIRMED", "REJECTED"}
             and (row[14] is None or row[15] is None or row[16] is None)
         ):
             raise ConversationIntegrityError("PendingAction resolution is inconsistent")
@@ -1238,7 +1278,14 @@ class MysqlConversationStore:
             str(row[5])
             for row in rows
             if len(row) == 7
-            and row[5] in {"ACTION_PREPARED", "ACTION_DECLINED", "ACTION_EXPIRED", "ACTION_RECEIPT"}
+            and row[5]
+            in {
+                "ACTION_PREPARED",
+                "ACTION_DECLINED",
+                "ACTION_EXPIRED",
+                "ACTION_RECEIPT",
+                "ACTION_REJECTED",
+            }
         ]
         cursor.execute(
             "SELECT pending_action_id FROM pending_action_reference "
@@ -1258,6 +1305,7 @@ class MysqlConversationStore:
             "action_declined",
             "action_expired",
             "action_completed",
+            "action_rejected",
         }
         if (
             not action_types
@@ -1289,11 +1337,17 @@ class MysqlConversationStore:
                 sandbox_id=sandbox_id,
             )
             return
-        if outcome in {"action_declined", "action_expired", "action_completed"}:
+        if outcome in {
+            "action_declined",
+            "action_expired",
+            "action_completed",
+            "action_rejected",
+        }:
             expected_event = {
                 "action_declined": "ACTION_DECLINED",
                 "action_expired": "ACTION_EXPIRED",
                 "action_completed": "ACTION_RECEIPT",
+                "action_rejected": "ACTION_REJECTED",
             }[outcome]
             if (
                 action_types != [expected_event]
@@ -1397,6 +1451,7 @@ class MysqlConversationStore:
             "action_declined": "DECLINED",
             "action_expired": "EXPIRED",
             "action_completed": "CONFIRMED",
+            "action_rejected": "REJECTED",
         }[outcome]
         cursor.execute(ACTION_TURN_EVENTS_SQL, (turn_id,))
         rows = cursor.fetchall()
@@ -1412,7 +1467,12 @@ class MysqlConversationStore:
                 expected_user_subject=subject,
                 pending_action_id=pending_action_id,
                 outcome=cast(
-                    Literal["action_declined", "action_expired", "action_completed"],
+                    Literal[
+                        "action_declined",
+                        "action_expired",
+                        "action_completed",
+                        "action_rejected",
+                    ],
                     outcome,
                 ),
             )

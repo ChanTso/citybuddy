@@ -56,6 +56,7 @@ def test_chat_response_is_allowlisted_and_server_ids_are_read_only() -> None:
         "action_clarification",
         "action_declined",
         "action_expired",
+        "action_rejected",
     ]
     assert response["properties"]["receiptId"] == {
         "type": ["string", "null"],
@@ -120,6 +121,7 @@ def test_stream_contract_fixes_headers_event_names_and_allowlisted_payloads() ->
         "action_clarification",
         "action_declined",
         "action_expired",
+        "action_rejected",
     ]
 
     source = (ROOT / "agent-service/src/citybuddy_agent/sse.py").read_text(encoding="utf-8")
@@ -307,6 +309,19 @@ def test_session_context_event_extends_the_closed_append_only_evidence_language(
         "TURN_FAILED",
     ):
         assert f"'{event_type}'" in migration
+
+
+def test_pending_action_rejection_extends_the_latest_closed_truth_sets() -> None:
+    migration = (
+        ROOT / "infra/mysql/migrations/agent/V010__pending_action_rejection.sql"
+    ).read_text(encoding="utf-8")
+
+    for retained_event in ("CONTEXT_WINDOW", "ACTION_RECEIPT", "ACTION_REJECTED"):
+        assert f"'{retained_event}'" in migration
+    assert "'action_rejected'" in migration
+    assert "'REJECTED'" in migration
+    assert "state IN ('PENDING', 'CONFIRMING')" in migration
+    assert "state IN ('DECLINED', 'EXPIRED', 'CONFIRMED', 'REJECTED')" in migration
 
 
 def test_service_contracts_use_service_versions_not_retired_slice_ids() -> None:

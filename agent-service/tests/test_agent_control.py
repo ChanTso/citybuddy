@@ -8,6 +8,7 @@ from typing import Any
 import httpx
 import pytest
 from citybuddy_agent import http_client
+from citybuddy_agent.actions import PendingActionReference
 from citybuddy_agent.agent_control import (
     CATALOG_PRODUCT_SPEC,
     KNOWLEDGE_SEARCH_SPEC,
@@ -16,6 +17,7 @@ from citybuddy_agent.agent_control import (
     SESSION_CONTEXT_TOKEN_BUDGET,
     SYSTEM_PROMPT,
     TOOL_BOUNDARY_FAILURE_REASONS,
+    ActionConfirmationRejected,
     AgentEvent,
     AttemptBudget,
     AttemptBudgetExhausted,
@@ -2271,6 +2273,196 @@ def test_refund_prepare_malformed_rejection_is_response_invalid(
     assert failure.value.reason == "ACTION_PREPARATION_RESPONSE_INVALID"
 
 
+def confirmation_reference() -> PendingActionReference:
+    return PendingActionReference(
+        pending_action_id="00000000-0000-0000-0000-000000000121",
+        source_turn_id="00000000-0000-0000-0000-000000000122",
+        source_trace_id="00000000-0000-0000-0000-000000000123",
+        conversation_id="00000000-0000-0000-0000-000000000124",
+        session_id="session-1",
+        user_subject="user-1",
+        sandbox_id=None,
+        action_type="REFUND_REQUEST",
+        argument_commitment="a" * 64,
+        order_id="00000000-0000-0000-0000-000000000040",
+        target_version=1,
+        amount_minor=400,
+        currency="CNY",
+        expires_at=datetime.now(UTC) + timedelta(hours=1),
+    )
+
+
+def invoke_confirmation(adapter: ToolAdapter) -> object:
+    return adapter.confirm_action(
+        pending=confirmation_reference(),
+        direct_token="direct",
+        subject="user-1",
+        session_id="session-1",
+        sandbox_id=None,
+        budget=AttemptBudget(4, []),
+        events=[],
+    )
+
+
+@pytest.mark.parametrize(
+    ("status", "reason"),
+    [
+        (401, "ACTION_CONFIRMATION_IDENTITY_UNAUTHENTICATED"),
+        (403, "ACTION_CONFIRMATION_IDENTITY_FORBIDDEN"),
+        (502, "ACTION_CONFIRMATION_IDENTITY_UNAVAILABLE"),
+    ],
+)
+def test_confirmation_obo_failures_remain_recoverable_before_commerce(
+    status: int, reason: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(
+        http_client,
+        "stream",
+        lambda *args, **kwargs: pytest.fail("OBO failure reached Commerce"),
+    )
+
+    with pytest.raises(ToolBoundaryFailure) as failure:
+        invoke_confirmation(ToolAdapter("https://commerce.test", StatusObo(status)))
+
+    assert failure.value.reason == reason
+
+
+@pytest.mark.parametrize(
+    ("category", "reason"),
+    [
+        ("CONFLICT", "ACTION_CONFIRMATION_INTENT_CONFLICT"),
+        (
+            "INCONSISTENT_DURABLE_STATE",
+            "ACTION_CONFIRMATION_DURABLE_TRUTH_INCONSISTENT",
+        ),
+    ],
+)
+def test_confirmation_accepts_only_strict_commerce_409_as_deterministic_rejection(
+    category: str, reason: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    @contextmanager
+    def stream(method: str, url: str, **kwargs: Any) -> Iterator[httpx.Response]:
+        del kwargs
+        yield httpx.Response(
+            409,
+            json={"category": category, "message": "closed rejection"},
+            request=httpx.Request(method, url),
+        )
+
+    monkeypatch.setattr(http_client, "stream", stream)
+
+    with pytest.raises(ActionConfirmationRejected) as rejection:
+        invoke_confirmation(ToolAdapter("https://commerce.test", RecordingObo()))
+
+    assert rejection.value.reason == reason
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        b"not-json",
+        b'{"category":"CONFLICT","category":"CONFLICT","message":"x"}',
+        json.dumps({"category": "UNKNOWN", "message": "x"}).encode(),
+        json.dumps({"category": "CONFLICT", "message": "x", "extra": True}).encode(),
+        b"{" + b" " * 4096 + b"}",
+    ],
+)
+def test_confirmation_malformed_409_remains_recoverable_response_invalid(
+    body: bytes, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    @contextmanager
+    def stream(method: str, url: str, **kwargs: Any) -> Iterator[httpx.Response]:
+        del kwargs
+        yield httpx.Response(409, content=body, request=httpx.Request(method, url))
+
+    monkeypatch.setattr(http_client, "stream", stream)
+
+    with pytest.raises(ToolBoundaryFailure) as failure:
+        invoke_confirmation(ToolAdapter("https://commerce.test", RecordingObo()))
+
+    assert failure.value.status_code == 502
+    assert failure.value.reason == "ACTION_CONFIRMATION_RESPONSE_INVALID"
+
+
+@pytest.mark.parametrize(
+    ("status", "reason"),
+    [
+        (400, "ACTION_CONFIRMATION_COMMERCE_VALIDATION_REJECTED"),
+        (401, "ACTION_CONFIRMATION_COMMERCE_UNAUTHENTICATED"),
+        (403, "ACTION_CONFIRMATION_COMMERCE_FORBIDDEN"),
+        (404, "ACTION_CONFIRMATION_TARGET_NOT_FOUND"),
+        (422, "ACTION_CONFIRMATION_COMMERCE_VALIDATION_REJECTED"),
+        (429, "ACTION_CONFIRMATION_COMMERCE_INDETERMINATE"),
+        (503, "ACTION_CONFIRMATION_COMMERCE_UNAVAILABLE"),
+    ],
+)
+def test_confirmation_non_409_responses_remain_recoverable_failures(
+    status: int, reason: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    @contextmanager
+    def stream(method: str, url: str, **kwargs: Any) -> Iterator[httpx.Response]:
+        del kwargs
+        yield httpx.Response(status, json={"error": "fixed"}, request=httpx.Request(method, url))
+
+    monkeypatch.setattr(http_client, "stream", stream)
+
+    with pytest.raises(ToolBoundaryFailure) as failure:
+        invoke_confirmation(ToolAdapter("https://commerce.test", RecordingObo()))
+
+    assert failure.value.reason == reason
+
+
+def test_confirmation_transport_invalid_and_mismatched_success_remain_recoverable(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    @contextmanager
+    def timeout(method: str, url: str, **kwargs: Any) -> Iterator[httpx.Response]:
+        del kwargs
+        raise httpx.ReadTimeout("timeout", request=httpx.Request(method, url))
+        yield
+
+    monkeypatch.setattr(http_client, "stream", timeout)
+    with pytest.raises(ToolBoundaryFailure) as transport:
+        invoke_confirmation(ToolAdapter("https://commerce.test", RecordingObo()))
+    assert transport.value.reason == "ACTION_CONFIRMATION_COMMERCE_TIMEOUT"
+
+    @contextmanager
+    def invalid(method: str, url: str, **kwargs: Any) -> Iterator[httpx.Response]:
+        del kwargs
+        yield httpx.Response(200, json={"receiptId": "wrong"}, request=httpx.Request(method, url))
+
+    monkeypatch.setattr(http_client, "stream", invalid)
+    with pytest.raises(ToolBoundaryFailure) as response:
+        invoke_confirmation(ToolAdapter("https://commerce.test", RecordingObo()))
+    assert response.value.reason == "ACTION_CONFIRMATION_RESPONSE_INVALID"
+
+    @contextmanager
+    def mismatched(method: str, url: str, **kwargs: Any) -> Iterator[httpx.Response]:
+        del kwargs
+        yield httpx.Response(
+            200,
+            json={
+                "receiptId": "00000000-0000-0000-0000-000000000130",
+                "pendingActionId": "00000000-0000-0000-0000-000000000131",
+                "actionType": "REFUND_REQUEST",
+                "status": "REQUESTED",
+                "orderId": "00000000-0000-0000-0000-000000000040",
+                "refundId": "00000000-0000-0000-0000-000000000132",
+                "resourceVersion": 2,
+                "amountMinor": 400,
+                "currency": "CNY",
+                "committedAt": "2030-07-29T12:00:00.123456Z",
+                "replayed": False,
+            },
+            request=httpx.Request(method, url),
+        )
+
+    monkeypatch.setattr(http_client, "stream", mismatched)
+    with pytest.raises(ToolBoundaryFailure) as mismatch:
+        invoke_confirmation(ToolAdapter("https://commerce.test", RecordingObo()))
+    assert mismatch.value.reason == "ACTION_CONFIRMATION_RESPONSE_INVALID"
+
+
 def test_sensitive_tool_failure_producer_inventory_is_closed() -> None:
     assert TOOL_BOUNDARY_FAILURE_REASONS == {
         "ACTION_PREPARATION_IDENTITY_UNAUTHENTICATED",
@@ -2305,6 +2497,7 @@ def test_sensitive_tool_failure_producer_inventory_is_closed() -> None:
         "ACTION_CONFIRMATION_COMMERCE_FORBIDDEN",
         "ACTION_CONFIRMATION_TARGET_NOT_FOUND",
         "ACTION_CONFIRMATION_INTENT_CONFLICT",
+        "ACTION_CONFIRMATION_DURABLE_TRUTH_INCONSISTENT",
         "ACTION_CONFIRMATION_COMMERCE_UNAVAILABLE",
         "ACTION_CONFIRMATION_COMMERCE_TIMEOUT",
         "ACTION_CONFIRMATION_COMMERCE_INDETERMINATE",

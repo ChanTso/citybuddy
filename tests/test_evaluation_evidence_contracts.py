@@ -133,12 +133,14 @@ def test_evaluation_evidence_schema_is_a_closed_safe_projection() -> None:
         "action_clarification",
         "action_declined",
         "action_expired",
+        "action_rejected",
     }
     assert set(event["properties"]["eventKind"]["enum"]) >= {
         "CONTEXT_WINDOW",
         "ACTION_PREPARED",
         "ACTION_DECLINED",
         "ACTION_EXPIRED",
+        "ACTION_REJECTED",
     }
     public_fields = (
         set(response["properties"])

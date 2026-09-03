@@ -84,7 +84,10 @@ agent-evaluation, and database-oracle work is catalogued in its
 - **Sensitive action truth.** Commerce owns `PendingAction` and an immutable `ActionReceipt`. The
   agent prepares an action and claims it before commerce records the refund request, so a lost
   response cannot leave that request durably recorded in commerce and permanently absent from the
-  agent's receipt projection. Model prose is explicitly non-authoritative: only a projected
+  agent's receipt projection. A strict Commerce `409` Action error in category `CONFLICT` or
+  `INCONSISTENT_DURABLE_STATE` resolves the claim as `REJECTED` with no receipt; transport,
+  rate-limit, server, and invalid-response failures remain `CONFIRMING` for recovery. Model prose
+  is explicitly non-authoritative: only a projected
   receipt lets a client render success, SSE tokens cannot produce a success state, and a
   deterministic action-claim lexicon exists as defense in depth.
 - **Bounded conversation context.** Each modeled turn can receive only the 16 most recent

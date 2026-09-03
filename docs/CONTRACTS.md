@@ -512,6 +512,13 @@ sequenceDiagram
   commerce commit therefore leaves a claim that can safely re-enter commerce and replay the
   receipt; it never leaves a local durable statement that the action was declined or never
   attempted.
+- A strict Commerce `409` Action error in category `CONFLICT` or
+  `INCONSISTENT_DURABLE_STATE` resolves that claim, its `ACTION_REJECTED` evidence, and the
+  confirming turn's `action_rejected` outcome atomically. It records that Commerce rejected the
+  request and returned no receipt; it does not infer whether an inconsistent pre-existing durable
+  state includes a business effect. Malformed errors, other 4xx statuses, rate limits, server
+  failures, transport failures, and invalid success responses leave the reference `CONFIRMING` so
+  a later exact confirmation can recover.
 - A successful Commerce ActionReceipt remains immutable action truth. The agent projects it into
   `cs_db.action_receipt_projection` in the same transaction that resolves the reference to
   `CONFIRMED` and commits the turn as `action_completed`; none of those three may exist without the
@@ -567,7 +574,13 @@ sequenceDiagram
         alt Validation fails or business transition is illegal
             D-->>C: Roll back
             C-->>G: Structured rejection, no receipt
-            G-->>U: Safe rejection or clarification
+            alt Strict Commerce 409 CONFLICT or INCONSISTENT_DURABLE_STATE
+                G->>E: Resolve claim and turn atomically as REJECTED/action_rejected
+                G-->>U: Fixed rejection, no receipt
+            else Ambiguous, invalid, or transient response
+                Note over G,E: Keep CONFIRMING for a later exact confirmation
+                G-->>U: Fixed typed failure
+            end
         else Validation succeeds
             D->>D: Consume PendingAction once
             D->>D: Execute mutation and persist ActionReceipt
@@ -669,8 +682,8 @@ sequenceDiagram
 
 | Caller → owner | Method and path | Authentication | Required boundary | Success semantics | Rejection semantics |
 |---|---|---|---|---|---|
-| `web` or evaluator → `agent-service` | `POST /api/chat` | Direct-user JWT | Fixed issuer/user audience/type, permission, owned `X-Session-Id`, `Idempotency-Key`; evaluation also supplies matching sandbox header | Returns one complete response; exact confirmation returns `action_completed` with stored `receiptId` projection | Wrong identity/session/sandbox, idempotency conflict, policy block, or exhausted attempts rejects with typed status |
-| `web` or evaluator → `agent-service` | `POST /api/chat/stream` | Direct-user JWT | Same identity, session, idempotency, and sandbox rules as `/api/chat` | Emits only `token`, `done`, `error`, and `action_receipt`; receipt leads and appears only with `action_completed` terminal | Same failures; no raw tool/retrieval output or synthetic receipt |
+| `web` or evaluator → `agent-service` | `POST /api/chat` | Direct-user JWT | Fixed issuer/user audience/type, permission, owned `X-Session-Id`, `Idempotency-Key`; evaluation also supplies matching sandbox header | Returns one complete response; exact confirmation returns either `action_completed` with its stored `receiptId` projection or `action_rejected` without a receipt for the two strict Commerce `409` categories | Wrong identity/session/sandbox, idempotency conflict, policy block, or exhausted attempts rejects with typed status |
+| `web` or evaluator → `agent-service` | `POST /api/chat/stream` | Direct-user JWT | Same identity, session, idempotency, and sandbox rules as `/api/chat` | Emits only `token`, `done`, `error`, and `action_receipt`; receipt leads and appears only with `action_completed`, while `action_rejected` has no receipt frame | Same failures; no raw tool/retrieval output or synthetic receipt |
 | `web` → `agent-service` | `POST /api/feedback` | Direct-user JWT | User principal, owned support session, `Idempotency-Key`, trace owned by persisted support evidence | Persists authorized append-only feedback in `cs_db` | Wrong identity, unknown trace, forged/cross-user session, ownership failure, or idempotency conflict rejects |
 | Authorized evaluator → `agent-service` | `GET /api/eval/evidence/{traceId}` | Independent evaluation API credential; evaluation profile only | Sandbox and trace must be associated | Returns authoritative allowed support evidence from `cs_db` | Production not found; cross-sandbox/unknown trace/invalid credential rejects |
 | `agent-service` → `commerce-service` | `POST /internal/tools/catalog.product.get` | Agent OBO only | Exact catalog-read scope; `act.azp=agent-service`; user subject; verified support session; time bounds; ownership; eval equality/liveness when applicable | Returns ToolSpec-bounded published product view and evidence metadata | Direct-user token, wrong issuer/audience/type/scope/actor, forged session, body identity substitution, cross-user resource, sandbox mismatch/inactivity, malformed input, or unavailable truth rejects |

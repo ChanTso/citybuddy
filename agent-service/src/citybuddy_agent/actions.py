@@ -441,7 +441,8 @@ def validate_pending_action_reference(
             or len(row[12]) != 3
             or not row[12].isalpha()
             or row[12] != row[12].upper()
-            or row[13] not in {"PENDING", "CONFIRMING", "DECLINED", "EXPIRED", "CONFIRMED"}
+            or row[13]
+            not in {"PENDING", "CONFIRMING", "DECLINED", "EXPIRED", "CONFIRMED", "REJECTED"}
             or not isinstance(row[14], datetime)
             or (row[13] in {"PENDING", "CONFIRMING"}) != (row[15] is None)
             or (row[15] is not None and not isinstance(row[15], datetime))
@@ -512,6 +513,7 @@ def validate_pending_action_resolution(
         "DECLINED": "action_declined",
         "EXPIRED": "action_expired",
         "CONFIRMED": "action_completed",
+        "REJECTED": "action_rejected",
     }.get(state)
     if (
         outcome is None
@@ -537,7 +539,15 @@ def validate_pending_action_resolution(
         expected_session_id=pending.session_id,
         expected_user_subject=pending.user_subject,
         pending_action_id=pending.pending_action_id,
-        outcome=cast(Literal["action_declined", "action_expired"], outcome),
+        outcome=cast(
+            Literal[
+                "action_declined",
+                "action_expired",
+                "action_completed",
+                "action_rejected",
+            ],
+            outcome,
+        ),
     )
 
 
@@ -604,7 +614,8 @@ def validate_pending_action_events(
         != ["AGENT_OUTCOME", "ASSISTANT_RESPONSE", "TURN_COMPLETED"]
         or any(event.payload != {"outcome": "action_pending"} for event in events[-3:])
         or any(
-            event.event_type in {"ACTION_DECLINED", "ACTION_EXPIRED", "ACTION_RECEIPT"}
+            event.event_type
+            in {"ACTION_DECLINED", "ACTION_EXPIRED", "ACTION_RECEIPT", "ACTION_REJECTED"}
             for event in events
         )
         or any(
@@ -623,12 +634,13 @@ def validate_resolved_action_events(
     expected_session_id: str,
     expected_user_subject: str,
     pending_action_id: str,
-    outcome: Literal["action_declined", "action_expired", "action_completed"],
+    outcome: Literal["action_declined", "action_expired", "action_completed", "action_rejected"],
 ) -> tuple[ActionEvidenceEvent, ...]:
     event_type, event_outcome = {
         "action_declined": ("ACTION_DECLINED", "declined"),
         "action_expired": ("ACTION_EXPIRED", "expired"),
         "action_completed": ("ACTION_RECEIPT", "confirmed"),
+        "action_rejected": ("ACTION_REJECTED", "rejected"),
     }[outcome]
     if len(rows) != 5:
         raise ActionEvidenceError("Resolved action event cardinality is inconsistent")
@@ -676,7 +688,13 @@ def validate_resolved_action_events(
             event is not events[1]
             and (
                 event.event_type
-                in {"ACTION_PREPARED", "ACTION_DECLINED", "ACTION_EXPIRED", "ACTION_RECEIPT"}
+                in {
+                    "ACTION_PREPARED",
+                    "ACTION_DECLINED",
+                    "ACTION_EXPIRED",
+                    "ACTION_RECEIPT",
+                    "ACTION_REJECTED",
+                }
                 or "pendingActionId" in event.payload
             )
             for event in events

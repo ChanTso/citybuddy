@@ -145,6 +145,10 @@ def test_filter_preserves_non_success_action_guidance(safe_text: str) -> None:
         ),
         ("action_declined", "The prepared action was declined and was not executed."),
         ("action_expired", "The prepared action expired and was not executed."),
+        (
+            "action_rejected",
+            "Commerce rejected the prepared action and returned no action receipt.",
+        ),
     ],
 )
 def test_filter_projects_cb122_local_action_outcomes_without_receipt(

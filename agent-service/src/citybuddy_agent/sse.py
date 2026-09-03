@@ -92,6 +92,7 @@ _PUBLIC_COMPLETED_OUTCOMES = {
     "action_clarification",
     "action_declined",
     "action_expired",
+    "action_rejected",
 }
 
 

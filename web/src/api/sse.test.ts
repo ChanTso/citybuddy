@@ -110,6 +110,26 @@ describe('bounded SSE parser', () => {
     expect(() => parser.push(encode(frame))).toThrow(ApiFailure);
   });
 
+  it('accepts a rejected terminal without inventing a receipt', () => {
+    const parser = new SseParser();
+    parser.push(
+      encode(
+        'event: token\ndata: {"sequence":1,"text":"Commerce rejected the action."}\n\n',
+      ),
+    );
+    parser.push(
+      encode(
+        `event: done\ndata: {"sequence":2,"conversationId":"${UUID}","traceId":"${UUID}","turnId":"${UUID}","outcome":"action_rejected"}\n\n`,
+      ),
+    );
+
+    expect(parser.finish()).toEqual({
+      reply: 'Commerce rejected the action.',
+      outcome: 'action_rejected',
+      receiptId: null,
+    });
+  });
+
   it('allows exactly one public error terminal and maps it to a bounded dependency failure', () => {
     const parser = new SseParser();
     parser.push(

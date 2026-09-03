@@ -84,6 +84,7 @@ class ActionTruthInventoryCursor:
     [
         ((("USER_INPUT",), ("ACTION_PREPARED",)), (), True),
         ((("USER_INPUT",), ("ACTION_DECLINED",)), (), True),
+        ((("USER_INPUT",), ("ACTION_REJECTED",)), (), True),
         ((("USER_INPUT",),), (("00000000-0000-0000-0000-000000000121",),), True),
         ((("USER_INPUT",), ("TURN_COMPLETED",)), (), False),
     ],
@@ -103,6 +104,31 @@ def test_evaluation_action_scope_is_enumerated_before_terminal_outcome_validatio
         is expected
     )
     assert "source_turn_id = %s OR resolution_turn_id = %s" in cursor.query
+
+
+def test_evaluation_projects_only_the_closed_action_rejection_payload() -> None:
+    store = object.__new__(MysqlEvaluationEvidenceStore)
+    pending_id = "00000000-0000-0000-0000-000000000121"
+
+    projected = store._project_event(  # noqa: SLF001
+        2,
+        "ACTION_REJECTED",
+        {"pendingActionId": pending_id, "outcome": "rejected"},
+        datetime.now(UTC),
+    )
+
+    assert (projected.event_kind, projected.outcome, projected.reference) == (
+        "ACTION_REJECTED",
+        "rejected",
+        pending_id,
+    )
+    with pytest.raises(EvaluationEvidenceInvalid):
+        store._project_event(  # noqa: SLF001
+            2,
+            "ACTION_REJECTED",
+            {"pendingActionId": pending_id, "outcome": "declined"},
+            datetime.now(UTC),
+        )
 
 
 @pytest.mark.parametrize("outcome", ["completed", "action_clarification"])
@@ -272,6 +298,13 @@ def test_pending_reference_and_source_turn_matrix_binds_every_persisted_field() 
     assert resolved.resolution_turn_id == resolved_row[16]
     assert resolved.resolution_trace_id == resolved_row[17]
 
+    rejected_row = list(resolved_row)
+    rejected_row[13] = "REJECTED"
+    _, rejected_state, _ = validate_pending_action_reference(
+        tuple(rejected_row), [source_turn], **expected
+    )
+    assert rejected_state == "REJECTED"
+
     damaged_values: dict[int, object] = {
         0: "not-a-uuid",
         1: "00000000-0000-0000-0000-000000000999",
@@ -372,6 +405,20 @@ def test_resolved_pending_reference_is_anchored_to_one_exact_decision_turn() -> 
         event(5, "TURN_COMPLETED", {"outcome": "action_declined"}),
     )
     validate_pending_action_resolution(pending, "DECLINED", (turn,), events)
+
+    rejected_turn = (*turn[:-1], "action_rejected")
+    rejected_events = (
+        event(1, "USER_INPUT", {"accepted": True}),
+        event(
+            2,
+            "ACTION_REJECTED",
+            {"pendingActionId": pending.pending_action_id, "outcome": "rejected"},
+        ),
+        event(3, "AGENT_OUTCOME", {"outcome": "action_rejected"}),
+        event(4, "ASSISTANT_RESPONSE", {"outcome": "action_rejected"}),
+        event(5, "TURN_COMPLETED", {"outcome": "action_rejected"}),
+    )
+    validate_pending_action_resolution(pending, "REJECTED", (rejected_turn,), rejected_events)
 
     for damaged_turn in (
         (),

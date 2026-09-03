@@ -16,6 +16,7 @@ type StreamOutcome = Extract<
   | 'action_clarification'
   | 'action_declined'
   | 'action_expired'
+  | 'action_rejected'
 >;
 
 export type StreamResult = {
@@ -180,6 +181,7 @@ export class SseParser {
         'action_clarification',
         'action_declined',
         'action_expired',
+        'action_rejected',
       ];
       if (
         typeof value.outcome !== 'string' ||
