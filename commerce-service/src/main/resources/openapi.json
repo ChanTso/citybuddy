@@ -254,19 +254,38 @@
         "security": [{"directUserBearer": []}],
         "parameters": [
           {"name": "orderId", "in": "path", "required": true, "schema": {"type": "string", "format": "uuid"}},
-          {"name": "Idempotency-Key", "in": "header", "required": true, "schema": {"type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[A-Za-z0-9._:-]+$"}}
+          {"name": "Idempotency-Key", "in": "header", "required": true, "schema": {"type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[A-Za-z0-9._:-]+$"}},
+          {"name": "X-Eval-Sandbox-Id", "in": "header", "required": false, "description": "Rejection input only: this production-only route rejects evaluation tokens whether the header is absent, matching, or mismatched, and rejects a production token when this header is supplied.", "schema": {"type": "string", "minLength": 1, "maxLength": 64}}
         ],
         "requestBody": {"required": true, "content": {"application/json": {"schema": {"$ref": "#/components/schemas/RefundRequest"}}}},
         "responses": {
           "200": {"description": "Same owner, order, key, and canonical refund intent replay", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/RefundResult"}}}},
           "201": {"description": "One eligible refund request created atomically with its Outbox event", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/RefundResult"}}}},
           "400": {"description": "Malformed or out-of-bounds refund intent", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/RefundError"}}}},
-          "401": {"description": "Invalid direct-user identity", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/RefundError"}}}},
-          "403": {"description": "Invalid refund permission or evaluation context", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/RefundError"}}}},
+          "401": {"description": "Invalid direct-user identity or any evaluation token or header context", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/RefundError"}}}},
+          "403": {"description": "Validated direct-user identity lacks the refund permission", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/RefundError"}}}},
           "404": {"description": "Missing or non-owned order", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/RefundError"}}}},
           "409": {"description": "Refund intent, eligibility, lifecycle, or visible durable-integrity conflict", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/RefundError"}}}},
           "429": {"description": "Bounded committed refund-truth observation remains indeterminate", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/RefundError"}}}},
           "503": {"description": "Authoritative refund or payment persistence unavailable", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/RefundError"}}}}
+        }
+      }
+    },
+    "/api/refunds/{refundId}": {
+      "get": {
+        "operationId": "getOwnedRefundStatus",
+        "security": [{"directUserBearer": []}],
+        "parameters": [
+          {"name": "refundId", "in": "path", "required": true, "schema": {"type": "string", "format": "uuid"}},
+          {"name": "X-Eval-Sandbox-Id", "in": "header", "required": false, "description": "Rejection input only: this production-only route rejects evaluation tokens whether the header is absent, matching, or mismatched, and rejects a production token when this header is supplied.", "schema": {"type": "string", "minLength": 1, "maxLength": 64}}
+        ],
+        "responses": {
+          "200": {"description": "Owned durable refund status", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/RefundResult"}}}},
+          "400": {"description": "Invalid refund identifier", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/RefundError"}}}},
+          "401": {"description": "Invalid direct-user identity or any evaluation token or header context", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/RefundError"}}}},
+          "403": {"description": "Validated direct-user identity lacks the refund permission", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/RefundError"}}}},
+          "404": {"description": "Missing or non-owned refund", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/RefundError"}}}},
+          "503": {"description": "Authoritative identity or refund persistence unavailable", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/RefundError"}}}}
         }
       }
     },

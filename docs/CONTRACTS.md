@@ -153,16 +153,16 @@ When two stores disagree, resolve the conflict in this order:
 - Authentication failure is never converted into an anonymous business request.
 - Missing audience, scope, actor, owner, session, or required sandbox context rejects; it does not
   fall back to a broader query.
-- Production rejects `X-Eval-Sandbox-Id` and does not load `/api/eval/*` or evidence routes.
+- Production direct-user, auth, and OBO tool boundaries reject `X-Eval-Sandbox-Id` and do not load
+  `/api/eval/*` or evidence routes. Other internal service endpoints may ignore an unknown header;
+  they rely on their own credential or signature boundary and never treat it as identity.
 - Evaluation requests require both management authentication and sandbox-bound user identity for
   black-box chat. The management credential is not a substitute for a user JWT.
 - SQL repositories, batch updates, deletes, and asynchronous consumers that participate in
   evaluation are covered by tests proving sandbox filtering. An absent sandbox context in an
   evaluation path fails before SQL mutation.
-- Before model calls, personal data is masked. Any reversible mapping is session-scoped,
-  short-lived, and excluded from logs. ToolAdapter restores only fields explicitly allowed by that
-  tool; final output does not automatically restore every masked value. Stable business
-  identifiers needed for tool use follow their explicit ToolSpec policy.
+- Runtime PII masking before model calls is not implemented and remains outside the current scope.
+  The evaluation evidence API still excludes raw text and PII maps from its fixed public projection.
 - Tool results are stored server-side in full only where evidence policy allows. The model receives
   a bounded view, and SSE receives a smaller allowlisted view.
 - Secrets are injected at runtime, excluded from logs, absent from committed examples, and scanned
@@ -231,7 +231,9 @@ direct-user downgrade.
    `aud=commerce-service`, exact `scope`, `act.azp=agent-service`, `jti`, `exp`, and applicable
    not-before/issued-at metadata. Scope is fixed by ToolSpec; neither model nor request payload can
    widen it. Cache keys are limited to `user + support session + exact scope` and never outlive the
-   token.
+   token. The OBO is a short-lived replayable bearer, not a single-use token; `jti` is issued and
+   required to be nonblank but is neither consumed nor persisted for replay detection, so resource
+   authorization and operation idempotency contain duplicate effects.
 9. `commerce-service` accepts internal tool identity only from the validated OBO. It validates
    signature, fixed issuer, OBO purpose/type, audience, exact required scope, actor, user subject,
    support session, expiry/not-before/skew, and resource ownership. It never trusts identity fields
@@ -492,6 +494,7 @@ sequenceDiagram
 | `web` → `commerce-service` | `POST /api/orders/{orderId}/mock-payment` | Direct-user JWT | Direct-user identity, ownership, `Idempotency-Key` | Starts eligible mock payment or replays complete committed truth after canonical owner visibility is established | Wrong identity mode, paid/cancelled/ineligible order, cross-user access, concealed ownership, idempotency conflict, or damaged visible durable truth rejects |
 | Mock payment component → `commerce-service` | `POST /internal/mock-payments/callback` | Separate internal callback credential/signature | Callback idempotency, payment/order correlation, exact sandbox binding when applicable | Applies one legal transition; duplicate returns fully reconciled existing result | Invalid credential, unknown correlation, sandbox mismatch/inactivity, illegal transition, or damaged durable closure rejects and audits |
 | `web` → `commerce-service` | `POST /api/orders/{orderId}/refunds` | Direct-user JWT | Direct-user identity, ownership, canonical refund intent, `Idempotency-Key` | Creates one eligible refund and Outbox event atomically, or replays the same committed owner/order/key/intent result | Malformed amount, wrong identity/evaluation mode, missing/non-owned order, lifecycle or durable-integrity conflict, indeterminate committed observation, or unavailable persistence rejects with its typed status |
+| `web` → `commerce-service` | `GET /api/refunds/{refundId}` | Direct-user JWT | Production direct-user identity, refund permission, owner-only lookup; `X-Eval-Sandbox-Id` is rejection input only | Returns the caller-owned durable refund status | Invalid id or identity/evaluation context, missing permission, concealed missing/non-owned refund, or unavailable identity/refund persistence rejects with its typed status |
 | `agent-service` → `commerce-service` | `POST /internal/tools/actions/prepare` | Agent OBO only | Exact sensitive scope, actor, owner/session, idempotency, trace/turn correlation, sandbox equality and liveness | Creates or returns PendingAction bound to owner, session, argument hash, target version, and expiry | Token mode, actor, scope, session, ownership, stale resource, conflict, or sandbox failure rejects |
 | `agent-service` → `commerce-service` | `POST /internal/tools/actions/{pendingActionId}/confirm` | Agent OBO only | Same owner/session/scope, exact sandbox equality, confirmation idempotency | One transaction validates, consumes, executes, and persists ActionReceipt | Expired/consumed action, mismatch, ownership, illegal transition, or sandbox failure rolls back |
 
@@ -730,7 +733,9 @@ incremental FAQ consumption distinct from complete FAQ/product rebuilds.
 ## 10. Evaluation-only capability
 
 - Evaluation routes are loaded only by the evaluation profile. Production returns not found for
-  `/api/eval/*`, rejects `X-Eval-Sandbox-Id`, and cannot issue evaluation test tokens.
+  `/api/eval/*` and cannot issue evaluation test tokens; production user, auth, and OBO tool
+  boundaries reject `X-Eval-Sandbox-Id`, while unrelated internal endpoints retain their own
+  authentication or signature semantics.
 - The evaluator first calls `commerce-service POST /api/eval/reset`. Commerce creates a one-time
   sandbox and business fixtures, then calls an internal service-authenticated auth provisioning
   endpoint with sandbox id, case correlation, TTL, and minimum test-principal attributes.

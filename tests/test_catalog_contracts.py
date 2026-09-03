@@ -29,6 +29,7 @@ def test_catalog_contract_exposes_only_authenticated_published_reads() -> None:
         "/api/orders",
         "/api/orders/{orderId}/mock-payment",
         "/api/orders/{orderId}/refunds",
+        "/api/refunds/{refundId}",
         "/api/seckill/activities/{activityId}/reservations",
         "/api/reservations/{reservationId}",
         "/internal/tools/catalog.product.get",
@@ -204,14 +205,16 @@ def test_order_result_and_rejection_expose_safe_deterministic_evidence() -> None
 
 def test_direct_refund_contract_is_closed_bounded_and_status_exact() -> None:
     contract = load_contract()
-    operation = contract["paths"]["/api/orders/{orderId}/refunds"]["post"]
+    submission = contract["paths"]["/api/orders/{orderId}/refunds"]["post"]
+    status = contract["paths"]["/api/refunds/{refundId}"]["get"]
 
-    assert operation["security"] == [{"directUserBearer": []}]
-    assert {item["name"] for item in operation["parameters"]} == {
+    assert submission["security"] == [{"directUserBearer": []}]
+    assert {item["name"] for item in submission["parameters"]} == {
         "orderId",
         "Idempotency-Key",
+        "X-Eval-Sandbox-Id",
     }
-    assert set(operation["responses"]) == {
+    assert set(submission["responses"]) == {
         "200",
         "201",
         "400",
@@ -222,6 +225,34 @@ def test_direct_refund_contract_is_closed_bounded_and_status_exact() -> None:
         "429",
         "503",
     }
+    assert "evaluation" in submission["responses"]["401"]["description"].lower()
+    assert "permission" in submission["responses"]["403"]["description"].lower()
+    assert "evaluation" not in submission["responses"]["403"]["description"].lower()
+
+    assert status["security"] == [{"directUserBearer": []}]
+    parameters = {item["name"]: item for item in status["parameters"]}
+    assert set(parameters) == {"refundId", "X-Eval-Sandbox-Id"}
+    assert parameters["refundId"] == {
+        "name": "refundId",
+        "in": "path",
+        "required": True,
+        "schema": {"type": "string", "format": "uuid"},
+    }
+    assert parameters["X-Eval-Sandbox-Id"]["required"] is False
+    assert set(status["responses"]) == {"200", "400", "401", "403", "404", "503"}
+    assert status["responses"]["200"]["content"]["application/json"]["schema"] == {
+        "$ref": "#/components/schemas/RefundResult"
+    }
+    for response in status["responses"].values():
+        schema = response.get("content", {}).get("application/json", {}).get("schema")
+        assert schema in (
+            {"$ref": "#/components/schemas/RefundResult"},
+            {"$ref": "#/components/schemas/RefundError"},
+        )
+    assert "owned" in status["responses"]["200"]["description"].lower()
+    assert "evaluation" in status["responses"]["401"]["description"].lower()
+    assert "permission" in status["responses"]["403"]["description"].lower()
+    assert "evaluation" not in status["responses"]["403"]["description"].lower()
     request = contract["components"]["schemas"]["RefundRequest"]
     result = contract["components"]["schemas"]["RefundResult"]
     error = contract["components"]["schemas"]["RefundError"]
