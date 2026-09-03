@@ -13,6 +13,7 @@ import pytest
 REPOSITORY = Path(__file__).resolve().parents[1]
 SETUP = REPOSITORY / "bench/agent/setup_agent_bench.sh"
 SETUP_GATE = REPOSITORY / "bench/agent/setup_environment_gate.sh"
+CPU_LIMIT = REPOSITORY / "bench/commerce_cpu_limit.sh"
 DOCKERFILE = REPOSITORY / "bench/agent/Dockerfile"
 
 
@@ -20,6 +21,7 @@ def _copy_setup(tmp_path: Path) -> tuple[Path, Path]:
     setup = tmp_path / "bench/agent/setup_agent_bench.sh"
     setup.parent.mkdir(parents=True)
     shutil.copyfile(SETUP, setup)
+    shutil.copyfile(CPU_LIMIT, tmp_path / "bench/commerce_cpu_limit.sh")
     run_dir = tmp_path / "bench/.run"
     run_dir.mkdir()
     (run_dir / "citybuddy_commit").write_text("old-commit\n", encoding="utf-8")

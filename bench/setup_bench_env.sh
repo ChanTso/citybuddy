@@ -5,6 +5,8 @@ set -euo pipefail
 
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$repo_root"
+# shellcheck source=bench/commerce_cpu_limit.sh
+source "$repo_root/bench/commerce_cpu_limit.sh"
 
 BENCH_USERS="${BENCH_USERS:-600}"
 BENCH_ACTIVITIES="${BENCH_ACTIVITIES:-32}"
@@ -190,7 +192,7 @@ echo "== starting commerce-service in the compose network =="
 docker run --detach --name citybuddy-bench-commerce \
   --network citybuddy_default \
   --publish 127.0.0.1:18081:8080 \
-  --cpus 4 \
+  --cpus "$BENCH_COMMERCE_CPU_LIMIT_REQUESTED_CPUS" \
   --volume "$commerce_jar:/opt/citybuddy/commerce.jar:ro" \
   --env SPRING_DATASOURCE_PASSWORD="$commerce_pw" \
   eclipse-temurin:21.0.8_9-jre-noble@sha256:20e7f7288e1c18eebe8f06a442c9f7183342d9b022d3b9a9677cae2b558ddddd \
@@ -261,6 +263,44 @@ if [ "$(git rev-parse --verify HEAD)" != "$citybuddy_commit" ]; then
   echo "CityBuddy HEAD changed during benchmark setup." >&2
   exit 1
 fi
+if [ "$(openssl dgst -sha256 "$auth_jar" | awk '{print $NF}')" != "$auth_jar_sha256" ] \
+  || [ "$(openssl dgst -sha256 "$commerce_jar" | awk '{print $NF}')" \
+    != "$commerce_jar_sha256" ]; then
+  echo "A benchmark JAR changed during setup." >&2
+  exit 1
+fi
+auth_container_identity="$(bench_capture_fixture_container \
+  citybuddy-bench-auth /opt/citybuddy/auth.jar "$auth_jar_sha256" "seckill setup")"
+IFS=$'\t' read -r auth_container_id auth_image_id auth_started_at auth_running \
+  auth_restart_count auth_mounted_jar_sha256 <<< "$auth_container_identity"
+commerce_container_identity="$(bench_capture_fixture_container \
+  citybuddy-bench-commerce /opt/citybuddy/commerce.jar "$commerce_jar_sha256" \
+  "seckill setup")"
+IFS=$'\t' read -r commerce_container_id commerce_image_id commerce_started_at commerce_running \
+  commerce_restart_count commerce_mounted_jar_sha256 <<< "$commerce_container_identity"
+mysql_container_identity="$(bench_capture_container_state citybuddy-mysql-1 "seckill setup")"
+IFS=$'\t' read -r mysql_container_id mysql_image_id mysql_started_at mysql_running \
+  mysql_restart_count <<< "$mysql_container_identity"
+redis_container_identity="$(bench_capture_container_state \
+  citybuddy-redis-commerce-1 "seckill setup")"
+IFS=$'\t' read -r redis_container_id redis_image_id redis_started_at redis_running \
+  redis_restart_count <<< "$redis_container_identity"
+broker_container_identity="$(bench_capture_container_state \
+  citybuddy-rocketmq-broker-proxy-1 "seckill setup")"
+IFS=$'\t' read -r broker_container_id broker_image_id broker_started_at broker_running \
+  broker_restart_count <<< "$broker_container_identity"
+namesrv_container_identity="$(bench_capture_container_state \
+  citybuddy-rocketmq-namesrv-1 "seckill setup")"
+IFS=$'\t' read -r namesrv_container_id namesrv_image_id namesrv_started_at namesrv_running \
+  namesrv_restart_count <<< "$namesrv_container_identity"
+commerce_cpu_limit_expected_nano_cpus="$(bench_commerce_cpu_limit_expected_nano_cpus)"
+commerce_cpu_limit_observed_cpuset_cpus=""
+commerce_cpu_limit_observed_nano_cpus="$(bench_verify_commerce_cpu_limit \
+  citybuddy-bench-commerce \
+  "$BENCH_COMMERCE_CPU_LIMIT_REQUESTED_CPUS" \
+  "$commerce_cpu_limit_expected_nano_cpus" \
+  "$commerce_cpu_limit_observed_cpuset_cpus" \
+  "seckill setup")"
 setup_completed_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 docker_cpus="$(docker info --format '{{.NCPU}}')"
 docker_memory_bytes="$(docker info --format '{{.MemTotal}}')"
@@ -278,11 +318,45 @@ TOPIC_SUFFIX=$topic_suffix
 CITYBUDDY_COMMIT=$citybuddy_commit
 IDENTITY_JAR_SHA256=$auth_jar_sha256
 COMMERCE_JAR_SHA256=$commerce_jar_sha256
+AUTH_CONTAINER_ID=$auth_container_id
+AUTH_CONTAINER_IMAGE_ID=$auth_image_id
+AUTH_CONTAINER_STARTED_AT=$auth_started_at
+AUTH_CONTAINER_RUNNING=$auth_running
+AUTH_CONTAINER_RESTART_COUNT=$auth_restart_count
+AUTH_MOUNTED_JAR_SHA256=$auth_mounted_jar_sha256
+COMMERCE_CONTAINER_ID=$commerce_container_id
+COMMERCE_CONTAINER_IMAGE_ID=$commerce_image_id
+COMMERCE_CONTAINER_STARTED_AT=$commerce_started_at
+COMMERCE_CONTAINER_RUNNING=$commerce_running
+COMMERCE_CONTAINER_RESTART_COUNT=$commerce_restart_count
+COMMERCE_MOUNTED_JAR_SHA256=$commerce_mounted_jar_sha256
+MYSQL_CONTAINER_ID=$mysql_container_id
+MYSQL_CONTAINER_IMAGE_ID=$mysql_image_id
+MYSQL_CONTAINER_STARTED_AT=$mysql_started_at
+MYSQL_CONTAINER_RUNNING=$mysql_running
+MYSQL_CONTAINER_RESTART_COUNT=$mysql_restart_count
+REDIS_COMMERCE_CONTAINER_ID=$redis_container_id
+REDIS_COMMERCE_CONTAINER_IMAGE_ID=$redis_image_id
+REDIS_COMMERCE_CONTAINER_STARTED_AT=$redis_started_at
+REDIS_COMMERCE_CONTAINER_RUNNING=$redis_running
+REDIS_COMMERCE_CONTAINER_RESTART_COUNT=$redis_restart_count
+ROCKETMQ_BROKER_PROXY_CONTAINER_ID=$broker_container_id
+ROCKETMQ_BROKER_PROXY_CONTAINER_IMAGE_ID=$broker_image_id
+ROCKETMQ_BROKER_PROXY_CONTAINER_STARTED_AT=$broker_started_at
+ROCKETMQ_BROKER_PROXY_CONTAINER_RUNNING=$broker_running
+ROCKETMQ_BROKER_PROXY_CONTAINER_RESTART_COUNT=$broker_restart_count
+ROCKETMQ_NAMESRV_CONTAINER_ID=$namesrv_container_id
+ROCKETMQ_NAMESRV_CONTAINER_IMAGE_ID=$namesrv_image_id
+ROCKETMQ_NAMESRV_CONTAINER_STARTED_AT=$namesrv_started_at
+ROCKETMQ_NAMESRV_CONTAINER_RUNNING=$namesrv_running
+ROCKETMQ_NAMESRV_CONTAINER_RESTART_COUNT=$namesrv_restart_count
 SETUP_STARTED_AT_UTC=$setup_started_at
 SETUP_COMPLETED_AT_UTC=$setup_completed_at
 DOCKER_CPUS=$docker_cpus
 DOCKER_MEMORY_BYTES=$docker_memory_bytes
-COMMERCE_CPU_LIMIT=4
+COMMERCE_CPU_LIMIT_REQUESTED_CPUS=$BENCH_COMMERCE_CPU_LIMIT_REQUESTED_CPUS
+COMMERCE_CPU_LIMIT_OBSERVED_NANO_CPUS=$commerce_cpu_limit_observed_nano_cpus
+COMMERCE_CPU_LIMIT_OBSERVED_CPUSET_CPUS=$commerce_cpu_limit_observed_cpuset_cpus
 EOF
 echo "== bench environment ready =="
 echo "setup record: $bench_env"

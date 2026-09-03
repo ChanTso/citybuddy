@@ -17,6 +17,8 @@ umask 077
 
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 cd "$repo_root"
+# shellcheck source=bench/commerce_cpu_limit.sh
+source "$repo_root/bench/commerce_cpu_limit.sh"
 
 # One user, one paid order and one session per pool entry, so the ladder never reuses any of
 # them. Size this past the total iteration count of the longest ladder to be run.
@@ -644,7 +646,7 @@ commerce_container_id="$(docker run --detach --name citybuddy-bench-commerce \
   --label "$citybuddy_commit_label=$citybuddy_commit" \
   --network citybuddy_default \
   --publish 127.0.0.1:18081:8080 \
-  --cpus 4 \
+  --cpus "$BENCH_COMMERCE_CPU_LIMIT_REQUESTED_CPUS" \
   --volume "$commerce_jar:/opt/citybuddy/commerce.jar:ro" \
   --env SPRING_DATASOURCE_PASSWORD="$commerce_pw" \
   "$java_runtime_image_id" \
@@ -708,6 +710,14 @@ if [ "$commerce_mounted_jar_sha256" != "$commerce_jar_sha256" ]; then
   echo "The commerce-service mounted JAR does not match the freshly built host artifact." >&2
   exit 1
 fi
+commerce_cpu_limit_expected_nano_cpus="$(bench_commerce_cpu_limit_expected_nano_cpus)"
+commerce_cpu_limit_observed_cpuset_cpus=""
+commerce_cpu_limit_observed_nano_cpus="$(bench_verify_commerce_cpu_limit \
+  citybuddy-bench-commerce \
+  "$BENCH_COMMERCE_CPU_LIMIT_REQUESTED_CPUS" \
+  "$commerce_cpu_limit_expected_nano_cpus" \
+  "$commerce_cpu_limit_observed_cpuset_cpus" \
+  "agent setup")"
 echo "commerce-service ready on 18081"
 
 echo "== starting the shared network namespace, model fixture and agent =="
@@ -945,6 +955,9 @@ uv run python - \
   "$commerce_jar_sha256" \
   "$commerce_mounted_jar_sha256" \
   "$commerce_java_runtime" \
+  "$BENCH_COMMERCE_CPU_LIMIT_REQUESTED_CPUS" \
+  "$commerce_cpu_limit_observed_nano_cpus" \
+  "$commerce_cpu_limit_observed_cpuset_cpus" \
   "$es_container_id" \
   "$es_container_image_id" \
   "$es_started_at" \
@@ -1020,6 +1033,9 @@ from pathlib import Path
     commerce_host_sha,
     commerce_mounted_sha,
     commerce_runtime,
+    commerce_cpu_limit_requested_cpus,
+    commerce_cpu_limit_observed_nano_cpus,
+    commerce_cpu_limit_observed_cpuset_cpus,
     elasticsearch_container_id,
     elasticsearch_image_id,
     elasticsearch_started_at,
@@ -1104,6 +1120,11 @@ environment = {
     "configuration": {
         "agentAttemptBudget": int(attempt_budget),
         "agentBenchUsers": int(users),
+        "commerceCpuLimit": {
+            "observedCpusetCpus": commerce_cpu_limit_observed_cpuset_cpus,
+            "observedNanoCpus": int(commerce_cpu_limit_observed_nano_cpus),
+            "requestedCpus": int(commerce_cpu_limit_requested_cpus),
+        },
         "requestedWorkers": int(requested_workers),
         "observedWorkerCount": len(worker_pids_csv.split(",")),
         "observedWorkerPids": [int(value) for value in worker_pids_csv.split(",")],

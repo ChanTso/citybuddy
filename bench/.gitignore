@@ -2,4 +2,4 @@
 .run/
 # k6 per-request point streams are ~100 MB each and regenerable from run_ladder.sh.
 # The k6 console summary, the per-step analysis, and summary-export JSON are kept as evidence.
-results/*_points.json
+results/**/*_points.json

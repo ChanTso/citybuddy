@@ -25,38 +25,112 @@ out="$repo_root/bench/results"
 bench_env="$run_dir/bench.env"
 auth_jar="$repo_root/auth-service/target/auth-service-0.0.1-SNAPSHOT.jar"
 commerce_jar="$repo_root/commerce-service/target/commerce-service-0.0.1-SNAPSHOT.jar"
-mkdir -p "$out"
+mkdir -p "$out" "$run_dir"
 http_name="correctness_${LABEL}_http.txt"
 sql_name="correctness_${LABEL}_sql.txt"
 setup_name="seckill_${LABEL}_setup.txt"
-for name in "$http_name" "$sql_name" "$setup_name"; do
-  if [ -e "$out/$name" ]; then
-    echo "Refusing to overwrite existing seckill correctness output: $out/$name" >&2
-    exit 1
-  fi
-done
+bundle_dir="$out/correctness_${LABEL}"
+claim_dir="$out/.claim.correctness_${LABEL}"
+if [ -e "$bundle_dir" ]; then
+  echo "Refusing to overwrite existing seckill correctness bundle: $bundle_dir" >&2
+  exit 1
+fi
 if [ ! -s "$bench_env" ]; then
   echo "Rerun setup_bench_env.sh before seckill correctness." >&2
   exit 1
 fi
 # shellcheck disable=SC1090
 source "$bench_env"
+# shellcheck source=bench/commerce_cpu_limit.sh
+source "$repo_root/bench/commerce_cpu_limit.sh"
 
-source_changes="$(git status --porcelain --untracked-files=all -- . \
-  ':(exclude)bench/results/**' \
-  ':(exclude)bench/.run/**')"
-if [ -n "$source_changes" ] || [ "$(git rev-parse --verify HEAD)" != "$CITYBUDDY_COMMIT" ] \
-  || [ "$(openssl dgst -sha256 "$auth_jar" | awk '{print $NF}')" != "$IDENTITY_JAR_SHA256" ] \
-  || [ "$(openssl dgst -sha256 "$commerce_jar" | awk '{print $NF}')" != "$COMMERCE_JAR_SHA256" ]; then
-  echo "Seckill correctness requires the clean checkout and JARs recorded by setup." >&2
-  [ -z "$source_changes" ] || printf '%s\n' "$source_changes" >&2
-  exit 1
-fi
+verify_checkout_and_jars() {
+  local phase="$1" source_changes
+  source_changes="$(git status --porcelain --untracked-files=all -- . \
+    ':(exclude)bench/results/**' \
+    ':(exclude)bench/.run/**')"
+  if [ -n "$source_changes" ] || [ "$(git rev-parse --verify HEAD)" != "$CITYBUDDY_COMMIT" ] \
+    || [ "$(openssl dgst -sha256 "$auth_jar" | awk '{print $NF}')" \
+      != "$IDENTITY_JAR_SHA256" ] \
+    || [ "$(openssl dgst -sha256 "$commerce_jar" | awk '{print $NF}')" \
+      != "$COMMERCE_JAR_SHA256" ]; then
+    echo "Seckill correctness boundary changed ($phase): checkout or JAR mismatch." >&2
+    [ -z "$source_changes" ] || printf '%s\n' "$source_changes" >&2
+    return 1
+  fi
+}
+
+verify_fixture_containers() {
+  local phase="$1"
+  bench_verify_fixture_container \
+    citybuddy-bench-auth /opt/citybuddy/auth.jar \
+    "$AUTH_CONTAINER_ID" "$AUTH_CONTAINER_IMAGE_ID" "$AUTH_CONTAINER_STARTED_AT" \
+    "$AUTH_CONTAINER_RUNNING" "$AUTH_CONTAINER_RESTART_COUNT" \
+    "$AUTH_MOUNTED_JAR_SHA256" "$IDENTITY_JAR_SHA256" "$phase"
+  bench_verify_fixture_container \
+    citybuddy-bench-commerce /opt/citybuddy/commerce.jar \
+    "$COMMERCE_CONTAINER_ID" "$COMMERCE_CONTAINER_IMAGE_ID" \
+    "$COMMERCE_CONTAINER_STARTED_AT" "$COMMERCE_CONTAINER_RUNNING" \
+    "$COMMERCE_CONTAINER_RESTART_COUNT" "$COMMERCE_MOUNTED_JAR_SHA256" \
+    "$COMMERCE_JAR_SHA256" "$phase"
+  bench_verify_dependency_container \
+    citybuddy-mysql-1 "$MYSQL_CONTAINER_ID" "$MYSQL_CONTAINER_IMAGE_ID" \
+    "$MYSQL_CONTAINER_STARTED_AT" "$MYSQL_CONTAINER_RUNNING" "$MYSQL_CONTAINER_RESTART_COUNT" \
+    "$phase"
+  bench_verify_dependency_container \
+    citybuddy-redis-commerce-1 "$REDIS_COMMERCE_CONTAINER_ID" \
+    "$REDIS_COMMERCE_CONTAINER_IMAGE_ID" "$REDIS_COMMERCE_CONTAINER_STARTED_AT" \
+    "$REDIS_COMMERCE_CONTAINER_RUNNING" "$REDIS_COMMERCE_CONTAINER_RESTART_COUNT" "$phase"
+  bench_verify_dependency_container \
+    citybuddy-rocketmq-broker-proxy-1 "$ROCKETMQ_BROKER_PROXY_CONTAINER_ID" \
+    "$ROCKETMQ_BROKER_PROXY_CONTAINER_IMAGE_ID" "$ROCKETMQ_BROKER_PROXY_CONTAINER_STARTED_AT" \
+    "$ROCKETMQ_BROKER_PROXY_CONTAINER_RUNNING" \
+    "$ROCKETMQ_BROKER_PROXY_CONTAINER_RESTART_COUNT" "$phase"
+  bench_verify_dependency_container \
+    citybuddy-rocketmq-namesrv-1 "$ROCKETMQ_NAMESRV_CONTAINER_ID" \
+    "$ROCKETMQ_NAMESRV_CONTAINER_IMAGE_ID" "$ROCKETMQ_NAMESRV_CONTAINER_STARTED_AT" \
+    "$ROCKETMQ_NAMESRV_CONTAINER_RUNNING" "$ROCKETMQ_NAMESRV_CONTAINER_RESTART_COUNT" "$phase"
+  bench_verify_commerce_cpu_limit \
+    citybuddy-bench-commerce \
+    "$COMMERCE_CPU_LIMIT_REQUESTED_CPUS" \
+    "$COMMERCE_CPU_LIMIT_OBSERVED_NANO_CPUS" \
+    "$COMMERCE_CPU_LIMIT_OBSERVED_CPUSET_CPUS" \
+    "$phase" >/dev/null
+}
+
+verify_run_boundary() {
+  local phase="$1"
+  verify_checkout_and_jars "$phase"
+  verify_fixture_containers "$phase"
+}
+
+verify_run_boundary "before seckill correctness"
 if [ "$BENCH_USERS" -lt "$ATTEMPTS" ]; then
   echo "Correctness needs at least $ATTEMPTS distinct benchmark users." >&2
   exit 1
 fi
-cp "$bench_env" "$out/$setup_name"
+
+stage_dir=""
+claim_owned=false
+cleanup() {
+  if [ -n "$stage_dir" ] && [[ "$stage_dir" == "$out/.correctness.${LABEL}."* ]]; then
+    rm -rf -- "$stage_dir"
+  fi
+  if [ "$claim_owned" = true ]; then
+    rmdir "$claim_dir" >/dev/null 2>&1 || true
+  fi
+}
+trap cleanup EXIT
+trap 'exit 129' HUP
+trap 'exit 130' INT
+trap 'exit 143' TERM
+if ! mkdir "$claim_dir" 2>/dev/null; then
+  echo "Another seckill correctness run owns label '$LABEL': $claim_dir" >&2
+  exit 1
+fi
+claim_owned=true
+stage_dir="$(mktemp -d "$out/.correctness.${LABEL}.XXXXXX")"
+cp "$bench_env" "$stage_dir/$setup_name"
 
 ACTIVITY="bench-correctness"
 PRODUCT="bench-correctness-product"
@@ -71,10 +145,11 @@ metadata() {
     "$LABEL" "$ACTIVITY" "$QUOTA" "$ATTEMPTS"
   printf 'fixture_users=%s fixture_activities=%s fixture_quota=%s fixture_stock=%s topic_suffix=%s\n' \
     "$BENCH_USERS" "$BENCH_ACTIVITIES" "$BENCH_QUOTA" "$BENCH_STOCK" "$TOPIC_SUFFIX"
-  printf 'docker_cpus=%s docker_memory_bytes=%s commerce_cpu_limit=%s\n' \
-    "$DOCKER_CPUS" "$DOCKER_MEMORY_BYTES" "$COMMERCE_CPU_LIMIT"
+  printf 'docker_cpus=%s docker_memory_bytes=%s commerce_cpu_limit_requested_cpus=%s commerce_cpu_limit_observed_nano_cpus=%s commerce_cpu_limit_observed_cpuset_cpus=%s\n' \
+    "$DOCKER_CPUS" "$DOCKER_MEMORY_BYTES" "$COMMERCE_CPU_LIMIT_REQUESTED_CPUS" \
+    "$COMMERCE_CPU_LIMIT_OBSERVED_NANO_CPUS" "$COMMERCE_CPU_LIMIT_OBSERVED_CPUSET_CPUS"
 }
-{ metadata; echo; } > "$out/$http_name"
+{ metadata; echo; } > "$stage_dir/$http_name"
 
 read_value() { grep -E "^$1=" .env | head -1 | cut -d= -f2-; }
 commerce_pw="$(read_value MYSQL_COMMERCE_APP_PASSWORD)"
@@ -112,7 +187,7 @@ stock_before="$(q commerce_app "$commerce_pw" --skip-column-names \
   -e "SELECT stock_quantity FROM product WHERE product_id='$PRODUCT'")"
 
 echo "== firing $ATTEMPTS concurrent reservations =="
-python3 - "$ATTEMPTS" "$ACTIVITY" <<'PY' | tee -a "$out/$http_name"
+python3 - "$ATTEMPTS" "$ACTIVITY" <<'PY' | tee -a "$stage_dir/$http_name"
 import collections, concurrent.futures, json, sys, time, urllib.error, urllib.request
 attempts, activity = int(sys.argv[1]), sys.argv[2]
 tokens = json.load(open("bench/.run/tokens.json"))
@@ -161,25 +236,36 @@ if [ "$admitted" != 100 ] || [ "$orders" != 100 ] || [ "$rejected" != 500 ] || [
   exit 1
 fi
 
-{ metadata; printf 'stock_before=%s\n\n' "$stock_before"; } > "$out/$sql_name"
-resolved_sql="$run_dir/correctness_${LABEL}_resolved.sql"
+{ metadata; printf 'stock_before=%s\n\n' "$stock_before"; } > "$stage_dir/$sql_name"
+resolved_sql="$stage_dir/correctness_resolved.sql"
 { echo "-- citybuddy_commit=$CITYBUDDY_COMMIT"; \
   QUOTA="$QUOTA" ACTIVITY="$ACTIVITY" PRODUCT="$PRODUCT" STOCK_BEFORE="$stock_before" \
   envsubst < bench/sql/correctness.sql; } > "$resolved_sql"
-q commerce_app "$commerce_pw" --table < "$resolved_sql" >> "$out/$sql_name"
+q commerce_app "$commerce_pw" --table < "$resolved_sql" >> "$stage_dir/$sql_name"
 for check in 01 02 03 04 05 06 07 08 09 10; do
-  grep -Eq "^[|][[:space:]]*Q${check}[[:space:]]" "$out/$sql_name" \
+  grep -Eq "^[|][[:space:]]*Q${check}[[:space:]]" "$stage_dir/$sql_name" \
     || { echo "Correctness SQL did not execute Q$check." >&2; exit 1; }
 done
-if grep -Eq '[|][[:space:]]*FAIL[[:space:]]*[|]' "$out/$sql_name"; then
+if grep -Eq '[|][[:space:]]*FAIL[[:space:]]*[|]' "$stage_dir/$sql_name"; then
   echo "Correctness SQL reported FAIL." >&2
   exit 1
 fi
+verify_run_boundary "after seckill correctness"
 run_completed_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-printf 'run_completed_at_utc=%s\n' "$run_completed_at" >> "$out/$http_name"
-printf '\nrun_completed_at_utc=%s\n' "$run_completed_at" >> "$out/$sql_name"
-if [ "$(git rev-parse --verify HEAD)" != "$CITYBUDDY_COMMIT" ]; then
-  echo "CityBuddy HEAD changed during correctness." >&2
+printf 'run_completed_at_utc=%s\n' "$run_completed_at" >> "$stage_dir/$http_name"
+printf '\nrun_completed_at_utc=%s\n' "$run_completed_at" >> "$stage_dir/$sql_name"
+for name in "$http_name" "$sql_name" "$setup_name"; do
+  if [ ! -s "$stage_dir/$name" ]; then
+    echo "Seckill correctness evidence is missing or empty: $name" >&2
+    exit 1
+  fi
+done
+if [ -e "$bundle_dir" ]; then
+  echo "Refusing to overwrite a bundle created during seckill correctness: $bundle_dir" >&2
   exit 1
 fi
-cat "$out/$sql_name"
+mv -- "$stage_dir" "$bundle_dir"
+stage_dir=""
+rmdir "$claim_dir"
+claim_owned=false
+cat "$bundle_dir/$sql_name"

@@ -2,6 +2,9 @@
 # Sourced by the ladder and profiler. The saved result record is the expected setup instance;
 # the live record, fixed container names, labels and mounted artifacts must still describe it.
 
+# shellcheck source=bench/commerce_cpu_limit.sh
+source "$repo_root/bench/commerce_cpu_limit.sh"
+
 agent_setup_sha256() {
   local path="$1" output digest
   if command -v sha256sum >/dev/null 2>&1; then
@@ -103,6 +106,37 @@ verify_agent_setup_environment() {
     [ -z "$source_changes" ] || printf '%s\n' "$source_changes" >&2
     return 1
   fi
+
+  local expected_commerce_cpu_requested expected_commerce_cpu_nano expected_commerce_cpuset
+  local live_commerce_cpu_requested live_commerce_cpu_nano live_commerce_cpuset
+  expected_commerce_cpu_requested="$(jq -er \
+    '.configuration.commerceCpuLimit.requestedCpus
+     | select(type == "number" and . >= 1 and floor == .) | tostring' "$expected_record")"
+  expected_commerce_cpu_nano="$(jq -er \
+    '.configuration.commerceCpuLimit.observedNanoCpus
+     | select(type == "number" and . >= 1 and floor == .) | tostring' "$expected_record")"
+  expected_commerce_cpuset="$(jq -er \
+    '.configuration.commerceCpuLimit.observedCpusetCpus
+     | select(type == "string")' "$expected_record")"
+  live_commerce_cpu_requested="$(jq -er \
+    '.configuration.commerceCpuLimit.requestedCpus | tostring' "$live_record")"
+  live_commerce_cpu_nano="$(jq -er \
+    '.configuration.commerceCpuLimit.observedNanoCpus | tostring' "$live_record")"
+  live_commerce_cpuset="$(jq -er \
+    '.configuration.commerceCpuLimit.observedCpusetCpus
+     | select(type == "string")' "$live_record")"
+  if [ "$live_commerce_cpu_requested" != "$expected_commerce_cpu_requested" ] \
+    || [ "$live_commerce_cpu_nano" != "$expected_commerce_cpu_nano" ] \
+    || [ "$live_commerce_cpuset" != "$expected_commerce_cpuset" ]; then
+    echo "Agent setup environment gate failed ($phase): the recorded commerce CPU limit changed." >&2
+    return 1
+  fi
+  bench_verify_commerce_cpu_limit \
+    citybuddy-bench-commerce \
+    "$expected_commerce_cpu_requested" \
+    "$expected_commerce_cpu_nano" \
+    "$expected_commerce_cpuset" \
+    "$phase" >/dev/null || return
 
   local expected_workers expected_layout expected_worker_pids live_workers live_layout
   local live_worker_pids actual_workers actual_layout actual_trace actual_worker_pids

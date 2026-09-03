@@ -1,13 +1,15 @@
 # Seckill measurement
 
-The agent's three support paths are measured separately in [agent/README.md](agent/README.md).
+The agent's four workloads are measured separately in [agent/README.md](agent/README.md).
 
 Local measurement of the CityBuddy seckill path: correctness under contention first, then
-component and full-path throughput. Every number here was produced by the scripts in this
-directory against the real local topology, and the raw tool output is in `results/`.
+component and full-path throughput. The retained raw and derived artifacts are in `results/`;
+the boundary between them is stated below.
 
-The k6 per-request point streams (~100 MB per run) are not committed; the k6 console summaries,
-the summary exports, and the per-step analysis derived from those streams are.
+No k6 per-request point stream is Git-tracked; their console summaries, summary exports, and
+per-step analyses are. Four older seckill point streams were present locally during this audit,
+but they are ignored files rather than repository evidence and are not provenance for a fresh
+checkout.
 
 ## Environment
 
@@ -15,12 +17,15 @@ the summary exports, and the per-step analysis derived from those streams are.
 |---|---|
 | Host | MacBook Pro M4, 10 cores, 24 GB |
 | Docker Desktop | 14 GB / 8 CPU allocation |
-| Services | `auth-service`, `commerce-service` as containers on the compose network; commerce limited to 4 CPUs |
+| Services | `auth-service`, `commerce-service` as containers on the compose network; commerce requested at 4 CPUs inside Docker's 8-CPU allocation |
 | Dependencies | MySQL 8, Redis (commerce), Elasticsearch 8 + IK, RocketMQ 5 Broker/Proxy — all pinned by digest |
 | Generators | k6 v2.2.0 and memtier_benchmark 2.5.1 |
 
 Everything runs on one machine. These are **not** capacity or production claims; the value is
-the shape of the curve and where the ceiling comes from, not the absolute number.
+the shape of the curve and the observed workload boundaries, not the absolute number.
+The four-CPU commerce limit is a local fixture choice. The repository contains no production-sizing
+derivation or other rationale for choosing four rather than another share of the eight allocated
+CPUs, so results at that boundary do not establish a production resource requirement.
 
 ## Method
 
@@ -39,17 +44,54 @@ the shape of the curve and where the ceiling comes from, not the absolute number
    measurement includes a transport cost that can exceed the work being measured. Redis is
    measured from both the host and inside the compose network, and the difference is reported
    as a result in its own right.
-6. **Formal runs are commit-bound.** Setup requires a clean source tree, records the full HEAD and
-   auth/commerce JAR digests in `bench/.run/bench.env`, and clears only synthetic activity, user and
-   rebuild Redis keys. Runners check that record before load and confirm HEAD afterward.
-7. **Results never overwrite.** Every run needs a unique safe `LABEL`. k6 is digest-pinned and its
-   exit code is checked; every result records the measured commit, UTC window and configuration.
+6. **Formal runs are boundary-bound.** Setup requires a clean source tree; records full HEAD,
+   auth/commerce host and mounted JAR digests, and the identity/start/restart state of every runtime
+   dependency; and clears only synthetic activity, user and rebuild Redis keys. Runners check the
+   source, artifacts, containers and CPU controls before and after load.
+7. **A result bundle publishes atomically.** Every run needs a unique safe `LABEL`. A hidden staging
+   directory and a same-label claim live on the `bench/results` filesystem. Only after k6 or SQL
+   validation and the final boundary gate passes is that directory renamed once to
+   `results/ladder_${LABEL}` or `results/correctness_${LABEL}`. Failure removes the hidden staging
+   directory and claim, so no partial bundle looks published and the label remains reusable.
+
+### CPU artifact boundary
+
+Docker reports whole-container CPU with 100% equal to one logical CPU. It is not a share of the
+container limit: a commerce reading of 387% is about 3.87 CPUs and is near this fixture's 400%
+ceiling. Memory is the container's current usage and Docker VM limit, not a per-process allocation.
+
+- `k6_*_cpu.txt` files are raw `docker stats --no-stream` snapshots from the seckill runner. Their
+  observed cadence is roughly four to five seconds because each stats call takes time before the
+  runner's three-second sleep. They sample k6, commerce, MySQL and Redis, not Java stacks, host CPU,
+  auth, RocketMQ, or scheduler and I/O wait separately.
+- `agent_*_cpu.txt` files are the Agent runner's raw Docker snapshots, generally about two seconds
+  apart. Current commit-bound bundles sample k6, Agent, the model fixture, auth, commerce, the
+  dedicated benchmark Elasticsearch container and MySQL. Older unbound Agent files sampled the
+  ordinary Compose Elasticsearch container instead of the SUT's dedicated one; their dependency
+  attribution is correspondingly incomplete.
+- `peak_cpu.txt` is a retained convenience transcription of maxima for k6, commerce and MySQL from
+  the legacy contended/spread seckill CPU files. It has no commit or timestamp metadata and is not
+  raw profiler output. `agent_*_cpu_by_step.txt` files are likewise historical windowed summaries
+  derived from timestamped raw samples; the current runner does not generate them and the original
+  derivation command was not retained.
+
+These files measure CPU consumption for sampled containers and, when a container has a recorded
+quota, its proximity to that quota. A controlled counterfactual can support a component-level
+attribution. The series alone cannot prove saturation, name a Java method, distinguish user time
+from kernel time or waiting, or prove that an unsampled dependency had headroom.
+
+Existing setup and CPU artifacts remain historical facts. Their `commerce_cpu_limit=4` field was
+written from the same hard-coded value passed to Docker; it was not a live observation. New setup
+records use the single requested fixture value plus Docker's inspected `HostConfig.NanoCpus`, and
+record an empty `HostConfig.CpusetCpus`; setup and runners fail if either control drifts. That new
+guard does not retroactively add a live resource-limit observation to older files.
 
 ## Results
 
 ### 1. Correctness under contention — 10/10 PASS
 
-600 concurrent reservations against one activity with `allocated_quota = 100`
+600 reservation requests against one activity with `allocated_quota = 100`, issued by a client
+pool capped at 128 concurrent workers
 (`results/correctness_sql.txt`, `results/correctness_http.txt`):
 
 - exactly 100 `ADMITTED`, 500 rejected `EXHAUSTED`; no oversell
@@ -68,14 +110,21 @@ the shape of the curve and where the ceiling comes from, not the absolute number
 | macOS host to published port | 68,691 | 1.455 ms | 3.951 ms |
 | Inside the compose network | 300,918 | 0.332 ms | 0.727 ms |
 
-Measured from the host, **77 % of the observed latency is Docker Desktop's host-to-VM hop**, and
-throughput is 4.4x lower. A host-side Redis number on this setup describes port forwarding, not
-Redis. All full-path measurements below therefore run inside the network.
+The inside-network run observed 77.16% lower mean latency and 4.38x the throughput of the host-to-
+published-port run. That is consistent with avoiding Docker Desktop's published-port/VM transport,
+but generator placement changes at the same time, so this pair does not isolate a numerical “hop
+cost.” It does establish that host-side and inside-network Redis figures are different measurement
+boundaries. All full-path measurements below therefore run inside the network.
 
 ### 3. Full authenticated seckill path
 
 Five steps, 15 s each, one HTTP request per iteration, real JWT verification, real Lua admission,
 real MySQL transaction (`results/ladder_*_steps.txt`).
+
+In these legacy tables, `Achieved/s` is completed requests divided by the elapsed timestamp span
+from the first to last completion in that rate. It is a completion-density statistic whose
+denominator can extend with a backlog; it is not the current runner's `done / nominal step seconds`
+field and must not be compared to that newer field as though the denominators were identical.
 
 **One activity — every request contends for the same activity row:**
 
@@ -90,9 +139,11 @@ real MySQL transaction (`results/ladder_*_steps.txt`).
 The workload was essentially all `ADMITTED`, so this is the real admission path rather than cheap
 rejections. Throughput stops scaling between 400 and 800 requests/s and latency collapses.
 
-**Nothing was resource-saturated at that ceiling** (`results/peak_cpu.txt`): peak commerce CPU
-145 % of 400 % available, MySQL 61 %, and the k6 generator 60 % of a single core. The ceiling is
-queueing on a serialized section, not CPU, and the generator was not starving.
+Among the three containers transcribed in `results/peak_cpu.txt`, none saturated CPU at that point:
+commerce peaked at 145% of its 400% allowance, MySQL at 61%, and k6 at 60% of one CPU. The raw CPU
+series also sampled Redis. This rules out CPU saturation in those sampled containers; it does not
+by itself prove the cause of the queue or rule out an unsampled resource. The topology comparison
+below is the evidence that connects the collapse to same-row serialization.
 
 ### 4. Where the serialization is
 
@@ -104,25 +155,30 @@ SELECT ... FROM seckill_activity WHERE activity_id = ? FOR UPDATE
 
 and holds that single row through the idempotency lookup, the reservation insert, and a re-read
 until commit. Every reservation for one activity passes through that row. The Redis Lua quota
-decision happens *after* this transaction, so the ceiling above is MySQL row serialization, not
-the Lua admission.
+decision happens *after* this transaction, making the activity-row lock the serialization candidate
+that the 32-activity counterfactual below tests; the CPU samples alone do not establish it.
 
 ## Finding and fix: the serializing lock was also suppressing a deadlock
 
-Repeating the identical ladder with traffic spread over 32 activity rows removed the queueing,
-but from 400 requests/s upward the service began returning HTTP 500. That run produced roughly
-6,200 deadlock events; the single-activity run produced **zero**
-(`results/deadlock_count.txt`).
+Repeating the same workload shape with traffic spread over 32 activity rows removed the queueing,
+but the service returned 6,202 HTTP 500 responses over the whole 23,254-request ladder: 6 at 100,
+3 at 200, 1,803 at 400 and 4,390 at 800 requests/s. The corresponding raw log grep retained in
+`results/deadlock_count.txt` reports 12,404 text matches, numerically 2 × 6,202, while its printed
+minute subtotal sums to 6,222 and does not reconcile. No retained correlation binds two log lines
+to each individual request, so it establishes repeated deadlock diagnostics, not an independent
+exact deadlock-event count. The single-activity point stream contains zero HTTP 500 responses but
+one k6 `http_req_failed` out of 21,268 requests: an HTTP 409 `DUPLICATE_USER` decision.
 
-`SHOW ENGINE INNODB STATUS` (`results/innodb_deadlock.txt`) showed both transactions holding an X
-gap lock on the `supremum` pseudo-record of `uq_seckill_reservation_idempotency`, each then
-waiting for an insert-intention lock in that same gap:
+The retained `SHOW ENGINE INNODB STATUS` file contains only the section header, not the lock graph.
+The gap-lock mechanism below is therefore a reconstruction from the pre-fix query order, InnoDB
+locking semantics, the failing insert site and the post-fix disappearance—not a claim that
+`results/innodb_deadlock.txt` preserves these details:
 
-- `findByIdempotencyForUpdate` ran `SELECT ... FOR UPDATE` for a row that does not exist yet, so
-  InnoDB took a gap lock rather than a record lock;
-- gap locks are mutually compatible, so every concurrent transaction acquired it;
-- the following `INSERT` needed an insert-intention lock in that gap, which conflicts with the gap
-  locks the others held — a cycle, and InnoDB rolled one back.
+- `findByIdempotencyForUpdate` ran `SELECT ... FOR UPDATE` for a row that does not exist yet, which
+  can take a gap lock rather than a record lock;
+- concurrent gap locks are compatible, so multiple transactions can reach the next statement;
+- the following `INSERT` requires an insert-intention lock that conflicts with those gap locks,
+  providing the reconstructed cycle for InnoDB to break by rolling one transaction back.
 
 With a single activity this cannot happen: the `seckill_activity` row lock totally orders every
 entrant, so only one transaction is ever inside the insert section. **The row lock that caps
@@ -138,7 +194,11 @@ upgrading it would recreate the S-to-X cycle recorded for payment callbacks. Det
 
 ## Results after the fix
 
-Same build, same fixture, same ladder.
+The fix necessarily changed the build. These legacy before/after runs used the same machine,
+workload shape and fixture dimensions, but their artifacts predate the current commit-bound setup
+record. They are retained observations, not a same-session paired estimate.
+
+The results below use the same legacy `Achieved/s` denominator defined above.
 
 | | Contended (1 activity) | Spread (32 activities) |
 |---|---:|---:|
@@ -147,13 +207,15 @@ Same build, same fixture, same ladder.
 | p99 at that step | 4466.5 ms | 39.4 ms |
 | Dropped iterations | 2,075 | 0 |
 | Failed requests | 0.00 % | 0.00 % |
-| Deadlocks | 0 | 0 |
+| Commerce-log deadlock diagnostic matches | Not retained | 0 |
 
-Both sides now complete with zero errors, so the comparison is clean: concentrating the same
-offered load on one activity row costs about 1.56x throughput and moves p50 from 7.5 ms to 2.8 s.
-That isolates the `seckill_activity` row serialization as the ceiling, and the single-activity
-ceiling itself is unchanged by the fix (528.5 req/s before, 511.5 after), as expected — the gap
-lock was never the constraint when one row already serialized every entrant.
+Both post-fix topology runs complete with zero errors. Within that build, concentrating the same
+offered load on one activity row is associated with about 1.56x less completed throughput and moves
+p50 from 7.5 ms to 2.8 s. That isolates concentration on one activity as the material topology
+difference; the code path and later lock-mode treatment attribute it to the activity-row lock rather
+than this topology pair doing so alone. The older 528.5 req/s and post-fix 511.5 req/s single-
+activity observations are consistent with the gap lock not being that path's limit, but their
+difference is not a controlled estimate of “unchanged.”
 
 Correctness was re-verified on the fixed build: 10/10 checks pass, exactly 100 admitted and 500
 exhausted, ledger and stock conserved (`results/correctness_sql.txt`).
@@ -378,9 +440,12 @@ RATES=50,100,200,400,800 STEP_SECONDS=15 \
   ./bench/run_ladder.sh "$SPREAD_LABEL" 32
 ```
 
-The runner writes `k6_${LABEL}_{summary,console,cpu}.…`, `ladder_${LABEL}_steps.txt`, and
+The ladder runner atomically publishes `results/ladder_${LABEL}/`, containing
+`k6_${LABEL}_{summary,console,cpu,points}.…`, `ladder_${LABEL}_steps.txt`, and
 `seckill_${LABEL}_setup.txt`; points remain ignored but available to the automatic calculator.
-Correctness writes `correctness_${LABEL}_{http,sql}.txt`. Existing paths are never replaced.
+Correctness atomically publishes `results/correctness_${LABEL}/`, containing
+`correctness_${LABEL}_{http,sql}.txt` and the setup record. Historical flat artifacts remain in
+place; neither a bundle nor its active same-label claim is replaced.
 
 To locate the next ceiling, run one rate at a time from a fresh setup. Inspect the automatically
 generated step row and summary after each command; stop that topology at the first non-zero HTTP
