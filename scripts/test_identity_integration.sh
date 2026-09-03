@@ -565,6 +565,36 @@ cmp "$tmp_dir/first-chat.json" "$tmp_dir/http-response.json"
 test "$(mysql_query agent_app "$agent_app_password" cs_db "SELECT COUNT(*) FROM support_turn WHERE session_id = '$session_id'")" = 1
 test "$(mysql_query agent_app "$agent_app_password" cs_db "SELECT COUNT(*) FROM support_event WHERE trace_id = '$trace_id'")" = 9
 
+assert_status 201 "usage-fixture support session" \
+  --request POST "http://127.0.0.1:$agent_port/api/sessions" \
+  --header "Authorization: Bearer $direct_token" \
+  --header 'Content-Type: application/json' --data '{}'
+usage_session_id="$(uv run python scripts/read_json_field.py "$tmp_dir/http-response.json" sessionId)"
+usage_headers=(
+  --header "Authorization: Bearer $direct_token"
+  --header "X-Session-Id: $usage_session_id"
+  --header 'Idempotency-Key: usage-fixture-turn'
+  --header 'Content-Type: application/json'
+)
+assert_status 200 "synthetic model usage is durably recorded" \
+  --request POST "http://127.0.0.1:$agent_port/api/chat" "${usage_headers[@]}" \
+  --data '{"message":"usage-fixture"}'
+cp "$tmp_dir/http-response.json" "$tmp_dir/usage-chat.json"
+usage_trace="$(uv run python scripts/read_json_field.py "$tmp_dir/usage-chat.json" traceId)"
+usage_turn="$(uv run python scripts/read_json_field.py "$tmp_dir/usage-chat.json" turnId)"
+test "$(mysql_query agent_app "$agent_app_password" cs_db "SELECT CONCAT(JSON_EXTRACT(payload_json, '$.usage.prompt_tokens'), ':', JSON_EXTRACT(payload_json, '$.usage.completion_tokens'), ':', JSON_EXTRACT(payload_json, '$.usage.total_tokens')) FROM support_event WHERE trace_id = '$usage_trace' AND turn_id = '$usage_turn' AND event_type = 'MODEL_OUTCOME'")" = '120:8:128'
+for usage_pass in first replay; do
+  if [[ "$usage_pass" = replay ]]; then
+    assert_status 200 "usage replay does not repeat the provider call" \
+      --request POST "http://127.0.0.1:$agent_port/api/chat" "${usage_headers[@]}" \
+      --data '{"message":"usage-fixture"}'
+    cmp "$tmp_dir/usage-chat.json" "$tmp_dir/http-response.json"
+  fi
+  test "$(mysql_query agent_app "$agent_app_password" cs_db "SELECT COUNT(*) FROM support_event WHERE trace_id = '$usage_trace' AND event_type = 'MODEL_OUTCOME'")" = 1
+  curl --fail --silent --show-error "http://127.0.0.1:$proxy_port/fixture/counts" --output "$tmp_dir/usage-counts.json"
+  jq -e '.["usage-fixture:total"] == 1' "$tmp_dir/usage-counts.json" >/dev/null
+done
+
 assert_status 201 "bounded-context support-session creation" \
   --request POST "http://127.0.0.1:$agent_port/api/sessions" \
   --header "Authorization: Bearer $direct_token" \

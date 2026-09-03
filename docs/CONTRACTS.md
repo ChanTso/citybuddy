@@ -627,6 +627,11 @@ sequenceDiagram
   pair alone exceeds that target, it remains eligible only when it fits the 6,144 hard limit; a
   pair over that limit is omitted whole. The policy never splits a pair, skips a newer pair to
   retain an older one, summarizes text, or grows without a hard turn and token bound.
+- Model and reranker HTTP 200 replies report only nonnegative integer `prompt_tokens`,
+  `completion_tokens` and `total_tokens` in `MODEL_OUTCOME.usage`, independently of answer
+  validation; missing or invalid counts are `null`, and these endpoint-reported counts are
+  retained only when the turn commits, so timeout, missing-reply and failed-commit gaps make this
+  diagnostic evidence rather than a provider billing ledger (fixture counts are synthetic).
 - History is inserted as ordinary `user` and `assistant` roles between the one system message and
   the current user message. Prior user text and prior assistant replies are both untrusted context,
   not business truth, authorization or confirmation. Historical tool calls, tool data, retrieval

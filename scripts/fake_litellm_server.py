@@ -37,6 +37,7 @@ def scenario(message: str) -> str:
         "circuit-open",
         "circuit-recover",
         "provider-failure",
+        "usage-fixture",
         "unsafe-action-claim",
         "action-prepare",
         "context-seed",
@@ -201,6 +202,15 @@ async def complete(request: Request) -> JSONResponse:
     selected = scenario(current_message)
     counts[f"{selected}:total"] += 1
     counts[f"{selected}:{model}"] += 1
+    if selected == "usage-fixture":
+        # Synthetic counts test transport and persistence, not real provider consumption.
+        usage_response = response_message("Synthetic usage fixture completed.")
+        usage_response["usage"] = {
+            "prompt_tokens": 120,
+            "completion_tokens": 8,
+            "total_tokens": 128,
+        }
+        return JSONResponse(content=usage_response)
     has_tool_feedback = any(
         isinstance(item, dict) and item.get("role") == "tool" for item in messages
     )

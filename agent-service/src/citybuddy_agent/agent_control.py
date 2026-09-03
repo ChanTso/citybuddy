@@ -550,6 +550,19 @@ class ModelReply:
     tool_call_id: str | None = None
 
 
+def _reported_usage(payload: object) -> dict[str, int] | None:
+    usage = payload.get("usage") if isinstance(payload, dict) else None
+    if not isinstance(usage, dict):
+        return None
+    reported: dict[str, int] = {}
+    for name in ("prompt_tokens", "completion_tokens", "total_tokens"):
+        value = usage.get(name)
+        if type(value) is not int or value < 0:
+            return None
+        reported[name] = value
+    return reported
+
+
 class LiteLlmClient:
     """Call a LiteLLM-compatible endpoint using role aliases only."""
 
@@ -584,6 +597,7 @@ class LiteLlmClient:
             metric_role = ProviderRole.PRIMARY if route_index == 0 else ProviderRole.FALLBACK
             attempts_for_route = 0
             while True:
+                usage: dict[str, int] | None = None
                 transient_failure: ProviderFailure | None = None
                 admitted = False
                 attempt_outcome: ProviderOutcome | None = None
@@ -619,6 +633,7 @@ class LiteLlmClient:
                     except ValueError as exception:
                         attempt_outcome = ProviderOutcome.INVALID
                         raise ProviderFailure(transient=False) from exception
+                    usage = _reported_usage(payload)
                     try:
                         reply = self._parse(payload)
                     except ProviderFailure:
@@ -633,6 +648,7 @@ class LiteLlmClient:
                                 "alias": route.role_alias,
                                 "provider": route.provider_key,
                                 "result": "ok",
+                                "usage": usage,
                             },
                         )
                     )
@@ -652,6 +668,7 @@ class LiteLlmClient:
                                     "alias": route.role_alias,
                                     "provider": route.provider_key,
                                     "result": "denied",
+                                    "usage": usage,
                                 },
                             )
                         )
@@ -672,6 +689,7 @@ class LiteLlmClient:
                             "alias": route.role_alias,
                             "provider": route.provider_key,
                             "result": "transient",
+                            "usage": usage,
                         },
                     )
                 )
@@ -694,6 +712,7 @@ class LiteLlmClient:
         """Use one fixed role alias with one bounded same-route transient retry."""
         route = plan.reranker_route
         for attempt in range(2):
+            usage: dict[str, int] | None = None
             admitted = False
             attempt_outcome: ProviderOutcome | None = None
             budget.charge("reranker_http", route.provider_key)
@@ -731,6 +750,7 @@ class LiteLlmClient:
                 except ValueError as exception:
                     attempt_outcome = ProviderOutcome.INVALID
                     raise ProviderFailure(transient=False) from exception
+                usage = _reported_usage(payload)
                 try:
                     output = self._parse_rerank(payload)
                 except ProviderFailure:
@@ -745,6 +765,7 @@ class LiteLlmClient:
                             "alias": route.role_alias,
                             "provider": route.provider_key,
                             "result": "rerank-ok",
+                            "usage": usage,
                         },
                     )
                 )
@@ -769,6 +790,7 @@ class LiteLlmClient:
                             "alias": route.role_alias,
                             "provider": route.provider_key,
                             "result": "rerank-denied",
+                            "usage": usage,
                         },
                     )
                 )
@@ -781,6 +803,7 @@ class LiteLlmClient:
                         "alias": route.role_alias,
                         "provider": route.provider_key,
                         "result": "rerank-transient",
+                        "usage": usage,
                     },
                 )
             )

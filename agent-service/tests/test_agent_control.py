@@ -796,6 +796,116 @@ def test_litellm_sends_configured_model_boundary_parameters(
 
 
 @pytest.mark.parametrize(
+    "choices",
+    [
+        [{"message": {"content": "bounded response"}}],
+        [
+            {
+                "message": {
+                    "tool_calls": [
+                        {
+                            "id": "usage-call",
+                            "type": "function",
+                            "function": {"name": "catalog_product_get", "arguments": "{}"},
+                        }
+                    ]
+                }
+            }
+        ],
+        [],
+    ],
+)
+def test_litellm_records_reported_usage_before_reply_validation(
+    monkeypatch: pytest.MonkeyPatch, choices: list[dict[str, Any]]
+) -> None:
+    usage = {"prompt_tokens": 120, "completion_tokens": 8, "total_tokens": 129}
+    monkeypatch.setattr(
+        http_client,
+        "post",
+        lambda *args, **kwargs: httpx.Response(
+            200, json={"choices": choices, "usage": {**usage, "private_detail": "not retained"}}
+        ),
+    )
+    client = LiteLlmClient(
+        "https://proxy.test",
+        ProviderCircuits(minimum_requests=2, open_seconds=10, half_open_probes=1),
+    )
+    events: list[AgentEvent] = []
+    if choices:
+        client.complete(plan(), [], [], AttemptBudget(1, events), events)
+    else:
+        with pytest.raises(ProviderFailure):
+            client.complete(plan(), [], [], AttemptBudget(1, events), events)
+    outcomes = [event.payload for event in events if event.event_type == "MODEL_OUTCOME"]
+    assert len(outcomes) == 1
+    assert outcomes[0]["result"] == ("ok" if choices else "denied")
+    assert outcomes[0]["usage"] == usage
+
+
+@pytest.mark.parametrize(
+    "usage",
+    [
+        None,
+        [],
+        {},
+        {"prompt_tokens": 1, "completion_tokens": 2},
+        {"prompt_tokens": -1, "completion_tokens": 2, "total_tokens": 1},
+        {"prompt_tokens": 1, "completion_tokens": True, "total_tokens": 2},
+        {"prompt_tokens": 1, "completion_tokens": 2, "total_tokens": "3"},
+        {"prompt_tokens": 1.0, "completion_tokens": 2, "total_tokens": 3},
+        {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0},
+    ],
+)
+def test_litellm_unknown_usage_is_not_zero(monkeypatch: pytest.MonkeyPatch, usage: object) -> None:
+    payload = completion().json()
+    payload["usage"] = usage
+    monkeypatch.setattr(
+        http_client, "post", lambda *args, **kwargs: httpx.Response(200, json=payload)
+    )
+    events: list[AgentEvent] = []
+    reply = LiteLlmClient(
+        "https://proxy.test",
+        ProviderCircuits(minimum_requests=2, open_seconds=10, half_open_probes=1),
+    ).complete(plan(), [], [], AttemptBudget(1, events), events)
+    assert reply.content == "bounded response"
+    outcome = next(event for event in events if event.event_type == "MODEL_OUTCOME")
+    expected = (
+        usage if usage == {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0} else None
+    )
+    assert outcome.payload["usage"] == expected
+
+
+def test_litellm_usage_does_not_leak_across_calls_retries_or_fallback(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    usage = {"prompt_tokens": 12, "completion_tokens": 3, "total_tokens": 15}
+    payload = completion().json()
+    payload["usage"] = usage
+    responses = [
+        httpx.Response(200, json=payload),
+        httpx.Response(503),
+        httpx.Response(503),
+        completion(),
+    ]
+    monkeypatch.setattr(http_client, "post", lambda *args, **kwargs: responses.pop(0))
+    client = LiteLlmClient(
+        "https://proxy.test",
+        ProviderCircuits(minimum_requests=100, open_seconds=10, half_open_probes=1),
+    )
+    events: list[AgentEvent] = []
+    client.complete(plan(), [], [], AttemptBudget(1, events), events)
+    client.complete(plan(), [], [], AttemptBudget(3, events), events)
+    outcomes = [event.payload for event in events if event.event_type == "MODEL_OUTCOME"]
+    assert [event["usage"] for event in outcomes] == [usage, None, None, None]
+    assert [event["provider"] for event in outcomes] == [
+        "provider-a",
+        "provider-a",
+        "provider-a",
+        "provider-b",
+    ]
+
+
+@pytest.mark.parametrize(
     "spec",
     (CATALOG_PRODUCT_SPEC, KNOWLEDGE_SEARCH_SPEC, REFUND_PREPARE_SPEC),
 )

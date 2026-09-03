@@ -284,7 +284,13 @@ def test_litellm_reranker_uses_fixed_alias_shared_budget_and_one_retry(
                 ]
             }
         )
-        return Response(200, {"choices": [{"message": {"content": content}}]})
+        return Response(
+            200,
+            {
+                "choices": [{"message": {"content": content}}],
+                "usage": {"prompt_tokens": 31, "completion_tokens": 7, "total_tokens": 38},
+            },
+        )
 
     monkeypatch.setattr(http_client, "post", post)
     events: list[AgentEvent] = []
@@ -312,6 +318,10 @@ def test_litellm_reranker_uses_fixed_alias_shared_budget_and_one_retry(
     ]
     assert all(set(call) == {"model", "messages"} for call in calls)
     assert any(event.payload.get("result") == "rerank-transient" for event in events)
+    assert [event.payload["usage"] for event in events if event.event_type == "MODEL_OUTCOME"] == [
+        None,
+        {"prompt_tokens": 31, "completion_tokens": 7, "total_tokens": 38},
+    ]
     metric_payload = metrics.render().decode("utf-8")
     assert (
         'citybuddy_agent_model_request_attempts_total{outcome="transient",role="reranker"} 1.0'
@@ -327,7 +337,14 @@ def test_litellm_reranker_uses_fixed_alias_shared_budget_and_one_retry(
     ("status_code", "payload", "expected_outcome"),
     [
         (403, {"error": "bounded denial"}, "denied"),
-        (200, {"choices": []}, "invalid"),
+        (
+            200,
+            {
+                "choices": [],
+                "usage": {"prompt_tokens": 31, "completion_tokens": 7, "total_tokens": 38},
+            },
+            "invalid",
+        ),
     ],
 )
 def test_reranker_denial_and_invalid_response_record_one_actual_attempt(
@@ -353,6 +370,7 @@ def test_reranker_denial_and_invalid_response_record_one_actual_attempt(
 
     monkeypatch.setattr(http_client, "post", post)
     metrics = PrometheusCityBuddyMetrics()
+    events: list[AgentEvent] = []
     client = LiteLlmClient(
         "https://proxy.test",
         ProviderCircuits(minimum_requests=2, open_seconds=1, half_open_probes=1),
@@ -368,11 +386,13 @@ def test_reranker_denial_and_invalid_response_record_one_actual_attempt(
                     RerankCandidate.from_search_result(item) for item in search_output().results
                 ),
             ),
-            AttemptBudget(2, []),
-            [],
+            AttemptBudget(2, events),
+            events,
         )
 
     assert calls == 1
+    outcome = next(event for event in events if event.event_type == "MODEL_OUTCOME")
+    assert outcome.payload["usage"] == (payload["usage"] if status_code == 200 else None)
     metric_payload = metrics.render().decode("utf-8")
     assert (
         "citybuddy_agent_model_request_attempts_total"
