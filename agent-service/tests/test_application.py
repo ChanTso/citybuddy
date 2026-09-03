@@ -2059,13 +2059,45 @@ class FailingConfirmer:
         )
 
 
-def test_a_claimed_action_cannot_be_declined_or_expired_out_from_under_commerce() -> None:
+class AmbiguousThenReplayedConfirmer(RecordingConfirmer):
+    """Loses the first committed receipt, then returns that receipt on a fresh request."""
+
+    def confirm_action(
+        self,
+        *,
+        pending: PendingActionReference,
+        direct_token: str,
+        subject: str,
+        session_id: str,
+        sandbox_id: str | None,
+        budget: AttemptBudget,
+        events: list[AgentEvent],
+    ) -> ActionReceiptResponse:
+        receipt = super().confirm_action(
+            pending=pending,
+            direct_token=direct_token,
+            subject=subject,
+            session_id=session_id,
+            sandbox_id=sandbox_id,
+            budget=budget,
+            events=events,
+        )
+        if len(self.calls) == 1:
+            raise ToolBoundaryFailure(
+                status_code=503,
+                reason="ACTION_CONFIRMATION_COMMERCE_TIMEOUT",
+                detail="Action confirmation unavailable",
+            )
+        return receipt.model_copy(update={"replayed": True})
+
+
+def test_a_claimed_action_resists_decline_then_converges_on_a_fresh_key() -> None:
     """Commerce may already hold the refund, so nothing may record that it did not happen."""
     private, public_jwk = key_fixture("current-key")
     sessions = MemorySessionStore()
     session_id = sessions.create("user-123")
     conversations = MemoryConversationStore(sessions)
-    confirmer = FailingConfirmer()
+    confirmer = AmbiguousThenReplayedConfirmer()
     client = TestClient(
         create_app(
             settings(),
@@ -2080,11 +2112,14 @@ def test_a_claimed_action_cannot_be_declined_or_expired_out_from_under_commerce(
         "Authorization": f"Bearer {direct_token(private, 'current-key')}",
         "X-Session-Id": session_id,
     }
-    client.post(
+    prepared = client.post(
         "/api/chat",
         headers={**headers, "Idempotency-Key": "prepare"},
         json={"message": "prepare refund"},
     )
+    pending_before = conversations.action_pending
+    assert prepared.json()["outcome"] == "action_pending"
+    assert pending_before is not None
 
     # The confirmation claims the reference, then the commerce response is lost.
     lost = client.post(
@@ -2093,8 +2128,10 @@ def test_a_claimed_action_cannot_be_declined_or_expired_out_from_under_commerce(
         json={"message": "confirm"},
     )
     assert lost.status_code == 503
+    assert lost.json() == {"detail": "Action confirmation unavailable"}
     assert conversations.claims == 1
     assert conversations.action_state == "CONFIRMING"
+    assert [code for _, code in conversations.failures] == ["agent_execution_failed"]
 
     # A decline now must not resolve it, because the refund may exist at commerce.
     declined = client.post(
@@ -2107,13 +2144,27 @@ def test_a_claimed_action_cannot_be_declined_or_expired_out_from_under_commerce(
     assert conversations.action_pending is not None
 
     # Retrying the confirmation reuses the existing claim rather than taking a second one.
-    client.post(
+    recovered = client.post(
         "/api/chat",
         headers={**headers, "Idempotency-Key": "confirm-again"},
         json={"message": "confirm"},
     )
+
+    assert recovered.status_code == 200
+    assert recovered.json()["outcome"] == "action_completed"
+    assert recovered.json()["receiptId"] == confirmer.receipt_id
     assert conversations.claims == 1
-    assert confirmer.calls == 2
+    assert conversations.action_state == "CONFIRMED"
+    assert conversations.action_pending is None
+    assert len(conversations.confirmed_receipts) == 1
+    assert conversations.confirmed_receipts[0].receipt_id == confirmer.receipt_id
+    assert conversations.confirmed_receipts[0].replayed is True
+    assert len(confirmer.calls) == 2
+    assert [call.pending_action_id for call in confirmer.calls] == [
+        pending_before.pending_action_id,
+        pending_before.pending_action_id,
+    ]
+    assert [code for _, code in conversations.failures] == ["agent_execution_failed"]
 
 
 def test_an_expired_but_claimed_action_is_not_recorded_as_expired() -> None:
