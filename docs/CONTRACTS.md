@@ -474,6 +474,10 @@ sequenceDiagram
     end
 ```
 
+An acknowledgement exception means the worker did not confirm success, not that the broker
+definitely missed the acknowledgement; duplicate delivery converges through idempotent order
+creation.
+
 ## 7. Payment, refund, and sensitive-action truth
 
 ### 7.1 Persistent invariants
