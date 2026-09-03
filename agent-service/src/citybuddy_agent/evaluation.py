@@ -89,6 +89,13 @@ _ACTION_TERMINAL_OUTCOMES = {
     "action_declined",
     "action_expired",
 }
+_MODELED_TERMINAL_OUTCOMES = {
+    "completed",
+    "budget_exhausted",
+    "provider_denied",
+    "retrieval_denied",
+    "action_pending",
+}
 _ACTION_EVENT_TYPES = {
     "ACTION_PREPARED",
     "ACTION_DECLINED",
@@ -510,17 +517,24 @@ class MysqlEvaluationEvidenceStore:
     def _validate_lifecycle(
         events: list[EvidenceEventResponse], terminal_outcome: TerminalOutcome
     ) -> None:
-        if any(event.event_kind in {"TURN_COMPLETED", "TURN_FAILED"} for event in events[:-1]):
+        event_kinds = [event.event_kind for event in events]
+        if any(event_kind in {"TURN_COMPLETED", "TURN_FAILED"} for event_kind in event_kinds[:-1]):
             raise EvaluationEvidenceInvalid
         if terminal_outcome == "failed":
-            if [event.event_kind for event in events] != ["USER_INPUT", "TURN_FAILED"]:
+            if event_kinds != ["USER_INPUT", "TURN_FAILED"]:
                 raise EvaluationEvidenceInvalid
             return
-        if [event.event_kind for event in events[-3:]] != [
+        if event_kinds[-3:] != [
             "AGENT_OUTCOME",
             "ASSISTANT_RESPONSE",
             "TURN_COMPLETED",
         ]:
+            raise EvaluationEvidenceInvalid
+        if terminal_outcome in _MODELED_TERMINAL_OUTCOMES and (
+            event_kinds[:3] != ["USER_INPUT", "CONTEXT_WINDOW", "ROUTING_DECISION"]
+            or event_kinds.count("CONTEXT_WINDOW") != 1
+            or event_kinds.count("ROUTING_DECISION") != 1
+        ):
             raise EvaluationEvidenceInvalid
         for event in events:
             if event.event_kind in {"AGENT_OUTCOME", "ASSISTANT_RESPONSE", "TURN_COMPLETED"}:

@@ -643,11 +643,13 @@ sequenceDiagram
 - Current model input remains separated into `SYSTEM`, `TOOLS`, `CURRENT USER`, `UNTRUSTED SESSION
   CONTEXT`, `UNTRUSTED RETRIEVED`, and `UNTRUSTED TOOL DATA`; citations may point only to allowlisted
   evidence sources.
-- Every modeled turn records one content-free `CONTEXT_WINDOW` event with the policy and estimator
+- Every modeled turn records exactly one content-free `CONTEXT_WINDOW` at event sequence 2 followed
+  by exactly one `ROUTING_DECISION` at sequence 3. The context event carries the policy and estimator
   versions, budget, pressure, candidate/included/omitted counts, older-history flag and included
-  turn ids. The evaluation projection validates that selected ids are completed, earlier, ordered
-  turns under the same conversation/session/owner before exposing this metadata; it never exposes
-  the conversation text or prompt.
+  turn ids. The evaluation projection validates both this prefix and that selected ids are
+  completed, earlier, ordered turns under the same conversation/session/owner before exposing the
+  metadata; it never exposes the conversation text or prompt. Failed and server-local action
+  resolution turns retain their separate event shapes.
 - `cs_db` plus the evaluation-only evidence API is the authoritative support-evidence channel.
   Langfuse may be enabled only as an optional observability profile with no-op fallback; it may
   mirror traces but never becomes an assertion source or prompt authority. Prompt definitions stay

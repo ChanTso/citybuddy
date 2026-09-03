@@ -50,6 +50,13 @@ ROUTING_KEYS = {
     "sessionPropagationEnabled",
 }
 SOURCE_KEYS = {"rank", "sourceId", "chunkId", "sourceVersion", "docType"}
+MODELED_TERMINAL_OUTCOMES = {
+    "completed",
+    "budget_exhausted",
+    "provider_denied",
+    "retrieval_denied",
+    "action_pending",
+}
 
 
 def canonical_uuid(value: object) -> bool:
@@ -211,8 +218,15 @@ def main() -> None:
     if args.outcome == "failed":
         if kinds != ["USER_INPUT", "TURN_FAILED"]:
             raise SystemExit("Failed evidence contains an impossible lifecycle")
-    elif kinds[-3:] != ["AGENT_OUTCOME", "ASSISTANT_RESPONSE", "TURN_COMPLETED"]:
-        raise SystemExit("Completed evidence omitted the durable terminal sequence")
+    else:
+        if kinds[-3:] != ["AGENT_OUTCOME", "ASSISTANT_RESPONSE", "TURN_COMPLETED"]:
+            raise SystemExit("Completed evidence omitted the durable terminal sequence")
+        if args.outcome in MODELED_TERMINAL_OUTCOMES and (
+            kinds[:3] != ["USER_INPUT", "CONTEXT_WINDOW", "ROUTING_DECISION"]
+            or kinds.count("CONTEXT_WINDOW") != 1
+            or kinds.count("ROUTING_DECISION") != 1
+        ):
+            raise SystemExit("Modeled evidence omitted its exact context and routing prefix")
     for event in events:
         if event["eventKind"] in {"AGENT_OUTCOME", "ASSISTANT_RESPONSE", "TURN_COMPLETED"}:
             if event.get("outcome") != args.outcome:

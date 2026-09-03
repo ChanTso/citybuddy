@@ -55,12 +55,14 @@ from citybuddy_agent.conversation import (
 )
 from citybuddy_agent.evaluation import (
     ActionEvaluationEvidenceInvalid,
+    ContextWindowEvidenceResponse,
     EvaluationEvidenceInvalid,
     EvaluationEvidenceNotFound,
     EvaluationEvidenceResponse,
     EvaluationEvidenceStore,
     EvidenceEventResponse,
     MysqlEvaluationEvidenceStore,
+    RoutingEvidenceResponse,
 )
 from citybuddy_agent.feedback import (
     FeedbackConflictError,
@@ -627,6 +629,53 @@ class MemoryEvidenceStore(EvaluationEvidenceStore):
                 ),
                 EvidenceEventResponse(
                     sequence=2,
+                    event_kind="CONTEXT_WINDOW",
+                    outcome="low",
+                    reference="session-context-v1",
+                    context=ContextWindowEvidenceResponse.model_validate(
+                        {
+                            "policyVersion": "session-context-v1",
+                            "tokenEstimator": "utf8-bytes-v1",
+                            "tokenBudget": 6144,
+                            "tokenWatermark": "low",
+                            "candidateTokens": 0,
+                            "includedTokens": 0,
+                            "loadedTurnCount": 0,
+                            "includedTurnIds": [],
+                            "omittedLoadedTurnCount": 0,
+                            "olderTurnsAvailable": False,
+                        }
+                    ),
+                    occurred_at=now,
+                ),
+                EvidenceEventResponse(
+                    sequence=3,
+                    event_kind="ROUTING_DECISION",
+                    outcome="standard",
+                    attempt_limit=16,
+                    routing=RoutingEvidenceResponse(
+                        refund_context=False,
+                        refund_context_source="none",
+                        chitchat=False,
+                        tool_profile="read",
+                        session_propagation_enabled=True,
+                    ),
+                    occurred_at=now,
+                ),
+                EvidenceEventResponse(
+                    sequence=4,
+                    event_kind="AGENT_OUTCOME",
+                    outcome="completed",
+                    occurred_at=now,
+                ),
+                EvidenceEventResponse(
+                    sequence=5,
+                    event_kind="ASSISTANT_RESPONSE",
+                    outcome="completed",
+                    occurred_at=now,
+                ),
+                EvidenceEventResponse(
+                    sequence=6,
                     event_kind="TURN_COMPLETED",
                     outcome="completed",
                     occurred_at=now,
@@ -636,46 +685,141 @@ class MemoryEvidenceStore(EvaluationEvidenceStore):
         )
 
 
-def test_evaluation_evidence_rejects_conflicting_or_intermediate_terminal_lifecycle() -> None:
+def test_evaluation_evidence_requires_exact_modeled_context_and_routing_prefix() -> None:
     now = datetime(2026, 7, 18, 12, 0, tzinfo=UTC)
-    events = [
-        EvidenceEventResponse(
-            sequence=1,
-            event_kind="USER_INPUT",
-            outcome="accepted",
-            occurred_at=now,
-        ),
-        EvidenceEventResponse(
-            sequence=2,
-            event_kind="AGENT_OUTCOME",
-            outcome="completed",
-            occurred_at=now,
-        ),
-        EvidenceEventResponse(
-            sequence=3,
-            event_kind="ASSISTANT_RESPONSE",
-            outcome="completed",
-            occurred_at=now,
-        ),
-        EvidenceEventResponse(
-            sequence=4,
-            event_kind="TURN_COMPLETED",
-            outcome="completed",
-            occurred_at=now,
-        ),
-    ]
 
-    MysqlEvaluationEvidenceStore._validate_lifecycle(events, "completed")
-    conflicting = [*events]
-    conflicting[1] = conflicting[1].model_copy(update={"outcome": "provider_denied"})
+    def events(outcome: str, kinds: list[str]) -> list[EvidenceEventResponse]:
+        return [
+            EvidenceEventResponse(
+                sequence=sequence,
+                event_kind=cast(Any, kind),
+                outcome=(
+                    "accepted"
+                    if kind == "USER_INPUT"
+                    else outcome
+                    if kind in {"AGENT_OUTCOME", "ASSISTANT_RESPONSE", "TURN_COMPLETED"}
+                    else None
+                ),
+                occurred_at=now,
+            )
+            for sequence, kind in enumerate(kinds, start=1)
+        ]
+
+    valid_kinds = [
+        "USER_INPUT",
+        "CONTEXT_WINDOW",
+        "ROUTING_DECISION",
+        "AGENT_OUTCOME",
+        "ASSISTANT_RESPONSE",
+        "TURN_COMPLETED",
+    ]
+    for outcome in (
+        "completed",
+        "budget_exhausted",
+        "provider_denied",
+        "retrieval_denied",
+        "action_pending",
+    ):
+        MysqlEvaluationEvidenceStore._validate_lifecycle(
+            events(outcome, valid_kinds), cast(Any, outcome)
+        )
+
+    invalid_kinds = (
+        ["USER_INPUT", "AGENT_OUTCOME", "ASSISTANT_RESPONSE", "TURN_COMPLETED"],
+        [
+            "USER_INPUT",
+            "ROUTING_DECISION",
+            "CONTEXT_WINDOW",
+            "AGENT_OUTCOME",
+            "ASSISTANT_RESPONSE",
+            "TURN_COMPLETED",
+        ],
+        [
+            "USER_INPUT",
+            "MODEL_OUTCOME",
+            "CONTEXT_WINDOW",
+            "ROUTING_DECISION",
+            "AGENT_OUTCOME",
+            "ASSISTANT_RESPONSE",
+            "TURN_COMPLETED",
+        ],
+        [
+            "USER_INPUT",
+            "CONTEXT_WINDOW",
+            "ROUTING_DECISION",
+            "ROUTING_DECISION",
+            "AGENT_OUTCOME",
+            "ASSISTANT_RESPONSE",
+            "TURN_COMPLETED",
+        ],
+    )
+    for kinds in invalid_kinds:
+        with pytest.raises(EvaluationEvidenceInvalid):
+            MysqlEvaluationEvidenceStore._validate_lifecycle(
+                events("completed", kinds), "completed"
+            )
+    conflicting = events("completed", valid_kinds)
+    conflicting[3] = conflicting[3].model_copy(update={"outcome": "provider_denied"})
     with pytest.raises(EvaluationEvidenceInvalid):
         MysqlEvaluationEvidenceStore._validate_lifecycle(conflicting, "completed")
-    intermediate = [*events]
-    intermediate[1] = intermediate[1].model_copy(
+    intermediate = events("completed", valid_kinds)
+    intermediate[3] = intermediate[3].model_copy(
         update={"event_kind": "TURN_FAILED", "outcome": "failed"}
     )
     with pytest.raises(EvaluationEvidenceInvalid):
         MysqlEvaluationEvidenceStore._validate_lifecycle(intermediate, "completed")
+
+
+def test_evaluation_evidence_retains_failed_and_local_action_lifecycles() -> None:
+    now = datetime(2026, 7, 18, 12, 0, tzinfo=UTC)
+
+    def events(outcome: str, kinds: list[str]) -> list[EvidenceEventResponse]:
+        return [
+            EvidenceEventResponse(
+                sequence=sequence,
+                event_kind=cast(Any, kind),
+                outcome=(
+                    "accepted"
+                    if kind == "USER_INPUT"
+                    else outcome
+                    if kind
+                    in {
+                        "AGENT_OUTCOME",
+                        "ASSISTANT_RESPONSE",
+                        "TURN_COMPLETED",
+                    }
+                    else None
+                ),
+                occurred_at=now,
+            )
+            for sequence, kind in enumerate(kinds, start=1)
+        ]
+
+    MysqlEvaluationEvidenceStore._validate_lifecycle(
+        events("failed", ["USER_INPUT", "TURN_FAILED"]), "failed"
+    )
+    for outcome, action_event in (
+        ("action_clarification", None),
+        ("action_declined", "ACTION_DECLINED"),
+        ("action_expired", "ACTION_EXPIRED"),
+    ):
+        kinds = ["USER_INPUT"]
+        if action_event is not None:
+            kinds.append(action_event)
+        kinds.extend(("AGENT_OUTCOME", "ASSISTANT_RESPONSE", "TURN_COMPLETED"))
+        MysqlEvaluationEvidenceStore._validate_lifecycle(events(outcome, kinds), cast(Any, outcome))
+    confirmation = events(
+        "action_completed",
+        [
+            "USER_INPUT",
+            "ACTION_DECLINED",
+            "AGENT_OUTCOME",
+            "ASSISTANT_RESPONSE",
+            "TURN_COMPLETED",
+        ],
+    )
+    confirmation[1] = confirmation[1].model_copy(update={"event_kind": cast(Any, "ACTION_RECEIPT")})
+    MysqlEvaluationEvidenceStore._validate_lifecycle(confirmation, cast(Any, "action_completed"))
 
 
 def test_evaluation_evidence_normalizes_mysql_timestamps_to_utc() -> None:
@@ -837,6 +981,51 @@ def test_evaluation_evidence_route_is_profile_bound_and_independently_authentica
             },
             {
                 "sequence": 2,
+                "eventKind": "CONTEXT_WINDOW",
+                "outcome": "low",
+                "reference": "session-context-v1",
+                "context": {
+                    "policyVersion": "session-context-v1",
+                    "tokenEstimator": "utf8-bytes-v1",
+                    "tokenBudget": 6144,
+                    "tokenWatermark": "low",
+                    "candidateTokens": 0,
+                    "includedTokens": 0,
+                    "loadedTurnCount": 0,
+                    "includedTurnIds": [],
+                    "omittedLoadedTurnCount": 0,
+                    "olderTurnsAvailable": False,
+                },
+                "occurredAt": "2026-07-18T12:00:00Z",
+            },
+            {
+                "sequence": 3,
+                "eventKind": "ROUTING_DECISION",
+                "outcome": "standard",
+                "attemptLimit": 16,
+                "routing": {
+                    "refundContext": False,
+                    "refundContextSource": "none",
+                    "chitchat": False,
+                    "toolProfile": "read",
+                    "sessionPropagationEnabled": True,
+                },
+                "occurredAt": "2026-07-18T12:00:00Z",
+            },
+            {
+                "sequence": 4,
+                "eventKind": "AGENT_OUTCOME",
+                "outcome": "completed",
+                "occurredAt": "2026-07-18T12:00:00Z",
+            },
+            {
+                "sequence": 5,
+                "eventKind": "ASSISTANT_RESPONSE",
+                "outcome": "completed",
+                "occurredAt": "2026-07-18T12:00:00Z",
+            },
+            {
+                "sequence": 6,
                 "eventKind": "TURN_COMPLETED",
                 "outcome": "completed",
                 "occurredAt": "2026-07-18T12:00:00Z",

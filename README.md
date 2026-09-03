@@ -331,6 +331,9 @@ handling, cross-session memory, and human handoff are out of scope. The payment 
 committed receipt means the refund request is durably recorded and owned by commerce, not that
 money moved.
 
+Modeled support rows created before migration V009 lack the current context event and therefore
+fail closed in the evaluation evidence projection; this does not alter their stored business state.
+
 The sporadic preparation HTTP 502 measured by the benchmark was a variable-width timestamp
 mismatch: commerce sometimes rendered millisecond-aligned instants with three fractional digits,
 while the agent requires canonical six-digit UTC microseconds. Commerce now pins both preparation

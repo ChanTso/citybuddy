@@ -6,12 +6,21 @@ import subprocess
 import sys
 from pathlib import Path
 
+import pytest
+
 REPOSITORY = Path(__file__).resolve().parents[2]
 INTEGRATION_SCRIPT = REPOSITORY / "scripts" / "test_evaluation_sandbox_integration.sh"
 LEADING_DASH_SESSION = "-leading-dash-session"
 TRACE_ID = "00000000-0000-0000-0000-000000000150"
 TURN_ID = "00000000-0000-0000-0000-000000000151"
 TIMESTAMP = "2026-08-04T00:00:00Z"
+MODELED_OUTCOMES = (
+    "completed",
+    "budget_exhausted",
+    "provider_denied",
+    "retrieval_denied",
+    "action_pending",
+)
 
 
 def run_helper(*arguments: str) -> subprocess.CompletedProcess[str]:
@@ -24,41 +33,90 @@ def run_helper(*arguments: str) -> subprocess.CompletedProcess[str]:
     )
 
 
-def test_evaluation_helpers_accept_bound_leading_dash_session(tmp_path: Path) -> None:
-    evidence_path = tmp_path / "evidence.json"
-    evidence_path.write_text(
+def context_event(sequence: int) -> dict[str, object]:
+    return {
+        "sequence": sequence,
+        "eventKind": "CONTEXT_WINDOW",
+        "outcome": "low",
+        "reference": "session-context-v1",
+        "context": {
+            "policyVersion": "session-context-v1",
+            "tokenEstimator": "utf8-bytes-v1",
+            "tokenBudget": 6144,
+            "tokenWatermark": "low",
+            "candidateTokens": 0,
+            "includedTokens": 0,
+            "loadedTurnCount": 0,
+            "includedTurnIds": [],
+            "omittedLoadedTurnCount": 0,
+            "olderTurnsAvailable": False,
+        },
+        "occurredAt": TIMESTAMP,
+    }
+
+
+def routing_event(sequence: int, routing: dict[str, object] | None = None) -> dict[str, object]:
+    event: dict[str, object] = {
+        "sequence": sequence,
+        "eventKind": "ROUTING_DECISION",
+        "outcome": "standard",
+        "attemptLimit": 16,
+        "occurredAt": TIMESTAMP,
+    }
+    if routing is not None:
+        event["routing"] = routing
+    return event
+
+
+def terminal_events(outcome: str, start: int) -> list[dict[str, object]]:
+    return [
+        {
+            "sequence": start + offset,
+            "eventKind": event_kind,
+            "outcome": outcome,
+            "occurredAt": TIMESTAMP,
+        }
+        for offset, event_kind in enumerate(
+            ("AGENT_OUTCOME", "ASSISTANT_RESPONSE", "TURN_COMPLETED")
+        )
+    ]
+
+
+def write_evidence(
+    path: Path,
+    *,
+    outcome: str,
+    events: list[dict[str, object]],
+    session_id: str = "sandbox-session",
+) -> None:
+    path.write_text(
         json.dumps(
             {
                 "schemaVersion": "agent-evidence-v1",
                 "traceId": TRACE_ID,
-                "sessionId": LEADING_DASH_SESSION,
+                "sessionId": session_id,
                 "turnId": TURN_ID,
-                "terminalOutcome": "completed",
-                "events": [
-                    {"sequence": 1, "eventKind": "USER_INPUT", "occurredAt": TIMESTAMP},
-                    {
-                        "sequence": 2,
-                        "eventKind": "AGENT_OUTCOME",
-                        "outcome": "completed",
-                        "occurredAt": TIMESTAMP,
-                    },
-                    {
-                        "sequence": 3,
-                        "eventKind": "ASSISTANT_RESPONSE",
-                        "outcome": "completed",
-                        "occurredAt": TIMESTAMP,
-                    },
-                    {
-                        "sequence": 4,
-                        "eventKind": "TURN_COMPLETED",
-                        "outcome": "completed",
-                        "occurredAt": TIMESTAMP,
-                    },
-                ],
+                "terminalOutcome": outcome,
+                "events": events,
                 "feedback": [],
             }
         ),
         encoding="utf-8",
+    )
+
+
+def test_evaluation_helpers_accept_bound_leading_dash_session(tmp_path: Path) -> None:
+    evidence_path = tmp_path / "evidence.json"
+    write_evidence(
+        evidence_path,
+        outcome="completed",
+        session_id=LEADING_DASH_SESSION,
+        events=[
+            {"sequence": 1, "eventKind": "USER_INPUT", "occurredAt": TIMESTAMP},
+            context_event(2),
+            routing_event(3),
+            *terminal_events("completed", 4),
+        ],
     )
     evidence = run_helper(
         "scripts/check_agent_evaluation_evidence.py",
@@ -125,50 +183,17 @@ def test_agent_evidence_checker_accepts_legacy_and_closed_routing(tmp_path: Path
     )
 
     for name, routing, accepted in cases:
-        route: dict[str, object] = {
-            "sequence": 2,
-            "eventKind": "ROUTING_DECISION",
-            "outcome": "standard",
-            "attemptLimit": 16,
-            "occurredAt": TIMESTAMP,
-        }
-        if routing is not None:
-            route["routing"] = routing
+        route = routing_event(3, routing)
         evidence_path = tmp_path / f"routing-{name}.json"
-        evidence_path.write_text(
-            json.dumps(
-                {
-                    "schemaVersion": "agent-evidence-v1",
-                    "traceId": TRACE_ID,
-                    "sessionId": "sandbox-session",
-                    "turnId": TURN_ID,
-                    "terminalOutcome": "completed",
-                    "events": [
-                        {"sequence": 1, "eventKind": "USER_INPUT", "occurredAt": TIMESTAMP},
-                        route,
-                        {
-                            "sequence": 3,
-                            "eventKind": "AGENT_OUTCOME",
-                            "outcome": "completed",
-                            "occurredAt": TIMESTAMP,
-                        },
-                        {
-                            "sequence": 4,
-                            "eventKind": "ASSISTANT_RESPONSE",
-                            "outcome": "completed",
-                            "occurredAt": TIMESTAMP,
-                        },
-                        {
-                            "sequence": 5,
-                            "eventKind": "TURN_COMPLETED",
-                            "outcome": "completed",
-                            "occurredAt": TIMESTAMP,
-                        },
-                    ],
-                    "feedback": [],
-                }
-            ),
-            encoding="utf-8",
+        write_evidence(
+            evidence_path,
+            outcome="completed",
+            events=[
+                {"sequence": 1, "eventKind": "USER_INPUT", "occurredAt": TIMESTAMP},
+                context_event(2),
+                route,
+                *terminal_events("completed", 4),
+            ],
         )
 
         result = run_helper(
@@ -182,6 +207,119 @@ def test_agent_evidence_checker_accepts_legacy_and_closed_routing(tmp_path: Path
         )
 
         assert (result.returncode == 0) is accepted, result.stderr
+
+
+@pytest.mark.parametrize("outcome", MODELED_OUTCOMES)
+def test_agent_evidence_checker_requires_exact_modeled_prefix(tmp_path: Path, outcome: str) -> None:
+    evidence_path = tmp_path / f"modeled-{outcome}.json"
+    write_evidence(
+        evidence_path,
+        outcome=outcome,
+        events=[
+            {"sequence": 1, "eventKind": "USER_INPUT", "occurredAt": TIMESTAMP},
+            context_event(2),
+            routing_event(3),
+            *terminal_events(outcome, 4),
+        ],
+    )
+
+    result = run_helper(
+        "scripts/check_agent_evaluation_evidence.py",
+        str(evidence_path),
+        "--trace",
+        TRACE_ID,
+        "--session=sandbox-session",
+        "--outcome",
+        outcome,
+    )
+
+    assert result.returncode == 0, result.stderr
+
+
+@pytest.mark.parametrize(
+    ("name", "prefix"),
+    (
+        ("missing", []),
+        ("reversed", [routing_event(2), context_event(3)]),
+        (
+            "late",
+            [
+                {"sequence": 2, "eventKind": "MODEL_OUTCOME", "occurredAt": TIMESTAMP},
+                context_event(3),
+                routing_event(4),
+            ],
+        ),
+        ("duplicate-route", [context_event(2), routing_event(3), routing_event(4)]),
+    ),
+)
+def test_agent_evidence_checker_rejects_invalid_modeled_prefix(
+    tmp_path: Path, name: str, prefix: list[dict[str, object]]
+) -> None:
+    evidence_path = tmp_path / f"modeled-{name}.json"
+    write_evidence(
+        evidence_path,
+        outcome="completed",
+        events=[
+            {"sequence": 1, "eventKind": "USER_INPUT", "occurredAt": TIMESTAMP},
+            *prefix,
+            *terminal_events("completed", len(prefix) + 2),
+        ],
+    )
+
+    result = run_helper(
+        "scripts/check_agent_evaluation_evidence.py",
+        str(evidence_path),
+        "--trace",
+        TRACE_ID,
+        "--session=sandbox-session",
+        "--outcome",
+        "completed",
+    )
+
+    assert result.returncode != 0
+
+
+def test_agent_evidence_checker_retains_failed_and_local_action_shapes(tmp_path: Path) -> None:
+    failed_events = [
+        {"sequence": 1, "eventKind": "USER_INPUT", "occurredAt": TIMESTAMP},
+        {"sequence": 2, "eventKind": "TURN_FAILED", "occurredAt": TIMESTAMP},
+    ]
+    evidence_path = tmp_path / "failed.json"
+    write_evidence(evidence_path, outcome="failed", events=failed_events)
+    failed = run_helper(
+        "scripts/check_agent_evaluation_evidence.py",
+        str(evidence_path),
+        "--trace",
+        TRACE_ID,
+        "--session=sandbox-session",
+        "--outcome",
+        "failed",
+    )
+    assert failed.returncode == 0, failed.stderr
+
+    for outcome, action_event in (
+        ("action_clarification", None),
+        ("action_declined", "ACTION_DECLINED"),
+        ("action_expired", "ACTION_EXPIRED"),
+    ):
+        events = [{"sequence": 1, "eventKind": "USER_INPUT", "occurredAt": TIMESTAMP}]
+        if action_event is not None:
+            events.append({"sequence": 2, "eventKind": action_event, "occurredAt": TIMESTAMP})
+        events.extend(terminal_events(outcome, len(events) + 1))
+        evidence_path = tmp_path / f"local-{outcome}.json"
+        write_evidence(evidence_path, outcome=outcome, events=events)
+
+        result = run_helper(
+            "scripts/check_agent_evaluation_evidence.py",
+            str(evidence_path),
+            "--trace",
+            TRACE_ID,
+            "--session=sandbox-session",
+            "--outcome",
+            outcome,
+        )
+
+        assert result.returncode == 0, result.stderr
 
 
 def test_evaluation_script_binds_every_opaque_session_option() -> None:
