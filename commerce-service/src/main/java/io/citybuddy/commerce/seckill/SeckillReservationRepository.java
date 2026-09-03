@@ -20,15 +20,7 @@ public final class SeckillReservationRepository {
   }
 
   public void reservePending(SeckillReservation reservation, Duration resolutionWindow) {
-    long resolutionWindowMicros;
-    try {
-      resolutionWindowMicros = Math.multiplyExact(resolutionWindow.toMillis(), 1_000L);
-    } catch (ArithmeticException exception) {
-      throw new IllegalArgumentException("Transaction resolution window is too large", exception);
-    }
-    if (resolutionWindowMicros < 1) {
-      throw new IllegalArgumentException("Transaction resolution window must be positive");
-    }
+    long resolutionWindowMicros = resolutionWindowMicros(resolutionWindow);
     jdbc.update(
         """
         INSERT INTO seckill_reservation
@@ -45,6 +37,31 @@ public final class SeckillReservationRepository {
         reservation.quantity(),
         reservation.activityProjectionVersion(),
         resolutionWindowMicros);
+  }
+
+  public void reserveAdmitted(SeckillReservation reservation, Duration resolutionWindow) {
+    if (reservation.state() != ReservationState.ADMITTED
+        || reservation.decisionCode() != ReservationDecisionCode.ADMITTED
+        || reservation.projectionVersion() != 2) {
+      throw new IllegalArgumentException("Direct reservation truth must be admitted");
+    }
+    jdbc.update(
+        """
+        INSERT INTO seckill_reservation
+          (reservation_id, user_subject, activity_id, idempotency_key, intent_hash, quantity,
+           activity_projection_version, state, decision_code, projection_version,
+           transaction_resolution_due_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, 'ADMITTED', 'ADMITTED', 2,
+                TIMESTAMPADD(MICROSECOND, ?, CURRENT_TIMESTAMP(6)))
+        """,
+        reservation.reservationId(),
+        reservation.userSubject(),
+        reservation.activityId(),
+        reservation.idempotencyKey(),
+        reservation.intentHash(),
+        reservation.quantity(),
+        reservation.activityProjectionVersion(),
+        resolutionWindowMicros(resolutionWindow));
   }
 
   /**
@@ -265,6 +282,19 @@ public final class SeckillReservationRepository {
   private Optional<SeckillReservation> queryOne(String sql, Object... arguments) {
     return jdbc.query(sql, SeckillReservationRepository::mapReservation, arguments).stream()
         .findFirst();
+  }
+
+  private static long resolutionWindowMicros(Duration resolutionWindow) {
+    final long micros;
+    try {
+      micros = Math.multiplyExact(resolutionWindow.toMillis(), 1_000L);
+    } catch (ArithmeticException exception) {
+      throw new IllegalArgumentException("Transaction resolution window is too large", exception);
+    }
+    if (micros < 1) {
+      throw new IllegalArgumentException("Transaction resolution window must be positive");
+    }
+    return micros;
   }
 
   private static SeckillReservation mapReservation(ResultSet result, int row) throws SQLException {

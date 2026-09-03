@@ -61,6 +61,98 @@ class SeckillReservationIntegrationTest {
   @Autowired private TransactionTemplate transactions;
 
   @Test
+  void rejectsBeforeMysqlAndRetainsAdmittedWorkAsAReplayableHandoff() throws Exception {
+    String activityId = "redis-first-main";
+    createActivity(activityId, "redis-first-product", SeckillActivityState.ACTIVE, 1);
+
+    ReservationAdmissionStore.PreAdmission rejected =
+        reservationService.preAdmit(
+            "redis-first-rejected", activityId, "redis-first-rejected-key", request(2, 1));
+    assertThat(rejected.decision().decisionCode()).isEqualTo(ReservationDecisionCode.EXHAUSTED);
+    assertThat(rejected.handoffPending()).isFalse();
+    assertThat(reservationRepository.find(rejected.handoff().reservationId())).isEmpty();
+    assertThat(redis.hasKey(admissionStore.handoffKey(rejected.handoff().reservationId())))
+        .isFalse();
+
+    ReservationAdmissionStore.PreAdmission admitted =
+        reservationService.preAdmit(
+            "redis-first-admitted", activityId, "redis-first-admitted-key", request(1, 1));
+    assertThat(admitted.decision().state()).isEqualTo(ReservationState.ADMITTED);
+    assertThat(admitted.handoffPending()).isTrue();
+    assertThat(reservationRepository.find(admitted.handoff().reservationId())).isEmpty();
+    String admittedUserHash = SeckillReservationService.sha256("redis-first-admitted");
+    assertThat(
+            redis.getExpire(
+                admissionStore.intentKey(activityId, admittedUserHash, "redis-first-admitted-key"),
+                TimeUnit.MILLISECONDS))
+        .isEqualTo(-1);
+    assertThat(
+            redis.getExpire(
+                admissionStore.userKey(activityId, admittedUserHash), TimeUnit.MILLISECONDS))
+        .isEqualTo(-1);
+    assertThat(
+            redis.getExpire(
+                admissionStore.reservationKey(admitted.handoff().reservationId()),
+                TimeUnit.MILLISECONDS))
+        .isEqualTo(-1);
+    assertThat(
+            redis.getExpire(
+                admissionStore.decisionKey(admitted.handoff().reservationId()),
+                TimeUnit.MILLISECONDS))
+        .isEqualTo(-1);
+    assertThat(
+            reservationService
+                .pollOwned("redis-first-admitted", admitted.handoff().reservationId())
+                .state())
+        .isEqualTo(ReservationState.PENDING);
+    assertThatThrownBy(() -> activityService.changeAllocation(activityId, 2))
+        .isInstanceOf(IllegalStateException.class)
+        .hasMessageContaining("admission handoff");
+    assertRemaining(activityId, 0);
+
+    ReservationAdmissionStore.PreAdmission replay =
+        reservationService.preAdmit(
+            "redis-first-admitted", activityId, "redis-first-admitted-key", request(1, 1));
+    assertThat(replay.replay()).isTrue();
+    assertThat(replay.handoffPending()).isTrue();
+    assertThat(replay.handoff().reservationId()).isEqualTo(admitted.handoff().reservationId());
+    assertRemaining(activityId, 0);
+    assertThatThrownBy(
+            () ->
+                reservationService.preAdmit(
+                    "redis-first-admitted", activityId, "redis-first-admitted-key", request(2, 1)))
+        .isInstanceOf(IllegalStateException.class)
+        .hasMessageContaining("conflicting reservation intent");
+
+    ReservationResult durable = reservationService.persistAdmitted(admitted.handoff());
+    assertThat(durable.state()).isEqualTo(ReservationState.ADMITTED);
+    reservationService.completeAdmissionHandoff(admitted.handoff());
+    assertThat(
+            redis.getExpire(
+                admissionStore.intentKey(activityId, admittedUserHash, "redis-first-admitted-key"),
+                TimeUnit.MILLISECONDS))
+        .isPositive();
+    assertThat(
+            redis.getExpire(
+                admissionStore.reservationKey(admitted.handoff().reservationId()),
+                TimeUnit.MILLISECONDS))
+        .isPositive();
+    assertThat(
+            redis.getExpire(
+                admissionStore.userKey(activityId, admittedUserHash), TimeUnit.MILLISECONDS))
+        .isPositive();
+    assertThat(
+            redis.getExpire(
+                admissionStore.decisionKey(admitted.handoff().reservationId()),
+                TimeUnit.MILLISECONDS))
+        .isPositive();
+    assertThat(
+            reservationService.pollOwned("redis-first-admitted", durable.reservationId()).state())
+        .isEqualTo(ReservationState.ADMITTED);
+    assertThat(reservationService.hasPendingAdmissionHandoff(activityId)).isFalse();
+  }
+
+  @Test
   void admitsAtomicallyAndProvidesOwnerScopedIdempotentTruth() throws Exception {
     createActivity("reservation-main", "reservation-product-main", SeckillActivityState.ACTIVE, 5);
 

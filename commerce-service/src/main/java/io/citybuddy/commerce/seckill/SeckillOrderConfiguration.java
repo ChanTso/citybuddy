@@ -59,8 +59,8 @@ public class SeckillOrderConfiguration {
 
   @Bean
   SeckillTransactionResolutionWorker seckillTransactionResolutionWorker(
-      SeckillReservationService reservations) {
-    return new SeckillTransactionResolutionWorker(reservations);
+      SeckillReservationService reservations, SeckillTransactionCoordinator coordinator) {
+    return new SeckillTransactionResolutionWorker(reservations, coordinator);
   }
 
   @Bean(destroyMethod = "close")
@@ -74,6 +74,7 @@ public class SeckillOrderConfiguration {
       SeckillOrderRepository orders,
       SeckillReservationRepository reservations,
       SeckillActivityRepository activities,
+      ReservationAdmissionStore admissionStore,
       SeckillProjectionStore projections,
       PlatformTransactionManager transactionManager,
       Clock seckillClock) {
@@ -83,8 +84,8 @@ public class SeckillOrderConfiguration {
         orders,
         reservations,
         activities,
-        (activity, targetVersion, quantity) ->
-            projections.restoreQuota(activity, targetVersion, quantity),
+        admissionStore,
+        projections::publish,
         transaction,
         seckillClock);
   }

@@ -7,6 +7,7 @@ import io.citybuddy.commerce.evaluation.EvaluationSandboxException;
 import io.citybuddy.commerce.evaluation.EvaluationSandboxRepository;
 import io.citybuddy.commerce.evaluation.EvaluationViewRepository;
 import io.citybuddy.commerce.order.StandardOrderIntentCommitment;
+import io.citybuddy.commerce.seckill.ReservationAdmissionStore;
 import io.citybuddy.commerce.seckill.SeckillActivityRepository;
 import io.citybuddy.commerce.seckill.SeckillCancellationService;
 import io.citybuddy.commerce.seckill.SeckillOrderRepository;
@@ -101,6 +102,7 @@ class MockPaymentIntegrationTest {
   @Autowired private JdbcTemplate jdbc;
   @Autowired private MockPaymentService payments;
   @Autowired private PlatformTransactionManager transactionManager;
+  @Autowired private ReservationAdmissionStore admissionStore;
   private final List<String> seededStandardOrderIds = new ArrayList<>();
 
   @AfterEach
@@ -3054,7 +3056,8 @@ class MockPaymentIntegrationTest {
         new SeckillOrderRepository(jdbc),
         new SeckillReservationRepository(jdbc),
         new SeckillActivityRepository(jdbc),
-        (activity, targetVersion, quantity) -> {},
+        admissionStore,
+        (activity, remainingQuota) -> {},
         transactionTemplate(),
         Clock.systemUTC());
   }

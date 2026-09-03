@@ -7,6 +7,8 @@ import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
+import java.util.Set;
 import java.util.UUID;
 import org.springframework.data.redis.core.StringRedisTemplate;
 import org.springframework.data.redis.core.script.DefaultRedisScript;
@@ -15,7 +17,193 @@ public final class ReservationAdmissionStore {
   static final String RESERVATION_PREFIX = "commerce:seckill:reservation:";
   static final String DECISION_PREFIX = "commerce:seckill:decision:";
   static final String USER_PREFIX = "commerce:seckill:user:";
+  static final String INTENT_PREFIX = "commerce:seckill:intent:";
+  static final String HANDOFF_PREFIX = "commerce:seckill:handoff:";
+  static final String HANDOFF_INDEX = "commerce:seckill:handoff:pending";
+  static final String ACTIVITY_HANDOFF_PREFIX = "commerce:seckill:handoff-activity:";
   static final String REBUILD_PREFIX = "commerce:seckill:rebuild:";
+
+  private static final DefaultRedisScript<String> PRE_ADMISSION_SCRIPT =
+      new DefaultRedisScript<>(
+          """
+          local MAX_JSON_INTEGER = 99999999999999
+          local MAX_LUA_INTEGER = 9007199254740991
+          local HANDOFF_PREFIX = 'commerce:seckill:handoff:'
+
+          local function decode(value)
+            local ok, decoded = pcall(cjson.decode, value)
+            if not ok or type(decoded) ~= 'table' then return nil end
+            return decoded
+          end
+
+          local function output(reservation_id, state, code, replay, handoff_pending)
+            return cjson.encode({
+              reservationId = reservation_id,
+              state = state,
+              decisionCode = code,
+              replay = replay,
+              handoffPending = handoff_pending
+            })
+          end
+
+          local function reservation_payload(reservation_id, state, code)
+            return cjson.encode({
+              reservationId = reservation_id,
+              activityId = ARGV[2],
+              userHash = ARGV[3],
+              quantity = tonumber(ARGV[4]),
+              activityProjectionVersion = tonumber(ARGV[5]),
+              reservationVersion = 2,
+              state = state,
+              decisionCode = code,
+              durableOrderCreated = false
+            })
+          end
+
+          local function anchor_payload(reservation_id, state, code)
+            return cjson.encode({
+              reservationId = reservation_id,
+              activityId = ARGV[2],
+              userHash = ARGV[3],
+              quantity = tonumber(ARGV[4]),
+              activityProjectionVersion = tonumber(ARGV[5]),
+              intentHash = ARGV[6],
+              state = state,
+              decisionCode = code
+            })
+          end
+
+          local function reject(code)
+            local reservation = reservation_payload(ARGV[1], 'REJECTED', code)
+            redis.call('MSET', KEYS[2], anchor_payload(ARGV[1], 'REJECTED', code),
+              KEYS[4], reservation, KEYS[5], reservation)
+            redis.call('PEXPIRE', KEYS[2], ARGV[10])
+            redis.call('PEXPIRE', KEYS[4], ARGV[9])
+            redis.call('PEXPIRE', KEYS[5], ARGV[10])
+            return output(ARGV[1], 'REJECTED', code, false, false)
+          end
+
+          local existing_value = redis.call('GET', KEYS[2])
+          if existing_value then
+            local existing = decode(existing_value)
+            if not existing
+                or existing.activityId ~= ARGV[2]
+                or existing.userHash ~= ARGV[3]
+                or tonumber(existing.quantity) ~= tonumber(ARGV[4])
+                or tonumber(existing.activityProjectionVersion) ~= tonumber(ARGV[5])
+                or existing.intentHash ~= ARGV[6]
+                or type(existing.reservationId) ~= 'string' then
+              return 'CONFLICT'
+            end
+            if existing.state == 'ADMITTED' and existing.decisionCode == 'ADMITTED' then
+              local pending = redis.call('EXISTS', HANDOFF_PREFIX .. existing.reservationId) == 1
+              return output(existing.reservationId, 'ADMITTED', 'ADMITTED', true, pending)
+            end
+            if existing.state == 'REJECTED'
+                and type(existing.decisionCode) == 'string'
+                and existing.decisionCode ~= 'ADMITTED' then
+              return output(existing.reservationId, 'REJECTED', existing.decisionCode, true, false)
+            end
+            return 'PARTIAL'
+          end
+
+          if redis.call('EXISTS', KEYS[4]) == 1
+              or redis.call('EXISTS', KEYS[5]) == 1
+              or redis.call('EXISTS', KEYS[6]) == 1 then
+            return 'PARTIAL'
+          end
+          if redis.call('EXISTS', KEYS[8]) == 1 then return 'REBUILDING' end
+
+          local activity_value = redis.call('GET', KEYS[1])
+          if not activity_value then return 'MISSING_ACTIVITY' end
+          local activity = decode(activity_value)
+          if not activity then return 'MALFORMED_ACTIVITY' end
+          local projection_version = tonumber(activity.projectionVersion)
+          local expected_version = tonumber(ARGV[5])
+          local remaining = tonumber(activity.remainingQuota)
+          local quantity = tonumber(ARGV[4])
+          local now = tonumber(ARGV[8])
+          local starts_at = tonumber(activity.startsAtEpochMicros)
+          local ends_at = tonumber(activity.endsAtEpochMicros)
+          if activity.activityId ~= ARGV[2]
+              or not projection_version or projection_version < 1
+              or projection_version > MAX_JSON_INTEGER
+              or not expected_version or expected_version < 1
+              or expected_version > MAX_JSON_INTEGER
+              or not remaining or remaining < 0 or remaining > MAX_JSON_INTEGER
+              or not quantity or quantity < 1 or quantity > MAX_JSON_INTEGER
+              or not now or math.abs(now) > MAX_LUA_INTEGER
+              or not starts_at or math.abs(starts_at) > MAX_LUA_INTEGER
+              or not ends_at or math.abs(ends_at) > MAX_LUA_INTEGER
+              or starts_at >= ends_at then
+            return 'MALFORMED_ACTIVITY'
+          end
+          if projection_version ~= expected_version then return reject('STALE_VERSION') end
+          if activity.state ~= 'ACTIVE' then return reject('ACTIVITY_INACTIVE') end
+          if now < starts_at then return reject('NOT_OPEN') end
+          if now >= ends_at then return reject('EXPIRED') end
+
+          local existing_user = redis.call('GET', KEYS[3])
+          if existing_user then return reject('DUPLICATE_USER') end
+          if remaining < quantity then return reject('EXHAUSTED') end
+
+          activity.remainingQuota = remaining - quantity
+          local reservation = reservation_payload(ARGV[1], 'ADMITTED', 'ADMITTED')
+          local handoff = cjson.encode({
+            reservationId = ARGV[1],
+            userSubject = ARGV[7],
+            activityId = ARGV[2],
+            idempotencyKey = ARGV[11],
+            intentHash = ARGV[6],
+            quantity = quantity,
+            activityProjectionVersion = expected_version
+          })
+          redis.call('MSET', KEYS[1], cjson.encode(activity),
+            KEYS[2], anchor_payload(ARGV[1], 'ADMITTED', 'ADMITTED'),
+            KEYS[3], ARGV[1], KEYS[4], reservation, KEYS[5], reservation,
+            KEYS[6], handoff)
+          redis.call('ZADD', KEYS[7], ARGV[12], ARGV[1])
+          redis.call('SADD', KEYS[9], ARGV[1])
+          return output(ARGV[1], 'ADMITTED', 'ADMITTED', false, true)
+          """,
+          String.class);
+
+  private static final DefaultRedisScript<Long> COMPLETE_HANDOFF_SCRIPT =
+      new DefaultRedisScript<>(
+          """
+          local removed = redis.call('DEL', KEYS[1])
+          redis.call('ZREM', KEYS[2], ARGV[1])
+          redis.call('SREM', KEYS[3], ARGV[1])
+          if removed == 1 then
+            redis.call('PEXPIRE', KEYS[4], ARGV[2])
+            redis.call('PEXPIRE', KEYS[5], ARGV[3])
+            redis.call('PEXPIRE', KEYS[6], ARGV[3])
+            redis.call('PEXPIRE', KEYS[7], ARGV[2])
+          end
+          return removed
+          """,
+          Long.class);
+
+  private static final DefaultRedisScript<String> SUSPEND_PROJECTION_SCRIPT =
+      new DefaultRedisScript<>(
+          """
+          if redis.call('GET', KEYS[2]) ~= ARGV[1] then return '__LOCK_LOST__' end
+          local current = redis.call('GET', KEYS[1])
+          if not current then return '' end
+          redis.call('DEL', KEYS[1])
+          return current
+          """,
+          String.class);
+
+  private static final DefaultRedisScript<Long> RESTORE_SUSPENDED_PROJECTION_SCRIPT =
+      new DefaultRedisScript<>(
+          """
+          if redis.call('GET', KEYS[2]) ~= ARGV[1] then return -1 end
+          if redis.call('EXISTS', KEYS[1]) == 1 then return 0 end
+          redis.call('SET', KEYS[1], ARGV[2])
+          return 1
+          """,
+          Long.class);
 
   private static final DefaultRedisScript<Long> ADMISSION_SCRIPT =
       new DefaultRedisScript<>(
@@ -365,6 +553,292 @@ public final class ReservationAdmissionStore {
     this.clock = clock;
   }
 
+  public PreAdmission preAdmit(AdmissionHandoff candidate, String userHash) {
+    validateHandoff(candidate);
+    if (userHash == null || !userHash.matches("[0-9a-f]{64}")) {
+      throw new IllegalArgumentException("Reservation user hash is invalid");
+    }
+    String anchorKey = intentKey(candidate.activityId(), userHash, candidate.idempotencyKey());
+    List<String> keys =
+        List.of(
+            activityKey(candidate.activityId()),
+            anchorKey,
+            userKey(candidate.activityId(), userHash),
+            reservationKey(candidate.reservationId()),
+            decisionKey(candidate.reservationId()),
+            handoffKey(candidate.reservationId()),
+            HANDOFF_INDEX,
+            rebuildKey(candidate.activityId()),
+            activityHandoffKey(candidate.activityId()));
+    final String result;
+    try {
+      long dueAtMillis =
+          Math.addExact(clock.millis(), properties.brokerTransactionTimeout().toMillis());
+      result =
+          redis.execute(
+              PRE_ADMISSION_SCRIPT,
+              keys,
+              candidate.reservationId(),
+              candidate.activityId(),
+              userHash,
+              Integer.toString(candidate.quantity()),
+              Long.toString(candidate.activityProjectionVersion()),
+              candidate.intentHash(),
+              candidate.userSubject(),
+              Long.toString(epochMicros(clock.instant())),
+              Long.toString(properties.reservationTtl().toMillis()),
+              Long.toString(properties.decisionMarkerTtl().toMillis()),
+              candidate.idempotencyKey(),
+              Long.toString(dueAtMillis));
+    } catch (RuntimeException exception) {
+      throw new AdmissionIndeterminateException(
+          "Redis-first admission execution failed", exception);
+    }
+    if (result == null) {
+      throw new AdmissionIndeterminateException("Redis-first admission returned no result");
+    }
+    return parsePreAdmission(result, candidate);
+  }
+
+  public List<AdmissionHandoff> dueHandoffs(int limit) {
+    if (limit < 1 || limit > 1_000) {
+      throw new IllegalArgumentException("Admission handoff batch size is invalid");
+    }
+    final Set<String> reservationIds;
+    try {
+      reservationIds = redis.opsForZSet().rangeByScore(HANDOFF_INDEX, 0, clock.millis(), 0, limit);
+    } catch (RuntimeException exception) {
+      throw new AdmissionIndeterminateException("Admission handoff scan failed", exception);
+    }
+    if (reservationIds == null || reservationIds.isEmpty()) {
+      return List.of();
+    }
+    List<AdmissionHandoff> handoffs = new ArrayList<>();
+    for (String reservationId : reservationIds) {
+      final String value;
+      try {
+        value = redis.opsForValue().get(handoffKey(reservationId));
+      } catch (RuntimeException exception) {
+        throw new AdmissionIndeterminateException("Admission handoff read failed", exception);
+      }
+      if (value == null) {
+        throw new AdmissionIndeterminateException("Admission handoff index is partial");
+      }
+      try {
+        AdmissionHandoff handoff = objectMapper.readValue(value, AdmissionHandoff.class);
+        validateHandoff(handoff);
+        if (!reservationId.equals(handoff.reservationId())) {
+          throw new AdmissionIndeterminateException("Admission handoff identity conflicts");
+        }
+        handoffs.add(handoff);
+      } catch (JsonProcessingException exception) {
+        throw new AdmissionIndeterminateException("Admission handoff is unreadable", exception);
+      }
+    }
+    return List.copyOf(handoffs);
+  }
+
+  public Optional<AdmissionProjection> readOwned(String reservationId, String userHash) {
+    final String value;
+    final Boolean pending;
+    try {
+      value = redis.opsForValue().get(reservationKey(reservationId));
+      pending = redis.hasKey(handoffKey(reservationId));
+    } catch (RuntimeException exception) {
+      throw new AdmissionIndeterminateException("Reservation projection read failed", exception);
+    }
+    if (value == null) {
+      return Optional.empty();
+    }
+    try {
+      var payload = objectMapper.readTree(value);
+      if (!reservationId.equals(payload.path("reservationId").asText())
+          || !userHash.equals(payload.path("userHash").asText())
+          || !payload.path("quantity").canConvertToInt()
+          || payload.path("quantity").intValue() < 1
+          || !payload.path("activityProjectionVersion").canConvertToLong()
+          || payload.path("activityProjectionVersion").longValue() < 1
+          || payload.path("reservationVersion").longValue() != 2) {
+        return Optional.empty();
+      }
+      ReservationState state = ReservationState.valueOf(payload.path("state").asText());
+      ReservationDecisionCode code =
+          ReservationDecisionCode.valueOf(payload.path("decisionCode").asText());
+      if ((state == ReservationState.ADMITTED && code != ReservationDecisionCode.ADMITTED)
+          || (state == ReservationState.REJECTED && code == ReservationDecisionCode.ADMITTED)
+          || (state != ReservationState.ADMITTED && state != ReservationState.REJECTED)) {
+        throw new AdmissionIndeterminateException("Reservation projection is malformed");
+      }
+      return Optional.of(
+          new AdmissionProjection(
+              reservationId,
+              payload.path("activityId").asText(),
+              payload.path("quantity").intValue(),
+              payload.path("activityProjectionVersion").longValue(),
+              state,
+              code,
+              Boolean.TRUE.equals(pending)));
+    } catch (JsonProcessingException | IllegalArgumentException exception) {
+      throw new AdmissionIndeterminateException("Reservation projection is unreadable", exception);
+    }
+  }
+
+  public boolean hasPendingHandoff(String activityId) {
+    try {
+      Long count = redis.opsForSet().size(activityHandoffKey(activityId));
+      return count != null && count > 0;
+    } catch (RuntimeException exception) {
+      throw new AdmissionIndeterminateException("Activity handoff read failed", exception);
+    }
+  }
+
+  public void completeHandoff(AdmissionHandoff handoff) {
+    validateHandoff(handoff);
+    final Long result;
+    try {
+      result =
+          redis.execute(
+              COMPLETE_HANDOFF_SCRIPT,
+              List.of(
+                  handoffKey(handoff.reservationId()),
+                  HANDOFF_INDEX,
+                  activityHandoffKey(handoff.activityId()),
+                  intentKey(
+                      handoff.activityId(),
+                      SeckillReservationService.sha256(handoff.userSubject()),
+                      handoff.idempotencyKey()),
+                  userKey(
+                      handoff.activityId(),
+                      SeckillReservationService.sha256(handoff.userSubject())),
+                  reservationKey(handoff.reservationId()),
+                  decisionKey(handoff.reservationId())),
+              handoff.reservationId(),
+              Long.toString(properties.decisionMarkerTtl().toMillis()),
+              Long.toString(properties.reservationTtl().toMillis()));
+    } catch (RuntimeException exception) {
+      throw new AdmissionIndeterminateException("Admission handoff completion failed", exception);
+    }
+    if (result == null) {
+      throw new AdmissionIndeterminateException("Admission handoff completion returned no result");
+    }
+  }
+
+  public String suspendProjection(String activityId, String lockToken) {
+    final String result;
+    try {
+      result =
+          redis.execute(
+              SUSPEND_PROJECTION_SCRIPT,
+              List.of(activityKey(activityId), rebuildKey(activityId)),
+              lockToken);
+    } catch (RuntimeException exception) {
+      throw new AdmissionIndeterminateException("Activity projection suspension failed", exception);
+    }
+    if (result == null || "__LOCK_LOST__".equals(result)) {
+      throw new AdmissionIndeterminateException("Reservation rebuild lock was lost");
+    }
+    return result;
+  }
+
+  public void restoreSuspendedProjection(
+      String activityId, String lockToken, String suspendedProjection) {
+    if (suspendedProjection == null || suspendedProjection.isEmpty()) {
+      return;
+    }
+    final Long result;
+    try {
+      result =
+          redis.execute(
+              RESTORE_SUSPENDED_PROJECTION_SCRIPT,
+              List.of(activityKey(activityId), rebuildKey(activityId)),
+              lockToken,
+              suspendedProjection);
+    } catch (RuntimeException exception) {
+      throw new AdmissionIndeterminateException(
+          "Activity projection restoration failed", exception);
+    }
+    if (result == null || result < 0) {
+      throw new AdmissionIndeterminateException("Reservation rebuild lock was lost");
+    }
+  }
+
+  private PreAdmission parsePreAdmission(String result, AdmissionHandoff candidate) {
+    if ("CONFLICT".equals(result)) {
+      throw new IllegalStateException(
+          "Idempotency key is bound to a conflicting reservation intent");
+    }
+    String message =
+        switch (result) {
+          case "PARTIAL" -> "Redis-first admission projection is partial";
+          case "REBUILDING" -> "Activity projection rebuild is active";
+          case "MISSING_ACTIVITY" -> "Activity projection is missing";
+          case "MALFORMED_ACTIVITY" -> "Activity projection is malformed";
+          default -> null;
+        };
+    if (message != null) {
+      throw new AdmissionIndeterminateException(message);
+    }
+    try {
+      var payload = objectMapper.readTree(result);
+      String reservationId = payload.path("reservationId").asText();
+      ReservationState state = ReservationState.valueOf(payload.path("state").asText());
+      ReservationDecisionCode code =
+          ReservationDecisionCode.valueOf(payload.path("decisionCode").asText());
+      if (!payload.path("replay").isBoolean()
+          || !payload.path("handoffPending").isBoolean()
+          || (state == ReservationState.ADMITTED && code != ReservationDecisionCode.ADMITTED)
+          || (state == ReservationState.REJECTED && code == ReservationDecisionCode.ADMITTED)
+          || (state != ReservationState.ADMITTED && state != ReservationState.REJECTED)) {
+        throw new AdmissionIndeterminateException("Redis-first admission result is malformed");
+      }
+      AdmissionHandoff handoff =
+          new AdmissionHandoff(
+              reservationId,
+              candidate.userSubject(),
+              candidate.activityId(),
+              candidate.idempotencyKey(),
+              candidate.intentHash(),
+              candidate.quantity(),
+              candidate.activityProjectionVersion());
+      validateHandoff(handoff);
+      return new PreAdmission(
+          handoff,
+          new AdmissionDecision(state, code),
+          payload.path("replay").booleanValue(),
+          payload.path("handoffPending").booleanValue());
+    } catch (JsonProcessingException | IllegalArgumentException exception) {
+      throw new AdmissionIndeterminateException(
+          "Redis-first admission result is unreadable", exception);
+    }
+  }
+
+  private static void validateHandoff(AdmissionHandoff handoff) {
+    if (handoff == null
+        || !hasText(handoff.reservationId(), 36)
+        || !hasText(handoff.userSubject(), 128)
+        || !hasText(handoff.activityId(), 64)
+        || !hasText(handoff.idempotencyKey(), 128)
+        || handoff.intentHash() == null
+        || !handoff.intentHash().matches("[0-9a-f]{64}")
+        || handoff.quantity() < 1
+        || handoff.activityProjectionVersion() < 1
+        || handoff.activityProjectionVersion() > SeckillLuaNumber.MAX_EXACT_INTEGER) {
+      throw new IllegalArgumentException("Admission handoff is invalid");
+    }
+    try {
+      UUID.fromString(handoff.reservationId());
+    } catch (IllegalArgumentException exception) {
+      throw new IllegalArgumentException("Admission handoff reservation id is invalid", exception);
+    }
+  }
+
+  private static boolean hasText(String value, int maximumLength) {
+    return value != null
+        && !value.isBlank()
+        && value.length() <= maximumLength
+        && value.equals(value.strip());
+  }
+
   public AdmissionDecision decide(
       SeckillReservation reservation, SeckillActivity activity, String userHash) {
     SeckillLuaNumber.requirePositiveExact(activity.allocatedQuota(), "Allocated quota");
@@ -641,6 +1115,30 @@ public final class ReservationAdmissionStore {
     return USER_PREFIX + activityId + ":" + userHash;
   }
 
+  public String intentKey(String activityId, String userHash, String idempotencyKey) {
+    String canonical =
+        activityId.length()
+            + ":"
+            + activityId
+            + ":"
+            + userHash.length()
+            + ":"
+            + userHash
+            + ":"
+            + idempotencyKey.length()
+            + ":"
+            + idempotencyKey;
+    return INTENT_PREFIX + SeckillReservationService.sha256(canonical);
+  }
+
+  public String handoffKey(String reservationId) {
+    return HANDOFF_PREFIX + reservationId;
+  }
+
+  public String activityHandoffKey(String activityId) {
+    return ACTIVITY_HANDOFF_PREFIX + activityId;
+  }
+
   public String rebuildKey(String activityId) {
     return REBUILD_PREFIX + activityId;
   }
@@ -675,6 +1173,30 @@ public final class ReservationAdmissionStore {
   }
 
   public record AdmissionDecision(ReservationState state, ReservationDecisionCode decisionCode) {}
+
+  public record AdmissionHandoff(
+      String reservationId,
+      String userSubject,
+      String activityId,
+      String idempotencyKey,
+      String intentHash,
+      int quantity,
+      long activityProjectionVersion) {}
+
+  public record PreAdmission(
+      AdmissionHandoff handoff,
+      AdmissionDecision decision,
+      boolean replay,
+      boolean handoffPending) {}
+
+  public record AdmissionProjection(
+      String reservationId,
+      String activityId,
+      int quantity,
+      long activityProjectionVersion,
+      ReservationState state,
+      ReservationDecisionCode decisionCode,
+      boolean handoffPending) {}
 
   public enum RebuildResult {
     APPLIED,

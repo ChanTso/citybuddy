@@ -75,23 +75,23 @@ public final class RocketMqSeckillTransactions implements AutoCloseable {
   }
 
   public ReservationResult submit(
-      SeckillReservation reservation, SeckillReservationService reservationService)
+      ReservationAdmissionStore.AdmissionHandoff handoff,
+      SeckillReservationService reservationService)
       throws ClientException {
-    SeckillTransactionMessage payload = SeckillTransactionMessage.from(reservation);
+    SeckillTransactionMessage payload = SeckillTransactionMessage.from(handoff);
     Message message = message(payload);
     Transaction transaction = producer.beginTransaction();
     producer.send(message, transaction);
-    ReservationResult result = reservationService.admit(reservation.reservationId());
+    ReservationResult result = reservationService.persistAdmitted(handoff);
+    boolean committed = false;
     try {
-      if (result.state() == ReservationState.ADMITTED) {
-        transaction.commit();
-      } else if (result.state() == ReservationState.REJECTED) {
-        transaction.rollback();
-      } else {
-        throw new IllegalStateException("Lua decision did not produce a terminal marker");
-      }
+      transaction.commit();
+      committed = true;
     } catch (ClientException exception) {
       // The checker reads the durable MySQL reservation after an uncertain second phase.
+    }
+    if (committed) {
+      reservationService.completeAdmissionHandoff(handoff);
     }
     return result;
   }
