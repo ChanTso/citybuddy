@@ -532,9 +532,9 @@ class SeckillTransactionIntegrationTest {
             reservationRepository.find(legacyPending.reservationId()).orElseThrow(),
             ReservationState.ADMITTED,
             ReservationDecisionCode.ADMITTED);
-    orderService.create(
-        SeckillTransactionMessage.from(
-            reservationRepository.find(canonical.reservationId()).orElseThrow()));
+    assertThat(consumeEventually()).isEqualTo(1);
+    assertThat(reservationRepository.find(canonical.reservationId()).orElseThrow().state())
+        .isEqualTo(ReservationState.ORDERED);
     orderService.create(SeckillTransactionMessage.from(legacyAdmitted));
     assertThat(reservationRepository.find(legacyAdmitted.reservationId()).orElseThrow().state())
         .isEqualTo(ReservationState.UNFULFILLED);
