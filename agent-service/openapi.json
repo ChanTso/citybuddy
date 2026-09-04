@@ -103,7 +103,8 @@
                         "action_completed",
                         "action_clarification",
                         "action_declined",
-                        "action_expired"
+                        "action_expired",
+                        "action_rejected"
                       ]
                     },
                     "citations": {
@@ -335,7 +336,8 @@
               "action_completed",
               "action_clarification",
               "action_declined",
-              "action_expired"
+              "action_expired",
+              "action_rejected"
             ]
           }
         }
@@ -404,6 +406,7 @@
               "action_clarification",
               "action_declined",
               "action_expired",
+              "action_rejected",
               "failed"
             ]
           },
@@ -444,6 +447,7 @@
               "ACTION_PREPARED",
               "ACTION_DECLINED",
               "ACTION_EXPIRED",
+              "ACTION_REJECTED",
               "AGENT_OUTCOME",
               "ASSISTANT_RESPONSE",
               "TURN_COMPLETED",

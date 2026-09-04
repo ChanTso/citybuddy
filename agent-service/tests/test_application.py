@@ -25,6 +25,7 @@ from citybuddy_agent.actions import (
 )
 from citybuddy_agent.agent_control import (
     EMPTY_CONVERSATION_HISTORY,
+    ActionConfirmationRejected,
     AgentEvent,
     AgentRunner,
     AgentRunResult,
@@ -301,6 +302,24 @@ class MemoryConversationStore(ConversationStore):
         )
         return replace(result, receipt_id=receipt.receipt_id)
 
+    def complete_action_rejected(
+        self,
+        *,
+        start: TurnStart,
+        pending: PendingActionReference,
+        response_text: str,
+    ) -> ConversationResult:
+        if self.action_state != "CONFIRMING":
+            raise ActionArbitrationConflictError
+        self.action_pending = None
+        self.action_state = "REJECTED"
+        return self.complete_turn(
+            start=start,
+            response_text=response_text,
+            outcome="action_rejected",
+            events=(),
+        )
+
     def fail_turn(self, *, start: TurnStart, failure_code: str) -> None:
         self.failures.append((start.turn_id, failure_code))
         for key, pending in tuple(self.pending.items()):
@@ -513,6 +532,7 @@ def test_action_request_failure_producer_inventory_is_closed() -> None:
         "ACTION_CONFIRMATION_COMMERCE_FORBIDDEN",
         "ACTION_CONFIRMATION_TARGET_NOT_FOUND",
         "ACTION_CONFIRMATION_INTENT_CONFLICT",
+        "ACTION_CONFIRMATION_DURABLE_TRUTH_INCONSISTENT",
         "ACTION_CONFIRMATION_COMMERCE_UNAVAILABLE",
         "ACTION_CONFIRMATION_COMMERCE_TIMEOUT",
         "ACTION_CONFIRMATION_COMMERCE_INDETERMINATE",
@@ -2065,6 +2085,76 @@ class FailingConfirmer:
         )
 
 
+class RejectingConfirmer:
+    def __init__(self) -> None:
+        self.calls = 0
+
+    def confirm_action(
+        self,
+        *,
+        pending: PendingActionReference,
+        direct_token: str,
+        subject: str,
+        session_id: str,
+        sandbox_id: str | None,
+        budget: AttemptBudget,
+        events: list[AgentEvent],
+    ) -> ActionReceiptResponse:
+        del pending, direct_token, subject, session_id, sandbox_id, budget, events
+        self.calls += 1
+        raise ActionConfirmationRejected(reason="ACTION_CONFIRMATION_INTENT_CONFLICT")
+
+
+def test_deterministic_commerce_rejection_closes_claim_and_replays_stored_turn() -> None:
+    private, public_jwk = key_fixture("current-key")
+    sessions = MemorySessionStore()
+    session_id = sessions.create("user-123")
+    conversations = MemoryConversationStore(sessions)
+    confirmer = RejectingConfirmer()
+    client = TestClient(
+        create_app(
+            settings(),
+            validator=DirectJwtValidator(settings(), CountingJwksSource([public_jwk])),
+            sessions=sessions,
+            conversations=conversations,
+            agent=PreparedActionAgent(),
+            confirmer=confirmer,
+        )
+    )
+    headers = {
+        "Authorization": f"Bearer {direct_token(private, 'current-key')}",
+        "X-Session-Id": session_id,
+    }
+    client.post(
+        "/api/chat",
+        headers={**headers, "Idempotency-Key": "prepare"},
+        json={"message": "prepare refund"},
+    )
+
+    rejected = client.post(
+        "/api/chat",
+        headers={**headers, "Idempotency-Key": "confirm"},
+        json={"message": "confirm"},
+    )
+    replay = client.post(
+        "/api/chat",
+        headers={**headers, "Idempotency-Key": "confirm"},
+        json={"message": "confirm"},
+    )
+
+    assert rejected.status_code == 200
+    assert rejected.json()["outcome"] == "action_rejected"
+    assert rejected.json()["receiptId"] is None
+    assert rejected.json()["reply"] == (
+        "Commerce rejected the prepared action and returned no action receipt."
+    )
+    assert replay.content == rejected.content
+    assert conversations.action_state == "REJECTED"
+    assert conversations.action_pending is None
+    assert conversations.claims == 1
+    assert confirmer.calls == 1
+
+
 def test_a_claimed_action_cannot_be_declined_or_expired_out_from_under_commerce() -> None:
     """Commerce may already hold the refund, so nothing may record that it did not happen."""
     private, public_jwk = key_fixture("current-key")
@@ -2768,6 +2858,16 @@ def test_chat_redacts_mysql_failure() -> None:
             response_text: str,
         ) -> ConversationResult:
             del start, pending, receipt, response_text
+            raise AssertionError("unreachable")
+
+        def complete_action_rejected(
+            self,
+            *,
+            start: TurnStart,
+            pending: PendingActionReference,
+            response_text: str,
+        ) -> ConversationResult:
+            del start, pending, response_text
             raise AssertionError("unreachable")
 
         def fail_turn(self, *, start: TurnStart, failure_code: str) -> None:

@@ -313,6 +313,7 @@ TOOL_BOUNDARY_FAILURE_REASONS = frozenset(
         "ACTION_CONFIRMATION_COMMERCE_FORBIDDEN",
         "ACTION_CONFIRMATION_TARGET_NOT_FOUND",
         "ACTION_CONFIRMATION_INTENT_CONFLICT",
+        "ACTION_CONFIRMATION_DURABLE_TRUTH_INCONSISTENT",
         "ACTION_CONFIRMATION_COMMERCE_UNAVAILABLE",
         "ACTION_CONFIRMATION_COMMERCE_TIMEOUT",
         "ACTION_CONFIRMATION_COMMERCE_INDETERMINATE",
@@ -332,6 +333,19 @@ class ToolBoundaryFailure(Exception):
         self.status_code = status_code
         self.reason = reason
         self.detail = detail
+
+
+class ActionConfirmationRejected(Exception):
+    """A strict Commerce 409 that can durably resolve the local confirmation claim."""
+
+    def __init__(self, *, reason: str) -> None:
+        if reason not in {
+            "ACTION_CONFIRMATION_INTENT_CONFLICT",
+            "ACTION_CONFIRMATION_DURABLE_TRUTH_INCONSISTENT",
+        }:
+            raise ValueError("Unregistered deterministic confirmation rejection")
+        super().__init__("Action confirmation rejected")
+        self.reason = reason
 
 
 @dataclass
@@ -1439,7 +1453,7 @@ class ToolAdapter:
 
         Commerce is idempotent on the PendingAction: a repeat confirm of a consumed action replays
         its committed receipt rather than refunding twice. That is what makes a retry safe after a
-        response is lost, and it is why no local claim state is needed to reach exactly one refund.
+        response is lost and lets a local CONFIRMING claim safely re-enter Commerce.
         """
         budget.charge("identity_http", ACTION_SCOPE)
         try:
@@ -1503,15 +1517,13 @@ class ToolAdapter:
                 detail="Invalid action confirmation response",
             ) from exception
 
+        if response.status_code == 409:
+            raise self._deterministic_confirm_rejection(response)
         if response.status_code != 200:
             reason = self._classify_confirm_rejection(response)
-            # A stale target version, an expired PendingAction, a binding conflict and a
-            # not-owned action are all permanent: reporting them as an unavailable dependency
-            # would invite a retry that can never succeed.
-            if response.status_code in {400, 401, 403, 404, 409, 422}:
-                # A conflict rather than an outage, so the caller is not invited to retry
-                # something that cannot succeed. The public text stays the single fixed string:
-                # which kind of refusal it was is server-only.
+            if response.status_code in {400, 401, 403, 404, 422}:
+                # These remain public typed failures, but they cannot choose local terminal truth:
+                # only the two strict Commerce 409 categories can resolve a claimed reference.
                 raise ToolBoundaryFailure(
                     status_code=409,
                     reason=reason,
@@ -1553,6 +1565,42 @@ class ToolAdapter:
             )
         )
         return receipt
+
+    @staticmethod
+    def _deterministic_confirm_rejection(
+        response: BoundedHttpResponse | httpx.Response,
+    ) -> ActionConfirmationRejected:
+        try:
+            document = strict_json_object(response.content)
+        except ActionJsonError as exception:
+            raise ToolBoundaryFailure(
+                status_code=502,
+                reason="ACTION_CONFIRMATION_RESPONSE_INVALID",
+                detail="Invalid action confirmation response",
+            ) from exception
+        if set(document) != {"category", "message"}:
+            raise ToolBoundaryFailure(
+                status_code=502,
+                reason="ACTION_CONFIRMATION_RESPONSE_INVALID",
+                detail="Invalid action confirmation response",
+            )
+        category = document.get("category")
+        message = document.get("message")
+        if category not in {"CONFLICT", "INCONSISTENT_DURABLE_STATE"} or not (
+            isinstance(message, str) and 1 <= len(message) <= 160
+        ):
+            raise ToolBoundaryFailure(
+                status_code=502,
+                reason="ACTION_CONFIRMATION_RESPONSE_INVALID",
+                detail="Invalid action confirmation response",
+            )
+        return ActionConfirmationRejected(
+            reason=(
+                "ACTION_CONFIRMATION_INTENT_CONFLICT"
+                if category == "CONFLICT"
+                else "ACTION_CONFIRMATION_DURABLE_TRUTH_INCONSISTENT"
+            )
+        )
 
     def _prepare_with_bounded_replay(
         self,

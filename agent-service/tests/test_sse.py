@@ -153,6 +153,10 @@ def test_shared_public_result_validator_rejects_invalid_identity_outcome_and_rec
         ),
         ("action_declined", "The prepared action was declined and was not executed."),
         ("action_expired", "The prepared action expired and was not executed."),
+        (
+            "action_rejected",
+            "Commerce rejected the prepared action and returned no action receipt.",
+        ),
     ],
 )
 def test_filter_projects_cb122_local_action_outcomes_without_receipt(

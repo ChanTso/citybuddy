@@ -104,6 +104,7 @@ OPERATION_LABELS = frozenset(
             OperationOutcome.CONFIRMED,
             OperationOutcome.DECLINED,
             OperationOutcome.EXPIRED,
+            OperationOutcome.REJECTED,
             OperationOutcome.RETRIEVAL_DENIED,
             OperationOutcome.BUDGET_EXHAUSTED,
             OperationOutcome.PROVIDER_DENIED,
@@ -142,6 +143,7 @@ OPERATION_LABELS = frozenset(
             OperationOutcome.CONFLICT,
             OperationOutcome.ERROR,
         )
+        + ((OperationOutcome.REJECTED,) if operation is Operation.PENDING_ACTION_CONFIRM else ())
     }
 )
 FAQ_LABELS = frozenset(

@@ -92,6 +92,10 @@
           "outcome": "confirmed"
         },
         {
+          "operation": "chat_turn",
+          "outcome": "rejected"
+        },
+        {
           "operation": "pending_action_prepare",
           "outcome": "success"
         },
@@ -166,6 +170,10 @@
         {
           "operation": "pending_action_confirm",
           "outcome": "confirmed"
+        },
+        {
+          "operation": "pending_action_confirm",
+          "outcome": "rejected"
         },
         {
           "operation": "pending_action_confirm",
@@ -297,6 +305,10 @@
           "outcome": "confirmed"
         },
         {
+          "operation": "chat_turn",
+          "outcome": "rejected"
+        },
+        {
           "operation": "pending_action_prepare",
           "outcome": "success"
         },
@@ -371,6 +383,10 @@
         {
           "operation": "pending_action_confirm",
           "outcome": "confirmed"
+        },
+        {
+          "operation": "pending_action_confirm",
+          "outcome": "rejected"
         },
         {
           "operation": "pending_action_confirm",

@@ -25,6 +25,7 @@ from .actions import ConfirmationDecision, confirmation_decision
 from .agent_control import (
     MAX_USER_MESSAGE_CHARACTERS,
     TOOL_BOUNDARY_FAILURE_REASONS,
+    ActionConfirmationRejected,
     ActionConfirmer,
     AgentEvent,
     AgentRunner,
@@ -954,6 +955,32 @@ def _create_app(
                                 budget=AttemptBudget(resolved.attempt_budget, confirm_events),
                                 events=confirm_events,
                             )
+                        except ActionConfirmationRejected as rejection:
+                            record_action_request_failure(rejection.reason)
+                            try:
+                                result = resolved_conversations.complete_action_rejected(
+                                    start=start,
+                                    pending=pending,
+                                    response_text=(
+                                        "Commerce rejected the prepared action and returned no "
+                                        "action receipt."
+                                    ),
+                                )
+                            except ActionArbitrationConflictError:
+                                local_observation.outcome = OperationOutcome.CONFLICT
+                                raise
+                            except ConversationIntegrityError:
+                                local_observation.outcome = OperationOutcome.CONFLICT
+                                raise
+                            except pymysql.MySQLError as exception:
+                                local_observation.outcome = OperationOutcome.UNAVAILABLE
+                                raise ToolBoundaryFailure(
+                                    status_code=503,
+                                    reason="ACTION_CONFIRMATION_PERSISTENCE_UNAVAILABLE",
+                                    detail="Service unavailable",
+                                ) from exception
+                            local_observation.outcome = OperationOutcome.REJECTED
+                            return result
                         except ToolBoundaryFailure as failure:
                             local_observation.outcome = OperationOutcome.UNAVAILABLE
                             record_action_request_failure(failure.reason)
@@ -1132,6 +1159,7 @@ def _create_app(
                     "action_pending": OperationOutcome.PENDING,
                     "action_clarification": OperationOutcome.CLARIFICATION,
                     "action_completed": OperationOutcome.CONFIRMED,
+                    "action_rejected": OperationOutcome.REJECTED,
                     "action_declined": OperationOutcome.DECLINED,
                     "action_expired": OperationOutcome.EXPIRED,
                     "retrieval_denied": OperationOutcome.RETRIEVAL_DENIED,
