@@ -1,0 +1,11 @@
+citybuddy_commit=9157b91cf67f41e910b04c2a4e6fd75e204acdd4
+sut_commit=9157b91cf67f41e910b04c2a4e6fd75e204acdd4
+benchmark_harness_commit=9157b91cf67f41e910b04c2a4e6fd75e204acdd4
+
+=== obo_bcrypt_after_20260903 (30s steps) ===
+rate nominal_offered started finished served nonserved dropped interrupted 5xx errors finished/s p50_ms p95_ms p99_ms max_ms
+5 150 151 151 151 0 0 0 0 0 5.03 30.0 40.6 69.4 430.5
+10 300 301 301 301 0 0 0 0 0 10.03 21.8 28.8 36.2 42.0
+15 450 451 451 451 0 0 0 0 0 15.03 17.2 23.0 29.9 41.6
+20 600 600 600 600 0 0 0 0 0 20.00 15.2 23.8 29.1 43.0
+30 900 901 901 901 0 0 0 0 0 30.03 13.2 22.3 29.3 45.2

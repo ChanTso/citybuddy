@@ -150,13 +150,16 @@ ENV_FILE="$env_file" ./scripts/init_local.sh
 auth_app_password="$(read_value MYSQL_AUTH_APP_PASSWORD)"
 commerce_app_password="$(read_value MYSQL_COMMERCE_APP_PASSWORD)"
 agent_app_password="$(read_value MYSQL_AGENT_APP_PASSWORD)"
-commerce_service_password="$(openssl rand -hex 24)"
-evaluator_password="$(openssl rand -hex 24)"
-agent_service_password="$(openssl rand -hex 24)"
+commerce_service_password="$(uv run python scripts/service_credential.py generate)"
+evaluator_password="$(uv run python scripts/service_credential.py generate)"
+agent_service_password="$(uv run python scripts/service_credential.py generate)"
 production_user_password="$(openssl rand -hex 24)"
-commerce_service_hash="$(uv run python scripts/hash_test_credential.py "$commerce_service_password")"
-evaluator_hash="$(uv run python scripts/hash_test_credential.py "$evaluator_password")"
-agent_service_hash="$(uv run python scripts/hash_test_credential.py "$agent_service_password")"
+commerce_service_hash="$(printf '%s' "$commerce_service_password" \
+  | uv run python scripts/service_credential.py hash commerce-service)"
+evaluator_hash="$(printf '%s' "$evaluator_password" \
+  | uv run python scripts/service_credential.py hash evaluation-client)"
+agent_service_hash="$(printf '%s' "$agent_service_password" \
+  | uv run python scripts/service_credential.py hash agent-service)"
 production_user_hash="$(uv run python scripts/hash_test_credential.py "$production_user_password")"
 
 "${compose[@]}" up --detach --wait --wait-timeout 60 mysql

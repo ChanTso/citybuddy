@@ -77,7 +77,13 @@ class AuthIdentityTest {
     keys = new AuthKeySet(properties, clock);
     controller =
         new AuthController(
-            repository, keys, passwordEncoder, properties, new MockEnvironment(), clock);
+            repository,
+            keys,
+            passwordEncoder,
+            new ServiceCredentialVerifier(passwordEncoder),
+            properties,
+            new MockEnvironment(),
+            clock);
   }
 
   @Test

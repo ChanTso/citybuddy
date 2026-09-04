@@ -26,6 +26,11 @@ public class IdentityConfiguration {
   }
 
   @Bean
+  ServiceCredentialVerifier serviceCredentialVerifier(PasswordEncoder identityPasswordEncoder) {
+    return new ServiceCredentialVerifier(identityPasswordEncoder);
+  }
+
+  @Bean
   AuthRepository authRepository(JdbcClient jdbcClient) {
     return new AuthRepository(jdbcClient);
   }

@@ -215,23 +215,32 @@ direct-user downgrade.
 
 ### 4.2 Agent OBO
 
-5. Conversation and public FAQ paths do not acquire commerce authority. On the first internal
-   commerce tool call, `agent-service` requests a short-lived OBO just in time.
+5. Conversation and public FAQ paths do not acquire commerce authority. Before an internal
+   commerce tool invocation, `agent-service` requests a short-lived OBO just in time.
 6. `POST /api/sessions` is the only support-session bootstrap. It requires a direct user JWT;
    `agent-service` generates an opaque session id and binds it to the validated token subject. In
    evaluation it also binds the sandbox context. The client cannot choose the owner. Wrong token
    type, cross-user substitution, or sandbox mismatch rejects. `X-Session-Id` identifies this
    support session, not a login-token session, and every use is rechecked against the validated user
    and sandbox context in `cs_db`.
-7. On first tool use, `agent-service` submits the validated user JWT, its independently
+7. For that tool invocation, `agent-service` submits the validated user JWT, its independently
    authenticated service credential, the verified support-session binding, and the exact
    server-side ToolSpec scope to token exchange. `auth-service` trusts the authenticated service's
-   session-binding assertion and writes that support session into the OBO.
+   session-binding assertion and writes that support session into the OBO. Service authentication
+   reads current state, scope, and the exact persisted verifier on every exchange. New machine
+   credentials are `cbsvc_v1_` tokens containing 256 CSPRNG bits and store a versioned, client-bound
+   SHA-256 digest; `scripts/service_credential.py` is the provisioning primitive. The digest is safe
+   only for those generated high-entropy tokens, not for human-chosen passwords. Legacy service
+   BCrypt rows remain accepted and execute BCrypt on every request; no successful verifier is
+   cached. Deploying a new binary does not rewrite those rows: obtaining the digest-path behavior
+   requires an explicit `generate` then client-bound `hash` credential rotation. Human login always
+   executes BCrypt directly. New application-generated BCrypt hashes use configured strength 12;
+   verification honors the cost encoded in each persisted hash.
 8. The OBO contains at least an explicit OBO purpose/type, `sub`, `user_id`, support `session`,
    `aud=commerce-service`, exact `scope`, `act.azp=agent-service`, `jti`, `exp`, and applicable
    not-before/issued-at metadata. Scope is fixed by ToolSpec; neither model nor request payload can
-   widen it. Cache keys are limited to `user + support session + exact scope` and never outlive the
-   token.
+   widen it. `jti` is required but is not consumed: the OBO is a bearer token, not a server-enforced
+   single-use capability, and remains subject to every validation above until expiry.
 9. `commerce-service` accepts internal tool identity only from the validated OBO. It validates
    signature, fixed issuer, OBO purpose/type, audience, exact required scope, actor, user subject,
    support session, expiry/not-before/skew, and resource ownership. It never trusts identity fields

@@ -27,6 +27,7 @@ public final class AuthController {
   private final AuthRepository repository;
   private final AuthKeySet keys;
   private final PasswordEncoder passwordEncoder;
+  private final ServiceCredentialVerifier serviceCredentialVerifier;
   private final IdentityProperties properties;
   private final Clock clock;
   private final boolean evaluationProfile;
@@ -35,12 +36,14 @@ public final class AuthController {
       AuthRepository repository,
       AuthKeySet keys,
       PasswordEncoder passwordEncoder,
+      ServiceCredentialVerifier serviceCredentialVerifier,
       IdentityProperties properties,
       Environment environment,
       Clock clock) {
     this.repository = repository;
     this.keys = keys;
     this.passwordEncoder = passwordEncoder;
+    this.serviceCredentialVerifier = serviceCredentialVerifier;
     this.properties = properties;
     this.clock = clock;
     this.evaluationProfile = environment.acceptsProfiles(Profiles.of("evaluation"));
@@ -89,7 +92,9 @@ public final class AuthController {
             .filter(candidate -> EXCHANGE_SERVICE.equals(candidate.clientId()))
             .filter(candidate -> "ACTIVE".equals(candidate.state()))
             .filter(
-                candidate -> passwordEncoder.matches(basic.secret(), candidate.credentialHash()))
+                candidate ->
+                    serviceCredentialVerifier.matches(
+                        candidate.clientId(), basic.secret(), candidate.credentialHash()))
             .orElseThrow(() -> new IdentityException(401, "Invalid service credential"));
 
     if (!hasText(request.sessionId())

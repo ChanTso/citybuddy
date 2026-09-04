@@ -13,8 +13,9 @@ no in-memory substitutes and no mocked infrastructure in the integration suite.
 | Boundary | Measured result | Measurement boundary |
 |---|---|---|
 | [Transactional ownership binding](https://github.com/ChanTso/state-eval/tree/main/results/ownership-campaign-v1) | In this fixed 600-trial evaluation, commerce's in-transaction ownership binding reduced unauthorized refund requests observed by independent terminal SQL from 55/300 (18.33%; 95% Wilson CI 14.36%–23.10%) with the binding off to 0/300 (0%; 95% Wilson CI approximately 0%–1.264%) with it on. | 5 phrasings × 2 arms × 60 in 60 balanced randomized blocks (seed `2026083102`); 600/600 planned trials measured, the activation check passed, and operationally inconclusive, interrupted, and extra trial counts were each 0. StateEval `38cdde3aec1c4b8044d535fcdb7a7616dc81722b`; CityBuddy SUT `09130fa3c0209648f98781ff0892c3d07a55e59f`; one operator-attested proxy-exposed `gpt-5.4` alias, not an immutable upstream model pin; two 100-trial calibration runs excluded. |
-| [Seckill reservation contention](bench/README.md#finding-and-fix-the-serializing-lock-was-also-suppressing-a-deadlock) | The pre-fix 32-activity ladder logged roughly 6,200 deadlock events; the fixed run logged 0. At the 800 req/s target, 12,003 admissions completed at 799.9 req/s with p99 39.4 ms and 0 drops or failed requests. | One MacBook Pro M4 (10 cores, 24 GB), Docker Desktop (8 CPUs, 14 GB), authenticated requests across Redis Lua and real MySQL transactions; 32 activities, a 15 s fixed-arrival-rate step, setup excluded. This is a local workload result, not a capacity claim. |
-| [Concurrent standard-order creation](bench/results/order_idempotency_parallel_creation_fix.txt) | Four workers created 6,000/6,000 distinct orders with 6,000 matched idempotency rows and outbox events, 0 orphan idempotency rows, and MySQL 1205/1213 counter deltas of 0. | One Apple M4 (10 cores, 24 GB), Docker (8 CPUs, 14 GB), real MySQL 8.4.10; 6,000 unique users and order intents. The 16.9 s window included per-user login and `POST /api/orders`; seeding and service startup were excluded. |
+| [Seckill reservation contention](bench/README.md#finding-and-fix-the-serializing-lock-was-also-suppressing-a-deadlock) | The pre-fix 32-activity ladder logged roughly 6,200 deadlock events; the fixed run logged 0. At the 800 req/s target, 12,003 admissions completed at 799.9 req/s with p99 39.4 ms and 0 drops or failed requests. | One MacBook Pro M4 (10 cores, 24 GB), Docker Desktop (8 CPUs, 14 GB), Commerce limited to 4 CPUs, authenticated requests across Redis Lua and real MySQL transactions; 32 activities, a 15 s fixed-arrival-rate step, setup excluded. This is a local workload result, not a capacity claim. |
+| [Concurrent standard-order creation](bench/results/order_idempotency_parallel_creation_fix.txt) | Four workers created 6,000/6,000 distinct orders with 6,000 matched idempotency rows and outbox events, 0 orphan idempotency rows, and MySQL 1205/1213 counter deltas of 0. | One Apple M4 (10 cores, 24 GB), Docker (8 CPUs, 14 GB), real MySQL 8.4.10; 6,000 unique users and order intents. The 16.9 s fixture window included 6,000 logins using a shared BCrypt cost-4 fixture hash plus `POST /api/orders`; production login uses BCrypt cost 12, so this is not a default-auth performance result. Seeding and service startup were excluded. |
+| [Repeated OBO credential verification](bench/agent/README.md#repeated-obo-service-credential-verification) | At 30 requests/s, the BCrypt cost-12 fixture served 803 requests, dropped 98, had p50 4,139.8 ms, and put auth at 694.42% median container CPU. After rotating that machine identity to a generated 256-bit credential with a client-bound digest, 901/901 requests were served with 0 drops, p50 13.4 ms, and auth at 4.30%. | Paired source-clean commits on one MacBook Pro M4, Docker 8 CPUs, one Agent worker, shared outbound clients, deterministic zero-inference fixture, fresh setup per side, fixed 5→30 requests/s order, one 30-second step per rate. Human passwords and unrotated legacy service identities still execute BCrypt using the cost encoded in each stored hash. This is a local counterfactual, not a capacity claim. |
 
 ```mermaid
 flowchart LR
@@ -22,7 +23,7 @@ flowchart LR
     W -->|direct-user JWT| A[agent-service]
     W -->|direct-user JWT| C[commerce-service]
     A -->|exchange| AU[auth-service]
-    AU -->|OBO token, one tool call,<br/>exact scope| A
+    AU -->|short-lived bearer OBO,<br/>minted for one invocation,<br/>exact scope| A
     A -->|OBO token| C
     A -.->|prose, never authority| U
     C ==>|PendingAction, ActionReceipt| M[(MySQL commerce_db)]
@@ -73,9 +74,9 @@ agent-evaluation, and database-oracle work is catalogued in its
 ## What is worth reading here
 
 - **Delegated identity.** RS256 login and JWKS publication, plus just-in-time token exchange
-  that mints an exact-scope on-behalf-of token per tool call. The OBO token binds `act.azp`,
-  the user subject, the server-owned support session, and resource ownership; commerce rejects
-  body-level identity substitution. See the
+  that mints a short-lived exact-scope bearer for a tool invocation. It is not a server-enforced
+  one-use token: commerce revalidates `act.azp`, user subject, server-owned support session, exact
+  scope, and resource ownership on every use, and rejects body-level identity substitution. See the
   [identity and authorization contracts](docs/CONTRACTS.md#contract-identity-authorization).
 - **Seckill admission under contention.** Redis Lua performs atomic quota and one-order-per-user
   admission; MySQL holds authoritative reservation, order, inventory, and ledger truth. A
