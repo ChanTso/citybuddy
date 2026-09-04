@@ -14,7 +14,8 @@ export type ReservationState =
   | 'ADMITTED'
   | 'REJECTED'
   | 'ORDERED'
-  | 'CANCELLED';
+  | 'CANCELLED'
+  | 'UNFULFILLED';
 
 export type Reservation = {
   reservationId: string;
@@ -242,6 +243,7 @@ export function decodeReservation(value: unknown): Reservation {
       'REJECTED',
       'ORDERED',
       'CANCELLED',
+      'UNFULFILLED',
     ] as const),
     decisionCode,
     projectionVersion: integerValue(

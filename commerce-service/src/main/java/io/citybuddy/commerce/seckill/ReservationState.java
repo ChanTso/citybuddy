@@ -5,5 +5,6 @@ public enum ReservationState {
   ADMITTED,
   REJECTED,
   ORDERED,
+  UNFULFILLED,
   CANCELLED
 }

@@ -29,16 +29,12 @@ public final class SeckillOrderService {
     this.clock = clock;
   }
 
-  public SeckillOrderRepository.OrderRecord create(SeckillTransactionMessage message) {
+  public void create(SeckillTransactionMessage message) {
     validateMessage(message);
-    SeckillOrderRepository.OrderRecord result = transactions.execute(status -> createOnce(message));
-    if (result == null) {
-      throw new IllegalStateException("Seckill order transaction returned no result");
-    }
-    return result;
+    transactions.executeWithoutResult(status -> createOnce(message));
   }
 
-  private SeckillOrderRepository.OrderRecord createOnce(SeckillTransactionMessage message) {
+  private void createOnce(SeckillTransactionMessage message) {
     SeckillReservation reservation =
         reservations
             .findForUpdate(message.reservationId())
@@ -46,17 +42,14 @@ public final class SeckillOrderService {
     requireMessageMatchesTruth(message, reservation);
     if (reservation.state() == ReservationState.ORDERED
         || reservation.state() == ReservationState.CANCELLED) {
-      return requireExistingOrder(reservation);
+      requireExistingOrder(reservation);
+      return;
+    }
+    if (reservation.state() == ReservationState.UNFULFILLED) {
+      return;
     }
     if (reservation.state() != ReservationState.ADMITTED) {
       throw new IllegalStateException("Committed message has no admitted reservation truth");
-    }
-
-    var existingByReservation = orders.findByReservation(reservation.reservationId());
-    var existingByUser =
-        orders.findByActivityUser(reservation.activityId(), reservation.userSubject());
-    if (existingByReservation.isPresent() || existingByUser.isPresent()) {
-      throw new IllegalStateException("Seckill order exists without its atomic reservation state");
     }
 
     SeckillActivity activity =
@@ -67,12 +60,22 @@ public final class SeckillOrderService {
         orders
             .findProductForUpdate(activity.productId())
             .orElseThrow(() -> new IllegalStateException("Seckill product truth is missing"));
+    var existingByReservation = orders.findByReservation(reservation.reservationId());
+    var existingByUser =
+        orders.findByActivityUser(reservation.activityId(), reservation.userSubject());
+    if (existingByReservation.isPresent()) {
+      throw new IllegalStateException("Seckill order exists without its atomic reservation state");
+    }
+    if (existingByUser.isPresent()) {
+      reservations.markUnfulfilled(reservation);
+      return;
+    }
     if (!"PUBLISHED".equals(product.publicationState()) || !product.available()) {
       throw new IllegalStateException("Seckill product is not orderable");
     }
     if (product.stockQuantity() < reservation.quantity()) {
-      throw new IllegalStateException(
-          "Authoritative inventory cannot satisfy admitted reservation");
+      reservations.markUnfulfilled(reservation);
+      return;
     }
 
     String orderId = UUID.randomUUID().toString();
@@ -103,7 +106,6 @@ public final class SeckillOrderService {
     orders.insertOrder(order);
     orders.insertOrderCreateMovement(order);
     reservations.markOrdered(reservation, orderId);
-    return order;
   }
 
   private SeckillOrderRepository.OrderRecord requireExistingOrder(SeckillReservation reservation) {

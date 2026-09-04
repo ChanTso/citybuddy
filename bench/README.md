@@ -6,8 +6,23 @@ Local measurement of the CityBuddy seckill path: correctness under contention fi
 component and full-path throughput. Every number here was produced by the scripts in this
 directory against the real local topology, and the raw tool output is in `results/`.
 
-The k6 per-request point streams (~100 MB per run) are not committed; the k6 console summaries,
-the summary exports, and the per-step analysis derived from those streams are.
+Historical k6 per-request point streams (~100 MB per run) were not committed; their console
+summaries, summary exports and per-step analysis were. The Redis-first fixed-load bundles below
+also retain losslessly compressed point streams.
+
+## Redis-first fixed-load rejection result
+
+The [2026-09-04 comparison](results/redis_first_fixed_load_20260904.md) completed an ABBA
+sequence at 800 offered requests/s across 32 already-sold-out activities. Both repeats improved
+rejection p99 beyond the pre-registered within-arm variation: **205.7–241.0 ms → 2.66–3.04 ms**,
+with zero dropped iterations in all four windows. Each window used the same fixed 256-request
+preparation; no early seconds were discarded. This is a local rejection-entry result, not
+successful-order capacity. The plentiful-admission comparison remained incomplete, so the
+added admission-path performance cost is unquantified. The report retains every window, CPU
+regression, source revision, raw point stream and the earlier failed experiment.
+
+The tradeoff is to reject in Redis before business MySQL/MQ, while retaining complete admission
+decision inputs in the projection and a pending handoff/recovery path for admitted work.
 
 ## Environment
 
@@ -28,8 +43,10 @@ the shape of the curve and where the ceiling comes from, not the absolute number
    is established first and is unaffected by whatever the throughput numbers turn out to be.
 2. **Setup is excluded.** Users, activities, tokens, and logins are created before measurement.
    The token pool is sized larger than the total iteration count so that no user is reused —
-   a reused user is rejected by the one-order-per-user rule and would stop exercising the
-   admission path.
+   an already-admitted user can be rejected by the one-order-per-user rule and stop exercising
+   admission. An EXHAUSTED rejection does not install that admitted-user marker; this explanation
+   does not apply to reusing a previously exhausted user. The fixed-load comparison above uses
+   distinct users/keys regardless and defines its sold-out workload separately.
 3. **Steps, not a continuous ramp.** Each rate is its own `constant-arrival-rate` scenario with a
    fixed steady-state window, so percentiles come from a constant arrival rate. The open-model
    executor keeps request generation independent of server response time.

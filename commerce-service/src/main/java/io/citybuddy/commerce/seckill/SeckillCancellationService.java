@@ -11,6 +11,7 @@ public final class SeckillCancellationService {
   private final SeckillOrderRepository orders;
   private final SeckillReservationRepository reservations;
   private final SeckillActivityRepository activities;
+  private final ReservationAdmissionStore admissionStore;
   private final QuotaRestorationPublisher projections;
   private final TransactionTemplate transactions;
   private final Clock clock;
@@ -19,25 +20,58 @@ public final class SeckillCancellationService {
       SeckillOrderRepository orders,
       SeckillReservationRepository reservations,
       SeckillActivityRepository activities,
+      ReservationAdmissionStore admissionStore,
       QuotaRestorationPublisher projections,
       TransactionTemplate transactions,
       Clock clock) {
     this.orders = orders;
     this.reservations = reservations;
     this.activities = activities;
+    this.admissionStore = admissionStore;
     this.projections = projections;
     this.transactions = transactions;
     this.clock = clock;
   }
 
   public CancellationResult cancel(SeckillTimeoutMessage message) {
-    CancellationTruth truth = transactions.execute(status -> cancelOnce(requireMessage(message)));
+    SeckillTimeoutMessage valid = requireMessage(message);
+    SeckillReservation reservation = reservations.find(valid.reservationId()).orElse(null);
+    if (reservation == null) {
+      return result(transactions.execute(status -> cancelOnce(valid)));
+    }
+    String activityId = reservation.activityId();
+    String fence = admissionStore.acquireRebuild(activityId);
+    try {
+      if (admissionStore.hasPendingHandoff(activityId)) {
+        throw new ReservationAdmissionStore.AdmissionIndeterminateException(
+            "Pending admission handoff prevents cancellation");
+      }
+      String suspended = admissionStore.suspendProjection(activityId, fence);
+      final CancellationTruth truth;
+      try {
+        truth = transactions.execute(status -> cancelOnce(valid));
+      } catch (IllegalArgumentException | IllegalStateException exception) {
+        admissionStore.restoreSuspendedProjection(activityId, fence, suspended);
+        throw exception;
+      }
+      if (truth == null) {
+        admissionStore.restoreSuspendedProjection(activityId, fence, suspended);
+        throw new IllegalStateException("Seckill cancellation transaction returned no result");
+      }
+      if (truth.activity() == null) {
+        admissionStore.restoreSuspendedProjection(activityId, fence, suspended);
+      } else {
+        projections.publish(truth.activity(), truth.remainingQuota());
+      }
+      return result(truth);
+    } finally {
+      admissionStore.releaseRebuild(activityId, fence);
+    }
+  }
+
+  private static CancellationResult result(CancellationTruth truth) {
     if (truth == null) {
       throw new IllegalStateException("Seckill cancellation transaction returned no result");
-    }
-    if (truth.activity() != null) {
-      projections.restore(
-          truth.activity(), truth.targetProjectionVersion(), truth.restoredQuantity());
     }
     return new CancellationResult(truth.outcome(), truth.retryAfter());
   }
@@ -57,7 +91,7 @@ public final class SeckillCancellationService {
     }
     if (clock.instant().isBefore(order.unpaidDeadline())) {
       Duration untilDue = Duration.between(clock.instant(), order.unpaidDeadline());
-      return new CancellationTruth(Outcome.EARLY, null, 0, 0, boundedRetry(untilDue));
+      return new CancellationTruth(Outcome.EARLY, null, 0, boundedRetry(untilDue));
     }
 
     SeckillReservation reservation =
@@ -87,8 +121,10 @@ public final class SeckillCancellationService {
     SeckillActivity advanced = activities.advanceProjectionVersion(activity);
     orders.markCancelled(order, advanced.projectionVersion());
     reservations.markCancelled(reservation);
-    return new CancellationTruth(
-        Outcome.CANCELLED, advanced, advanced.projectionVersion(), order.quantity(), Duration.ZERO);
+    long remainingQuota =
+        Math.subtractExact(
+            advanced.allocatedQuota(), reservations.admittedQuantity(advanced.activityId()));
+    return new CancellationTruth(Outcome.CANCELLED, advanced, remainingQuota, Duration.ZERO);
   }
 
   private CancellationTruth existingCancellation(SeckillOrderRepository.OrderRecord order) {
@@ -106,12 +142,11 @@ public final class SeckillCancellationService {
         activities
             .findForUpdate(order.activityId())
             .orElseThrow(() -> new IllegalStateException("Seckill activity truth is missing"));
+    long remainingQuota =
+        Math.subtractExact(
+            activity.allocatedQuota(), reservations.admittedQuantity(activity.activityId()));
     return new CancellationTruth(
-        Outcome.ALREADY_CANCELLED,
-        activity,
-        order.cancellationProjectionVersion(),
-        order.quantity(),
-        Duration.ZERO);
+        Outcome.ALREADY_CANCELLED, activity, remainingQuota, Duration.ZERO);
   }
 
   private static SeckillTimeoutMessage requireMessage(SeckillTimeoutMessage message) {
@@ -166,17 +201,13 @@ public final class SeckillCancellationService {
 
   @FunctionalInterface
   public interface QuotaRestorationPublisher {
-    void restore(SeckillActivity activity, long targetProjectionVersion, long restoredQuantity);
+    void publish(SeckillActivity activity, long remainingQuota);
   }
 
   private record CancellationTruth(
-      Outcome outcome,
-      SeckillActivity activity,
-      long targetProjectionVersion,
-      long restoredQuantity,
-      Duration retryAfter) {
+      Outcome outcome, SeckillActivity activity, long remainingQuota, Duration retryAfter) {
     static CancellationTruth of(Outcome outcome) {
-      return new CancellationTruth(outcome, null, 0, 0, Duration.ZERO);
+      return new CancellationTruth(outcome, null, 0, Duration.ZERO);
     }
   }
 }

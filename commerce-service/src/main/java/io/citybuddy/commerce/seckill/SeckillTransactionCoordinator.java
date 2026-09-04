@@ -14,19 +14,26 @@ public final class SeckillTransactionCoordinator {
 
   public ReservationResult submit(
       String userSubject, String activityId, String idempotencyKey, ReservationRequest request) {
-    SeckillReservationService.PreparedReservation prepared =
-        reservations.prepare(userSubject, activityId, idempotencyKey, request);
-    if (prepared.reservation().state() != ReservationState.PENDING) {
-      return ReservationResult.from(prepared.reservation(), true);
-    }
     try {
-      ReservationResult result = messaging.submit(prepared.reservation(), reservations);
-      return prepared.existing() ? result.asReplay() : result;
+      ReservationAdmissionStore.PreAdmission admission =
+          reservations.preAdmit(userSubject, activityId, idempotencyKey, request);
+      if (admission.decision().state() == ReservationState.REJECTED) {
+        return reservations.preAdmissionResult(admission);
+      }
+      if (admission.replay() && !admission.handoffPending()) {
+        return reservations.pollOwned(userSubject, admission.handoff().reservationId()).asReplay();
+      }
+      ReservationResult result = messaging.submit(admission.handoff(), reservations);
+      return admission.replay() ? result.asReplay() : result;
     } catch (ReservationAdmissionStore.AdmissionIndeterminateException exception) {
-      return reservations.pollOwned(userSubject, prepared.reservation().reservationId()).asReplay();
+      throw new SeckillRequestException(503, "UNAVAILABLE", "Transaction admission is unavailable");
     } catch (ClientException exception) {
       throw new SeckillRequestException(503, "UNAVAILABLE", "Transaction admission is unavailable");
     }
+  }
+
+  public void recover(ReservationAdmissionStore.AdmissionHandoff handoff) throws ClientException {
+    messaging.submit(handoff, reservations);
   }
 
   public ReservationResult poll(String userSubject, String reservationId) {
