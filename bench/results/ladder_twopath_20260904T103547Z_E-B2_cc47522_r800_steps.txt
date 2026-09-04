@@ -1,0 +1,13 @@
+citybuddy_commit=cc47522b2fe782c07fc7c0d76256a475eb4fcb35
+setup_window_utc=2026-09-04T11:21:15Z/2026-09-04T11:21:59Z
+run_started_at_utc=2026-09-04T11:24:35Z
+run_completed_at_utc=2026-09-04T11:25:10Z
+label=twopath_20260904T103547Z_E-B2_cc47522_r800 activities=32 rates=800 step_seconds=30 gap_seconds=0 nominal_iterations=24000
+fixture_users=25000 fixture_activities=32 fixture_quota=1 fixture_stock=2000000 topic_suffix=twopath-20260904T103547Z-E-B2-cc47522
+docker_cpus=8 docker_memory_bytes=14638391296 commerce_cpu_limit=4
+k6_image=grafana/k6@sha256:5221b620a4f874faff6e32ba597aa667c058391fe4898b1c6f6377f062c6cdec
+
+=== twopath_20260904T103547Z_E-B2_cc47522_r800 ===
+ target  nominal     done  dropped  failed  fail %  achieved/s    p50 ms    p95 ms    p99 ms    max ms  decisions
+-----------------------------------------------------------------------------------------------------------------
+    800    24000    24001        0   24001  100.00       800.0       0.3       1.0       2.7      17.9  EXHAUSTED=24001
