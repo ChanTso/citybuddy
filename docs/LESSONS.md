@@ -1,9 +1,10 @@
 # Engineering notes
 
-Problems this project actually hit, what caused them, and what each one changed. Everything here
-was found by running the real thing — real MySQL, real Redis, real Elasticsearch, real RocketMQ,
-most of it under concurrency — and every entry names where the evidence lives. The unabridged
-per-slice record, with a pull-request or commit link on every entry, is in
+Problems this project actually hit, what caused them, and what each one changed. The evidence class
+varies by entry: retained runtime output from real infrastructure, integration regressions, or
+code/schema review followed by a regression. Narrative reconstruction is labelled when the raw
+artifact did not retain the claimed detail. The unabridged per-slice record, with a pull-request or
+commit link on every entry, is in
 [docs/archive/SLICE_LESSONS.md](archive/SLICE_LESSONS.md).
 
 They are grouped by what they taught, not by when they happened.
@@ -12,16 +13,22 @@ They are grouped by what they taught, not by when they happened.
 
 ### The row lock limiting throughput was also hiding a deadlock
 
-A single-activity seckill ladder never deadlocked. Spreading the same ladder across 32 activity
-rows produced a handful of HTTP 500s at 100 and 200 req/s and then 1,803 of them at 400 and 4,390
-at 800 — about 6,200 `Deadlock found when trying to get lock` across the run, every one on
-`INSERT INTO seckill_reservation`.
+The single-activity seckill ladder contained zero HTTP 500 responses but one k6
+`http_req_failed` out of 21,268 requests: an HTTP 409 `DUPLICATE_USER` decision. Spreading the same
+workload shape across 32 activity rows produced 6 HTTP 500s at 100 req/s, 3 at 200, 1,803 at 400
+and 4,390 at 800: 6,202 failures out of 23,254 whole-ladder requests. The retained count artifact
+reports 12,404 `Deadlock found when trying to get lock` text matches, numerically 2 × 6,202, but
+no per-request correlation is retained and its printed minute subtotal does not reconcile. It is
+evidence of the repeated diagnostic and SQL site, not a second exact deadlock-event count. The
+failing statement was `INSERT INTO seckill_reservation`.
 
-`reserveIntent` locked the idempotency row *before* inserting it, with `SELECT … FOR UPDATE` on a
-key that did not exist yet. InnoDB answers that with a gap lock, and gap locks are mutually
-compatible, so every concurrent transaction held one on the same `supremum` pseudo-record. The
-following `INSERT` then needed an insert-intention lock on that gap, which conflicts with the gap
-locks everyone else was holding. A ring, every time.
+The retained InnoDB-status file contains only its deadlock section header; it does not preserve a
+lock graph. The mechanism is reconstructed from the pre-fix code and InnoDB semantics:
+`reserveIntent` performed `SELECT … FOR UPDATE` on an idempotency key that did not exist, which can
+take a gap lock, before the competing `INSERT` needed an insert-intention lock in that gap. Compatible
+gap locks followed by conflicting insert intentions explain the cycle and its disappearance after
+insert-first, but the specific `supremum` record and per-transaction lock holdings are not raw
+retained evidence.
 
 It never appeared with one activity because the transaction's opening `SELECT … FOR UPDATE` on
 `seckill_activity` had already serialized same-activity callers completely — only one transaction
@@ -30,8 +37,10 @@ adding a concurrency dimension removed the cover.
 
 The fix inverts the order: insert first, and let the unique key decide. On `DuplicateKeyException`,
 read the existing row back with `FOR SHARE` and compare the intent hash. Both choices matter, and
-each is a separate lesson below. Failure rate went from 26.67 % to 0.00 %, deadlocks from ~6,200 to
-0, and the top step of the ladder served its full 800 req/s clean.
+each is a separate lesson below. The spread whole-ladder HTTP failure rate went from 6,202/23,254
+(26.67%) to 0/23,256; its retained post-fix commerce-log check found zero matching deadlock
+diagnostic, and the top step served its full 800 req/s schedule clean. No corresponding post-fix
+commerce-log count was retained for the contended run.
 
 **Lock-read-then-insert on a key that may not exist is inherently self-conflicting.** Idempotent
 writes should be adjudicated by the unique constraint. Read-then-insert is only safe when something
@@ -218,9 +227,10 @@ I predicted that removing it would make each turn cheaper without moving the cei
 because the agent was not CPU-bound where it served cleanly. That was wrong. One process-wide
 client moved the plain-chat knee from 50 req/s at p99 50.1 ms to 75 req/s at p99 31.3 ms, and
 knowledge retrieval from 10 req/s to 60, and the failure mode past the knee became graceful
-shedding instead of seconds of p99. The new ceiling is about 1.4 cores of the eight available with
-low CPU in the sampled dependencies; the dedicated benchmark Elasticsearch process was not sampled,
-so what holds it there is not established.
+shedding instead of seconds of p99. The overloaded steps show an Agent-container plateau around
+1.4 logical CPUs while the sampled dependencies stay below one; the dedicated benchmark
+Elasticsearch process was not sampled, so neither “Agent-local ceiling” nor universal dependency
+headroom is established.
 
 **Not being CPU-bound at the serving rate does not mean the wasted CPU is irrelevant to where
 serving stops.** Profile before optimising, be suspicious of per-request client construction, and
@@ -249,12 +259,13 @@ seconds to 901/901 served, zero dropped, and p50 13.4 ms. Auth median CPU fell f
 The final 5→30/s ladder had no HTTP error, SQL-classified failed turn, or observed new saturation,
 but it neither measures unrotated legacy rows nor establishes capacity above 30/s.
 
-**A whole-container CPU series can tell you which process is saturated, not which method consumed
-the cycles.** Here the method attribution comes from the controlled code-and-credential
-counterfactual: preserve the workload, remove repeated successful BCrypt from the machine-credential
-path, and watch both the CPU slope and the throughput collapse disappear. That is weaker than a
-Java stack profile but stronger than the old prose. Evidence, the rejected prototype, and their
-exact limits are in
+**A whole-container CPU series identifies the dominant sampled CPU consumer, not saturation or the
+method that consumed the cycles.** Auth had no per-container CPU quota in this fixture; its readings
+approached the shared eight-CPU Docker boundary but do not prove an Auth-local saturation point.
+Here the method attribution comes from the controlled code-and-credential counterfactual: preserve
+the workload, remove repeated successful BCrypt from the machine-credential path, and watch both
+the CPU slope and the throughput collapse disappear. That is weaker than a Java stack profile but
+stronger than the old prose. Evidence, the rejected prototype, and their exact limits are in
 [bench/agent/README.md](../bench/agent/README.md#repeated-obo-service-credential-verification).
 
 ### Measure before attributing slowness; the conspicuous wait is rarely the cost
