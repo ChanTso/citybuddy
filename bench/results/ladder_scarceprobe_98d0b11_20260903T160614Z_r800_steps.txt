@@ -1,0 +1,13 @@
+citybuddy_commit=98d0b116cbe4c9c18faf6e1f205591b28605a64b
+setup_window_utc=2026-09-03T16:25:46Z/2026-09-03T16:26:30Z
+run_started_at_utc=2026-09-03T16:27:53Z
+run_completed_at_utc=2026-09-03T16:28:13Z
+label=scarceprobe_98d0b11_20260903T160614Z_r800 activities=32 rates=800 step_seconds=15 gap_seconds=0 nominal_iterations=12000
+fixture_users=25000 fixture_activities=32 fixture_quota=100 fixture_stock=2000000 topic_suffix=probe-scarce-98d0b11-20260903T160614Z
+docker_cpus=8 docker_memory_bytes=14638391296 commerce_cpu_limit=4
+k6_image=grafana/k6@sha256:5221b620a4f874faff6e32ba597aa667c058391fe4898b1c6f6377f062c6cdec
+
+=== scarceprobe_98d0b11_20260903T160614Z_r800 ===
+ target  nominal     done  dropped  failed  fail %  achieved/s    p50 ms    p95 ms    p99 ms    max ms  decisions
+-----------------------------------------------------------------------------------------------------------------
+    800    12000    11922       78    8722   73.16       794.8      11.9     845.4    1001.2    1334.3  EXHAUSTED=8722, ADMITTED=3200

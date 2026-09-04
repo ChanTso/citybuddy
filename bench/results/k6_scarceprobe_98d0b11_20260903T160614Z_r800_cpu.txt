@@ -1,0 +1,26 @@
+citybuddy_commit=98d0b116cbe4c9c18faf6e1f205591b28605a64b
+setup_window_utc=2026-09-03T16:25:46Z/2026-09-03T16:26:30Z
+run_started_at_utc=2026-09-03T16:27:53Z
+label=scarceprobe_98d0b11_20260903T160614Z_r800 activities=32 rates=800 step_seconds=15 gap_seconds=0 nominal_iterations=12000
+fixture_users=25000 fixture_activities=32 fixture_quota=100 fixture_stock=2000000 topic_suffix=probe-scarce-98d0b11-20260903T160614Z
+docker_cpus=8 docker_memory_bytes=14638391296 commerce_cpu_limit=4
+k6_image=grafana/k6@sha256:5221b620a4f874faff6e32ba597aa667c058391fe4898b1c6f6377f062c6cdec
+
+16:27:53 citybuddy-bench-k6 cpu=54.46% mem=255MiB / 13.63GiB
+16:27:53 citybuddy-bench-commerce cpu=313.09% mem=454.7MiB / 13.63GiB
+16:27:53 citybuddy-mysql-1 cpu=77.33% mem=826.3MiB / 13.63GiB
+16:27:53 citybuddy-redis-commerce-1 cpu=6.58% mem=29.51MiB / 13.63GiB
+16:27:58 citybuddy-bench-k6 cpu=64.31% mem=299.7MiB / 13.63GiB
+16:27:58 citybuddy-bench-commerce cpu=334.77% mem=547.6MiB / 13.63GiB
+16:27:58 citybuddy-mysql-1 cpu=92.67% mem=826.2MiB / 13.63GiB
+16:27:58 citybuddy-redis-commerce-1 cpu=8.45% mem=32.7MiB / 13.63GiB
+16:28:03 citybuddy-bench-k6 cpu=48.03% mem=324.1MiB / 13.63GiB
+16:28:03 citybuddy-bench-commerce cpu=141.27% mem=599.3MiB / 13.63GiB
+16:28:03 citybuddy-mysql-1 cpu=80.33% mem=826.3MiB / 13.63GiB
+16:28:03 citybuddy-redis-commerce-1 cpu=5.08% mem=35.8MiB / 13.63GiB
+16:28:08 citybuddy-bench-k6 cpu=0.10% mem=324.1MiB / 13.63GiB
+16:28:08 citybuddy-bench-commerce cpu=2.90% mem=624.1MiB / 13.63GiB
+16:28:08 citybuddy-mysql-1 cpu=2.75% mem=826.3MiB / 13.63GiB
+16:28:08 citybuddy-redis-commerce-1 cpu=1.51% mem=37.68MiB / 13.63GiB
+
+run_completed_at_utc=2026-09-03T16:28:13Z
