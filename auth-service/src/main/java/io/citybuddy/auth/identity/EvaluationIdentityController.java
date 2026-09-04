@@ -4,7 +4,6 @@ import java.nio.charset.StandardCharsets;
 import java.util.Base64;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.context.annotation.Profile;
-import org.springframework.security.crypto.password.PasswordEncoder;
 import org.springframework.web.bind.annotation.PathVariable;
 import org.springframework.web.bind.annotation.PostMapping;
 import org.springframework.web.bind.annotation.RequestBody;
@@ -21,15 +20,15 @@ public final class EvaluationIdentityController {
   private static final String ISSUE_SCOPE = "eval:test-token:issue";
 
   private final AuthRepository repository;
-  private final PasswordEncoder passwordEncoder;
+  private final ServiceCredentialVerifier serviceCredentialVerifier;
   private final EvaluationIdentityService service;
 
   public EvaluationIdentityController(
       AuthRepository repository,
-      PasswordEncoder passwordEncoder,
+      ServiceCredentialVerifier serviceCredentialVerifier,
       EvaluationIdentityService service) {
     this.repository = repository;
-    this.passwordEncoder = passwordEncoder;
+    this.serviceCredentialVerifier = serviceCredentialVerifier;
     this.service = service;
   }
 
@@ -73,7 +72,10 @@ public final class EvaluationIdentityController {
         .filter(item -> expectedClient.equals(item.clientId()))
         .filter(item -> "ACTIVE".equals(item.state()))
         .filter(item -> item.allowedScopes().contains(requiredScope))
-        .filter(item -> passwordEncoder.matches(basic.secret(), item.credentialHash()))
+        .filter(
+            item ->
+                serviceCredentialVerifier.matches(
+                    item.clientId(), basic.secret(), item.credentialHash()))
         .orElseThrow(() -> new IdentityException(401, "Invalid evaluation credential"));
   }
 

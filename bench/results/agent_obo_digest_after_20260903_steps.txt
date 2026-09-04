@@ -1,0 +1,11 @@
+citybuddy_commit=a4056f708aa83aa73346373bb9f4e463ae819635
+sut_commit=a4056f708aa83aa73346373bb9f4e463ae819635
+benchmark_harness_commit=a4056f708aa83aa73346373bb9f4e463ae819635
+
+=== obo_digest_after_20260903 (30s steps) ===
+rate nominal_offered started finished served nonserved dropped interrupted 5xx errors finished/s p50_ms p95_ms p99_ms max_ms
+5 150 151 151 151 0 0 0 0 0 5.03 30.6 39.7 55.7 58.5
+10 300 301 301 301 0 0 0 0 0 10.03 21.2 25.8 27.3 33.5
+15 450 450 450 450 0 0 0 0 0 15.00 17.5 22.8 27.7 32.3
+20 600 600 600 600 0 0 0 0 0 20.00 15.4 22.6 27.6 46.2
+30 900 901 901 901 0 0 0 0 0 30.03 13.4 22.9 31.5 51.2

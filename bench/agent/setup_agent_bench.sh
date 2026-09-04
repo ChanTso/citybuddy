@@ -13,6 +13,7 @@
 # fixture, the fixture builder and the k6 generator all join one network namespace held by a
 # placeholder container and reach each other over loopback.
 set -euo pipefail
+umask 077
 
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 cd "$repo_root"
@@ -35,6 +36,7 @@ AGENT_HTTP_CLIENT_LAYOUT="$(trim_ascii_whitespace "${AGENT_HTTP_CLIENT_LAYOUT:-}
 [ -n "$AGENT_HTTP_CLIENT_LAYOUT" ] || AGENT_HTTP_CLIENT_LAYOUT=shared
 run_dir="$repo_root/bench/.run"
 mkdir -p "$run_dir"
+chmod 700 "$run_dir"
 commit_file="$run_dir/citybuddy_commit"
 environment_file="$run_dir/agent_setup_environment.json"
 legacy_boundary_file="$run_dir/agent_setup_boundary.json"
@@ -423,12 +425,18 @@ java_runtime_image_id="$(resolve_image_id \
   eclipse-temurin:21.0.8_9-jre-noble@sha256:20e7f7288e1c18eebe8f06a442c9f7183342d9b022d3b9a9677cae2b558ddddd)"
 net_image_id="$(resolve_image_id alpine:3.20)"
 
-# Reused across runs so a rerun does not invalidate tokens already minted for a live agent.
 agent_secret_file="$run_dir/agent_service_secret"
-[ -f "$agent_secret_file" ] || printf 'bench-agent-%s' "$(openssl rand -hex 12)" > "$agent_secret_file"
+# Reused across runs so a rerun does not invalidate tokens already minted for a live agent. Replace
+# pre-v1 fixture values because the versioned digest contract accepts only generated 256-bit tokens.
+if [ ! -f "$agent_secret_file" ] \
+  || ! uv run python scripts/service_credential.py validate < "$agent_secret_file"; then
+  uv run python scripts/service_credential.py generate > "$agent_secret_file"
+fi
+chmod 600 "$agent_secret_file"
 agent_secret="$(cat "$agent_secret_file")"
 payment_file="$run_dir/mock_payment"
 [ -f "$payment_file" ] || printf 'bench-callback-key\nbench-%s\n' "$(openssl rand -hex 16)" > "$payment_file"
+chmod 600 "$payment_file"
 payment_key_id="$(sed -n 1p "$payment_file")"
 payment_secret="$(sed -n 2p "$payment_file")"
 
@@ -532,7 +540,8 @@ UPDATE auth_user_principal
 # rather than assumed to exist: nothing else in the repository creates it, and any other fixture
 # that needs the same id replaces it with a secret this rig does not hold.
 echo "== registering the agent service identity =="
-agent_service_hash="$(uv run python scripts/hash_test_credential.py "$agent_secret")"
+agent_service_hash="$(printf '%s' "$agent_secret" \
+  | uv run python scripts/service_credential.py hash agent-service)"
 sql root "$root_pw" commerce_db "DELETE FROM auth_service_identity WHERE client_id = 'agent-service';"
 sql auth_app "$auth_pw" commerce_db "
 INSERT INTO auth_service_identity (service_id, client_id, credential_hash, state, allowed_scopes)

@@ -61,12 +61,166 @@ class SeckillReservationIntegrationTest {
   @Autowired private TransactionTemplate transactions;
 
   @Test
+  void admittedUserMarkerOutlivesTheReplayWindowUntilActivityEnds() throws Exception {
+    String activityId = "reservation-user-ttl-" + UUID.randomUUID();
+    Instant now = Instant.now();
+    SeckillActivity activity =
+        new SeckillActivity(
+            activityId,
+            "ttl-product",
+            now.minusSeconds(1),
+            now.plusSeconds(30),
+            SeckillActivityState.ACTIVE,
+            3,
+            1);
+    SeckillReservationProperties shortReplay =
+        new SeckillReservationProperties(
+            Duration.ofMillis(100),
+            Duration.ofMillis(100),
+            Duration.ofMillis(1),
+            Duration.ofMillis(1),
+            1,
+            Duration.ofMillis(1),
+            Duration.ofSeconds(2));
+    ReservationAdmissionStore store =
+        new ReservationAdmissionStore(redis, objectMapper, shortReplay, Clock.systemUTC());
+    String subject = "ttl-user";
+    String secondId = UUID.randomUUID().toString();
+    String userHash = SeckillReservationService.sha256(subject);
+    var first =
+        new ReservationAdmissionStore.AdmissionHandoff(
+            UUID.randomUUID().toString(), subject, activityId, "ttl-first", "a".repeat(64), 1, 1);
+    redis
+        .opsForValue()
+        .set(
+            store.activityKey(activityId),
+            objectMapper.writeValueAsString(SeckillProjection.from(activity)));
+    try {
+      assertThat(store.preAdmit(first, userHash).decision().state())
+          .isEqualTo(ReservationState.ADMITTED);
+      store.completeHandoff(first);
+      Thread.sleep(200);
+      assertThat(redis.hasKey(store.intentKey(activityId, userHash, "ttl-first"))).isFalse();
+      var second =
+          new ReservationAdmissionStore.AdmissionHandoff(
+              secondId, subject, activityId, "ttl-second", "b".repeat(64), 1, 1);
+      assertThat(store.preAdmit(second, userHash).decision().decisionCode())
+          .isEqualTo(ReservationDecisionCode.DUPLICATE_USER);
+      assertThat(redis.getExpire(store.userKey(activityId, userHash), TimeUnit.MILLISECONDS))
+          .isGreaterThan(20_000);
+      assertRemaining(activityId, 2);
+    } finally {
+      redis.delete(
+          List.of(
+              store.activityKey(activityId),
+              store.userKey(activityId, userHash),
+              store.handoffKey(first.reservationId()),
+              store.handoffKey(secondId),
+              store.activityHandoffKey(activityId)));
+      redis
+          .opsForZSet()
+          .remove(ReservationAdmissionStore.HANDOFF_INDEX, first.reservationId(), secondId);
+    }
+  }
+
+  @Test
+  void rejectsBeforeMysqlAndRetainsAdmittedWorkAsAReplayableHandoff() throws Exception {
+    String activityId = "redis-first-main";
+    createActivity(activityId, "redis-first-product", SeckillActivityState.ACTIVE, 1);
+
+    ReservationAdmissionStore.PreAdmission rejected =
+        reservationService.preAdmit(
+            "redis-first-rejected", activityId, "redis-first-rejected-key", request(2, 1));
+    assertThat(rejected.decision().decisionCode()).isEqualTo(ReservationDecisionCode.EXHAUSTED);
+    assertThat(rejected.handoffPending()).isFalse();
+    assertThat(reservationRepository.find(rejected.handoff().reservationId())).isEmpty();
+    assertThat(redis.hasKey(admissionStore.handoffKey(rejected.handoff().reservationId())))
+        .isFalse();
+
+    ReservationAdmissionStore.PreAdmission admitted =
+        reservationService.preAdmit(
+            "redis-first-admitted", activityId, "redis-first-admitted-key", request(1, 1));
+    assertThat(admitted.decision().state()).isEqualTo(ReservationState.ADMITTED);
+    assertThat(admitted.handoffPending()).isTrue();
+    assertThat(reservationRepository.find(admitted.handoff().reservationId())).isEmpty();
+    String admittedUserHash = SeckillReservationService.sha256("redis-first-admitted");
+    assertThat(
+            redis.getExpire(
+                admissionStore.intentKey(activityId, admittedUserHash, "redis-first-admitted-key"),
+                TimeUnit.MILLISECONDS))
+        .isEqualTo(-1);
+    assertThat(
+            redis.getExpire(
+                admissionStore.userKey(activityId, admittedUserHash), TimeUnit.MILLISECONDS))
+        .isGreaterThan(properties.reservationTtl().toMillis());
+    assertThat(
+            redis.getExpire(
+                admissionStore.reservationKey(admitted.handoff().reservationId()),
+                TimeUnit.MILLISECONDS))
+        .isEqualTo(-1);
+    assertThat(
+            redis.getExpire(
+                admissionStore.decisionKey(admitted.handoff().reservationId()),
+                TimeUnit.MILLISECONDS))
+        .isEqualTo(-1);
+    assertThat(
+            reservationService
+                .pollOwned("redis-first-admitted", admitted.handoff().reservationId())
+                .state())
+        .isEqualTo(ReservationState.PENDING);
+    assertThatThrownBy(() -> activityService.changeAllocation(activityId, 2))
+        .isInstanceOf(IllegalStateException.class)
+        .hasMessageContaining("admission handoff");
+    assertRemaining(activityId, 0);
+
+    ReservationAdmissionStore.PreAdmission replay =
+        reservationService.preAdmit(
+            "redis-first-admitted", activityId, "redis-first-admitted-key", request(1, 1));
+    assertThat(replay.replay()).isTrue();
+    assertThat(replay.handoffPending()).isTrue();
+    assertThat(replay.handoff().reservationId()).isEqualTo(admitted.handoff().reservationId());
+    assertRemaining(activityId, 0);
+    assertThatThrownBy(
+            () ->
+                reservationService.preAdmit(
+                    "redis-first-admitted", activityId, "redis-first-admitted-key", request(2, 1)))
+        .isInstanceOf(IllegalStateException.class)
+        .hasMessageContaining("conflicting reservation intent");
+
+    ReservationResult durable = reservationService.persistAdmitted(admitted.handoff());
+    assertThat(durable.state()).isEqualTo(ReservationState.ADMITTED);
+    reservationService.completeAdmissionHandoff(admitted.handoff());
+    assertThat(
+            redis.getExpire(
+                admissionStore.intentKey(activityId, admittedUserHash, "redis-first-admitted-key"),
+                TimeUnit.MILLISECONDS))
+        .isPositive();
+    assertThat(
+            redis.getExpire(
+                admissionStore.reservationKey(admitted.handoff().reservationId()),
+                TimeUnit.MILLISECONDS))
+        .isPositive();
+    assertThat(
+            redis.getExpire(
+                admissionStore.userKey(activityId, admittedUserHash), TimeUnit.MILLISECONDS))
+        .isPositive();
+    assertThat(
+            redis.getExpire(
+                admissionStore.decisionKey(admitted.handoff().reservationId()),
+                TimeUnit.MILLISECONDS))
+        .isPositive();
+    assertThat(
+            reservationService.pollOwned("redis-first-admitted", durable.reservationId()).state())
+        .isEqualTo(ReservationState.ADMITTED);
+    assertThat(reservationService.hasPendingAdmissionHandoff(activityId)).isFalse();
+  }
+
+  @Test
   void admitsAtomicallyAndProvidesOwnerScopedIdempotentTruth() throws Exception {
     createActivity("reservation-main", "reservation-product-main", SeckillActivityState.ACTIVE, 5);
 
     ReservationResult admitted =
-        reservationService.reserve(
-            "subject-main", "reservation-main", "request-main", request(2, 1));
+        admitThroughHandoff("subject-main", "reservation-main", "request-main", request(2, 1));
     assertThat(admitted.state()).isEqualTo(ReservationState.ADMITTED);
     assertThat(admitted.decisionCode()).isEqualTo(ReservationDecisionCode.ADMITTED);
     assertThat(admitted.projectionVersion()).isEqualTo(2);
@@ -76,8 +230,7 @@ class SeckillReservationIntegrationTest {
     assertTerminalProjection(admitted, "subject-main");
 
     ReservationResult replay =
-        reservationService.reserve(
-            "subject-main", "reservation-main", "request-main", request(2, 1));
+        admitThroughHandoff("subject-main", "reservation-main", "request-main", request(2, 1));
     assertThat(replay.reservationId()).isEqualTo(admitted.reservationId());
     assertThat(replay.replay()).isTrue();
     assertRemaining("reservation-main", 3);
@@ -90,7 +243,7 @@ class SeckillReservationIntegrationTest {
 
     assertThatThrownBy(
             () ->
-                reservationService.reserve(
+                admitThroughHandoff(
                     "subject-main", "reservation-main", "request-main", request(1, 1)))
         .isInstanceOf(IllegalStateException.class)
         .hasMessageContaining("conflicting reservation intent");
@@ -98,7 +251,7 @@ class SeckillReservationIntegrationTest {
     substitutedOwner.captureExtra("userSubject", "attacker");
     assertThatThrownBy(
             () ->
-                reservationService.reserve(
+                admitThroughHandoff(
                     "subject-main", "reservation-main", "request-owner", substitutedOwner))
         .isInstanceOf(IllegalArgumentException.class)
         .hasMessageContaining("authenticated identity");
@@ -175,7 +328,7 @@ class SeckillReservationIntegrationTest {
     createActivity(
         "reservation-duplicate", "reservation-product-duplicate", SeckillActivityState.ACTIVE, 2);
     ReservationResult first =
-        reservationService.reserve(
+        admitThroughHandoff(
             "duplicate-subject", "reservation-duplicate", "duplicate-one", request(1, 1));
     assertThat(first.state()).isEqualTo(ReservationState.ADMITTED);
     assertRejected(
@@ -189,6 +342,66 @@ class SeckillReservationIntegrationTest {
   }
 
   @Test
+  void restoresAnExpiredAdmissionMarkerBeforeRejectingAnotherIntent() throws Exception {
+    String activityId = "reservation-expired-marker";
+    String subject = "expired-marker-subject";
+    createActivity(
+        activityId, "reservation-product-expired-marker", SeckillActivityState.ACTIVE, 5);
+    ReservationResult admitted =
+        admitThroughHandoff(subject, activityId, "expired-marker-first", request(2, 1));
+    String userKey = admissionStore.userKey(activityId, SeckillReservationService.sha256(subject));
+    assertThat(redis.delete(userKey)).isTrue();
+    assertThat(reservationService.rebuildActivityState(activityId))
+        .isEqualTo(ReservationAdmissionStore.RebuildResult.APPLIED);
+
+    ReservationResult duplicate =
+        admitThroughHandoff(subject, activityId, "expired-marker-second", request(1, 1));
+
+    assertThat(duplicate.state()).isEqualTo(ReservationState.REJECTED);
+    assertThat(duplicate.decisionCode()).isEqualTo(ReservationDecisionCode.DUPLICATE_USER);
+    assertThat(reservationRepository.admittedQuantity(activityId)).isEqualTo(2);
+    assertRemaining(activityId, 3);
+    assertThat(redis.opsForValue().get(userKey)).isEqualTo(admitted.reservationId());
+  }
+
+  @Test
+  void rebuildsLegacyRepeatedAdmissionsWithAStableCanonicalMarker() throws Exception {
+    String activityId = "reservation-legacy-repeated";
+    String subject = "legacy-repeated-subject";
+    createActivity(
+        activityId, "reservation-product-legacy-repeated", SeckillActivityState.ACTIVE, 5);
+    List<String> reservationIds =
+        new ArrayList<>(List.of(UUID.randomUUID().toString(), UUID.randomUUID().toString()));
+    reservationIds.sort(String::compareTo);
+    insertLegacyAdmittedReservation(
+        reservationIds.get(1), subject, activityId, "legacy-repeated-second", 2);
+    insertLegacyAdmittedReservation(
+        reservationIds.get(0), subject, activityId, "legacy-repeated-first", 1);
+
+    assertThat(reservationService.rebuildActivityState(activityId))
+        .isEqualTo(ReservationAdmissionStore.RebuildResult.APPLIED);
+
+    assertThat(reservationRepository.admittedQuantity(activityId)).isEqualTo(3);
+    assertRemaining(activityId, 2);
+    String userKey = admissionStore.userKey(activityId, SeckillReservationService.sha256(subject));
+    assertThat(redis.opsForValue().get(userKey)).isEqualTo(reservationIds.get(0));
+    for (String reservationId : reservationIds) {
+      JsonNode reservation =
+          objectMapper.readTree(
+              redis.opsForValue().get(admissionStore.reservationKey(reservationId)));
+      JsonNode decision =
+          objectMapper.readTree(redis.opsForValue().get(admissionStore.decisionKey(reservationId)));
+      assertThat(reservation).isEqualTo(decision);
+      assertThat(reservation.get("reservationId").asText()).isEqualTo(reservationId);
+      assertThat(reservation.get("state").asText()).isEqualTo(ReservationState.ADMITTED.name());
+    }
+
+    assertThat(reservationService.rebuildActivityState(activityId))
+        .isEqualTo(ReservationAdmissionStore.RebuildResult.APPLIED);
+    assertThat(redis.opsForValue().get(userKey)).isEqualTo(reservationIds.get(0));
+  }
+
+  @Test
   void constrainsConcurrentQuotaAndOneAdmissionPerUser() throws Exception {
     createActivity(
         "reservation-concurrent", "reservation-product-concurrent", SeckillActivityState.ACTIVE, 5);
@@ -197,7 +410,7 @@ class SeckillReservationIntegrationTest {
       int attempt = index;
       quotaAttempts.add(
           () ->
-              reservationService.reserve(
+              admitThroughHandoff(
                   "quota-subject-" + attempt,
                   "reservation-concurrent",
                   "quota-key-" + attempt,
@@ -220,7 +433,7 @@ class SeckillReservationIntegrationTest {
       int attempt = index;
       userAttempts.add(
           () ->
-              reservationService.reserve(
+              admitThroughHandoff(
                   "one-subject", "reservation-one-user", "one-key-" + attempt, request(1, 1)));
     }
     List<ReservationResult> userResults = runConcurrently(userAttempts);
@@ -317,8 +530,7 @@ class SeckillReservationIntegrationTest {
         String subject = "parallel-subject-" + index + "-" + round;
         attempts.add(
             () ->
-                reservationService.reserve(
-                    subject, activityId, "parallel-key-" + subject, request(1, 1)));
+                admitThroughHandoff(subject, activityId, "parallel-key-" + subject, request(1, 1)));
       }
     }
 
@@ -344,7 +556,7 @@ class SeckillReservationIntegrationTest {
     for (int index = 0; index < 8; index++) {
       attempts.add(
           () ->
-              reservationService.reserve(
+              admitThroughHandoff(
                   "duplicate-subject",
                   "reservation-duplicate-key",
                   "duplicate-key",
@@ -372,16 +584,11 @@ class SeckillReservationIntegrationTest {
                 .projectionVersion())
         .isEqualTo(2);
     redis.opsForValue().set(projectionStore.key("reservation-lag-current"), laggingCurrent);
-    assertThatThrownBy(
-            () ->
-                reservationService.reserve(
-                    "lag-current-subject",
-                    "reservation-lag-current",
-                    "lag-current-key",
-                    request(1, 2)))
-        .isInstanceOf(ReservationAdmissionStore.AdmissionIndeterminateException.class)
-        .hasMessageContaining("differs from MySQL truth");
-    assertPending("reservation-lag-current", "lag-current-key");
+    ReservationResult lagging =
+        admitThroughHandoff(
+            "lag-current-subject", "reservation-lag-current", "lag-current-key", request(1, 2));
+    assertThat(lagging.decisionCode()).isEqualTo(ReservationDecisionCode.STALE_VERSION);
+    assertThat(reservationRepository.find(lagging.reservationId())).isEmpty();
     assertThat(redis.opsForValue().get(projectionStore.key("reservation-lag-current")))
         .isEqualTo(laggingCurrent);
 
@@ -394,15 +601,21 @@ class SeckillReservationIntegrationTest {
                 .activity()
                 .projectionVersion())
         .isEqualTo(2);
+    String currentProjection =
+        redis.opsForValue().get(projectionStore.key("reservation-lag-stale"));
     redis.opsForValue().set(projectionStore.key("reservation-lag-stale"), laggingStale);
-    ReservationResult stale =
-        reservationService.reserve(
+    var stale =
+        reservationService.preAdmit(
             "lag-stale-subject", "reservation-lag-stale", "lag-stale-key", request(1, 1));
-    assertThat(stale.state()).isEqualTo(ReservationState.REJECTED);
-    assertThat(stale.decisionCode()).isEqualTo(ReservationDecisionCode.STALE_VERSION);
-    assertThat(redis.opsForValue().get(projectionStore.key("reservation-lag-stale")))
-        .isEqualTo(laggingStale);
-    assertTerminalProjection(stale, "lag-stale-subject");
+    assertThatThrownBy(() -> reservationService.persistAdmitted(stale.handoff()))
+        .isInstanceOf(IllegalStateException.class)
+        .hasMessageContaining("activity truth");
+    assertThat(reservationRepository.find(stale.handoff().reservationId())).isEmpty();
+    assertThat(reservationService.hasPendingAdmissionHandoff("reservation-lag-stale")).isTrue();
+    assertNoOrderOrOutbox("reservation-product-lag-stale");
+    // The fixture deliberately rolled Redis back; restore the operator-owned projection afterwards.
+    redis.opsForValue().set(projectionStore.key("reservation-lag-stale"), currentProjection);
+    reservationService.completeAdmissionHandoff(stale.handoff());
 
     long unsafe = SeckillLuaNumber.MAX_EXACT_INTEGER + 1;
     seedProduct("reservation-product-unsafe-create", unsafe);
@@ -426,7 +639,7 @@ class SeckillReservationIntegrationTest {
         SeckillActivityState.ACTIVE,
         SeckillLuaNumber.MAX_EXACT_INTEGER);
     ReservationResult safeBoundary =
-        reservationService.reserve(
+        admitThroughHandoff(
             "safe-boundary-subject",
             "reservation-safe-boundary",
             "safe-boundary-key",
@@ -448,7 +661,7 @@ class SeckillReservationIntegrationTest {
     redis
         .opsForValue()
         .set(projectionStore.key("reservation-unsafe-projection"), unsafeProjectionJson);
-    assertIndeterminatePending(
+    assertIndeterminateBeforeMysql(
         "unsafe-projection-subject",
         "reservation-unsafe-projection",
         "unsafe-projection-key",
@@ -462,16 +675,13 @@ class SeckillReservationIntegrationTest {
     createActivity(
         "reservation-missing", "reservation-product-missing", SeckillActivityState.ACTIVE, 2);
     redis.delete(projectionStore.key("reservation-missing"));
-    SeckillReservation missing =
-        assertIndeterminatePending(
-            "missing-subject", "reservation-missing", "missing-key", "projection is missing");
-    assertThat(reservationService.pollOwned("missing-subject", missing.reservationId()).state())
-        .isEqualTo(ReservationState.PENDING);
+    assertIndeterminateBeforeMysql(
+        "missing-subject", "reservation-missing", "missing-key", "projection is missing");
 
     createActivity(
         "reservation-malformed", "reservation-product-malformed", SeckillActivityState.ACTIVE, 2);
     redis.opsForValue().set(projectionStore.key("reservation-malformed"), "{malformed");
-    assertIndeterminatePending(
+    assertIndeterminateBeforeMysql(
         "malformed-subject", "reservation-malformed", "malformed-key", "projection is malformed");
 
     createActivity(
@@ -542,7 +752,7 @@ class SeckillReservationIntegrationTest {
               properties);
       assertThatThrownBy(
               () ->
-                  failingService.reserve(
+                  failingService.preAdmit(
                       "unavailable-subject",
                       "reservation-unavailable",
                       "unavailable-key",
@@ -551,7 +761,7 @@ class SeckillReservationIntegrationTest {
           .hasMessageContaining("execution failed")
           .hasStackTraceContaining("Connection refused");
     }
-    assertPending("reservation-unavailable", "unavailable-key");
+    assertNoReservation("reservation-unavailable", "unavailable-key");
     assertRemaining("reservation-unavailable", 2);
 
     createActivity(
@@ -566,7 +776,7 @@ class SeckillReservationIntegrationTest {
         server.setConfig("maxmemory", "1");
         assertThatThrownBy(
                 () ->
-                    reservationService.reserve(
+                    admitThroughHandoff(
                         "noeviction-subject",
                         "reservation-noeviction",
                         "noeviction-key",
@@ -579,11 +789,9 @@ class SeckillReservationIntegrationTest {
         server.setConfig("maxmemory-policy", originalPolicy);
       }
     }
-    SeckillReservation pending = assertPending("reservation-noeviction", "noeviction-key");
+    assertNoReservation("reservation-noeviction", "noeviction-key");
     assertThat(redis.opsForValue().get(projectionStore.key("reservation-noeviction")))
         .isEqualTo(activityBefore);
-    assertThat(redis.hasKey(admissionStore.reservationKey(pending.reservationId()))).isFalse();
-    assertThat(redis.hasKey(admissionStore.decisionKey(pending.reservationId()))).isFalse();
     assertThat(
             redis.hasKey(
                 admissionStore.userKey(
@@ -600,6 +808,7 @@ class SeckillReservationIntegrationTest {
         "reservation-product-deadline-unavailable",
         SeckillActivityState.ACTIVE,
         2);
+    // A persisted PENDING row remains a legacy compatibility fixture, not live admission.
     var prepared =
         reservationService.prepare(
             "deadline-unavailable-subject",
@@ -620,6 +829,9 @@ class SeckillReservationIntegrationTest {
               unavailable.store(),
               transactions,
               properties);
+      assertThatThrownBy(() -> failingService.dueAdmissionHandoffs(32))
+          .isInstanceOf(ReservationAdmissionStore.AdmissionIndeterminateException.class)
+          .hasMessageContaining("handoff scan failed");
       assertThatThrownBy(() -> failingService.resolveDueReservations(32))
           .isInstanceOf(ReservationAdmissionStore.AdmissionIndeterminateException.class)
           .hasMessageContaining("deadline resolution failed")
@@ -640,17 +852,15 @@ class SeckillReservationIntegrationTest {
     createActivity(
         "reservation-rebuild", "reservation-product-rebuild", SeckillActivityState.ACTIVE, 5);
     ReservationResult first =
-        reservationService.reserve(
-            "rebuild-one", "reservation-rebuild", "rebuild-key-one", request(2, 1));
+        admitThroughHandoff("rebuild-one", "reservation-rebuild", "rebuild-key-one", request(2, 1));
     ReservationResult second =
-        reservationService.reserve(
-            "rebuild-two", "reservation-rebuild", "rebuild-key-two", request(1, 1));
+        admitThroughHandoff("rebuild-two", "reservation-rebuild", "rebuild-key-two", request(1, 1));
     ReservationResult rejected =
-        reservationService.reserve(
+        admitThroughHandoff(
             "rebuild-three", "reservation-rebuild", "rebuild-key-three", request(3, 1));
     assertThat(rejected.decisionCode()).isEqualTo(ReservationDecisionCode.EXHAUSTED);
     ReservationResult sameUserRejected =
-        reservationService.reserve(
+        admitThroughHandoff(
             "rebuild-one", "reservation-rebuild", "rebuild-key-duplicate", request(1, 1));
     assertThat(sameUserRejected.decisionCode()).isEqualTo(ReservationDecisionCode.DUPLICATE_USER);
 
@@ -672,7 +882,8 @@ class SeckillReservationIntegrationTest {
     assertRemaining("reservation-rebuild", 3);
     assertTerminalProjection(first, "rebuild-one");
     assertTerminalProjection(second, "rebuild-two");
-    assertTerminalProjection(rejected, "rebuild-three");
+    assertThat(reservationRepository.find(rejected.reservationId())).isEmpty();
+    assertThat(redis.hasKey(admissionStore.reservationKey(rejected.reservationId()))).isFalse();
     assertThat(
             redis
                 .opsForValue()
@@ -681,19 +892,80 @@ class SeckillReservationIntegrationTest {
                         "reservation-rebuild", SeckillReservationService.sha256("rebuild-one"))))
         .isEqualTo(first.reservationId());
     assertThat(redis.hasKey(admissionStore.reservationKey(sameUserRejected.reservationId())))
-        .isTrue();
+        .isFalse();
     assertThat(reservationService.rebuildActivityState("reservation-rebuild"))
         .isEqualTo(ReservationAdmissionStore.RebuildResult.APPLIED);
 
     String rejectedOnlyUserKey =
         admissionStore.userKey(
             "reservation-rebuild", SeckillReservationService.sha256("rebuild-three"));
+    // Historical rejected rows remain readable by rebuild; live rejections above created no row.
+    assertThat(
+            jdbc.update(
+                "INSERT INTO seckill_reservation (reservation_id, user_subject, activity_id, idempotency_key, "
+                    + "intent_hash, quantity, activity_projection_version, state, decision_code, "
+                    + "projection_version, transaction_resolution_due_at) "
+                    + "VALUES (?, 'rebuild-three', 'reservation-rebuild', 'legacy-rejected', ?, 3, 1, "
+                    + "'REJECTED', 'EXHAUSTED', 2, CURRENT_TIMESTAMP(6))",
+                UUID.randomUUID().toString(),
+                SeckillReservationService.sha256("legacy-rejected")))
+        .isEqualTo(1);
     redis.opsForValue().set(rejectedOnlyUserKey, "non-authoritative-marker");
-    assertThatThrownBy(() -> reservationService.rebuildActivityState("reservation-rebuild"))
-        .isInstanceOf(ReservationAdmissionStore.AdmissionIndeterminateException.class)
-        .hasMessageContaining("projection conflicts");
+    assertThat(reservationService.rebuildActivityState("reservation-rebuild"))
+        .isEqualTo(ReservationAdmissionStore.RebuildResult.APPLIED);
+    assertThat(redis.hasKey(rejectedOnlyUserKey)).isFalse();
     assertThat(redis.hasKey(admissionStore.rebuildKey("reservation-rebuild"))).isFalse();
-    redis.delete(rejectedOnlyUserKey);
+
+    String admittedUserKey =
+        admissionStore.userKey(
+            "reservation-rebuild", SeckillReservationService.sha256("rebuild-one"));
+    redis.opsForValue().set(projectionStore.key("reservation-rebuild"), "{malformed");
+    redis.opsForValue().set(admissionStore.reservationKey(first.reservationId()), "{malformed");
+    redis.delete(admissionStore.decisionKey(first.reservationId()));
+    redis.opsForValue().set(admittedUserKey, "bogus-admitted-marker");
+    redis.opsForValue().set(rejectedOnlyUserKey, "bogus-rejected-marker");
+
+    assertThat(reservationService.rebuildActivityState("reservation-rebuild"))
+        .isEqualTo(ReservationAdmissionStore.RebuildResult.APPLIED);
+    assertRemaining("reservation-rebuild", 3);
+    assertTerminalProjection(first, "rebuild-one");
+    assertThat(redis.opsForValue().get(admittedUserKey)).isEqualTo(first.reservationId());
+    assertThat(redis.hasKey(rejectedOnlyUserKey)).isFalse();
+
+    com.fasterxml.jackson.databind.node.ObjectNode conflictingActivity =
+        (com.fasterxml.jackson.databind.node.ObjectNode)
+            objectMapper.readTree(
+                redis.opsForValue().get(projectionStore.key("reservation-rebuild")));
+    conflictingActivity.put("state", SeckillActivityState.DRAFT.name());
+    redis
+        .opsForValue()
+        .set(
+            projectionStore.key("reservation-rebuild"),
+            objectMapper.writeValueAsString(conflictingActivity));
+    com.fasterxml.jackson.databind.node.ObjectNode conflictingReservation =
+        (com.fasterxml.jackson.databind.node.ObjectNode)
+            objectMapper.readTree(
+                redis.opsForValue().get(admissionStore.reservationKey(first.reservationId())));
+    conflictingReservation.put("quantity", 1);
+    String conflictingReservationJson = objectMapper.writeValueAsString(conflictingReservation);
+    redis
+        .opsForValue()
+        .set(admissionStore.reservationKey(first.reservationId()), conflictingReservationJson);
+    redis
+        .opsForValue()
+        .set(admissionStore.decisionKey(first.reservationId()), conflictingReservationJson);
+
+    assertThat(reservationService.rebuildActivityState("reservation-rebuild"))
+        .isEqualTo(ReservationAdmissionStore.RebuildResult.APPLIED);
+    JsonNode restoredActivity =
+        objectMapper.readTree(redis.opsForValue().get(projectionStore.key("reservation-rebuild")));
+    assertThat(restoredActivity.get("state").asText())
+        .isEqualTo(SeckillActivityState.ACTIVE.name());
+    JsonNode restoredReservation =
+        objectMapper.readTree(
+            redis.opsForValue().get(admissionStore.reservationKey(first.reservationId())));
+    assertThat(restoredReservation.get("quantity").asInt()).isEqualTo(2);
+    assertTerminalProjection(first, "rebuild-one");
 
     Duration minimum = properties.minimumBrokerCoverage();
     assertThat(properties.reservationTtl()).isGreaterThanOrEqualTo(minimum);
@@ -725,16 +997,35 @@ class SeckillReservationIntegrationTest {
         "reservation-product-pending-rebuild",
         SeckillActivityState.ACTIVE,
         2);
-    redis.delete(projectionStore.key("reservation-pending-rebuild"));
-    assertIndeterminatePending(
-        "pending-rebuild-subject",
-        "reservation-pending-rebuild",
-        "pending-rebuild-key",
-        "projection is missing");
+    var pendingRebuild =
+        reservationService.preAdmit(
+            "pending-rebuild-subject",
+            "reservation-pending-rebuild",
+            "pending-rebuild-key",
+            request(1, 1));
+    assertThat(pendingRebuild.handoffPending()).isTrue();
+    assertThat(reservationRepository.find(pendingRebuild.handoff().reservationId())).isEmpty();
     assertThatThrownBy(() -> reservationService.rebuildActivityState("reservation-pending-rebuild"))
         .isInstanceOf(ReservationAdmissionStore.AdmissionIndeterminateException.class)
-        .hasMessageContaining("Pending reservation");
+        .hasMessageContaining("Pending admission handoff");
     assertThat(redis.hasKey(admissionStore.rebuildKey("reservation-pending-rebuild"))).isFalse();
+    reservationService.persistAdmitted(pendingRebuild.handoff());
+    reservationService.completeAdmissionHandoff(pendingRebuild.handoff());
+  }
+
+  private ReservationResult admitThroughHandoff(
+      String subject, String activityId, String idempotencyKey, ReservationRequest request) {
+    var admission = reservationService.preAdmit(subject, activityId, idempotencyKey, request);
+    if (admission.decision().state() == ReservationState.REJECTED) {
+      assertThat(reservationRepository.find(admission.handoff().reservationId())).isEmpty();
+      return reservationService.preAdmissionResult(admission);
+    }
+    if (admission.replay() && !admission.handoffPending()) {
+      return reservationService.pollOwned(subject, admission.handoff().reservationId());
+    }
+    ReservationResult result = reservationService.persistAdmitted(admission.handoff());
+    reservationService.completeAdmissionHandoff(admission.handoff());
+    return admission.replay() ? result.asReplay() : result;
   }
 
   private ReservationResult assertRejected(
@@ -743,18 +1034,37 @@ class SeckillReservationIntegrationTest {
       String idempotencyKey,
       ReservationRequest request,
       ReservationDecisionCode code) {
-    ReservationResult result =
-        reservationService.reserve(subject, activityId, idempotencyKey, request);
+    ReservationResult result = admitThroughHandoff(subject, activityId, idempotencyKey, request);
     assertThat(result.state()).isEqualTo(ReservationState.REJECTED);
     assertThat(result.decisionCode()).isEqualTo(code);
     assertThat(result.durableOrderCreated()).isFalse();
     return result;
   }
 
+  private void assertIndeterminateBeforeMysql(
+      String subject, String activityId, String idempotencyKey, String message) {
+    assertThatThrownBy(
+            () -> reservationService.preAdmit(subject, activityId, idempotencyKey, request(1, 1)))
+        .isInstanceOf(ReservationAdmissionStore.AdmissionIndeterminateException.class)
+        .hasMessageContaining(message);
+    assertNoReservation(activityId, idempotencyKey);
+    assertThat(reservationService.hasPendingAdmissionHandoff(activityId)).isFalse();
+  }
+
+  private void assertNoReservation(String activityId, String idempotencyKey) {
+    assertThat(
+            jdbc.queryForObject(
+                "SELECT COUNT(*) FROM seckill_reservation WHERE activity_id = ? AND idempotency_key = ?",
+                Integer.class,
+                activityId,
+                idempotencyKey))
+        .isZero();
+  }
+
   private SeckillReservation assertIndeterminatePending(
       String subject, String activityId, String idempotencyKey, String message) {
     assertThatThrownBy(
-            () -> reservationService.reserve(subject, activityId, idempotencyKey, request(1, 1)))
+            () -> admitThroughHandoff(subject, activityId, idempotencyKey, request(1, 1)))
         .isInstanceOf(ReservationAdmissionStore.AdmissionIndeterminateException.class)
         .hasMessageContaining(message);
     return assertPending(activityId, idempotencyKey);
@@ -797,16 +1107,17 @@ class SeckillReservationIntegrationTest {
     }
   }
 
-  private void deleteReservationRedisState(String activityId, List<ReservationResult> results) {
+  private void deleteReservationRedisState(String activityId, List<ReservationResult> results)
+      throws Exception {
     List<String> keys = new ArrayList<>();
     keys.add(projectionStore.key(activityId));
     for (ReservationResult result : results) {
-      SeckillReservation truth = reservationRepository.find(result.reservationId()).orElseThrow();
+      JsonNode projection =
+          objectMapper.readTree(
+              redis.opsForValue().get(admissionStore.reservationKey(result.reservationId())));
       keys.add(admissionStore.reservationKey(result.reservationId()));
       keys.add(admissionStore.decisionKey(result.reservationId()));
-      keys.add(
-          admissionStore.userKey(
-              activityId, SeckillReservationService.sha256(truth.userSubject())));
+      keys.add(admissionStore.userKey(activityId, projection.get("userHash").asText()));
     }
     redis.delete(keys);
   }
@@ -880,6 +1191,31 @@ class SeckillReservationIntegrationTest {
         productId,
         productId,
         stock);
+  }
+
+  private void insertLegacyAdmittedReservation(
+      String reservationId,
+      String subject,
+      String activityId,
+      String idempotencyKey,
+      int quantity) {
+    assertThat(
+            jdbc.update(
+                """
+                INSERT INTO seckill_reservation
+                  (reservation_id, user_subject, activity_id, idempotency_key, intent_hash,
+                   quantity, activity_projection_version, state, decision_code,
+                   projection_version, transaction_resolution_due_at)
+                VALUES (?, ?, ?, ?, ?, ?, 1, 'ADMITTED', 'ADMITTED', 2,
+                        CURRENT_TIMESTAMP(6))
+                """,
+                reservationId,
+                subject,
+                activityId,
+                idempotencyKey,
+                SeckillReservationService.sha256(idempotencyKey),
+                quantity))
+        .isEqualTo(1);
   }
 
   private ReservationRequest request(int quantity, long expectedVersion) {

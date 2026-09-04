@@ -215,23 +215,32 @@ direct-user downgrade.
 
 ### 4.2 Agent OBO
 
-5. Conversation and public FAQ paths do not acquire commerce authority. On the first internal
-   commerce tool call, `agent-service` requests a short-lived OBO just in time.
+5. Conversation and public FAQ paths do not acquire commerce authority. Before an internal
+   commerce tool invocation, `agent-service` requests a short-lived OBO just in time.
 6. `POST /api/sessions` is the only support-session bootstrap. It requires a direct user JWT;
    `agent-service` generates an opaque session id and binds it to the validated token subject. In
    evaluation it also binds the sandbox context. The client cannot choose the owner. Wrong token
    type, cross-user substitution, or sandbox mismatch rejects. `X-Session-Id` identifies this
    support session, not a login-token session, and every use is rechecked against the validated user
    and sandbox context in `cs_db`.
-7. On first tool use, `agent-service` submits the validated user JWT, its independently
+7. For that tool invocation, `agent-service` submits the validated user JWT, its independently
    authenticated service credential, the verified support-session binding, and the exact
    server-side ToolSpec scope to token exchange. `auth-service` trusts the authenticated service's
-   session-binding assertion and writes that support session into the OBO.
+   session-binding assertion and writes that support session into the OBO. Service authentication
+   reads current state, scope, and the exact persisted verifier on every exchange. New machine
+   credentials are `cbsvc_v1_` tokens containing 256 CSPRNG bits and store a versioned, client-bound
+   SHA-256 digest; `scripts/service_credential.py` is the provisioning primitive. The digest is safe
+   only for those generated high-entropy tokens, not for human-chosen passwords. Legacy service
+   BCrypt rows remain accepted and execute BCrypt on every request; no successful verifier is
+   cached. Deploying a new binary does not rewrite those rows: obtaining the digest-path behavior
+   requires an explicit `generate` then client-bound `hash` credential rotation. Human login always
+   executes BCrypt directly. New application-generated BCrypt hashes use configured strength 12;
+   verification honors the cost encoded in each persisted hash.
 8. The OBO contains at least an explicit OBO purpose/type, `sub`, `user_id`, support `session`,
    `aud=commerce-service`, exact `scope`, `act.azp=agent-service`, `jti`, `exp`, and applicable
    not-before/issued-at metadata. Scope is fixed by ToolSpec; neither model nor request payload can
-   widen it. Cache keys are limited to `user + support session + exact scope` and never outlive the
-   token.
+   widen it. `jti` is required but is not consumed: the OBO is a bearer token, not a server-enforced
+   single-use capability, and remains subject to every validation above until expiry.
 9. `commerce-service` accepts internal tool identity only from the validated OBO. It validates
    signature, fixed issuer, OBO purpose/type, audience, exact required scope, actor, user subject,
    support session, expiry/not-before/skew, and resource ownership. It never trusts identity fields
@@ -348,26 +357,31 @@ not by treating the product cache-invalidation consumer as a knowledge-indexer f
 
 - RocketMQ 5 runs with Broker and Proxy available to the 5.x clients. The Proxy endpoint remains
   explicit.
-- Seckill ordering uses a transaction message: send the half message, run Redis Lua admission,
-  then commit, roll back, or temporarily return `UNKNOWN`. A deterministic result writes a durable
-  transaction decision marker; admission also writes the reservation projection required by the
-  order path.
-- `UNKNOWN` is an intermediate checker result only when the durable decision marker is missing or
-  temporarily indeterminate. It is not a permanent application terminal state. The application
-  persists one stable transaction-resolution deadline derived from configured transaction
-  timeout, check interval, maximum check count, and bounded safety margin; restart never recomputes
-  it. An indexed, bounded deadline-decision worker atomically creates a timeout marker only when no
-  durable decision exists, then idempotently converges MySQL to that marker. This
-  state-machine-specific resolver is not a generalized recovery scanner.
-- The checker reads only the durable marker. Marker and reservation TTL cover the complete
-  configured timeout/check interval/maximum-check window. Application terminal convergence is
-  proven through the persisted deadline plus durable-marker compare-and-set and MySQL convergence.
-  Broker terminal behavior is proven independently with `mqadmin` evidence against the transaction
-  terminal system topic; the application does not subscribe to that system topic and does not
-  treat observed callback count as protocol truth.
+- Live seckill admission has one path: Redis Lua `preAdmit`, transaction half message, MySQL
+  admitted reservation, then broker commit. Deterministic rejections write a Redis intent
+  anchor plus reservation/decision projections, with an absolute 15-minute replay window that
+  replay does not refresh; they do not
+  access business MySQL or RocketMQ. Admitted user markers live until the activity ends, not
+  merely until the request replay window expires.
+- Lua admission records a pending handoff before returning. A bounded worker retries those
+  handoffs through the same half-message/MySQL path; MySQL rollback leaves the handoff available
+  for recovery. The existing activity rebuild lease blocks projection rebuild or cancellation
+  while a handoff is pending, so republishing quota cannot erase an admission not yet in MySQL.
+  Old MySQL-`PENDING` preparation and deadline APIs remain for legacy persistence fixtures, but
+  neither the HTTP runtime nor the worker calls them.
+- The transaction checker reads only the durable MySQL reservation and returns `UNKNOWN` when
+  it is missing, historically `PENDING`, or temporarily unreadable. Duplicate delivery is settled
+  by the existing MySQL order and ledger invariants, not by an observed callback count. This
+  path assumes a fresh fixture rather than online migration from old pending rows; it reuses the
+  existing rebuild lease without a new persistent write fence; Redis restart/data loss requires
+  operators to stop admission and rebuild from authoritative rows before reopening traffic.
 - Downstream order creation is idempotent. Database unique constraints, an inventory-ledger
   movement keyed by the business event, and conditional transitions handle repeated delivery; a
-  duplicate returns or projects the existing result.
+  duplicate returns or projects the existing result. Lua admission reserves per-activity quota,
+  while locked MySQL rows are final for stock shared by overlapping activities and the
+  activity-user uniqueness key. A positive stock shortfall or an order held by another reservation
+  on that key records terminal `UNFULFILLED` with the original `ADMITTED` decision, projection
+  version 3, no durable order, and no activity-quota refund; retries replay that result.
 - The inventory ledger covers seckill order creation and replay idempotency, atomic unpaid
   cancellation with inventory/activity-quota restoration, payment movements, refund movements,
   and full reconciliation.
@@ -396,8 +410,8 @@ not by treating the product cache-invalidation consumer as a knowledge-indexer f
 | Entity | Owner/store | Unique invariant | State or transaction boundary | Executable source |
 |---|---|---|---|---|
 | `seckill_activity` | `commerce-service`; `commerce_db` | Stable activity id; allocation cannot exceed inventory assigned to it | Quota allocation is a MySQL transaction; Redis receives only admission projection | Seckill activity migration |
-| Reservation | `commerce-service`; truth in `commerce_db`, hot projection in Commerce Redis | Unique `reservation_id`; projection is not authoritative | Admission records `PENDING/ADMITTED/REJECTED`; order consumer transitions durable reservation conditionally | Reservation and transaction-order migrations |
-| One-user-one-order | `commerce-service`; `commerce_db` plus Lua marker | Database uniqueness on `(activity_id, user_id)` and `reservation_id` | Lua blocks obvious duplicates; database uniqueness is final and repeated messages resolve to existing result | Transaction-order migration and consumer |
+| Reservation | `commerce-service`; Redis admission/replay state, admitted business truth in `commerce_db` | Unique `reservation_id`; Redis never creates an order | Live rejection remains Redis-only for 15 minutes; an admitted Redis handoff polls as `PENDING` until handoff completion; MySQL admission inserts `ADMITTED`; order consumption records `ORDERED` or admission-consuming `UNFULFILLED`, unpaid timeout may record `CANCELLED`; historical MySQL `PENDING/REJECTED` rows remain readable | Admission store, reservation service, and transaction-order migrations |
+| One-user-one-order | `commerce-service`; `commerce_db` plus Lua marker | Database uniqueness on `(activity_id, user_subject)` and `reservation_id` | Lua blocks repeat users until activity end; database uniqueness is final and repeated messages resolve to existing result | Transaction-order migration and consumer |
 | `inventory_ledger` | `commerce-service`; `commerce_db` | Unique business event/idempotency key per movement | Order creation, cancellation/restoration, payment, and refund movements reconcile against authoritative order/payment state | Commerce transaction migrations |
 
 ### 6.3 Interfaces
@@ -405,13 +419,13 @@ not by treating the product cache-invalidation consumer as a knowledge-indexer f
 | Caller → owner | Method and path | Authentication | Required boundary | Success semantics | Rejection semantics |
 |---|---|---|---|---|---|
 | `web` → `commerce-service` | `POST /api/seckill/activities/{activityId}/reservations` | Production direct-user JWT | Direct-user claims, ownership, idempotency; evaluation tokens/headers are not accepted | Starts transaction-message admission and returns reservation status, never a false completed-order claim | Identity/type/audience failure, evaluation context, no quota, duplicate user, inactive activity, or bounded indeterminate result rejects or returns explicit status |
-| `web` → `commerce-service` | `GET /api/reservations/{reservationId}` | Production direct-user JWT | Direct-user claims and ownership; evaluation tokens/headers are not accepted | Returns durable/projection status distinguishing admitted, ordered, rejected, and expired | Cross-user access, evaluation context, or unknown reservation rejects |
+| `web` → `commerce-service` | `GET /api/reservations/{reservationId}` | Production direct-user JWT | Direct-user claims and ownership; evaluation tokens/headers are not accepted | Returns Redis-only `PENDING` handoff or `REJECTED` within its replay window, otherwise owned MySQL status (`ADMITTED`, `ORDERED`, `UNFULFILLED`, `CANCELLED`, or historical `PENDING/REJECTED`) without inventing an order | Cross-user access, evaluation context, or unknown/expired Redis-only reservation rejects |
 
 ### 6.4 Asynchronous contracts
 
 | Channel | Producer → consumer | Message type | Stable payload/invariant | Failure and replay rule | State |
 |---|---|---|---|---|---|
-| Seckill order transaction | Commerce producer → commerce order consumer | Transaction | Reservation/activity/user ids, event id, version; current production payload carries no sandbox and consumer rejects the reserved sandbox property | Half message commits only after Lua admission; `UNKNOWN` is temporary; configured broker bounds define terminal window; uniqueness and ledger movements make replay harmless | Implemented |
+| Seckill order transaction | Commerce producer → commerce order consumer | Transaction | Reservation/activity/user ids, event id, version; current production payload carries no sandbox and consumer rejects the reserved sandbox property | Half message is sent after Lua admission and commits only after MySQL `ADMITTED`; pending handoff retains recovery work; checker reads MySQL, and uniqueness plus ledger movements make replay harmless | Implemented |
 | Order/payment timeout | `commerce-service` → commerce timeout consumer | Delay | Order id, expected state/version, due time, event id; current production payload carries no sandbox and consumer rejects the reserved sandbox property | Re-read MySQL; conditional cancellation and ledger restoration are idempotent; paid/final orders are not cancelled | Implemented |
 | Commerce domain events | Commerce Outbox publisher → authorized consumers | Normal | Event id, aggregate/version, occurred time; current payloads carry no sandbox and production consumers reject the reserved sandbox property | Mutation and Outbox commit together; consumers are idempotent; late events cannot reverse newer state | Implemented; current product event consumer is commerce cache invalidation |
 
@@ -429,21 +443,33 @@ sequenceDiagram
     participant D as MySQL commerce_db
 
     U->>C: Request seckill reservation
-    C->>M: Send transaction half message
-    M-->>C: Half message accepted
     C->>R: Run Lua quota, one-user, and reservation admission
 
-    alt Lua deterministically rejects and writes a rejection marker
+    alt Lua rejects and writes intent anchor plus reservation/decision projections
         R-->>C: Rejected
-        C->>M: Roll back half message
-        Note over M,W: Rolled-back message is not delivered
+        Note over C,D: No business MySQL or RocketMQ request
         C-->>U: Rejected reservation status
-    else Lua admits and writes reservation plus admission marker
-        R-->>C: Admitted with reservation id
-        C->>M: Commit half message
+    else Lua admits and writes a pending handoff with reserved quota
+        R-->>C: Admitted handoff with reservation id
+        C->>M: Send transaction half message
+        M-->>C: Half message accepted
+        C->>D: Insert ADMITTED reservation in MySQL transaction
+        alt MySQL transaction rolls back or is unavailable
+            D-->>C: No committed admission
+            Note over C,R: Keep pending handoff for bounded worker recovery
+        else MySQL admission commits
+            D-->>C: Durable ADMITTED reservation
+            C->>M: Commit half message
+            opt Broker commit acknowledged
+                C->>R: Complete handoff without shortening user-marker lifetime
+            end
+        Note over M,W: Only a committed half message can be delivered
         M-->>W: Deliver committed transaction message
         W->>D: Conditional order insert and reservation transition
-        alt Unique activity-user or reservation key already exists
+        alt Locked stock is short or another reservation owns the activity-user order
+            D-->>W: Reservation UNFULFILLED at projection version 3; no order
+            W-->>M: Acknowledge terminal disposition
+        else Unique activity-user or reservation key already exists
             D-->>W: Existing order/result
             W-->>M: Acknowledge duplicate safely
         else Insert and transition succeed
@@ -454,20 +480,26 @@ sequenceDiagram
             Note over W,M: No acknowledgement, bounded retry or dead-letter policy applies
         end
         C-->>U: Reservation id, client polls durable status
-    else Lua result has no durable decision marker
+        end
+    else Lua result cannot be determined
         R-->>C: Indeterminate
-        C->>M: Report UNKNOWN
+        Note over C,D: No new half message or MySQL admission
         C-->>U: Indeterminate reservation status
+    end
+
+    opt Pending handoff remains after send, MySQL, or commit uncertainty
+        C->>R: Bounded worker reads due handoffs
+        Note over C,D: Retry the same half-message/MySQL path with reservation idempotency
     end
 
     opt Second-phase acknowledgement is missing or result is UNKNOWN
         M->>C: Transaction checkback
-        C->>R: Read transaction decision marker only
-        alt Marker says admitted
+        C->>D: Read durable reservation only
+        alt MySQL state consumed admission
             C-->>M: COMMIT
-        else Marker says rejected
+        else Historical MySQL state is REJECTED
             C-->>M: ROLLBACK
-        else Marker absent or temporarily indeterminate
+        else MySQL state missing, PENDING, or temporarily unreadable
             C-->>M: UNKNOWN
             Note over M,C: UNKNOWN is intermediate only. Broker timeout, check interval, and maximum check count define the terminal boundary.
         end
@@ -903,7 +935,7 @@ in build files, image references, and lockfiles.
 | MyBatis-Plus on Java transaction service | Boot 3 starter is supported and warns against adding raw MyBatis starter alongside it | Implemented | Use only `mybatis-plus-spring-boot3-starter`; exact patch in Maven | [MyBatis-Plus installation](https://baomidou.com/en/getting-started/install/) |
 | Java multi-module build | Maven reactor aggregates/orders modules; Maven Wrapper pins entry point | Implemented | One root reactor for auth, commerce, and RocketMQ probe; no Gradle | [Maven reactor](https://maven.apache.org/guides/mini/guide-multiple-modules.html); [Maven Wrapper](https://maven.apache.org/tools/wrapper/) |
 | <a id="contract-preflight-rocketmq-runtime"></a> RocketMQ 5 runtime and Java client | Broker plus Proxy, 5.x clients, transaction and delay message mechanisms are implemented and integration-tested | Implemented | Proxy endpoint explicit; message types explicit; consumer idempotency remains application obligation | [RocketMQ quick start](https://rocketmq.apache.org/docs/quickStart/01quickstart/); [transaction messages](https://rocketmq.apache.org/docs/featureBehavior/04transactionmessage/); [delay messages](https://rocketmq.apache.org/docs/featureBehavior/02delaymessage/); [official clients](https://github.com/apache/rocketmq-clients) |
-| RocketMQ transaction failure behavior | Project-specific Lua rejection, duplicate delivery, checkback, bounded `UNKNOWN`, and terminal evidence were drilled against selected runtime | Resolved | Checker reads durable marker only; configured transaction bounds define terminal window | [RocketMQ transaction lifecycle](https://rocketmq.apache.org/docs/featureBehavior/04transactionmessage/) |
+| RocketMQ transaction failure behavior | Project-specific Lua rejection, duplicate delivery, checkback, bounded `UNKNOWN`, and terminal evidence were drilled against selected runtime | Resolved | Checker reads the durable MySQL reservation only; configured transaction bounds define terminal window | [RocketMQ transaction lifecycle](https://rocketmq.apache.org/docs/featureBehavior/04transactionmessage/) |
 | Python RocketMQ consumption | Selected simple-consumer/manual-ack path proves consumption, retry/redelivery, long processing, source-version ordering, tombstones, and rebuild handoff | Resolved | Keep indexer behind messaging adapter and preserve explicit ACK/retry classification | [client matrix](https://github.com/apache/rocketmq-clients); [Python examples](https://github.com/apache/rocketmq-clients/tree/master/python/example); [client issue #1198](https://github.com/apache/rocketmq-clients/issues/1198) |
 | <a id="contract-preflight-mysql-redis"></a> MySQL 8 and Redis 7 dual-instance semantics | InnoDB transaction truth plus separate Redis durability/eviction policies are implemented | Implemented | One MySQL instance with two databases; Commerce Redis `noeviction` + AOF; Support Redis TTL + LFU; Redis never business truth | [InnoDB transaction model](https://dev.mysql.com/doc/refman/8.0/en/innodb-transaction-model.html); [Redis eviction](https://redis.io/docs/latest/develop/reference/eviction/); [Redis persistence](https://redis.io/docs/latest/operate/oss_and_stack/management/persistence/) |
 | MySQL delegated grants through non-default role | Grantor requires delegated privilege with `GRANT OPTION`; roles require explicit activation | Implemented | Dedicated non-default role, `activate_all_roles_on_login=OFF`, fixed one-shot grant job, explicit clear to `NONE` | [MySQL `GRANT`](https://dev.mysql.com/doc/refman/8.4/en/grant.html); [roles](https://dev.mysql.com/doc/refman/8.4/en/roles.html); [`SET ROLE`](https://dev.mysql.com/doc/refman/8.4/en/set-role.html); [role activation variable](https://dev.mysql.com/doc/refman/8.4/en/server-system-variables.html#sysvar_activate_all_roles_on_login) |
@@ -926,7 +958,7 @@ relevant real integration evidence rather than relying on this prose.
 |---|---:|---|---|
 | Python RocketMQ consumer viability | Resolved | Against pinned Broker/Proxy/client: connection, subscription/filtering, consumption, explicit acknowledgement, retry/redelivery, long processing/invisible duration, source-version out-of-order rejection, tombstones, rebuild and alias switch; reruns record client mode, exceptions, timing, and duplicate behavior | Block the indexer messaging change. No language/protocol fallback is pre-approved; changing the service/language boundary requires explicit contract and evidence updates. |
 | <a id="contract-spike-elasticsearch-ik"></a> Elasticsearch/IK version pair | Resolved | Matching pinned artifact installs reproducibly and passes startup/analyzer tests with provenance in executable configuration | Block the version change. Do not silently omit IK or change analysis behavior. |
-| RocketMQ transaction failure drill | Resolved | Lua rejection rolls back without delivery; duplicate delivery creates one durable order; missing second-phase result checkbacks from durable marker; `UNKNOWN` is bounded; marker/reservation TTL covers configured window | Block changes to transaction-message behavior until equivalent real evidence passes. Moving away from this mainline requires explicit invariant, migration, and test updates. |
+| RocketMQ transaction failure drill | Resolved | Lua rejection rolls back without delivery; duplicate delivery creates one durable order; missing second-phase result checkbacks from the durable MySQL reservation; `UNKNOWN` is bounded; marker/reservation TTL covers the Lua/deadline-recovery window | Block changes to transaction-message behavior until equivalent real evidence passes. Moving away from this mainline requires explicit invariant, migration, and test updates. |
 
 <a id="contract-risk-register"></a>
 

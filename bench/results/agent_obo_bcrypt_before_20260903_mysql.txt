@@ -1,0 +1,17 @@
+citybuddy_commit=98d0b116cbe4c9c18faf6e1f205591b28605a64b
+sut_commit=98d0b116cbe4c9c18faf6e1f205591b28605a64b
+benchmark_harness_commit=98d0b116cbe4c9c18faf6e1f205591b28605a64b
+snapshot=before
+Variable_name	Value
+Connection_errors_max_connections	0
+Connections	18610
+Max_used_connections	97
+Variable_name	Value
+max_connections	151
+snapshot=after
+Variable_name	Value
+Connection_errors_max_connections	0
+Connections	32633
+Max_used_connections	101
+Variable_name	Value
+max_connections	151

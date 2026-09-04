@@ -8,6 +8,8 @@ import java.util.List;
 import java.util.Locale;
 import java.util.Set;
 import java.util.UUID;
+import org.apache.rocketmq.client.apis.producer.TransactionResolution;
+import org.springframework.dao.DataAccessException;
 import org.springframework.dao.DuplicateKeyException;
 import org.springframework.transaction.support.TransactionTemplate;
 
@@ -34,6 +36,7 @@ public final class SeckillReservationService {
     this.properties = properties;
   }
 
+  // Retained for explicit legacy persistence fixtures; live admission starts at preAdmit.
   public ReservationResult reserve(
       String userSubject, String activityId, String idempotencyKey, ReservationRequest request) {
     PreparedReservation intentReservation =
@@ -46,9 +49,60 @@ public final class SeckillReservationService {
     return admit(reservation.reservationId());
   }
 
+  public ReservationAdmissionStore.PreAdmission preAdmit(
+      String userSubject, String activityId, String idempotencyKey, ReservationRequest request) {
+    ValidatedIntent intent = validate(userSubject, activityId, idempotencyKey, request);
+    var handoff =
+        new ReservationAdmissionStore.AdmissionHandoff(
+            UUID.randomUUID().toString(),
+            userSubject,
+            activityId,
+            idempotencyKey,
+            intent.intentHash(),
+            intent.quantity(),
+            intent.expectedActivityVersion());
+    return admissionStore.preAdmit(handoff, sha256(userSubject));
+  }
+
+  public ReservationResult preAdmissionResult(ReservationAdmissionStore.PreAdmission admission) {
+    return new ReservationResult(
+        admission.handoff().reservationId(),
+        admission.handoff().activityId(),
+        admission.handoff().quantity(),
+        admission.handoff().activityProjectionVersion(),
+        admission.decision().state(),
+        admission.decision().decisionCode(),
+        2,
+        admission.replay(),
+        false,
+        null);
+  }
+
+  public ReservationResult persistAdmitted(ReservationAdmissionStore.AdmissionHandoff handoff) {
+    SeckillReservation admitted =
+        requireReservation(transactions.execute(status -> persistAdmittedOnce(handoff)));
+    return ReservationResult.from(admitted, false);
+  }
+
+  public List<ReservationAdmissionStore.AdmissionHandoff> dueAdmissionHandoffs(int batchSize) {
+    return admissionStore.dueHandoffs(batchSize);
+  }
+
+  public void completeAdmissionHandoff(ReservationAdmissionStore.AdmissionHandoff handoff) {
+    admissionStore.completeHandoff(handoff);
+  }
+
+  public boolean hasPendingAdmissionHandoff(String activityId) {
+    return admissionStore.hasPendingHandoff(activityId);
+  }
+
   public PreparedReservation prepare(
       String userSubject, String activityId, String idempotencyKey, ReservationRequest request) {
     ValidatedIntent intent = validate(userSubject, activityId, idempotencyKey, request);
+    if (repository.hasBlockingAdmissionTruthForDifferentIntent(
+        userSubject, activityId, idempotencyKey)) {
+      rebuildActivityState(activityId);
+    }
     return requirePreparedReservation(
         transactions.execute(
             status -> reserveIntent(userSubject, activityId, idempotencyKey, intent)));
@@ -78,6 +132,36 @@ public final class SeckillReservationService {
   public ReservationResult pollOwned(String userSubject, String reservationId) {
     validateIdentity(userSubject, 128, "Reservation owner");
     validateIdentity(reservationId, 36, "Reservation id");
+    var projected = admissionStore.readOwned(reservationId, sha256(userSubject));
+    if (projected.isPresent()) {
+      var value = projected.orElseThrow();
+      if (value.state() == ReservationState.REJECTED) {
+        return new ReservationResult(
+            value.reservationId(),
+            value.activityId(),
+            value.quantity(),
+            value.activityProjectionVersion(),
+            value.state(),
+            value.decisionCode(),
+            2,
+            true,
+            false,
+            null);
+      }
+      if (value.handoffPending()) {
+        return new ReservationResult(
+            value.reservationId(),
+            value.activityId(),
+            value.quantity(),
+            value.activityProjectionVersion(),
+            ReservationState.PENDING,
+            null,
+            1,
+            true,
+            false,
+            null);
+      }
+    }
     SeckillReservation reservation =
         repository
             .findOwned(userSubject, reservationId)
@@ -85,10 +169,31 @@ public final class SeckillReservationService {
     return ReservationResult.from(reservation, true);
   }
 
+  public TransactionResolution transactionResolution(String reservationId) {
+    try {
+      return repository
+          .find(reservationId)
+          .map(
+              reservation ->
+                  switch (reservation.state()) {
+                    case REJECTED -> TransactionResolution.ROLLBACK;
+                    case ADMITTED, ORDERED, CANCELLED, UNFULFILLED -> TransactionResolution.COMMIT;
+                    case PENDING -> TransactionResolution.UNKNOWN;
+                  })
+          .orElse(TransactionResolution.UNKNOWN);
+    } catch (DataAccessException exception) {
+      return TransactionResolution.UNKNOWN;
+    }
+  }
+
   public ReservationAdmissionStore.RebuildResult rebuildActivityState(String activityId) {
     validateIdentity(activityId, 64, "Activity id");
     String lockToken = admissionStore.acquireRebuild(activityId);
     try {
+      if (admissionStore.hasPendingHandoff(activityId)) {
+        throw new ReservationAdmissionStore.AdmissionIndeterminateException(
+            "Pending admission handoff prevents projection rebuild");
+      }
       RebuildTruth truth =
           requireRebuildTruth(
               transactions.execute(
@@ -107,10 +212,7 @@ public final class SeckillReservationService {
                     }
                     long admitted =
                         reservations.stream()
-                            .filter(
-                                reservation ->
-                                    reservation.state() == ReservationState.ADMITTED
-                                        || reservation.state() == ReservationState.ORDERED)
+                            .filter(reservation -> consumesActivityQuota(reservation.state()))
                             .mapToLong(SeckillReservation::quantity)
                             .sum();
                     if (admitted > activity.allocatedQuota()) {
@@ -127,6 +229,7 @@ public final class SeckillReservationService {
     }
   }
 
+  // Only legacy MySQL-PENDING fixtures use this resolver; the worker recovers Redis handoffs.
   public int resolveDueReservations(int batchSize) {
     List<SeckillReservation> due = repository.findDuePending(batchSize);
     for (SeckillReservation reservation : due) {
@@ -188,7 +291,8 @@ public final class SeckillReservationService {
             .orElseThrow(() -> new IllegalStateException("Reservation truth is missing"));
     if (current.state() != ReservationState.PENDING) {
       if (current.state() == ReservationState.ORDERED
-          || current.state() == ReservationState.CANCELLED) {
+          || current.state() == ReservationState.CANCELLED
+          || current.state() == ReservationState.UNFULFILLED) {
         if (decision.state() == ReservationState.ADMITTED
             && decision.decisionCode() == ReservationDecisionCode.ADMITTED
             && current.decisionCode() == ReservationDecisionCode.ADMITTED
@@ -204,6 +308,61 @@ public final class SeckillReservationService {
       return current;
     }
     return repository.applyDecision(current, decision.state(), decision.decisionCode());
+  }
+
+  private SeckillReservation persistAdmittedOnce(
+      ReservationAdmissionStore.AdmissionHandoff handoff) {
+    SeckillActivity activity =
+        activityRepository
+            .findForShare(handoff.activityId())
+            .orElseThrow(() -> new IllegalStateException("Reservation activity truth is missing"));
+    if (activity.projectionVersion() != handoff.activityProjectionVersion()) {
+      throw new IllegalStateException("Admission handoff conflicts with activity truth");
+    }
+    SeckillReservation admitted =
+        new SeckillReservation(
+            handoff.reservationId(),
+            handoff.userSubject(),
+            handoff.activityId(),
+            handoff.idempotencyKey(),
+            handoff.intentHash(),
+            handoff.quantity(),
+            handoff.activityProjectionVersion(),
+            ReservationState.ADMITTED,
+            ReservationDecisionCode.ADMITTED,
+            2);
+    try {
+      repository.reserveAdmitted(admitted, properties.minimumBrokerCoverage());
+      return repository
+          .findForUpdate(admitted.reservationId())
+          .orElseThrow(() -> new IllegalStateException("Inserted reservation truth is missing"));
+    } catch (DuplicateKeyException duplicate) {
+      SeckillReservation existing =
+          repository
+              .findByIdempotencyForShare(
+                  handoff.userSubject(), handoff.activityId(), handoff.idempotencyKey())
+              .orElseThrow(
+                  () -> new IllegalStateException("Duplicate reservation truth is missing"));
+      if (!sameAdmission(existing, admitted)) {
+        throw new IllegalStateException("Admission handoff conflicts with MySQL truth");
+      }
+      return existing;
+    }
+  }
+
+  private static boolean sameAdmission(SeckillReservation existing, SeckillReservation admitted) {
+    return existing.reservationId().equals(admitted.reservationId())
+        && existing.userSubject().equals(admitted.userSubject())
+        && existing.activityId().equals(admitted.activityId())
+        && existing.idempotencyKey().equals(admitted.idempotencyKey())
+        && existing.intentHash().equals(admitted.intentHash())
+        && existing.quantity() == admitted.quantity()
+        && existing.activityProjectionVersion() == admitted.activityProjectionVersion()
+        && existing.decisionCode() == ReservationDecisionCode.ADMITTED
+        && (existing.state() == ReservationState.ADMITTED
+            || existing.state() == ReservationState.ORDERED
+            || existing.state() == ReservationState.CANCELLED
+            || existing.state() == ReservationState.UNFULFILLED);
   }
 
   private static ValidatedIntent validate(
@@ -253,6 +412,19 @@ public final class SeckillReservationService {
     } catch (NoSuchAlgorithmException exception) {
       throw new IllegalStateException("SHA-256 is unavailable", exception);
     }
+  }
+
+  static boolean blocksAnotherAdmission(ReservationState state) {
+    return state == ReservationState.ADMITTED
+        || state == ReservationState.ORDERED
+        || state == ReservationState.CANCELLED
+        || state == ReservationState.UNFULFILLED;
+  }
+
+  static boolean consumesActivityQuota(ReservationState state) {
+    return state == ReservationState.ADMITTED
+        || state == ReservationState.ORDERED
+        || state == ReservationState.UNFULFILLED;
   }
 
   private static PreparedReservation requirePreparedReservation(PreparedReservation reservation) {

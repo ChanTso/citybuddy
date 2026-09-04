@@ -16,6 +16,12 @@ says what the change was worth.
 The current four-path baseline and 16-cell worker × outbound-client bundles record the measured
 full commit `cdbe1cbd40d6463270aa5652151f8330bc38773f`. The 16 warm-history run bundles and their
 aggregate record the measured full commit `65bb40e7c04bbdcc0b4be22531bb16040af49274`.
+The repeated-OBO evidence records the BCrypt baseline commit
+`98d0b116cbe4c9c18faf6e1f205591b28605a64b`, rejected cache-prototype commit
+`9157b91cf67f41e910b04c2a4e6fd75e204acdd4`, and final generated-credential digest commit
+`a4056f708aa83aa73346373bb9f4e463ae819635`. Each measured checkout was source-clean, used a
+fresh setup, and records its own setup nonce. Only the baseline-to-digest pair supports the final
+implementation claim; the cache artifacts are retained as evidence for the rejected design.
 Repository history reconstructs the earlier paired baseline boundary as
 `272eecdfb79b73811bc6fff677360a0d79a07991` and the post-client-reuse boundary as
 `6acf856716ff0b926bb147c0e1d99614a8d9e9c8`. The artifacts were committed immediately after the
@@ -793,10 +799,103 @@ traffic that is now the largest single item in the agent's own profile, without 
 it serves. Retrieval, which collapses without ever touching the limit, is a control only for the
 narrow claim that this MySQL limit is not the universal cause.
 
-**Nothing in the agent bounds its own concurrency on any path.** The observed first constraints
-are a configured database limit on chat and the commerce tool boundary on preparation. Retrieval
-collapses without a MySQL connection rejection, but these runs do not distinguish an Agent-local
-limit from the dedicated Elasticsearch dependency they failed to sample.
+**Nothing in the agent bounds its own concurrency on any path.** The observed first constraint on
+chat is a configured database limit. Retrieval collapses without a MySQL connection rejection, but
+these runs do not distinguish an Agent-local limit from the dedicated Elasticsearch dependency
+they failed to sample. The historical preparation attribution to a commerce tool boundary was
+wrong: that workload performs an OBO exchange on every turn, and the old samples showed the auth
+container saturating. The paired correction below isolates that cost.
+
+## Repeated OBO service-credential verification
+
+The owned-order preparation path exchanges a service credential for an OBO before calling
+commerce. At BCrypt cost 12, the pre-change 5/10/15/20/30 requests/s ladder put the auth container
+at median CPU readings of 117.18%, 234.43%, 358.03%, 527.40%, and 694.42%. Commerce medians over
+the same windows were 1.95%, 2.53%, 3.31%, 4.89%, and 5.56%. The old description of the first
+constraint as “the commerce tool boundary” was therefore contradicted by the component samples.
+
+The final design separates human passwords from machine credentials. Human login and legacy
+service rows remain on per-request BCrypt using the cost encoded in each stored hash; the measured
+baseline service row used cost 12. New service credentials are `cbsvc_v1_` tokens with 256 bits from
+a CSPRNG; the database stores a versioned SHA-256 digest bound to the exact client id. Every
+exchange still reads current state, allowed scopes, and the persisted verifier. The fast verifier is
+appropriate only because the machine token has 256 bits of generated entropy; it is not a password
+hash and must not be used for human-selected secrets. Existing BCrypt rows are not migrated by a
+binary deployment and retain their old cost until the service credential is explicitly rotated.
+
+The paired ladders used the same MacBook Pro `Mac16,1`, Docker's 8 CPUs and 14,638,391,296-byte
+memory allocation, MySQL `max_connections=151`, one Agent worker, shared outbound clients, the
+deterministic zero-inference model fixture, the same fixed 5/10/15/20/30 order, and one 30-second
+step at each rate. Each side rebuilt a fresh fixture. The treatment is the final code plus rotation
+of `agent-service` from a BCrypt fixture secret to the generated digest credential; it is not merely
+a new binary over an unchanged database row.
+
+| Rate | BCrypt served / dropped | BCrypt p50 / p99 | BCrypt auth CPU median / max | Digest served / dropped | Digest p50 / p99 | Digest auth CPU median / max |
+|---:|---:|---:|---:|---:|---:|---:|
+| 5/s | 150 / 0 | 253.9 / 272.6 ms | 117.18% / 121.25% | 151 / 0 | 30.6 / 55.7 ms | 3.37% / 12.10% |
+| 10/s | 301 / 0 | 252.8 / 280.2 ms | 234.43% / 240.81% | 301 / 0 | 21.2 / 27.3 ms | 3.51% / 8.64% |
+| 15/s | 451 / 0 | 260.5 / 318.9 ms | 358.03% / 393.38% | 450 / 0 | 17.5 / 27.7 ms | 3.29% / 12.12% |
+| 20/s | 601 / 0 | 295.1 / 551.4 ms | 527.40% / 602.97% | 600 / 0 | 15.4 / 27.6 ms | 3.19% / 6.17% |
+| 30/s | 803 / 98 | 4,139.8 / 6,786.7 ms | 694.42% / 745.30% | 901 / 0 | 13.4 / 31.5 ms | 4.30% / 7.87% |
+
+Both ladders recorded zero HTTP 5xx responses and zero MySQL connection-limit errors. In the
+BCrypt run, the 30/s step completed 26.77 iterations/s; in the digest run, all 901 started
+iterations completed at 30.03/s. Across the final digest ladder, all 2,403 started requests were
+served, with zero HTTP errors, nonserved responses, drops, or SQL-classified failed turns. At 30/s,
+the other whole-container median/max CPU readings were Agent 14.61%/18.34%, MySQL 13.94%/17.27%,
+commerce 4.02%/5.38%, k6 1.46%/2.73%, model fixture 0.97%/1.14%, and Elasticsearch 0.30%/0.39%.
+The measured range therefore contains no new observed saturation point; it does not establish
+capacity above 30/s.
+
+This pair supports the narrow causal statement that repeated successful service-credential BCrypt
+verification was the old preparation knee's primary cost, and that generated machine credentials
+remove that cost after rotation. It does not claim faster human login or faster unrotated legacy
+service identities. Each rate was measured once in ascending order. The digest p50 falling as the
+rate rises is confounded by warm-up and order, so it is not evidence that higher load lowers latency.
+
+The final raw pair is the
+[BCrypt steps](../results/agent_obo_bcrypt_before_20260903_steps.txt),
+[BCrypt CPU readings](../results/agent_obo_bcrypt_before_20260903_cpu.txt),
+[BCrypt setup](../results/agent_obo_bcrypt_before_20260903_setup_environment.json),
+[digest steps](../results/agent_obo_digest_after_20260903_steps.txt),
+[digest CPU readings](../results/agent_obo_digest_after_20260903_cpu.txt), and
+[digest setup](../results/agent_obo_digest_after_20260903_setup_environment.json); their adjacent
+console, summary, MySQL, CPU-error, and workload-contract files complete each bundle.
+
+An intermediate process-local successful-verification cache was measured at commit `9157b91`, then
+rejected because a process memory disclosure could reveal both its HMAC key and reusable proof for
+a low-entropy service secret. Its [5–30/s steps](../results/agent_obo_bcrypt_after_20260903_steps.txt)
+and adjacent bundle are retained as a measured but superseded prototype, not final-implementation
+evidence. Its 5/s maximum was 430.5 ms, compared with 58.5 ms in the final digest run; that is one
+observation, not a distributional claim.
+
+The prototype also has a fresh-setup 40/60/80 requests/s extension. It found 7 nonserved HTTP
+errors and 7 SQL-classified failed turns at 40/s, then clean 60/s and 80/s steps. The published
+bundle did not retain the seven response reasons. A post-run live-container inspection saw seven
+429 `ACTION_PREPARATION_COMMERCE_INDETERMINATE` responses, but that observation is not durable raw
+evidence. The non-monotonic run cannot define a knee or capacity, and because it measured the
+rejected cache commit, it says nothing about the final digest implementation above 30/s. Its
+[steps](../results/agent_obo_bcrypt_after_ext_20260903_steps.txt),
+[summary](../results/agent_obo_bcrypt_after_ext_20260903_summary.json),
+[CPU readings](../results/agent_obo_bcrypt_after_ext_20260903_cpu.txt), and
+[workload contract](../results/agent_obo_bcrypt_after_ext_20260903_workload_contract.tsv) preserve
+the bad first-step result rather than discarding it.
+
+The `*_cpu.txt` files are approximately two-second-cadence `docker stats --no-stream` readings of
+whole-container CPU and memory; some adjacent timestamps are three seconds apart. A step median can
+locate a saturated container and, paired with the deployment counterfactual, support a
+component-level attribution. It cannot name a Java method, distinguish user/kernel/wait time, or
+substitute for a stack profile. The raw readings establish auth saturation; the code-and-credential
+counterfactual is what isolates successful service-credential verification.
+
+A Java Flight Recorder capture is feasible without product-code changes. The Temurin 21 JRE used
+by this fixture can start JFR with `-XX:StartFlightRecording` on the existing `java -jar` command,
+write the recording to a benchmark-mounted directory, and run under the same closed-loop load shape
+as `profile_agent_cpu.sh`. A dynamic `jcmd` attach would require switching the fixture image from a
+JRE to a JDK or adding another attach mechanism. Either design also needs provenance, a check that
+the load outlives the sample, and a separate artifact because a closed-loop profile answers where
+CPU time goes, not throughput at an arrival rate. No JFR recording was needed to claim this paired
+counterfactual, and none is represented by the Docker CPU files.
 
 ## Three things found while building the fixture
 

@@ -1,0 +1,13 @@
+citybuddy_commit=9157b91cf67f41e910b04c2a4e6fd75e204acdd4
+sut_commit=9157b91cf67f41e910b04c2a4e6fd75e204acdd4
+benchmark_harness_commit=9157b91cf67f41e910b04c2a4e6fd75e204acdd4
+correlation_boundary=obo-bcrypt-after-20260903-prepare-
+path=prepare
+expected_tool_profile=all
+evidence_role=workload_contract_only_not_performance_or_business_grader
+rate_per_second	boundary_turns	completed_turns	failed_turns	processing_turns	matching_profile_turns	empty_history_turns	unexpected_routing_events	nonempty_context_events	routing_events	context_events	actual_tool_profiles	loaded_turn_counts	included_turn_counts
+5	151	151	0	0	151	151	0	0	151	151	all	0	0
+10	301	301	0	0	301	301	0	0	301	301	all	0	0
+15	451	451	0	0	451	451	0	0	451	451	all	0	0
+20	600	600	0	0	600	600	0	0	600	600	all	0	0
+30	901	901	0	0	901	901	0	0	901	901	all	0	0

@@ -640,9 +640,9 @@ commerce_app_password="$(read_value MYSQL_COMMERCE_APP_PASSWORD)"
 commerce_migration_password="$(read_value MYSQL_COMMERCE_MIGRATION_PASSWORD)"
 agent_app_password="$(read_value MYSQL_AGENT_APP_PASSWORD)"
 root_password="$(read_value MYSQL_BOOTSTRAP_PASSWORD)"
-commerce_service_password="$(openssl rand -hex 24)"
-evaluator_password="$(openssl rand -hex 24)"
-agent_service_password="$(openssl rand -hex 24)"
+commerce_service_password="$(uv run python scripts/service_credential.py generate)"
+evaluator_password="$(uv run python scripts/service_credential.py generate)"
+agent_service_password="$(uv run python scripts/service_credential.py generate)"
 management_password="$(openssl rand -hex 24)"
 invalid_management_password="$(openssl rand -hex 24)"
 ordinary_user_password="$(openssl rand -hex 24)"
@@ -680,9 +680,12 @@ legacy_other_product_id_2='legacy-other-product-2'
 legacy_other_reference_id_2="$(evaluation_product_reference \
   "$legacy_other_sandbox_id" "$legacy_other_session" "$legacy_other_trace_2" \
   "$legacy_other_operation_2" PRODUCT_FIXTURE "$legacy_other_product_id_2" 1 OBSERVED)"
-commerce_service_hash="$(uv run python scripts/hash_test_credential.py "$commerce_service_password")"
-evaluator_hash="$(uv run python scripts/hash_test_credential.py "$evaluator_password")"
-agent_service_hash="$(uv run python scripts/hash_test_credential.py "$agent_service_password")"
+commerce_service_hash="$(printf '%s' "$commerce_service_password" \
+  | uv run python scripts/service_credential.py hash commerce-service)"
+evaluator_hash="$(printf '%s' "$evaluator_password" \
+  | uv run python scripts/service_credential.py hash evaluation-client)"
+agent_service_hash="$(printf '%s' "$agent_service_password" \
+  | uv run python scripts/service_credential.py hash agent-service)"
 ordinary_user_hash="$(uv run python scripts/hash_test_credential.py "$ordinary_user_password")"
 
 "${compose[@]}" up --detach --wait --wait-timeout 60 mysql

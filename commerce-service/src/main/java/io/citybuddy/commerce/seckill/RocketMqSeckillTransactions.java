@@ -25,18 +25,18 @@ public final class RocketMqSeckillTransactions implements AutoCloseable {
   private final ClientServiceProvider provider;
   private final ObjectMapper objectMapper;
   private final SeckillOrderProperties properties;
-  private final ReservationAdmissionStore admissionStore;
+  private final SeckillReservationService reservationService;
   private final Producer producer;
   private final SimpleConsumer consumer;
 
   public RocketMqSeckillTransactions(
       ObjectMapper objectMapper,
       SeckillOrderProperties properties,
-      ReservationAdmissionStore admissionStore)
+      SeckillReservationService reservationService)
       throws ClientException {
     this.objectMapper = objectMapper;
     this.properties = properties;
-    this.admissionStore = admissionStore;
+    this.reservationService = reservationService;
     provider = ClientServiceProvider.loadService();
     ClientConfiguration configuration =
         ClientConfiguration.newBuilder()
@@ -75,23 +75,23 @@ public final class RocketMqSeckillTransactions implements AutoCloseable {
   }
 
   public ReservationResult submit(
-      SeckillReservation reservation, SeckillReservationService reservationService)
+      ReservationAdmissionStore.AdmissionHandoff handoff,
+      SeckillReservationService reservationService)
       throws ClientException {
-    SeckillTransactionMessage payload = SeckillTransactionMessage.from(reservation);
+    SeckillTransactionMessage payload = SeckillTransactionMessage.from(handoff);
     Message message = message(payload);
     Transaction transaction = producer.beginTransaction();
     producer.send(message, transaction);
-    ReservationResult result = reservationService.admit(reservation.reservationId());
+    ReservationResult result = reservationService.persistAdmitted(handoff);
+    boolean committed = false;
     try {
-      if (result.state() == ReservationState.ADMITTED) {
-        transaction.commit();
-      } else if (result.state() == ReservationState.REJECTED) {
-        transaction.rollback();
-      } else {
-        throw new IllegalStateException("Lua decision did not produce a terminal marker");
-      }
+      transaction.commit();
+      committed = true;
     } catch (ClientException exception) {
-      // The durable marker remains the sole checker authority after an uncertain second phase.
+      // The checker reads the durable MySQL reservation after an uncertain second phase.
+    }
+    if (committed) {
+      reservationService.completeAdmissionHandoff(handoff);
     }
     return result;
   }
@@ -111,7 +111,7 @@ public final class RocketMqSeckillTransactions implements AutoCloseable {
 
   TransactionResolution check(MessageView message) {
     try {
-      return admissionStore.transactionResolution(singleKey(message));
+      return reservationService.transactionResolution(singleKey(message));
     } catch (RuntimeException exception) {
       return TransactionResolution.UNKNOWN;
     }

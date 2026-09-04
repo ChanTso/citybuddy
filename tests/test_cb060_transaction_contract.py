@@ -3,7 +3,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 
 
-def test_transaction_checker_is_a_pure_durable_marker_mapping() -> None:
+def test_transaction_checker_delegates_to_mysql_reservation_mapping() -> None:
     source = (
         ROOT / "commerce-service/src/main/java/io/citybuddy/commerce/seckill/"
         "RocketMqSeckillTransactions.java"
@@ -12,8 +12,8 @@ def test_transaction_checker_is_a_pure_durable_marker_mapping() -> None:
     end = source.index("\n  private static String singleKey", start)
     checker = source[start:end]
 
-    assert "admissionStore.transactionResolution(singleKey(message))" in checker
-    assert "reservationService" not in checker
+    assert "reservationService.transactionResolution(singleKey(message))" in checker
+    assert "admissionStore" not in checker
     assert "properties" not in checker
     assert "getBody" not in checker
     assert "Jdbc" not in checker
