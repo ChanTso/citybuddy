@@ -513,7 +513,7 @@ sequenceDiagram
 | Entity | Owner/store | Unique invariant | State or transaction boundary | Executable source |
 |---|---|---|---|---|
 | Mock payment | `commerce-service`; `commerce_db` | Unique payment-attempt and callback idempotency keys per order | `UNPAID → PAID`; duplicate callbacks return existing state; illegal transitions reject; committed replay reconciles complete durable closure within caller authorization visibility | Payment migration, OpenAPI, and integration tests |
-| Refund | `commerce-service`; `commerce_db` | Unique refund id and request idempotency key; refundable amount cannot exceed eligible amount | Requested/processing/succeeded/failed states are guarded by order/payment state; refund, ledger, and Outbox share required transaction boundaries | Refund migration, OpenAPI, and integration tests |
+| Refund | `commerce-service`; `commerce_db` | Unique refund id and request idempotency key; the sum reserved by requested, processing, and succeeded refunds cannot exceed the authoritative paid amount | Requested/processing/succeeded/failed states are guarded by order/payment state; capacity uses a locking current read after the payment-attempt aggregate-root lock; refund, ledger, and Outbox share required transaction boundaries | Refund migration, OpenAPI, and integration tests |
 | PendingAction | `commerce-service`; `commerce_db` | Unique `pending_action_id`; one server-derived idempotency key per turn/tool/argument hash | Prepared with argument hash, resource version, owner, expiry, and unconsumed state; confirmation validates, consumes once, executes, and persists receipt in one commerce transaction | Action migration and OpenAPI |
 | ActionReceipt | `commerce-service`; `commerce_db` | Unique receipt id and action idempotency key | Persisted with successful action and immutable; repeated key returns existing receipt | Action migration and OpenAPI |
 
@@ -537,8 +537,9 @@ sequenceDiagram
   PendingAction in `commerce_db`; `agent-service` stores only the validated reference and presents
   a text confirmation request.
 - Confirmation is not a front-end security primitive. In one commerce transaction, the service
-  validates argument hash, resource version, expiry, ownership, and unconsumed state; consumes the
-  PendingAction once; executes the business mutation; and persists an ActionReceipt.
+  validates argument hash, resource version, expiry, ownership, unconsumed state, and current refund
+  capacity after locking the payment aggregate root; consumes the PendingAction once; executes the
+  business mutation; and persists an ActionReceipt.
 - Before the irreversible commerce call, the agent atomically claims its local reference from
   `PENDING` to `CONFIRMING` in a separate committed transaction. A transport failure after the
   commerce commit therefore leaves a claim that can safely re-enter commerce and replay the
@@ -596,6 +597,7 @@ sequenceDiagram
         G->>C: Confirm pending_action_id with OBO
         C->>D: Begin one business transaction
         D->>D: Validate owner, scope, args hash, resource version, expiry, and unconsumed state
+        D->>D: Lock payment root; current-read refund capacity
         alt Validation fails or business transition is illegal
             D-->>C: Roll back
             C-->>G: Structured rejection, no receipt

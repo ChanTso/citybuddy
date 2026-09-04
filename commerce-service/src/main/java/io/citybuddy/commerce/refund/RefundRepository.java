@@ -124,6 +124,8 @@ public class RefundRepository {
   }
 
   public long reservedAmount(String attemptId) {
+    // This must remain a locking current read: an Action caller may establish a REPEATABLE READ
+    // snapshot before it waits for the payment-attempt aggregate root.
     BigDecimal total =
         jdbc.queryForObject(
             """
@@ -131,6 +133,7 @@ public class RefundRepository {
             FROM mock_refund
             WHERE payment_attempt_id = ?
               AND state IN ('REQUESTED', 'PROCESSING', 'SUCCEEDED')
+            FOR UPDATE
             """,
             BigDecimal.class,
             attemptId);
