@@ -364,6 +364,7 @@ ChatOutcome = Literal[
     "action_clarification",
     "action_declined",
     "action_expired",
+    "action_rejected",
 ]
 
 

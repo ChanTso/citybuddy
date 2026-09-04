@@ -309,11 +309,14 @@ class MemoryConversationStore(ConversationStore):
 
 
 class MemoryAgent(AgentRunner):
-    def __init__(self, *, request_reasons: tuple[str, ...] = ()) -> None:
+    def __init__(
+        self, *, request_reasons: tuple[str, ...] = (), outcome: str = "completed"
+    ) -> None:
         self.calls = 0
         self.sandbox_ids: list[str | None] = []
         self.histories: list[ConversationHistory] = []
         self.request_reasons = request_reasons
+        self.outcome = outcome
 
     def run(
         self,
@@ -333,8 +336,8 @@ class MemoryAgent(AgentRunner):
         del message, direct_token, subject, session_id, trace_id, turn_id
         return AgentRunResult(
             "Bounded support response.",
-            "completed",
-            (AgentEvent("AGENT_OUTCOME", {"outcome": "completed"}),),
+            self.outcome,
+            (AgentEvent("AGENT_OUTCOME", {"outcome": self.outcome}),),
             request_reasons=self.request_reasons,
         )
 
@@ -1632,13 +1635,14 @@ def test_obo_client_rejects_malformed_exchange_response(
     assert malformed.value.detail == "Identity exchange rejected"
 
 
-def test_chat_persists_server_owned_result_and_replays_same_intent() -> None:
+@pytest.mark.parametrize("outcome", ["completed", "action_rejected"])
+def test_chat_persists_server_owned_result_and_replays_same_intent(outcome: str) -> None:
     private, public_jwk = key_fixture("current-key")
     validator = DirectJwtValidator(settings(), CountingJwksSource([public_jwk]))
     sessions = MemorySessionStore()
     session_id = sessions.create("user-123")
     conversations = MemoryConversationStore(sessions)
-    agent = MemoryAgent()
+    agent = MemoryAgent(outcome=outcome)
     client = TestClient(
         create_app(
             settings(),
@@ -1670,7 +1674,8 @@ def test_chat_persists_server_owned_result_and_replays_same_intent() -> None:
         "citations",
     }
     assert first.json()["citations"] == []
-    assert first.json()["outcome"] == "completed"
+    assert first.json()["outcome"] == outcome
+    assert first.json()["receiptId"] is None
     assert "order" not in first.json()["reply"].lower()
     assert len(conversations.results) == 1
     assert agent.calls == 1

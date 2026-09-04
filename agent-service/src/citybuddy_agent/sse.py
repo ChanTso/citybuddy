@@ -26,6 +26,7 @@ _PUBLIC_COMPLETED_OUTCOMES = {
     "action_clarification",
     "action_declined",
     "action_expired",
+    "action_rejected",
 }
 _PUBLIC_OUTCOMES = _PUBLIC_COMPLETED_OUTCOMES | {"budget_exhausted", "provider_denied"}
 
