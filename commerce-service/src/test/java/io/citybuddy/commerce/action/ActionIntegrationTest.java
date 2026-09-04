@@ -31,8 +31,10 @@ import java.util.Base64;
 import java.util.Date;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 import java.util.UUID;
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
@@ -203,6 +205,96 @@ class ActionIntegrationTest {
                 String.class,
                 pendingId))
         .isEqualTo("CONSUMED:2:1");
+  }
+
+  @Test
+  void differentPendingActionsUseCurrentRefundCapacityAfterPaymentLockWait() throws Exception {
+    PaidFixture paid = seedPaidStandard(1000, "action-capacity-race");
+    ActionRequestContext firstContext =
+        new ActionRequestContext(
+            USER, SESSION, "trace-capacity-first", UUID.randomUUID().toString(), null, SCOPE);
+    ActionRequestContext secondContext =
+        new ActionRequestContext(
+            USER, SESSION, "trace-capacity-second", UUID.randomUUID().toString(), null, SCOPE);
+    PrepareActionCommand command =
+        new PrepareActionCommand("REFUND_REQUEST", paid.orderId(), 600L, "AUD");
+    PendingActionView firstPending = actions.prepare(firstContext, command);
+    PendingActionView secondPending = actions.prepare(secondContext, command);
+
+    CountDownLatch receiptSnapshots = new CountDownLatch(2);
+    ActionRepository synchronizedReceiptReads =
+        new ActionRepository(jdbc, objectMapper) {
+          @Override
+          public Optional<ActionReceiptRecord> findReceiptByPending(String pendingActionId) {
+            Optional<ActionReceiptRecord> receipt = super.findReceiptByPending(pendingActionId);
+            receiptSnapshots.countDown();
+            awaitLatch(receiptSnapshots, "Concurrent Action receipt snapshots did not converge");
+            return receipt;
+          }
+        };
+    ActionService competingActions = actionService(synchronizedReceiptReads);
+
+    CompletableFuture<Object> first =
+        CompletableFuture.supplyAsync(
+            () -> confirmOutcome(competingActions, firstContext, firstPending.pendingActionId()));
+    CompletableFuture<Object> second =
+        CompletableFuture.supplyAsync(
+            () -> confirmOutcome(competingActions, secondContext, secondPending.pendingActionId()));
+    List<Object> outcomes =
+        List.of(first.get(10, TimeUnit.SECONDS), second.get(10, TimeUnit.SECONDS));
+
+    assertThat(outcomes.stream().filter(ActionReceiptView.class::isInstance)).hasSize(1);
+    assertThat(outcomes.stream().filter(ActionException.class::isInstance)).hasSize(1);
+    ActionException rejected =
+        (ActionException)
+            outcomes.stream().filter(ActionException.class::isInstance).findFirst().orElseThrow();
+    assertThat(rejected.status()).isEqualTo(409);
+    assertThat(rejected.category()).isEqualTo("CONFLICT");
+    assertThat(rejected.reason())
+        .isEqualTo(ActionRejectionReason.ACTION_IDEMPOTENCY_INTENT_CONFLICT);
+    assertThat(rowCount("mock_refund", "order_id", paid.orderId())).isOne();
+    assertThat(rowCount("action_receipt", "order_id", paid.orderId())).isOne();
+    assertThat(
+            jdbc.queryForObject(
+                """
+                SELECT COALESCE(SUM(requested_amount_minor), 0)
+                FROM mock_refund
+                WHERE payment_attempt_id = ?
+                  AND state IN ('REQUESTED', 'PROCESSING', 'SUCCEEDED')
+                """,
+                Long.class,
+                paid.attemptId()))
+        .isEqualTo(600L);
+    assertThat(
+            jdbc.queryForObject(
+                """
+                SELECT COUNT(*) FROM pending_action
+                WHERE pending_action_id IN (?, ?) AND state = 'CONSUMED'
+                """,
+                Long.class,
+                firstPending.pendingActionId(),
+                secondPending.pendingActionId()))
+        .isOne();
+    assertThat(
+            jdbc.queryForObject(
+                """
+                SELECT COUNT(*) FROM pending_action
+                WHERE pending_action_id IN (?, ?) AND state = 'PREPARED'
+                """,
+                Long.class,
+                firstPending.pendingActionId(),
+                secondPending.pendingActionId()))
+        .isOne();
+    assertThat(
+            jdbc.queryForObject(
+                """
+                SELECT COUNT(*) FROM commerce_outbox
+                WHERE aggregate_type = 'REFUND' AND event_type = 'REFUND_REQUESTED'
+                  AND JSON_UNQUOTE(JSON_EXTRACT(payload, '$.orderId')) = ?
+                """,
+                Long.class,
+                paid.orderId()))
+        .isOne();
   }
 
   @Test
@@ -694,6 +786,26 @@ class ActionIntegrationTest {
 
   private ActionService actionService(ActionRepository repository) {
     return actionService(repository, Clock.systemUTC());
+  }
+
+  private static Object confirmOutcome(
+      ActionService service, ActionRequestContext context, String pendingActionId) {
+    try {
+      return service.confirm(context, pendingActionId);
+    } catch (ActionException exception) {
+      return exception;
+    }
+  }
+
+  private static void awaitLatch(CountDownLatch latch, String message) {
+    try {
+      if (!latch.await(10, TimeUnit.SECONDS)) {
+        throw new IllegalStateException(message);
+      }
+    } catch (InterruptedException exception) {
+      Thread.currentThread().interrupt();
+      throw new IllegalStateException(message, exception);
+    }
   }
 
   private ConfirmedAction confirmAction(String suffix, long paidAmount, long refundAmount) {

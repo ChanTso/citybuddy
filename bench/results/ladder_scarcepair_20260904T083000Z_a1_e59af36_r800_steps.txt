@@ -1,0 +1,13 @@
+citybuddy_commit=e59af3660c9d4a0074d5e0da8663bffb932d2503
+setup_window_utc=2026-09-04T08:43:31Z/2026-09-04T08:44:18Z
+run_started_at_utc=2026-09-04T08:46:08Z
+run_completed_at_utc=2026-09-04T08:46:44Z
+label=scarcepair_20260904T083000Z_a1_e59af36_r800 activities=32 rates=800 step_seconds=30 gap_seconds=0 nominal_iterations=24000
+fixture_users=25000 fixture_activities=32 fixture_quota=100 fixture_stock=2000000 topic_suffix=scarcepair-20260904T083000Z-a1-e59af36
+docker_cpus=8 docker_memory_bytes=14638391296 commerce_cpu_limit=4
+k6_image=grafana/k6@sha256:5221b620a4f874faff6e32ba597aa667c058391fe4898b1c6f6377f062c6cdec
+
+=== scarcepair_20260904T083000Z_a1_e59af36_r800 ===
+ target  nominal     done  dropped  failed  fail %  achieved/s    p50 ms    p95 ms    p99 ms    max ms  decisions
+-----------------------------------------------------------------------------------------------------------------
+    800    24000    23645      356   20445   86.47       788.2      13.0    1122.6    1368.9    1675.6  EXHAUSTED=20445, ADMITTED=3200

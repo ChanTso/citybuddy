@@ -64,6 +64,15 @@ const ordered: Reservation = {
   orderId: '00000000-0000-0000-0000-000000000002',
 };
 
+const unfulfilled: Reservation = {
+  ...ordered,
+  state: 'UNFULFILLED',
+  decisionCode: 'ADMITTED',
+  projectionVersion: 3,
+  durableOrderCreated: false,
+  orderId: null,
+};
+
 function response(
   outcome: ChatResponse['outcome'],
   reply: string,
@@ -328,7 +337,7 @@ describe('CityBuddy portfolio surface', () => {
       durableOrderCreated: false,
       orderId: null,
     });
-    mockedPollReservation.mockResolvedValue(ordered);
+    mockedPollReservation.mockResolvedValue(unfulfilled);
     render(<App />);
     await signIn();
     vi.useFakeTimers();
@@ -341,7 +350,10 @@ describe('CityBuddy portfolio surface', () => {
       await vi.advanceTimersByTimeAsync(750);
     });
     expect(mockedPollReservation).toHaveBeenCalledTimes(1);
-    expect(screen.getByText('服务端状态：ORDERED')).toBeVisible();
+    expect(screen.getByText('服务端状态：UNFULFILLED')).toBeVisible();
+    expect(
+      screen.getByText('准入已完成，但权威库存或订单约束未满足，未创建订单。'),
+    ).toBeVisible();
     vi.useRealTimers();
   });
 

@@ -19,6 +19,7 @@ import io.citybuddy.commerce.payment.MockPaymentRepository;
 import io.citybuddy.commerce.payment.MockPaymentRequest;
 import io.citybuddy.commerce.payment.MockPaymentResult;
 import io.citybuddy.commerce.payment.MockPaymentService;
+import io.citybuddy.commerce.seckill.ReservationAdmissionStore;
 import io.citybuddy.commerce.seckill.SeckillActivityRepository;
 import io.citybuddy.commerce.seckill.SeckillCancellationService;
 import io.citybuddy.commerce.seckill.SeckillOrderRepository;
@@ -87,6 +88,7 @@ class RefundIntegrationTest {
     registry.add("spring.datasource.password", () -> required("MYSQL_COMMERCE_APP_PASSWORD"));
     registry.add("spring.data.redis.url", () -> required("CATALOG_REDIS_URL"));
     registry.add("citybuddy.catalog.enabled", () -> "true");
+    registry.add("citybuddy.seckill.enabled", () -> "true");
     registry.add("citybuddy.catalog.issuer", () -> "https://identity.citybuddy.test");
     registry.add("citybuddy.catalog.user-audience", () -> "citybuddy-web");
     registry.add("citybuddy.catalog.jwks-url", () -> required("IDENTITY_JWKS_URL"));
@@ -124,6 +126,7 @@ class RefundIntegrationTest {
   @Autowired private MockPaymentService payments;
   @Autowired private RefundService refunds;
   @Autowired private PlatformTransactionManager transactionManager;
+  @Autowired private ReservationAdmissionStore admissionStore;
 
   @Test
   void directApiEnforcesIdentityIdempotencyEligibilityAndCumulativeAmount() throws Exception {
@@ -1822,7 +1825,8 @@ class RefundIntegrationTest {
         new SeckillOrderRepository(jdbc),
         new SeckillReservationRepository(jdbc),
         new SeckillActivityRepository(jdbc),
-        (activity, targetVersion, quantity) -> {},
+        admissionStore,
+        (activity, remainingQuota) -> {},
         transactionTemplate(),
         Clock.systemUTC());
   }

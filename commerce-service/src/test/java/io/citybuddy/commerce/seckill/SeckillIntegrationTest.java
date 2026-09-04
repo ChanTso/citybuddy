@@ -44,6 +44,7 @@ class SeckillIntegrationTest {
   @Autowired private SeckillActivityRepository repository;
   @Autowired private SeckillReservationRepository reservationRepository;
   @Autowired private SeckillProjectionStore projectionStore;
+  @Autowired private ReservationAdmissionStore admissionStore;
   @Autowired private SeckillActivityService service;
   @Autowired private TransactionTemplate transactions;
 
@@ -138,7 +139,7 @@ class SeckillIntegrationTest {
     try (UnavailableProjection unavailable = unavailableProjection()) {
       SeckillActivityService failingService =
           new SeckillActivityService(
-              repository, reservationRepository, unavailable.store(), transactions);
+              repository, reservationRepository, unavailable.store(), admissionStore, transactions);
       assertThatThrownBy(
               () ->
                   failingService.create(
@@ -156,6 +157,25 @@ class SeckillIntegrationTest {
     assertStock("seckill-failure", 10);
     assertNoOrderOrOutbox("seckill-failure");
 
+    service.create(
+        command("activity-publish-gap", "seckill-failure", SeckillActivityState.ACTIVE, 4));
+    SeckillActivityService failedAfterCommit =
+        new SeckillActivityService(
+            repository,
+            reservationRepository,
+            (activity, remainingQuota) -> {
+              throw new SeckillProjectionStore.ProjectionWriteException(
+                  "controlled publish failure");
+            },
+            admissionStore,
+            transactions);
+    assertThatThrownBy(() -> failedAfterCommit.changeAllocation("activity-publish-gap", 5))
+        .isInstanceOf(SeckillProjectionStore.ProjectionWriteException.class)
+        .hasMessage("controlled publish failure");
+    assertActivity("activity-publish-gap", 5, 2);
+    assertThat(redis.hasKey(projectionStore.key("activity-publish-gap"))).isFalse();
+    assertThat(admissionStore.hasPendingHandoff("activity-publish-gap")).isFalse();
+
     try (RedisConnection connection = redis.getConnectionFactory().getConnection()) {
       RedisServerCommands server = connection.serverCommands();
       String originalMaxmemory = config(server, "maxmemory");
@@ -171,15 +191,15 @@ class SeckillIntegrationTest {
                             "seckill-failure",
                             SeckillActivityState.DRAFT,
                             5)))
-            .isInstanceOf(SeckillProjectionStore.ProjectionWriteException.class)
-            .hasMessageContaining("write failed")
+            .isInstanceOf(ReservationAdmissionStore.AdmissionIndeterminateException.class)
+            .hasMessageContaining("lock failed")
             .hasStackTraceContaining("OOM");
       } finally {
         server.setConfig("maxmemory", originalMaxmemory);
         server.setConfig("maxmemory-policy", originalPolicy);
       }
     }
-    assertActivity("activity-noeviction", 5, 1);
+    assertThat(repository.find("activity-noeviction")).isEmpty();
     assertThat(redis.hasKey(projectionStore.key("activity-noeviction"))).isFalse();
     assertStock("seckill-failure", 10);
     assertNoOrderOrOutbox("seckill-failure");

@@ -50,7 +50,12 @@ type PendingNotice = {
   receiptId?: string;
 };
 
-const TERMINAL_RESERVATIONS = new Set(['REJECTED', 'ORDERED', 'CANCELLED']);
+const TERMINAL_RESERVATIONS = new Set([
+  'REJECTED',
+  'ORDERED',
+  'CANCELLED',
+  'UNFULFILLED',
+]);
 const POLL_LIMIT = 8;
 const CONFIRMATION_MESSAGES = new Set([
   'confirm',
@@ -640,6 +645,11 @@ export function App() {
                     <div>
                       <strong>服务端状态：{reservation.result.state}</strong>
                       <p>Reservation {reservation.result.reservationId}</p>
+                      {reservation.result.state === 'UNFULFILLED' && (
+                        <p>
+                          准入已完成，但权威库存或订单约束未满足，未创建订单。
+                        </p>
+                      )}
                       {reservation.phase === 'indeterminate' && (
                         <p>轮询已达上限，状态仍未确定。</p>
                       )}

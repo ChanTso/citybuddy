@@ -337,7 +337,12 @@ def _prepare_cleanup_counterexample(tmp_path: Path) -> tuple[Path, dict[str, str
         """
         #!/bin/sh
         case "$*" in
-          *"hash_test_credential.py"*) printf 'fixture-hash\\n'; exit 0 ;;
+          *"service_credential.py generate"*)
+            printf 'cbsvc_v1_%064d\\n' 0
+            exit 0
+            ;;
+          *"service_credential.py validate"*) cat >/dev/null; exit 0 ;;
+          *"service_credential.py hash"*) cat >/dev/null; printf 'fixture-hash\\n'; exit 0 ;;
           *"citybuddy-indexer bootstrap"*) exit 99 ;;
           *) exit 0 ;;
         esac

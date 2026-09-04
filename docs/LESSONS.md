@@ -77,8 +77,10 @@ freshly committed, entirely legitimate ledger movement as a contradiction.
 The immediate fix summed the reserved amount from a `SELECT … FOR UPDATE` current read of that
 attempt's refund rows, and moved the reconciliation reads to `FOR SHARE`. `FOR UPDATE` and
 `FOR SHARE` do not only mean "take a lock" — in InnoDB they also mean "read the committed version
-as of now". The reconciliation reads are still `FOR SHARE`; the reserved total later moved into the
-database as a single aggregate, for the reason in *Bounds apply before materialization* below.
+as of now". The reconciliation reads are still `FOR SHARE`; the reserved total later moved into one
+exact database `SUM`, for the reason in *Bounds apply before materialization* below, while retaining
+`FOR UPDATE` so an Action transaction with an earlier receipt or sandbox snapshot still sees a
+refund committed while it waited on the payment-attempt lock.
 
 **After any lock wait, every derived aggregate or related fact has to be audited individually.**
 Fixing the first query is not fixing the pattern.
@@ -157,10 +159,10 @@ two checker callbacks. Trying to read the broker's own termination topic to sett
 
 So the application stopped trying to derive its terminal state from the broker at all. It persists
 its own one-time `transaction_resolution_due_at`, derived from the broker's check window with
-margin and never recomputed on restart; a bounded indexed worker sweeps due rows; a Redis Lua CAS
-lets the first legal admission-or-timeout decision win and write a durable marker; and the checker
-becomes a pure read of that marker, answering `UNKNOWN` when it cannot read it. The broker's own
-terminal state is evidenced separately with `mqadmin`.
+margin and never recomputed on restart; a bounded indexed worker sweeps due rows; and a Redis Lua
+CAS lets the first legal admission-or-timeout decision win and write a durable marker. The broker
+checker reads the MySQL reservation, answering `UNKNOWN` when it is missing, still `PENDING`, or
+temporarily unreadable. The broker's own terminal state is evidenced separately with `mqadmin`.
 
 **A gap between configured and observed is a diagnostic, not an interface.** Own your termination
 deadline in your own durable state.
@@ -217,12 +219,43 @@ because the agent was not CPU-bound where it served cleanly. That was wrong. One
 client moved the plain-chat knee from 50 req/s at p99 50.1 ms to 75 req/s at p99 31.3 ms, and
 knowledge retrieval from 10 req/s to 60, and the failure mode past the knee became graceful
 shedding instead of seconds of p99. The new ceiling is about 1.4 cores of the eight available with
-every dependency idle, and what holds it there is not yet established.
+low CPU in the sampled dependencies; the dedicated benchmark Elasticsearch process was not sampled,
+so what holds it there is not established.
 
 **Not being CPU-bound at the serving rate does not mean the wasted CPU is irrelevant to where
 serving stops.** Profile before optimising, be suspicious of per-request client construction, and
 state a prediction so the measurement can contradict it. Evidence:
 [bench/agent/README.md](../bench/agent/README.md), [#92](https://github.com/ChanTso/citybuddy/pull/92).
+
+### Container CPU can falsify a boundary attribution without naming a Java method
+
+The refund-preparation ladder was described as hitting a commerce tool boundary at 20 requests/s.
+That path alone exchanges a service credential for an OBO on every turn. At 5, 10, 15, 20, and 30
+requests/s, the auth container's median CPU rose almost linearly through 117%, 234%, 358%, 527%, and
+694%, while commerce stayed between 2% and 6%. The original attribution had not sampled Java stacks
+and was wrong at the service boundary.
+
+The credential check used BCrypt cost 12 on every successful exchange. A process-local proof cache
+made the benchmark fast, but independent review rejected it: a process memory disclosure could
+reveal both the HMAC key and a reusable proof for a low-entropy service secret. The measured
+prototype remains in the evidence directory rather than being relabelled as the final result.
+
+The replacement makes the credential class explicit. Human passwords and legacy service rows keep
+per-request BCrypt at the cost encoded in each hash; the measured baseline service row used cost 12.
+Newly provisioned service identities receive generated 256-bit machine tokens and store
+client-bound, versioned SHA-256 digests. The deployment counterfactual therefore includes an
+explicit service-credential rotation. At 30/s it changed 803 served plus 98 dropped at p50 4.14
+seconds to 901/901 served, zero dropped, and p50 13.4 ms. Auth median CPU fell from 694.42% to 4.30%.
+The final 5→30/s ladder had no HTTP error, SQL-classified failed turn, or observed new saturation,
+but it neither measures unrotated legacy rows nor establishes capacity above 30/s.
+
+**A whole-container CPU series can tell you which process is saturated, not which method consumed
+the cycles.** Here the method attribution comes from the controlled code-and-credential
+counterfactual: preserve the workload, remove repeated successful BCrypt from the machine-credential
+path, and watch both the CPU slope and the throughput collapse disappear. That is weaker than a
+Java stack profile but stronger than the old prose. Evidence, the rejected prototype, and their
+exact limits are in
+[bench/agent/README.md](../bench/agent/README.md#repeated-obo-service-credential-verification).
 
 ### Measure before attributing slowness; the conspicuous wait is rarely the cost
 

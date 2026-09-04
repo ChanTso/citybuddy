@@ -153,7 +153,7 @@ echo "== publishing Redis activity projections =="
 for i in $(seq 0 $((BENCH_ACTIVITIES - 1))); do
   docker exec citybuddy-redis-commerce-1 redis-cli -a "$redis_pw" --no-auth-warning \
     SET "commerce:seckill:activity:bench-activity-$i" \
-    "{\"activityId\":\"bench-activity-$i\",\"projectionVersion\":1,\"startsAt\":\"2020-01-01T00:00:00Z\",\"endsAt\":\"2035-01-01T00:00:00Z\",\"state\":\"ACTIVE\",\"remainingQuota\":$BENCH_QUOTA}" >/dev/null 2>&1
+    "{\"activityId\":\"bench-activity-$i\",\"projectionVersion\":1,\"startsAt\":\"2020-01-01T00:00:00Z\",\"endsAt\":\"2035-01-01T00:00:00Z\",\"startsAtEpochMicros\":1577836800000000,\"endsAtEpochMicros\":2051222400000000,\"state\":\"ACTIVE\",\"remainingQuota\":$BENCH_QUOTA}" >/dev/null 2>&1
 done
 
 echo "== starting auth-service in the compose network =="

@@ -169,6 +169,27 @@ describe('closed public decoders', () => {
     ).toBe('CANCELLED');
   });
 
+  it('accepts the admitted terminal that did not create an order', () => {
+    expect(
+      decodeReservation({
+        ...reservation,
+        state: 'UNFULFILLED',
+        decisionCode: 'ADMITTED',
+        projectionVersion: 3,
+        durableOrderCreated: false,
+        orderId: null,
+      }),
+    ).toEqual(
+      expect.objectContaining({
+        state: 'UNFULFILLED',
+        decisionCode: 'ADMITTED',
+        projectionVersion: 3,
+        durableOrderCreated: false,
+        orderId: null,
+      }),
+    );
+  });
+
   it.each([
     ['conversationId', 'not-a-uuid'],
     ['traceId', 'not-a-uuid'],

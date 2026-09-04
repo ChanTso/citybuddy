@@ -158,11 +158,12 @@ agent_migration_password="$(read_value MYSQL_AGENT_MIGRATION_PASSWORD)"
 user_password="$(openssl rand -hex 24)"
 other_password="$(openssl rand -hex 24)"
 disabled_password="$(openssl rand -hex 24)"
-service_password="$(openssl rand -hex 24)"
+service_password="$(uv run python scripts/service_credential.py generate)"
 user_hash="$(uv run python scripts/hash_test_credential.py "$user_password")"
 other_hash="$(uv run python scripts/hash_test_credential.py "$other_password")"
 disabled_hash="$(uv run python scripts/hash_test_credential.py "$disabled_password")"
-service_hash="$(uv run python scripts/hash_test_credential.py "$service_password")"
+service_hash="$(printf '%s' "$service_password" \
+  | uv run python scripts/service_credential.py hash agent-service)"
 
 "${compose[@]}" up --detach --wait --wait-timeout 60 mysql
 compose_host_port MYSQL_PORT mysql 3306

@@ -289,6 +289,7 @@ def test_seckill_result_never_claims_an_order_without_explicit_durable_state() -
         "REJECTED",
         "ORDERED",
         "CANCELLED",
+        "UNFULFILLED",
     }
     assert result["properties"]["projectionVersion"]["minimum"] == 1
     assert result["properties"]["projectionVersion"]["maximum"] == 4
