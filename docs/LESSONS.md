@@ -16,8 +16,8 @@ They are grouped by what they taught, not by when they happened.
 The single-activity seckill ladder contained zero HTTP 500 responses but one k6
 `http_req_failed` out of 21,268 requests: an HTTP 409 `DUPLICATE_USER` decision. Spreading the same
 workload shape across 32 activity rows produced 6 HTTP 500s at 100 req/s, 3 at 200, 1,803 at 400
-and 4,390 at 800: 6,202 failures out of 23,254 whole-ladder requests. The log artifact contains
-12,404 matching `Deadlock found when trying to get lock` text lines, numerically 2 × 6,202, but
+and 4,390 at 800: 6,202 failures out of 23,254 whole-ladder requests. The retained count artifact
+reports 12,404 `Deadlock found when trying to get lock` text matches, numerically 2 × 6,202, but
 no per-request correlation is retained and its printed minute subtotal does not reconcile. It is
 evidence of the repeated diagnostic and SQL site, not a second exact deadlock-event count. The
 failing statement was `INSERT INTO seckill_reservation`.
