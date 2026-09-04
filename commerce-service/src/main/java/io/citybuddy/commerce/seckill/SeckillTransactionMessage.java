@@ -17,4 +17,14 @@ public record SeckillTransactionMessage(
         reservation.quantity(),
         reservation.activityProjectionVersion());
   }
+
+  public static SeckillTransactionMessage from(ReservationAdmissionStore.AdmissionHandoff handoff) {
+    return new SeckillTransactionMessage(
+        handoff.reservationId(),
+        handoff.reservationId(),
+        handoff.activityId(),
+        handoff.userSubject(),
+        handoff.quantity(),
+        handoff.activityProjectionVersion());
+  }
 }

@@ -157,10 +157,10 @@ two checker callbacks. Trying to read the broker's own termination topic to sett
 
 So the application stopped trying to derive its terminal state from the broker at all. It persists
 its own one-time `transaction_resolution_due_at`, derived from the broker's check window with
-margin and never recomputed on restart; a bounded indexed worker sweeps due rows; a Redis Lua CAS
-lets the first legal admission-or-timeout decision win and write a durable marker; and the checker
-becomes a pure read of that marker, answering `UNKNOWN` when it cannot read it. The broker's own
-terminal state is evidenced separately with `mqadmin`.
+margin and never recomputed on restart; a bounded indexed worker sweeps due rows; and a Redis Lua
+CAS lets the first legal admission-or-timeout decision win and write a durable marker. The broker
+checker reads the MySQL reservation, answering `UNKNOWN` when it is missing, still `PENDING`, or
+temporarily unreadable. The broker's own terminal state is evidenced separately with `mqadmin`.
 
 **A gap between configured and observed is a diagnostic, not an interface.** Own your termination
 deadline in your own durable state.

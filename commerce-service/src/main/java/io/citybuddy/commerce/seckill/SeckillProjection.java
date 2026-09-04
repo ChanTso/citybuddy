@@ -7,6 +7,8 @@ public record SeckillProjection(
     long projectionVersion,
     Instant startsAt,
     Instant endsAt,
+    long startsAtEpochMicros,
+    long endsAtEpochMicros,
     SeckillActivityState state,
     long remainingQuota) {
 
@@ -20,7 +22,14 @@ public record SeckillProjection(
         activity.projectionVersion(),
         activity.startsAt(),
         activity.endsAt(),
+        epochMicros(activity.startsAt()),
+        epochMicros(activity.endsAt()),
         activity.state(),
         remainingQuota);
+  }
+
+  private static long epochMicros(Instant instant) {
+    return Math.addExact(
+        Math.multiplyExact(instant.getEpochSecond(), 1_000_000L), instant.getNano() / 1_000L);
   }
 }

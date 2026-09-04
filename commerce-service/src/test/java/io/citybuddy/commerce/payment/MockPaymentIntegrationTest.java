@@ -7,6 +7,7 @@ import io.citybuddy.commerce.evaluation.EvaluationSandboxException;
 import io.citybuddy.commerce.evaluation.EvaluationSandboxRepository;
 import io.citybuddy.commerce.evaluation.EvaluationViewRepository;
 import io.citybuddy.commerce.order.StandardOrderIntentCommitment;
+import io.citybuddy.commerce.seckill.ReservationAdmissionStore;
 import io.citybuddy.commerce.seckill.SeckillActivityRepository;
 import io.citybuddy.commerce.seckill.SeckillCancellationService;
 import io.citybuddy.commerce.seckill.SeckillOrderRepository;
@@ -71,6 +72,7 @@ class MockPaymentIntegrationTest {
     registry.add("spring.datasource.password", () -> required("MYSQL_COMMERCE_APP_PASSWORD"));
     registry.add("spring.data.redis.url", () -> required("CATALOG_REDIS_URL"));
     registry.add("citybuddy.catalog.enabled", () -> "true");
+    registry.add("citybuddy.seckill.enabled", () -> "true");
     registry.add("citybuddy.catalog.issuer", () -> "https://identity.citybuddy.test");
     registry.add("citybuddy.catalog.user-audience", () -> "citybuddy-web");
     registry.add("citybuddy.catalog.jwks-url", () -> required("IDENTITY_JWKS_URL"));
@@ -101,6 +103,7 @@ class MockPaymentIntegrationTest {
   @Autowired private JdbcTemplate jdbc;
   @Autowired private MockPaymentService payments;
   @Autowired private PlatformTransactionManager transactionManager;
+  @Autowired private ReservationAdmissionStore admissionStore;
   private final List<String> seededStandardOrderIds = new ArrayList<>();
 
   @AfterEach
@@ -3054,7 +3057,8 @@ class MockPaymentIntegrationTest {
         new SeckillOrderRepository(jdbc),
         new SeckillReservationRepository(jdbc),
         new SeckillActivityRepository(jdbc),
-        (activity, targetVersion, quantity) -> {},
+        admissionStore,
+        (activity, remainingQuota) -> {},
         transactionTemplate(),
         Clock.systemUTC());
   }
