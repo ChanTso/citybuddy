@@ -190,14 +190,14 @@ infer a speedup from the lower `one-short` observations.
 ## What is and is not being measured
 
 The model provider is [`scripts/fake_litellm_server.py`](../../scripts/fake_litellm_server.py),
-a deterministic fixture that answers immediately. **Inference time is therefore zero**, and these
-numbers describe CityBuddy's own orchestration around the model: session lookup, RS256
+a deterministic fixture with no model inference. The fixture's HTTP and serialization time remains
+inside the measurement. These numbers describe CityBuddy's orchestration around that stub: session lookup, RS256
 verification, the on-behalf-of token exchange, Elasticsearch retrieval and reranking, the commerce
 tool boundary, and the MySQL writes that make a turn durable. They are not end-to-end user
 latency, and they are not a capacity claim — one machine, one process, one of everything.
 
-That constraint is what makes the result useful: with inference held at zero, whatever remains is
-the platform's own cost.
+That constraint makes the result useful: with inference absent, the measured time is the local
+orchestration topology, including fixture and container/network overhead.
 
 | | |
 |---|---|
@@ -206,10 +206,14 @@ the platform's own cost.
 | Host | MacBook Pro M4, 10 cores, 24 GB |
 | Docker Desktop | 13.6 GiB / 8 CPU allocation, aarch64, server 29.5.3 |
 | Agent | `agent-service` as a container; one uvicorn worker in the baseline and one/two in the factorial, with sync endpoints on each worker's AnyIO pool |
-| Dependencies | MySQL 8, Elasticsearch 8 + IK, `auth-service` and `commerce-service` as containers |
-| Model | Deterministic fake LiteLLM fixture; inference time held at zero |
+| Dependencies | MySQL 8, Elasticsearch 8 + IK, `auth-service` and `commerce-service` as containers; commerce requested at 4 CPUs |
+| Model | Deterministic fake LiteLLM fixture; no model inference, with fixture HTTP/serialization overhead retained |
 | Current generator | k6 v2.2.0, linux/arm64, pinned as `grafana/k6@sha256:5221b620a4f874faff6e32ba597aa667c058391fe4898b1c6f6377f062c6cdec` |
 | Historical generator | k6 inside the agent's network namespace; the old runs recorded `grafana/k6:latest`, so their exact digest is unavailable |
+
+The four-CPU commerce setting is a local fixture choice within Docker's eight-CPU allocation,
+not a production-sizing result. Historical setup JSON does not record a live commerce
+`HostConfig.NanoCpus` observation; the requested value is recoverable from the measured runner.
 
 ## Method
 
@@ -239,8 +243,9 @@ service's shape.
    connects to the container's bridge address, where nothing is listening. Rather than change
    production code or put a proxy hop inside the path being measured, the agent, the model
    fixture, the fixture builder and k6 all share one namespace and talk over loopback. This also
-   keeps the Docker Desktop host-to-VM hop out of the measurement, which the seckill work found
-   to be 77 % of observed latency when it is included.
+   keeps Docker Desktop's published-port/VM transport out of the measurement. The seckill
+   vantage-point pair observed 77.16% lower mean latency inside the network, but it also changed
+   generator placement and therefore did not isolate a numerical hop cost.
 6. **Steps are isolated from each other.** A collapsed step keeps completing requests long past
    its own window, so the gap between steps has to exceed k6's graceful stop or the next step's
    percentiles are taken on top of the previous step's backlog. The gap defaults to 55 s against a
@@ -499,8 +504,9 @@ describe the mix rather than the latency of a served turn.
 | 100 | p99 | 1028.5 ms | **159.2 ms** |
 | | outcomes | 1194 completed, **807 HTTP 503** | **all 2000 completed** |
 
-**Knowledge retrieval** — alias resolution, mapping validation, BM25 and dense retrieval, RRF
-fusion, rerank, then the closing model call:
+**Knowledge retrieval** — alias resolution, mapping validation, BM25 and an 8-dimensional
+deterministic vector placeholder, RRF fusion, rerank, then the closing model call. This measures
+the retrieval path, not learned semantic embeddings or semantic query-rewrite quality:
 
 | Target | | before | after |
 |---:|---|---:|---:|
@@ -587,8 +593,11 @@ p99 at 60 req/s is 689 ms against 27 s for the old 12 req/s step.
 ### 2. What a turn costs, and where observed throughput plateaus
 
 Peak CPU over a whole ladder is dominated by whichever step collapsed, so it says nothing about
-what serving the load costs. The runner reports each step's own window instead
-(`../results/agent_*_cpu_by_step.txt`). Median agent CPU, before and after:
+what serving the load costs. The historical `agent_*_cpu_by_step.txt` files partition raw Docker
+samples by the timestamp windows printed in the step outputs. The current runner does not generate
+those summaries, and the original postprocessing command is not retained, so they are derived
+evidence that can be checked against the raw timestamps rather than an independent measurement.
+Median agent CPU, before and after:
 
 | Plain chat | 10 | 25 | 50 | 75 | 100 |
 |---|---:|---:|---:|---:|---:|
@@ -724,9 +733,10 @@ Re-profiled after the change, same script, same concurrencies
 
 Sample counts are given because they vary by three orders of magnitude across these cells. The
 preparation path at concurrency 1 yields only 24 on-CPU samples in fifteen seconds — the agent is
-almost never running, because the turn is spent blocked on commerce — so 0.0 % there is not a
-precise estimate. It is still decisive against the old share: zero of twenty-four is not a
-sample drawn from a population where 57 % of samples match.
+almost never running while the turn waits somewhere downstream. An Agent-only on-CPU profile does
+not distinguish auth, commerce, database or network wait, so 0.0% there is not a precise estimate
+of the wait boundary. It still shows that the former TLS-construction hotspot disappeared from the
+24 captured on-CPU samples; it does not attribute the off-CPU time.
 
 What the agent's CPU is spent on instead, at retrieval and concurrency 8:
 
@@ -789,22 +799,22 @@ The original control experiment still stands and was not repeated: raising
 545 rejections into 3, and let the same load queue to a 6.9 s p99 instead of failing fast. The
 limit was doing admission control, not capping throughput.
 
-MySQL is at 49–54 % of one core when the limit bites, so this is a configured cap on a database
-with capacity to spare rather than a loaded database. That makes connection pooling in the
-conversation store look like free headroom, and the control experiment says it is not: removing
-the cap did not raise what the path served, it converted fast rejections into long queues. Read
-alongside §2 — the agent plateaus at about 1.4 cores while MySQL sits at half of one — the
-expectation is that pooling would change how the chat path fails, and would cut the MySQL wire
-traffic that is now the largest single item in the agent's own profile, without moving the rate
-it serves. Retrieval, which collapses without ever touching the limit, is a control only for the
-narrow claim that this MySQL limit is not the universal cause.
+MySQL is at 49–54% of one CPU in those whole-container samples when the connection limit rejects;
+that establishes sampled CPU headroom, not spare database capacity in every dimension. Raising
+the connection limit did not raise the served rate in that control; it converted fast rejections
+into long queues. Raising a limit is not a connection-pooling treatment, so this experiment does
+not establish pooling's throughput effect in either direction. That remains unmeasured.
+Retrieval, which collapses without touching the limit, is a control only for the narrow claim
+that this MySQL limit is not the universal cause.
 
-**Nothing in the agent bounds its own concurrency on any path.** The observed first constraint on
-chat is a configured database limit. Retrieval collapses without a MySQL connection rejection, but
-these runs do not distinguish an Agent-local limit from the dedicated Elasticsearch dependency
-they failed to sample. The historical preparation attribution to a commerce tool boundary was
-wrong: that workload performs an OBO exchange on every turn, and the old samples showed the auth
-container saturating. The paired correction below isolates that cost.
+The measured chat workload exposes a configured MySQL connection-rejection boundary, but the
+1,000-connection control did not increase its clean served rate, so that boundary explains overload
+behavior rather than the throughput cause.
+Retrieval collapses without a MySQL connection rejection, but these runs do not distinguish an
+Agent-local limit from the dedicated Elasticsearch dependency they failed to sample. The
+historical preparation attribution to a commerce tool boundary was wrong: that workload performs
+an OBO exchange on every turn, and the old samples showed auth as the dominant CPU consumer near
+the shared Docker CPU boundary. The paired correction below isolates that component cost.
 
 ## Repeated OBO service-credential verification
 
@@ -881,21 +891,26 @@ rejected cache commit, it says nothing about the final digest implementation abo
 [workload contract](../results/agent_obo_bcrypt_after_ext_20260903_workload_contract.tsv) preserve
 the bad first-step result rather than discarding it.
 
-The `*_cpu.txt` files are approximately two-second-cadence `docker stats --no-stream` readings of
-whole-container CPU and memory; some adjacent timestamps are three seconds apart. A step median can
-locate a saturated container and, paired with the deployment counterfactual, support a
-component-level attribution. It cannot name a Java method, distinguish user/kernel/wait time, or
-substitute for a stack profile. The raw readings establish auth saturation; the code-and-credential
-counterfactual is what isolates successful service-credential verification.
+The Agent `agent_*_cpu.txt` files are approximately two-second-cadence `docker stats --no-stream`
+readings of whole-container CPU and memory; some adjacent timestamps are three seconds apart.
+One hundred percent is one logical CPU, not the container's full allowance. A step median identifies
+the dominant sampled CPU consumer and, paired with the deployment counterfactual, can support a
+component-level attribution. Auth had no per-container quota, so the series does not prove an
+Auth-local saturation point. It cannot name a Java method, distinguish user/kernel/wait time, or
+substitute for a stack profile. The raw readings establish auth as the dominant sampled CPU
+consumer near the shared eight-CPU boundary; the code-and-credential counterfactual is what isolates
+successful service-credential verification. The older Agent CPU families and the seckill
+cadence/target differences are catalogued in
+[the seckill CPU artifact boundary](../README.md#cpu-artifact-boundary).
 
 A Java Flight Recorder capture is feasible without product-code changes. The Temurin 21 JRE used
-by this fixture can start JFR with `-XX:StartFlightRecording` on the existing `java -jar` command,
-write the recording to a benchmark-mounted directory, and run under the same closed-loop load shape
-as `profile_agent_cpu.sh`. A dynamic `jcmd` attach would require switching the fixture image from a
-JRE to a JDK or adding another attach mechanism. Either design also needs provenance, a check that
-the load outlives the sample, and a separate artifact because a closed-loop profile answers where
-CPU time goes, not throughput at an arrival rate. No JFR recording was needed to claim this paired
-counterfactual, and none is represented by the Docker CPU files.
+by this fixture can start JFR with `-XX:StartFlightRecording` on the existing `java -jar` command
+and write to a benchmark-mounted directory. A dynamic `jcmd` attach would require a JDK image or a
+separate attach mechanism. A profile run would also need commit/runtime provenance, a duration gate,
+bounded recording storage, and its own artifact; JFR overhead on this fixture has not been measured.
+Like `profile_agent_cpu.sh`, a fixed-concurrency profile would answer where sampled CPU time goes,
+not throughput at a fixed arrival rate, and must not be substituted for a ladder. This is a
+feasibility boundary only: no JFR implementation or recording exists, and no Docker CPU file is one.
 
 ## Three things found while building the fixture
 
@@ -1022,7 +1037,8 @@ rendering fails deterministically.
 
 **The former default attempt budget could not fit a successful retrieval turn.** In
 `knowledge.py`, `search` resolves the alias, validates the mapping, and then runs one BM25 and one
-dense query per query text including the rewrite; with the reranker and the opening model call
+vector query using the deterministic 8-dimensional placeholder per query text, including the
+rewrite; with the reranker and the opening model call
 that is eight charged attempts. The old default of 8 left nothing for the closing model call. The
 default is now 16, matching the benchmark's pinned workload setting, and a regression test proves
 that a rewrite retrieval reaches composition after exactly nine successful charges. The existing
