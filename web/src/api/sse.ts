@@ -11,11 +11,13 @@ const UUID_PATTERN =
 type StreamOutcome = Extract<
   ChatOutcome,
   | 'completed'
+  | 'retrieval_denied'
   | 'action_completed'
   | 'action_pending'
   | 'action_clarification'
   | 'action_declined'
   | 'action_expired'
+  | 'action_rejected'
 >;
 
 export type StreamResult = {
@@ -153,7 +155,7 @@ export class SseParser {
       if (
         this.receiptId !== null ||
         !UUID_PATTERN.test(boundedString(value.receiptId, 36, 36)) ||
-        value.status !== 'SUCCEEDED'
+        value.status !== 'REQUESTED'
       ) {
         throw new ApiFailure('malformed');
       }
@@ -175,11 +177,13 @@ export class SseParser {
       }
       const allowed: StreamOutcome[] = [
         'completed',
+        'retrieval_denied',
         'action_completed',
         'action_pending',
         'action_clarification',
         'action_declined',
         'action_expired',
+        'action_rejected',
       ];
       if (
         typeof value.outcome !== 'string' ||
@@ -209,7 +213,6 @@ export class SseParser {
         'attempt_budget_exhausted',
         'provider_unavailable',
         'stream_unavailable',
-        'unsafe_output',
       ];
       if (typeof value.code !== 'string' || !allowed.includes(value.code)) {
         throw new ApiFailure('malformed');

@@ -44,7 +44,7 @@ type ChatIntent = {
   phase: 'sending' | 'error';
 };
 type PendingNotice = {
-  phase: 'pending' | 'declined' | 'expired' | 'confirmed';
+  phase: 'pending' | 'declined' | 'expired' | 'rejected' | 'confirmed';
   reply: string;
   // Shown only for a confirmed action, and only ever the identifier the server sent.
   receiptId?: string;
@@ -97,6 +97,7 @@ function outcomeLabel(outcome: ChatOutcome): string {
     action_clarification: '已记录补充说明，动作仍未执行',
     action_declined: '动作已由服务端标记为拒绝，未执行',
     action_expired: '动作已由服务端标记为过期，未执行',
+    action_rejected: 'Commerce 已拒绝该动作，未返回动作回执',
   }[outcome];
 }
 
@@ -369,6 +370,7 @@ export function App() {
     }
     if (outcome === 'action_declined') setPending({ phase: 'declined', reply });
     if (outcome === 'action_expired') setPending({ phase: 'expired', reply });
+    if (outcome === 'action_rejected') setPending({ phase: 'rejected', reply });
   }
 
   async function runChat(intent: ChatIntent) {
@@ -676,6 +678,9 @@ export function App() {
                   流式回复
                 </label>
               </div>
+              <p className="notice">
+                AI 生成的解释可能不准确；交易状态只以服务端状态和回执为准。
+              </p>
               <div className="chat-log" aria-live="polite">
                 {chat.length === 0 ? (
                   <p className="empty-chat">
@@ -760,11 +765,14 @@ export function App() {
                     </p>
                   )}
                   {(pending.phase === 'declined' ||
-                    pending.phase === 'expired') && (
+                    pending.phase === 'expired' ||
+                    pending.phase === 'rejected') && (
                     <p>
                       {pending.phase === 'declined'
                         ? '服务端已返回拒绝终态；动作未执行。'
-                        : '服务端已返回过期终态；动作未执行。'}
+                        : pending.phase === 'expired'
+                          ? '服务端已返回过期终态；动作未执行。'
+                          : 'Commerce 已拒绝该动作；Agent 未收到动作回执。'}
                     </p>
                   )}
                 </aside>

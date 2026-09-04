@@ -194,7 +194,12 @@ review produced the counterexample with no concurrency in it at all.
 
 The reference is now moved `PENDING → CONFIRMING` in its own transaction before the call. Recovery
 re-enters commerce with a fresh key and replays the committed receipt instead of issuing a second
-refund. Proven end to end: three confirmations across two actions produced two receipts, two
+refund. A strict Commerce `409` Action error in category `CONFLICT` or
+`INCONSISTENT_DURABLE_STATE` instead closes the claim and confirming turn atomically as
+`REJECTED`/`action_rejected`, recording only that Commerce rejected the request and returned no
+receipt. A malformed response, another 4xx status, a rate limit, a server or transport failure, or
+an invalid success response remains `CONFIRMING`; those observations cannot safely choose a remote
+business result. Proven end to end: three confirmations across two actions produced two receipts, two
 refunds, two consumed actions. Evidence: [#94](https://github.com/ChanTso/citybuddy/pull/94).
 
 ## Measurement

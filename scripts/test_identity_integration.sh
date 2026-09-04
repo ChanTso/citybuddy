@@ -686,15 +686,15 @@ assert_status 200 "budget exhaustion is one bounded public SSE error" \
   --data '{"message":"budget-exhaustion"}'
 uv run python scripts/check_sse_stream.py "$tmp_dir/http-response.json" \
   --terminal error --error-code attempt_budget_exhausted
-assert_status 200 "action claim without receipt is withheld" \
+assert_status 200 "action claim without receipt remains non-authoritative explanation" \
   --request POST "http://127.0.0.1:$agent_port/api/chat/stream" \
   "${chat_headers[@]}" \
   --header 'Idempotency-Key: cb082-unsafe-action' \
   --data '{"message":"unsafe-action-claim"}'
 uv run python scripts/check_sse_stream.py "$tmp_dir/http-response.json" \
-  --terminal error --error-code unsafe_output
-if grep -qi refund "$tmp_dir/http-response.json"; then
-  echo "Action-success language escaped without receipt truth." >&2
+  --terminal done --expected-text 'Your refund has been issued.'
+if grep -q 'event: action_receipt' "$tmp_dir/http-response.json"; then
+  echo "Unreceipted explanation acquired an action receipt." >&2
   exit 1
 fi
 

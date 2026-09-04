@@ -204,6 +204,23 @@ describe('closed public decoders', () => {
     );
   });
 
+  it('accepts a durable commerce rejection only without a receipt', () => {
+    expect(
+      decodeChatResponse({
+        ...chat,
+        outcome: 'action_rejected',
+        receiptId: null,
+      }).outcome,
+    ).toBe('action_rejected');
+    expect(() =>
+      decodeChatResponse({
+        ...chat,
+        outcome: 'action_rejected',
+        receiptId: UUID,
+      }),
+    ).toThrow('Malformed');
+  });
+
   it.each([
     ['sourceId', ''],
     ['chunkId', ''],

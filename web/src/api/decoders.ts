@@ -48,7 +48,8 @@ export type ChatOutcome =
   | 'action_pending'
   | 'action_clarification'
   | 'action_declined'
-  | 'action_expired';
+  | 'action_expired'
+  | 'action_rejected';
 
 export type Citation = {
   sourceId: string;
@@ -314,6 +315,7 @@ export function decodeChatResponse(value: unknown): ChatResponse {
       'action_clarification',
       'action_declined',
       'action_expired',
+      'action_rejected',
     ] as const),
     receiptId: receiptFor(record.outcome, record.receiptId),
     citations: record.citations.map(decodeCitation),

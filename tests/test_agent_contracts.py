@@ -56,16 +56,14 @@ def test_chat_response_is_allowlisted_and_server_ids_are_read_only() -> None:
         "action_clarification",
         "action_declined",
         "action_expired",
+        "action_rejected",
     ]
-    assert response["properties"]["receiptId"] == {
-        "type": ["string", "null"],
-        "format": "uuid",
-        "readOnly": True,
-        "description": (
-            "The committed receipt projected from durable action truth for action_completed; "
-            "null for every other outcome."
-        ),
-    }
+    assert response["properties"]["reply"]["minLength"] == 1
+    assert response["properties"]["reply"]["maxLength"] == 256
+    receipt = response["properties"]["receiptId"]
+    assert receipt["type"] == ["string", "null"]
+    assert receipt["format"] == "uuid"
+    assert receipt["readOnly"] is True
     citation = contract()["components"]["schemas"]["RetrievalCitation"]
     assert citation["additionalProperties"] is False
     assert set(citation["properties"]) == {
@@ -104,22 +102,24 @@ def test_stream_contract_fixes_headers_event_names_and_allowlisted_payloads() ->
         assert schema["additionalProperties"] is False
         assert set(schema["properties"]) == fields
         assert set(schema["required"]) == fields
-    assert (
-        "non-authoritative explanation"
-        in payload["components"]["schemas"]["SseTokenData"]["description"]
-    )
-    assert (
-        payload["components"]["schemas"]["SseActionReceiptData"]["description"]
-        == "Projects a committed ActionReceipt from the agent's durable receipt projection; "
-        "clients must treat this event, not token prose, as action-completion truth."
-    )
+    assert payload["components"]["schemas"]["SseActionReceiptData"]["properties"]["status"] == {
+        "type": "string",
+        "enum": ["REQUESTED"],
+    }
     assert payload["components"]["schemas"]["SseDoneData"]["properties"]["outcome"]["enum"] == [
         "completed",
+        "retrieval_denied",
         "action_pending",
         "action_completed",
         "action_clarification",
         "action_declined",
         "action_expired",
+        "action_rejected",
+    ]
+    assert payload["components"]["schemas"]["SseErrorData"]["properties"]["code"]["enum"] == [
+        "attempt_budget_exhausted",
+        "provider_unavailable",
+        "stream_unavailable",
     ]
 
     source = (ROOT / "agent-service/src/citybuddy_agent/sse.py").read_text(encoding="utf-8")
@@ -307,6 +307,19 @@ def test_session_context_event_extends_the_closed_append_only_evidence_language(
         "TURN_FAILED",
     ):
         assert f"'{event_type}'" in migration
+
+
+def test_pending_action_rejection_extends_the_latest_closed_truth_sets() -> None:
+    migration = (
+        ROOT / "infra/mysql/migrations/agent/V010__pending_action_rejection.sql"
+    ).read_text(encoding="utf-8")
+
+    for retained_event in ("CONTEXT_WINDOW", "ACTION_RECEIPT", "ACTION_REJECTED"):
+        assert f"'{retained_event}'" in migration
+    assert "'action_rejected'" in migration
+    assert "'REJECTED'" in migration
+    assert "state IN ('PENDING', 'CONFIRMING')" in migration
+    assert "state IN ('DECLINED', 'EXPIRED', 'CONFIRMED', 'REJECTED')" in migration
 
 
 def test_service_contracts_use_service_versions_not_retired_slice_ids() -> None:

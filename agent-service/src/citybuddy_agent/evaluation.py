@@ -52,6 +52,7 @@ TerminalOutcome = Literal[
     "action_clarification",
     "action_declined",
     "action_expired",
+    "action_rejected",
     "failed",
 ]
 EventKind = Literal[
@@ -67,6 +68,7 @@ EventKind = Literal[
     "ACTION_PREPARED",
     "ACTION_DECLINED",
     "ACTION_EXPIRED",
+    "ACTION_REJECTED",
     "AGENT_OUTCOME",
     "ASSISTANT_RESPONSE",
     "TURN_COMPLETED",
@@ -82,17 +84,20 @@ _TERMINAL_OUTCOMES = {
     "action_clarification",
     "action_declined",
     "action_expired",
+    "action_rejected",
 }
 _ACTION_TERMINAL_OUTCOMES = {
     "action_pending",
     "action_clarification",
     "action_declined",
     "action_expired",
+    "action_rejected",
 }
 _ACTION_EVENT_TYPES = {
     "ACTION_PREPARED",
     "ACTION_DECLINED",
     "ACTION_EXPIRED",
+    "ACTION_REJECTED",
 }
 _EVENT_TYPES = {
     "USER_INPUT",
@@ -107,6 +112,7 @@ _EVENT_TYPES = {
     "ACTION_PREPARED",
     "ACTION_DECLINED",
     "ACTION_EXPIRED",
+    "ACTION_REJECTED",
     "AGENT_OUTCOME",
     "ASSISTANT_RESPONSE",
     "TURN_COMPLETED",
@@ -689,9 +695,13 @@ class MysqlEvaluationEvidenceStore:
                 raise EvaluationEvidenceInvalid
             outcome = "prepared"
             reference = str(pending_action_id)
-        elif event_type in {"ACTION_DECLINED", "ACTION_EXPIRED"}:
+        elif event_type in {"ACTION_DECLINED", "ACTION_EXPIRED", "ACTION_REJECTED"}:
             pending_action_id = payload.get("pendingActionId")
-            expected = "declined" if event_type == "ACTION_DECLINED" else "expired"
+            expected = {
+                "ACTION_DECLINED": "declined",
+                "ACTION_EXPIRED": "expired",
+                "ACTION_REJECTED": "rejected",
+            }[event_type]
             if (
                 not self._bounded_string(pending_action_id, 36)
                 or payload.get("outcome") != expected
@@ -745,7 +755,8 @@ class MysqlEvaluationEvidenceStore:
         terminal_outcome: TerminalOutcome,
     ) -> None:
         has_action_event = any(
-            row[5] in {"ACTION_PREPARED", "ACTION_DECLINED", "ACTION_EXPIRED"} for row in rows
+            row[5] in {"ACTION_PREPARED", "ACTION_DECLINED", "ACTION_EXPIRED", "ACTION_REJECTED"}
+            for row in rows
         )
         cursor.execute(
             "SELECT pending_action_id FROM pending_action_reference "
@@ -771,7 +782,7 @@ class MysqlEvaluationEvidenceStore:
             len(source_references) != 1 or resolution_references
         ):
             raise EvaluationEvidenceInvalid
-        if terminal_outcome in {"action_declined", "action_expired"} and (
+        if terminal_outcome in {"action_declined", "action_expired", "action_rejected"} and (
             source_references or len(resolution_references) != 1
         ):
             raise EvaluationEvidenceInvalid
@@ -809,7 +820,11 @@ class MysqlEvaluationEvidenceStore:
         pending_action_id = action_payload.get("pendingActionId")
         if not isinstance(pending_action_id, str):
             raise EvaluationEvidenceInvalid
-        expected_state = "DECLINED" if terminal_outcome == "action_declined" else "EXPIRED"
+        expected_state = {
+            "action_declined": "DECLINED",
+            "action_expired": "EXPIRED",
+            "action_rejected": "REJECTED",
+        }[terminal_outcome]
         try:
             validate_resolved_action_events(
                 event_rows,

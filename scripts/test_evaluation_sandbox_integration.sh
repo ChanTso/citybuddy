@@ -4367,6 +4367,56 @@ if grep -Eq 'confirmation|traceId|sessionId|turnId|pendingActionId|python_gc|pro
   exit 1
 fi
 stop_process agent_pid "$agent_pid"
+start_agent true
+assert_status 201 "deterministic-rejection session binds the payment principal and sandbox" \
+  --request POST "http://127.0.0.1:$agent_port/api/sessions" \
+  --header "Authorization: Bearer $payment_token" \
+  --header 'X-Eval-Sandbox-Id: sandbox-payment' \
+  --header 'Content-Type: application/json' --data '{}'
+rejection_session="$(uv run python scripts/read_json_field.py "$tmp_dir/http-response.json" sessionId)"
+assert_status 200 "prepare action for a strict Commerce 409" \
+  --request POST "http://127.0.0.1:$agent_port/api/chat" \
+  --header "Authorization: Bearer $payment_token" \
+  --header 'X-Eval-Sandbox-Id: sandbox-payment' \
+  --header "X-Session-Id: $rejection_session" \
+  --header 'Idempotency-Key: rejection-prepare' \
+  --header 'Content-Type: application/json' --data '{"message":"action-prepare refund my order"}'
+rejection_prepare_turn="$(uv run python scripts/read_json_field.py "$tmp_dir/http-response.json" turnId)"
+rejection_pending_id="$(mysql_query root "$root_password" cs_db \
+  "SELECT pending_action_id FROM pending_action_reference WHERE source_turn_id = '$rejection_prepare_turn'")"
+rejection_pending_hash="$(mysql_query root "$root_password" commerce_db \
+  "SELECT pending_hash FROM pending_action WHERE pending_action_id = '$rejection_pending_id'")"
+mysql_query root "$root_password" commerce_db \
+  "UPDATE pending_action SET pending_hash = REPEAT('0', 64) WHERE pending_action_id = '$rejection_pending_id'"
+assert_status 200 "strict Commerce 409 closes the claimed action locally" \
+  --request POST "http://127.0.0.1:$agent_port/api/chat" \
+  --header "Authorization: Bearer $payment_token" \
+  --header 'X-Eval-Sandbox-Id: sandbox-payment' \
+  --header "X-Session-Id: $rejection_session" \
+  --header 'Idempotency-Key: rejection-confirm' \
+  --header 'Content-Type: application/json' --data '{"message":"confirm"}'
+cp "$tmp_dir/http-response.json" "$tmp_dir/rejection-confirmed.json"
+jq -e '.outcome == "action_rejected" and .receiptId == null and .reply == "Commerce rejected the prepared action and returned no action receipt."' \
+  "$tmp_dir/rejection-confirmed.json" >/dev/null
+assert_equal 'REJECTED:COMPLETED:action_rejected:1:0' \
+  "$(mysql_query root "$root_password" cs_db \
+    "SELECT CONCAT(reference.state, ':', turn_record.state, ':', turn_record.outcome, ':', (SELECT COUNT(*) FROM support_event WHERE turn_id = turn_record.turn_id AND event_type = 'ACTION_REJECTED'), ':', (SELECT COUNT(*) FROM action_receipt_projection WHERE pending_action_id = reference.pending_action_id)) FROM pending_action_reference reference JOIN support_turn turn_record ON turn_record.turn_id = reference.resolution_turn_id WHERE reference.pending_action_id = '$rejection_pending_id'")" \
+  "strict rejection commits one terminal local closure and no receipt"
+rejection_log_count="$(grep -c 'reason_code=ACTION_DURABLE_TRUTH_INCONSISTENT' "$tmp_dir/commerce.log")"
+assert_status 200 "same rejection key replays the stored terminal response" \
+  --request POST "http://127.0.0.1:$agent_port/api/chat" \
+  --header "Authorization: Bearer $payment_token" \
+  --header 'X-Eval-Sandbox-Id: sandbox-payment' \
+  --header "X-Session-Id: $rejection_session" \
+  --header 'Idempotency-Key: rejection-confirm' \
+  --header 'Content-Type: application/json' --data '{"message":"confirm"}'
+cmp "$tmp_dir/rejection-confirmed.json" "$tmp_dir/http-response.json"
+assert_equal "$rejection_log_count" \
+  "$(grep -c 'reason_code=ACTION_DURABLE_TRUTH_INCONSISTENT' "$tmp_dir/commerce.log")" \
+  "stored rejection replay does not call Commerce"
+mysql_query root "$root_password" commerce_db \
+  "UPDATE pending_action SET pending_hash = '$rejection_pending_hash' WHERE pending_action_id = '$rejection_pending_id'"
+stop_process agent_pid "$agent_pid"
 stop_process model_pid "$model_pid"
 stop_process commerce_pid "$commerce_pid"
 start_commerce evaluation "http://127.0.0.1:$auth_port"

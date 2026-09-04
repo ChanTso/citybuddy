@@ -5,6 +5,7 @@ import logging
 import secrets
 import sys
 import time
+import uuid
 from collections.abc import Mapping
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
@@ -24,6 +25,7 @@ from citybuddy_agent.actions import (
 )
 from citybuddy_agent.agent_control import (
     EMPTY_CONVERSATION_HISTORY,
+    ActionConfirmationRejected,
     AgentEvent,
     AgentRunner,
     AgentRunResult,
@@ -189,9 +191,9 @@ class MemoryConversationStore(ConversationStore):
             result = existing[1]
             return TurnStart(result.conversation_id, result.trace_id, result.turn_id, result)
         start = TurnStart(
-            conversation_id=f"server-conversation-{session_id}",
-            trace_id=f"server-trace-{self.calls}",
-            turn_id=f"server-turn-{self.calls}",
+            conversation_id=str(uuid.uuid5(uuid.NAMESPACE_URL, f"conversation:{session_id}")),
+            trace_id=str(uuid.uuid5(uuid.NAMESPACE_URL, f"trace:{session_id}:{self.calls}")),
+            turn_id=str(uuid.uuid5(uuid.NAMESPACE_URL, f"turn:{session_id}:{self.calls}")),
             history=ConversationHistory(tuple(self.turns.get(session_id, ()))),
         )
         self.pending[key] = (message, start)
@@ -300,6 +302,24 @@ class MemoryConversationStore(ConversationStore):
         )
         return replace(result, receipt_id=receipt.receipt_id)
 
+    def complete_action_rejected(
+        self,
+        *,
+        start: TurnStart,
+        pending: PendingActionReference,
+        response_text: str,
+    ) -> ConversationResult:
+        if self.action_state != "CONFIRMING":
+            raise ActionArbitrationConflictError
+        self.action_pending = None
+        self.action_state = "REJECTED"
+        return self.complete_turn(
+            start=start,
+            response_text=response_text,
+            outcome="action_rejected",
+            events=(),
+        )
+
     def fail_turn(self, *, start: TurnStart, failure_code: str) -> None:
         self.failures.append((start.turn_id, failure_code))
         for key, pending in tuple(self.pending.items()):
@@ -308,11 +328,14 @@ class MemoryConversationStore(ConversationStore):
 
 
 class MemoryAgent(AgentRunner):
-    def __init__(self, *, request_reasons: tuple[str, ...] = ()) -> None:
+    def __init__(
+        self, *, request_reasons: tuple[str, ...] = (), outcome: str = "completed"
+    ) -> None:
         self.calls = 0
         self.sandbox_ids: list[str | None] = []
         self.histories: list[ConversationHistory] = []
         self.request_reasons = request_reasons
+        self.outcome = outcome
 
     def run(
         self,
@@ -332,8 +355,8 @@ class MemoryAgent(AgentRunner):
         del message, direct_token, subject, session_id, trace_id, turn_id
         return AgentRunResult(
             "Bounded support response.",
-            "completed",
-            (AgentEvent("AGENT_OUTCOME", {"outcome": "completed"}),),
+            self.outcome,
+            (AgentEvent("AGENT_OUTCOME", {"outcome": self.outcome}),),
             request_reasons=self.request_reasons,
         )
 
@@ -509,6 +532,7 @@ def test_action_request_failure_producer_inventory_is_closed() -> None:
         "ACTION_CONFIRMATION_COMMERCE_FORBIDDEN",
         "ACTION_CONFIRMATION_TARGET_NOT_FOUND",
         "ACTION_CONFIRMATION_INTENT_CONFLICT",
+        "ACTION_CONFIRMATION_DURABLE_TRUTH_INCONSISTENT",
         "ACTION_CONFIRMATION_COMMERCE_UNAVAILABLE",
         "ACTION_CONFIRMATION_COMMERCE_TIMEOUT",
         "ACTION_CONFIRMATION_COMMERCE_INDETERMINATE",
@@ -1631,13 +1655,14 @@ def test_obo_client_rejects_malformed_exchange_response(
     assert malformed.value.detail == "Identity exchange rejected"
 
 
-def test_chat_persists_server_owned_result_and_replays_same_intent() -> None:
+@pytest.mark.parametrize("outcome", ["completed", "action_rejected"])
+def test_chat_persists_server_owned_result_and_replays_same_intent(outcome: str) -> None:
     private, public_jwk = key_fixture("current-key")
     validator = DirectJwtValidator(settings(), CountingJwksSource([public_jwk]))
     sessions = MemorySessionStore()
     session_id = sessions.create("user-123")
     conversations = MemoryConversationStore(sessions)
-    agent = MemoryAgent()
+    agent = MemoryAgent(outcome=outcome)
     client = TestClient(
         create_app(
             settings(),
@@ -1669,7 +1694,8 @@ def test_chat_persists_server_owned_result_and_replays_same_intent() -> None:
         "citations",
     }
     assert first.json()["citations"] == []
-    assert first.json()["outcome"] == "completed"
+    assert first.json()["outcome"] == outcome
+    assert first.json()["receiptId"] is None
     assert "order" not in first.json()["reply"].lower()
     assert len(conversations.results) == 1
     assert agent.calls == 1
@@ -2057,6 +2083,76 @@ class FailingConfirmer:
             reason="ACTION_CONFIRMATION_COMMERCE_TIMEOUT",
             detail="Action confirmation unavailable",
         )
+
+
+class RejectingConfirmer:
+    def __init__(self) -> None:
+        self.calls = 0
+
+    def confirm_action(
+        self,
+        *,
+        pending: PendingActionReference,
+        direct_token: str,
+        subject: str,
+        session_id: str,
+        sandbox_id: str | None,
+        budget: AttemptBudget,
+        events: list[AgentEvent],
+    ) -> ActionReceiptResponse:
+        del pending, direct_token, subject, session_id, sandbox_id, budget, events
+        self.calls += 1
+        raise ActionConfirmationRejected(reason="ACTION_CONFIRMATION_INTENT_CONFLICT")
+
+
+def test_deterministic_commerce_rejection_closes_claim_and_replays_stored_turn() -> None:
+    private, public_jwk = key_fixture("current-key")
+    sessions = MemorySessionStore()
+    session_id = sessions.create("user-123")
+    conversations = MemoryConversationStore(sessions)
+    confirmer = RejectingConfirmer()
+    client = TestClient(
+        create_app(
+            settings(),
+            validator=DirectJwtValidator(settings(), CountingJwksSource([public_jwk])),
+            sessions=sessions,
+            conversations=conversations,
+            agent=PreparedActionAgent(),
+            confirmer=confirmer,
+        )
+    )
+    headers = {
+        "Authorization": f"Bearer {direct_token(private, 'current-key')}",
+        "X-Session-Id": session_id,
+    }
+    client.post(
+        "/api/chat",
+        headers={**headers, "Idempotency-Key": "prepare"},
+        json={"message": "prepare refund"},
+    )
+
+    rejected = client.post(
+        "/api/chat",
+        headers={**headers, "Idempotency-Key": "confirm"},
+        json={"message": "confirm"},
+    )
+    replay = client.post(
+        "/api/chat",
+        headers={**headers, "Idempotency-Key": "confirm"},
+        json={"message": "confirm"},
+    )
+
+    assert rejected.status_code == 200
+    assert rejected.json()["outcome"] == "action_rejected"
+    assert rejected.json()["receiptId"] is None
+    assert rejected.json()["reply"] == (
+        "Commerce rejected the prepared action and returned no action receipt."
+    )
+    assert replay.content == rejected.content
+    assert conversations.action_state == "REJECTED"
+    assert conversations.action_pending is None
+    assert conversations.claims == 1
+    assert confirmer.calls == 1
 
 
 def test_a_claimed_action_cannot_be_declined_or_expired_out_from_under_commerce() -> None:
@@ -2764,6 +2860,16 @@ def test_chat_redacts_mysql_failure() -> None:
             del start, pending, receipt, response_text
             raise AssertionError("unreachable")
 
+        def complete_action_rejected(
+            self,
+            *,
+            start: TurnStart,
+            pending: PendingActionReference,
+            response_text: str,
+        ) -> ConversationResult:
+            del start, pending, response_text
+            raise AssertionError("unreachable")
+
         def fail_turn(self, *, start: TurnStart, failure_code: str) -> None:
             raise AssertionError("unreachable")
 
@@ -2840,7 +2946,8 @@ def test_unexpected_agent_error_is_visible_and_marks_the_reserved_turn_failed() 
 
     assert response.status_code == 500
     assert "private provider configuration detail" not in response.text
-    assert conversations.failures == [("server-turn-1", "agent_execution_failed")]
+    assert len(conversations.failures) == 1
+    assert conversations.failures[0][1] == "agent_execution_failed"
 
 
 def test_stream_projects_durable_result_and_replay_through_fixed_sse_schema() -> None:
@@ -2891,10 +2998,11 @@ def test_stream_projects_durable_result_and_replay_through_fixed_sse_schema() ->
     assert conversations.calls == 1
 
 
-def test_stream_withholds_action_claim_and_private_execution_failure() -> None:
+def test_json_and_stream_project_the_same_replayed_non_authoritative_explanation() -> None:
     class FixedAgent(AgentRunner):
         def __init__(self, result: AgentRunResult | None = None) -> None:
             self.result = result
+            self.calls = 0
 
         def run(
             self,
@@ -2909,6 +3017,7 @@ def test_stream_withholds_action_claim_and_private_execution_failure() -> None:
             sandbox_id: str | None = None,
         ) -> AgentRunResult:
             del message, direct_token, subject, session_id, trace_id, turn_id, history, sandbox_id
+            self.calls += 1
             if self.result is None:
                 raise RuntimeError("private provider stack and credential detail")
             return self.result
@@ -2921,22 +3030,31 @@ def test_stream_withholds_action_claim_and_private_execution_failure() -> None:
         "X-Session-Id": session_id,
         "Idempotency-Key": "unsafe-action",
     }
-    unsafe_conversations = MemoryConversationStore(sessions)
-    unsafe = TestClient(
+    conversations = MemoryConversationStore(sessions)
+    agent = FixedAgent(AgentRunResult("I cancelled it for you.", "completed", tuple()))
+    client = TestClient(
         create_app(
             settings(),
             validator=DirectJwtValidator(settings(), CountingJwksSource([public_jwk])),
             sessions=sessions,
-            conversations=unsafe_conversations,
-            agent=FixedAgent(AgentRunResult("I cancelled it for you.", "completed", tuple())),
+            conversations=conversations,
+            agent=agent,
         )
-    ).post("/api/chat/stream", headers=headers, json={"message": "refund"})
+    )
 
-    assert unsafe.status_code == 200
-    assert unsafe.text.count("event: error\n") == 1
-    assert '"code":"unsafe_output"' in unsafe.text
-    assert "cancelled" not in unsafe.text.lower()
-    assert len(unsafe_conversations.results) == 1
+    json_response = client.post("/api/chat", headers=headers, json={"message": "refund"})
+    stream_response = client.post("/api/chat/stream", headers=headers, json={"message": "refund"})
+
+    assert json_response.status_code == stream_response.status_code == 200
+    assert json_response.json()["reply"] == "I cancelled it for you."
+    assert json_response.json()["outcome"] == "completed"
+    assert json_response.json()["receiptId"] is None
+    assert '"text":"I cancelled it for you."' in stream_response.text
+    assert '"outcome":"completed"' in stream_response.text
+    assert "event: action_receipt" not in stream_response.text
+    assert "event: error" not in stream_response.text
+    assert agent.calls == 1
+    assert len(conversations.results) == 1
 
     failed_conversations = MemoryConversationStore(sessions)
     failed = TestClient(
@@ -2957,7 +3075,57 @@ def test_stream_withholds_action_claim_and_private_execution_failure() -> None:
     assert failed.text.count("event: error\n") == 1
     assert '"code":"stream_unavailable"' in failed.text
     assert "private provider" not in failed.text
-    assert failed_conversations.failures == [("server-turn-1", "agent_execution_failed")]
+    assert len(failed_conversations.failures) == 1
+    assert failed_conversations.failures[0][1] == "agent_execution_failed"
+
+
+def test_retrieval_denied_is_a_normal_bounded_stream_result() -> None:
+    class RetrievalDeniedAgent(AgentRunner):
+        def run(
+            self,
+            *,
+            message: str,
+            direct_token: str,
+            subject: str,
+            session_id: str,
+            trace_id: str,
+            turn_id: str,
+            history: ConversationHistory = EMPTY_CONVERSATION_HISTORY,
+            sandbox_id: str | None = None,
+        ) -> AgentRunResult:
+            del message, direct_token, subject, session_id, trace_id, turn_id, history, sandbox_id
+            return AgentRunResult(
+                "I do not have sufficient grounded evidence to answer that request.",
+                "retrieval_denied",
+                tuple(),
+            )
+
+    private, public_jwk = key_fixture("current-key")
+    sessions = MemorySessionStore()
+    session_id = sessions.create("user-123")
+    response = TestClient(
+        create_app(
+            settings(),
+            validator=DirectJwtValidator(settings(), CountingJwksSource([public_jwk])),
+            sessions=sessions,
+            conversations=MemoryConversationStore(sessions),
+            agent=RetrievalDeniedAgent(),
+        )
+    ).post(
+        "/api/chat/stream",
+        headers={
+            "Authorization": f"Bearer {direct_token(private, 'current-key')}",
+            "X-Session-Id": session_id,
+            "Idempotency-Key": "retrieval-denied",
+        },
+        json={"message": "unknown"},
+    )
+
+    assert response.status_code == 200
+    assert "event: token" in response.text
+    assert "event: done" in response.text
+    assert '"outcome":"retrieval_denied"' in response.text
+    assert "event: error" not in response.text
 
 
 def test_stream_maps_bounded_non_success_outcomes_to_one_terminal_error() -> None:

@@ -57,7 +57,7 @@ describe('bounded SSE parser', () => {
     const parser = new SseParser();
     parser.push(
       encode(
-        `event: action_receipt\ndata: {"sequence":1,"receiptId":"${UUID}","status":"SUCCEEDED"}\n\n`,
+        `event: action_receipt\ndata: {"sequence":1,"receiptId":"${UUID}","status":"REQUESTED"}\n\n`,
       ),
     );
     parser.push(encode('event: token\ndata: {"sequence":2,"text":"done"}\n\n'));
@@ -90,7 +90,7 @@ describe('bounded SSE parser', () => {
     const parser = new SseParser();
     parser.push(
       encode(
-        `event: action_receipt\ndata: {"sequence":1,"receiptId":"${UUID}","status":"SUCCEEDED"}\n\n`,
+        `event: action_receipt\ndata: {"sequence":1,"receiptId":"${UUID}","status":"REQUESTED"}\n\n`,
       ),
     );
     parser.push(encode('event: token\ndata: {"sequence":2,"text":"done"}\n\n'));
@@ -105,15 +105,52 @@ describe('bounded SSE parser', () => {
 
   it('refuses a second receipt in one stream', () => {
     const parser = new SseParser();
-    const frame = `event: action_receipt\ndata: {"sequence":1,"receiptId":"${UUID}","status":"SUCCEEDED"}\n\n`;
+    const frame = `event: action_receipt\ndata: {"sequence":1,"receiptId":"${UUID}","status":"REQUESTED"}\n\n`;
     parser.push(encode(frame));
     expect(() => parser.push(encode(frame))).toThrow(ApiFailure);
+  });
+
+  it('projects retrieval denial as a normal explanation terminal', () => {
+    const parser = new SseParser();
+    parser.push(encode(token));
+    parser.push(
+      encode(
+        `event: done\ndata: {"sequence":2,"conversationId":"${UUID}","traceId":"${UUID}","turnId":"${UUID}","outcome":"retrieval_denied"}\n\n`,
+      ),
+    );
+    expect(parser.finish()).toEqual({
+      reply: 'Hello ',
+      outcome: 'retrieval_denied',
+      receiptId: null,
+    });
+  });
+
+  it('accepts a rejected terminal without inventing a receipt', () => {
+    const parser = new SseParser();
+    parser.push(
+      encode(
+        'event: token\ndata: {"sequence":1,"text":"Commerce rejected the action."}\n\n',
+      ),
+    );
+    parser.push(
+      encode(
+        `event: done\ndata: {"sequence":2,"conversationId":"${UUID}","traceId":"${UUID}","turnId":"${UUID}","outcome":"action_rejected"}\n\n`,
+      ),
+    );
+
+    expect(parser.finish()).toEqual({
+      reply: 'Commerce rejected the action.',
+      outcome: 'action_rejected',
+      receiptId: null,
+    });
   });
 
   it('allows exactly one public error terminal and maps it to a bounded dependency failure', () => {
     const parser = new SseParser();
     parser.push(
-      encode('event: error\ndata: {"sequence":1,"code":"unsafe_output"}\n\n'),
+      encode(
+        'event: error\ndata: {"sequence":1,"code":"stream_unavailable"}\n\n',
+      ),
     );
     expect(() => parser.finish()).toThrowError(
       expect.objectContaining({ kind: 'dependency' }),

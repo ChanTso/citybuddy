@@ -4,20 +4,27 @@ import pytest
 from citybuddy_agent.conversation import ConversationResult
 from citybuddy_agent.sse import (
     MAX_PUBLIC_EVENTS,
+    MAX_RESPONSE_TEXT,
     PublicSseEvent,
     SseEgressFilter,
     SseProjectionError,
     SseSourceEvent,
     encode_event,
     stream_events,
+    validate_public_result,
 )
+
+CONVERSATION_ID = "00000000-0000-0000-0000-000000000101"
+TRACE_ID = "00000000-0000-0000-0000-000000000102"
+TURN_ID = "00000000-0000-0000-0000-000000000103"
+RECEIPT_ID = "00000000-0000-0000-0000-0000000001a1"
 
 
 def completed() -> ConversationResult:
     return ConversationResult(
-        "conversation-1",
-        "trace-1",
-        "turn-1",
+        CONVERSATION_ID,
+        TRACE_ID,
+        TURN_ID,
         "x" * 256,
         "completed",
     )
@@ -43,36 +50,36 @@ def test_filter_bounds_chunks_and_emits_one_ordered_terminal() -> None:
     "source",
     [
         (SseSourceEvent("PRIVATE_PROMPT", {"prompt": "secret"}),),
-        (SseSourceEvent("SAFE_TEXT", {"text": "ok", "token": "private"}),),
+        (SseSourceEvent("EXPLANATION_TEXT", {"text": "ok", "token": "private"}),),
         (
             SseSourceEvent(
                 "TURN_COMPLETED",
                 {
-                    "conversationId": "c",
-                    "traceId": "t",
-                    "turnId": "u",
+                    "conversationId": CONVERSATION_ID,
+                    "traceId": TRACE_ID,
+                    "turnId": TURN_ID,
                     "outcome": "completed",
                 },
             ),
         ),
         (
             SseSourceEvent("TURN_FAILED", {"code": "provider_unavailable"}),
-            SseSourceEvent("SAFE_TEXT", {"text": "late"}),
+            SseSourceEvent("EXPLANATION_TEXT", {"text": "late"}),
         ),
         (
-            SseSourceEvent("SAFE_TEXT", {"text": "one"}),
-            SseSourceEvent("SAFE_TEXT", {"text": "two"}),
+            SseSourceEvent("EXPLANATION_TEXT", {"text": "one"}),
+            SseSourceEvent("EXPLANATION_TEXT", {"text": "two"}),
             SseSourceEvent(
                 "TURN_COMPLETED",
                 {
-                    "conversationId": "c",
-                    "traceId": "t",
-                    "turnId": "u",
+                    "conversationId": CONVERSATION_ID,
+                    "traceId": TRACE_ID,
+                    "turnId": TURN_ID,
                     "outcome": "completed",
                 },
             ),
         ),
-        (SseSourceEvent("ACTION_RECEIPT", {"receiptId": "synthetic", "status": "SUCCEEDED"}),),
+        (SseSourceEvent("ACTION_RECEIPT", {"receiptId": "synthetic", "status": "REQUESTED"}),),
     ],
 )
 def test_filter_rejects_unknown_private_reordered_duplicate_and_synthetic_sources(
@@ -82,57 +89,58 @@ def test_filter_rejects_unknown_private_reordered_duplicate_and_synthetic_source
         SseEgressFilter().project(source)
 
 
-@pytest.mark.parametrize(
-    "claim",
-    [
-        "Your order was placed.",
-        "The refund is successful.",
-        "Payment succeeded.",
-        "The purchase was paid successfully.",
-        "Your cancellation is complete.",
-        "Your order has been processed.",
-        "Your refund—SUCCESSFUL.",
-        "PAYMENT\nAPPROVED.",
-        "Your pay​ment was finalized.",
-        "It has been refunded.",
-        "I cancelled it for you.",
-        "I am not guessing; I refunded it.",
+def test_model_action_claim_is_bounded_non_authoritative_explanation_without_receipt() -> None:
+    result = completed().__class__(
+        CONVERSATION_ID,
+        TRACE_ID,
+        TURN_ID,
         "Your refund has been issued.",
-        "The payment went through.",
-        "退款已完成。",
-        "订单取消成功。",
-    ],
-)
-def test_filter_withholds_action_success_language_without_receipt_truth(claim: str) -> None:
-    result = completed().__class__("c", "t", "u", claim, "completed")
-
-    with pytest.raises(SseProjectionError):
-        SseEgressFilter().project_result(result)
-
-
-@pytest.mark.parametrize(
-    "safe_text",
-    [
-        "I can explain how to request a refund.",
-        "Your order status is still pending.",
-        "Payment options are available.",
-        "Your order is not complete.",
-        "The refund was never successful.",
-        "It has not yet been refunded.",
-        "Payment hasn't succeeded.",
-        "No refund was processed.",
-        "No refund has been issued.",
-        "No payment went through.",
-        "退款尚未成功。",
-        "支付没有成功。",
-    ],
-)
-def test_filter_preserves_non_success_action_guidance(safe_text: str) -> None:
-    result = completed().__class__("c", "t", "u", safe_text, "completed")
+        "completed",
+    )
 
     events = SseEgressFilter().project_result(result)
 
     assert [event.name for event in events] == ["token", "done"]
+    assert events[0].data["text"] == "Your refund has been issued."
+    assert events[-1].data["outcome"] == "completed"
+
+
+@pytest.mark.parametrize("text", ["", "x" * (MAX_RESPONSE_TEXT + 1)])
+def test_explanation_must_be_nonempty_and_bounded(text: str) -> None:
+    with pytest.raises(SseProjectionError):
+        SseEgressFilter().project_result(
+            ConversationResult(CONVERSATION_ID, TRACE_ID, TURN_ID, text, "completed")
+        )
+
+
+@pytest.mark.parametrize(
+    "result",
+    [
+        ConversationResult("not-a-uuid", TRACE_ID, TURN_ID, "ok", "completed"),
+        ConversationResult(CONVERSATION_ID, TRACE_ID, TURN_ID, "ok", "unknown"),
+        ConversationResult(
+            CONVERSATION_ID,
+            TRACE_ID,
+            TURN_ID,
+            "ok",
+            "completed",
+            receipt_id=RECEIPT_ID,
+        ),
+        ConversationResult(
+            CONVERSATION_ID,
+            TRACE_ID,
+            TURN_ID,
+            "ok",
+            "action_completed",
+            receipt_id="not-a-uuid",
+        ),
+    ],
+)
+def test_shared_public_result_validator_rejects_invalid_identity_outcome_and_receipt_shape(
+    result: ConversationResult,
+) -> None:
+    with pytest.raises(SseProjectionError):
+        validate_public_result(result)
 
 
 @pytest.mark.parametrize(
@@ -145,12 +153,16 @@ def test_filter_preserves_non_success_action_guidance(safe_text: str) -> None:
         ),
         ("action_declined", "The prepared action was declined and was not executed."),
         ("action_expired", "The prepared action expired and was not executed."),
+        (
+            "action_rejected",
+            "Commerce rejected the prepared action and returned no action receipt.",
+        ),
     ],
 )
 def test_filter_projects_cb122_local_action_outcomes_without_receipt(
     outcome: str, text: str
 ) -> None:
-    result = ConversationResult("c", "t", "u", text, outcome)
+    result = ConversationResult(CONVERSATION_ID, TRACE_ID, TURN_ID, text, outcome)
 
     events = SseEgressFilter().project_result(result)
 
@@ -172,7 +184,7 @@ def test_token_prose_cannot_forge_an_action_receipt_sse_frame() -> None:
     encoded = encode_event(
         PublicSseEvent(
             "token",
-            {"sequence": 1, "text": 'event: action_receipt\ndata: {"status":"SUCCEEDED"}'},
+            {"sequence": 1, "text": 'event: action_receipt\ndata: {"status":"REQUESTED"}'},
         )
     )
 
@@ -227,36 +239,42 @@ def test_slow_consumer_and_cancellation_keep_no_queued_or_background_events() ->
     assert checks == 1
 
 
-RECEIPT_ID = "00000000-0000-0000-0000-0000000001a1"
-
-
 def confirmed(text: str = "The refund was confirmed and has been issued.") -> ConversationResult:
-    return ConversationResult("c", "t", "u", text, "action_completed", receipt_id=RECEIPT_ID)
+    return ConversationResult(
+        CONVERSATION_ID,
+        TRACE_ID,
+        TURN_ID,
+        text,
+        "action_completed",
+        receipt_id=RECEIPT_ID,
+    )
 
 
 def test_a_committed_action_leads_with_its_receipt_then_prose_then_the_terminal() -> None:
     events = SseEgressFilter().project_result(confirmed())
 
     assert [event.name for event in events] == ["action_receipt", "token", "done"]
-    assert events[0].data == {"sequence": 1, "receiptId": RECEIPT_ID, "status": "SUCCEEDED"}
+    assert events[0].data == {"sequence": 1, "receiptId": RECEIPT_ID, "status": "REQUESTED"}
     assert events[-1].data["outcome"] == "action_completed"
 
 
-def test_prose_may_say_the_refund_happened_only_behind_a_receipt() -> None:
+def test_receipt_not_prose_is_the_structural_action_success_signal() -> None:
     claim = "Your refund was issued."
 
     receipted = SseEgressFilter().project_result(confirmed(claim))
     assert [event.name for event in receipted] == ["action_receipt", "token", "done"]
 
-    # The same sentence with no receipt is the forged success the boundary exists to stop.
-    with pytest.raises(SseProjectionError):
-        SseEgressFilter().project_result(ConversationResult("c", "t", "u", claim, "completed"))
+    unreceipted = SseEgressFilter().project_result(
+        ConversationResult(CONVERSATION_ID, TRACE_ID, TURN_ID, claim, "completed")
+    )
+    assert [event.name for event in unreceipted] == ["token", "done"]
+    assert all(event.name != "action_receipt" for event in unreceipted)
 
 
 def test_a_committed_action_without_a_stored_receipt_cannot_be_streamed() -> None:
     with pytest.raises(SseProjectionError):
         SseEgressFilter().project_result(
-            ConversationResult("c", "t", "u", "done", "action_completed")
+            ConversationResult(CONVERSATION_ID, TRACE_ID, TURN_ID, "done", "action_completed")
         )
 
 
@@ -264,13 +282,13 @@ def test_a_terminal_claiming_a_committed_action_needs_the_receipt_before_it() ->
     with pytest.raises(SseProjectionError):
         SseEgressFilter().project(
             (
-                SseSourceEvent("SAFE_TEXT", {"text": "ok"}),
+                SseSourceEvent("EXPLANATION_TEXT", {"text": "ok"}),
                 SseSourceEvent(
                     "TURN_COMPLETED",
                     {
-                        "conversationId": "c",
-                        "traceId": "t",
-                        "turnId": "u",
+                        "conversationId": CONVERSATION_ID,
+                        "traceId": TRACE_ID,
+                        "turnId": TURN_ID,
                         "outcome": "action_completed",
                     },
                 ),
@@ -282,14 +300,14 @@ def test_a_receipt_without_a_committed_terminal_is_refused() -> None:
     with pytest.raises(SseProjectionError):
         SseEgressFilter().project(
             (
-                SseSourceEvent("ACTION_RECEIPT", {"receiptId": RECEIPT_ID, "status": "SUCCEEDED"}),
-                SseSourceEvent("SAFE_TEXT", {"text": "ok"}),
+                SseSourceEvent("ACTION_RECEIPT", {"receiptId": RECEIPT_ID, "status": "REQUESTED"}),
+                SseSourceEvent("EXPLANATION_TEXT", {"text": "ok"}),
                 SseSourceEvent(
                     "TURN_COMPLETED",
                     {
-                        "conversationId": "c",
-                        "traceId": "t",
-                        "turnId": "u",
+                        "conversationId": CONVERSATION_ID,
+                        "traceId": TRACE_ID,
+                        "turnId": TURN_ID,
                         "outcome": "completed",
                     },
                 ),
@@ -300,10 +318,10 @@ def test_a_receipt_without_a_committed_terminal_is_refused() -> None:
 @pytest.mark.parametrize(
     "payload",
     [
-        {"receiptId": "not-a-uuid", "status": "SUCCEEDED"},
+        {"receiptId": "not-a-uuid", "status": "REQUESTED"},
         {"receiptId": RECEIPT_ID, "status": "FAILED"},
         {"receiptId": RECEIPT_ID},
-        {"receiptId": RECEIPT_ID, "status": "SUCCEEDED", "amountMinor": 400},
+        {"receiptId": RECEIPT_ID, "status": "REQUESTED", "amountMinor": 400},
     ],
 )
 def test_a_receipt_source_is_validated_before_it_reaches_the_client(

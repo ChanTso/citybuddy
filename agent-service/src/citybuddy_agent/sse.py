@@ -3,8 +3,6 @@
 from __future__ import annotations
 
 import json
-import re
-import unicodedata
 import uuid
 from collections.abc import AsyncGenerator, Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass
@@ -20,147 +18,22 @@ MAX_RESPONSE_TEXT = 256
 MAX_PUBLIC_EVENTS = MAX_RESPONSE_TEXT // TOKEN_CHUNK_SIZE + 1
 MAX_RECEIPTED_RESPONSE_TEXT = (MAX_PUBLIC_EVENTS - 2) * TOKEN_CHUNK_SIZE
 
-# This normalized lexicon is intentionally bounded defense in depth. Token prose
-# is never action truth; only an ActionReceipt-derived event can carry that state.
-_SENSITIVE_ACTION_WORDS = {
-    "cancel",
-    "cancellation",
-    "order",
-    "payment",
-    "purchase",
-    "refund",
-}
-_ACTION_COMPLETION_WORDS = {
-    "approved",
-    "canceled",
-    "cancelled",
-    "complete",
-    "completed",
-    "completion",
-    "confirmed",
-    "done",
-    "executed",
-    "finalized",
-    "issued",
-    "ordered",
-    "paid",
-    "placed",
-    "processed",
-    "refunded",
-    "succeeded",
-    "success",
-    "successful",
-    "successfully",
-}
-_ACTION_COMPLETION_PHRASES: set[tuple[str, ...]] = {("went", "through")}
-_COMPLETED_ACTION_VERBS = {
-    "canceled",
-    "cancelled",
-    "ordered",
-    "paid",
-    "purchased",
-    "refunded",
-}
-_NEGATION_WORDS = {"cannot", "never", "no", "not"}
-_NEGATION_BRIDGE_WORDS = {
-    "actually",
-    "already",
-    "be",
-    "been",
-    "being",
-    "fully",
-    "successfully",
-    "yet",
-}
-_NEGATED_ACTION_AUXILIARIES = {"are", "had", "has", "is", "was", "were"}
-_SENSITIVE_ACTION_CJK = ("订单", "下单", "退款", "支付", "付款", "取消")
-_ACTION_COMPLETION_CJK = (
-    "成功",
-    "已完成",
-    "已确认",
-    "已下单",
-    "已退款",
-    "已支付",
-    "已付款",
-    "已取消",
-)
-_NEGATION_CJK = ("没有", "尚未", "并未", "还未", "还没", "未", "没", "不")
 _PUBLIC_COMPLETED_OUTCOMES = {
     "completed",
+    "retrieval_denied",
     "action_completed",
     "action_pending",
     "action_clarification",
     "action_declined",
     "action_expired",
+    "action_rejected",
 }
+_PUBLIC_OUTCOMES = _PUBLIC_COMPLETED_OUTCOMES | {"budget_exhausted", "provider_denied"}
 
 
-def _is_negated(words: list[str], index: int) -> bool:
-    for negation_index in range(max(0, index - 4), index):
-        if words[negation_index] not in _NEGATION_WORDS:
-            continue
-        bridge = words[negation_index + 1 : index]
-        if all(word in _NEGATION_BRIDGE_WORDS for word in bridge):
-            return True
-        if (
-            words[negation_index] == "no"
-            and bridge
-            and bridge[0] in _SENSITIVE_ACTION_WORDS
-            and all(
-                word in _NEGATION_BRIDGE_WORDS | _NEGATED_ACTION_AUXILIARIES for word in bridge[1:]
-            )
-        ):
-            return True
-    return False
-
-
-def _has_unnegated_word(words: list[str], candidates: set[str]) -> bool:
-    return any(
-        word in candidates and not _is_negated(words, index) for index, word in enumerate(words)
-    )
-
-
-def _has_unnegated_phrase(words: list[str], candidates: set[tuple[str, ...]]) -> bool:
-    return any(
-        tuple(words[index : index + len(candidate)]) == candidate and not _is_negated(words, index)
-        for candidate in candidates
-        for index in range(len(words) - len(candidate) + 1)
-    )
-
-
-def _has_unnegated_cjk_completion(text: str) -> bool:
-    for completion in _ACTION_COMPLETION_CJK:
-        for match in re.finditer(re.escape(completion), text):
-            prefix = text[max(0, match.start() - 4) : match.start()]
-            if not any(prefix.endswith(negation) for negation in _NEGATION_CJK):
-                return True
-    return False
-
-
-def _contains_unreceipted_action_claim(text: str) -> bool:
-    normalized = unicodedata.normalize("NFKC", text).casefold()
-    normalized = "".join(
-        character for character in normalized if unicodedata.category(character) != "Cf"
-    )
-    normalized = re.sub(
-        r"\b(?:are|could|did|does|do|had|has|have|is|should|was|were|would|will)n['’]t\b",
-        " not ",
-        normalized,
-    ).replace("can't", " cannot ")
-    words = re.findall(r"[a-z0-9]+", normalized)
-    if _has_unnegated_word(words, _COMPLETED_ACTION_VERBS):
-        return True
-    if set(words) & _SENSITIVE_ACTION_WORDS and (
-        _has_unnegated_word(words, _ACTION_COMPLETION_WORDS)
-        or _has_unnegated_phrase(words, _ACTION_COMPLETION_PHRASES)
-    ):
-        return True
-    return any(action in normalized for action in _SENSITIVE_ACTION_CJK) and (
-        _has_unnegated_cjk_completion(normalized)
-    )
-
-
-def _is_canonical_uuid(value: str) -> bool:
+def _is_canonical_uuid(value: object) -> bool:
+    if not isinstance(value, str):
+        return False
     try:
         return str(uuid.UUID(value)) == value
     except ValueError:
@@ -168,7 +41,33 @@ def _is_canonical_uuid(value: str) -> bool:
 
 
 class SseProjectionError(Exception):
-    """A source event cannot cross the public SSE boundary."""
+    """A durable result or source event cannot cross the public response boundary."""
+
+
+def validate_public_result(result: ConversationResult) -> None:
+    """Validate the durable result shared by JSON and SSE public projections."""
+
+    if not all(
+        _is_canonical_uuid(value)
+        for value in (result.conversation_id, result.trace_id, result.turn_id)
+    ):
+        raise SseProjectionError("invalid durable result identity")
+    if (
+        not isinstance(result.response_text, str)
+        or not result.response_text
+        or len(result.response_text) > MAX_RESPONSE_TEXT
+        or (
+            result.outcome == "action_completed"
+            and len(result.response_text) > MAX_RECEIPTED_RESPONSE_TEXT
+        )
+    ):
+        raise SseProjectionError("invalid durable result explanation")
+    if result.outcome not in _PUBLIC_OUTCOMES:
+        raise SseProjectionError("unknown durable outcome")
+    if (result.outcome == "action_completed") != (result.receipt_id is not None):
+        raise SseProjectionError("completed action and receipt disagree")
+    if result.receipt_id is not None and (not _is_canonical_uuid(result.receipt_id)):
+        raise SseProjectionError("invalid durable receipt identity")
 
 
 @dataclass(frozen=True)
@@ -184,9 +83,10 @@ class PublicSseEvent:
 
 
 class SseEgressFilter:
-    """Accept only server-constructed text and terminal truth with exact schemas."""
+    """Project one validated durable result into an exact bounded SSE schema."""
 
     def project_result(self, result: ConversationResult) -> tuple[PublicSseEvent, ...]:
+        validate_public_result(result)
         source: tuple[SseSourceEvent, ...]
         if result.outcome == "action_completed":
             # Read from the stored projection, never rebuilt from the response text: the receipt
@@ -196,9 +96,9 @@ class SseEgressFilter:
             source = (
                 SseSourceEvent(
                     "ACTION_RECEIPT",
-                    {"receiptId": result.receipt_id, "status": "SUCCEEDED"},
+                    {"receiptId": result.receipt_id, "status": "REQUESTED"},
                 ),
-                SseSourceEvent("SAFE_TEXT", {"text": result.response_text}),
+                SseSourceEvent("EXPLANATION_TEXT", {"text": result.response_text}),
                 SseSourceEvent(
                     "TURN_COMPLETED",
                     {
@@ -211,7 +111,7 @@ class SseEgressFilter:
             )
         elif result.outcome in _PUBLIC_COMPLETED_OUTCOMES:
             source = (
-                SseSourceEvent("SAFE_TEXT", {"text": result.response_text}),
+                SseSourceEvent("EXPLANATION_TEXT", {"text": result.response_text}),
                 SseSourceEvent(
                     "TURN_COMPLETED",
                     {
@@ -247,7 +147,7 @@ class SseEgressFilter:
         for event in source:
             if terminal:
                 raise SseProjectionError("source event follows terminal")
-            if event.event_type == "SAFE_TEXT":
+            if event.event_type == "EXPLANATION_TEXT":
                 if text_seen or set(event.payload) != {"text"}:
                     raise SseProjectionError("invalid text source")
                 text = event.payload["text"]
@@ -256,9 +156,8 @@ class SseEgressFilter:
                     or not text
                     or len(text) > MAX_RESPONSE_TEXT
                     or (receipt_seen and len(text) > MAX_RECEIPTED_RESPONSE_TEXT)
-                    or (not receipt_seen and _contains_unreceipted_action_claim(text))
                 ):
-                    raise SseProjectionError("unsafe text source")
+                    raise SseProjectionError("invalid explanation source")
                 text_seen = True
                 for offset in range(0, len(text), TOKEN_CHUNK_SIZE):
                     public.append(
@@ -275,8 +174,8 @@ class SseEgressFilter:
                 if not text_seen or set(event.payload) != required:
                     raise SseProjectionError("invalid completed source")
                 if event.payload["outcome"] not in _PUBLIC_COMPLETED_OUTCOMES or not all(
-                    isinstance(event.payload[name], str) and event.payload[name]
-                    for name in required
+                    _is_canonical_uuid(event.payload[name])
+                    for name in ("conversationId", "traceId", "turnId")
                 ):
                     raise SseProjectionError("invalid completed values")
                 if (event.payload["outcome"] == "action_completed") != receipt_seen:
@@ -294,22 +193,21 @@ class SseEgressFilter:
                         "attempt_budget_exhausted",
                         "provider_unavailable",
                         "stream_unavailable",
-                        "unsafe_output",
                     }
                 ):
                     raise SseProjectionError("invalid failure source")
                 terminal = True
                 public.append(PublicSseEvent("error", {"sequence": 1, **event.payload}))
             elif event.event_type == "ACTION_RECEIPT":
-                # The receipt leads the stream: the prose after it is allowed to say the
-                # action happened, and nothing before it is.
+                # The receipt leads the stream so clients encounter durable action state before
+                # the accompanying non-authoritative explanation.
                 if receipt_seen or text_seen or set(event.payload) != {"receiptId", "status"}:
                     raise SseProjectionError("invalid receipt source")
                 receipt_id = event.payload["receiptId"]
                 if (
                     not isinstance(receipt_id, str)
                     or not _is_canonical_uuid(receipt_id)
-                    or event.payload["status"] != "SUCCEEDED"
+                    or event.payload["status"] != "REQUESTED"
                 ):
                     raise SseProjectionError("invalid receipt values")
                 receipt_seen = True

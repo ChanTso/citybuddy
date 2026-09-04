@@ -23,7 +23,7 @@ retrieval evidence, and evaluation-only access remain independently enforceable.
 |---|---|---|
 | `auth-service` | Java 21 / Spring Boot 3.5 | Login, RS256 user tokens, service-authenticated token exchange, OBO tokens, JWKS publication and key rotation, and evaluation-only test identities. |
 | `commerce-service` | Java 21 / Spring Boot 3.5 | Products, inventory, orders, seckill admission and ordering, mock payment, refund, CRM and FAQ truth, internal tool APIs, PendingAction and ActionReceipt truth, and evaluation-only state APIs. |
-| `agent-service` | Python 3.11 / FastAPI / Pydantic | Customer-support APIs, bounded same-session context, one ReAct agent, deterministic control signals, model policy, tool mediation, PendingAction reference and decision handling, retrieval, safety, SSE egress, authoritative support evidence, confirmation of a prepared action, and projection of the receipt returned by commerce. |
+| `agent-service` | Python 3.11 / FastAPI / Pydantic | Customer-support APIs, bounded same-session context, one ReAct agent, deterministic control signals, model policy, tool mediation, PendingAction reference and decision handling, retrieval, bounded public projection, authoritative support evidence, confirmation of a prepared action, and projection of the receipt returned by commerce. |
 | `knowledge-indexer` | Python 3.11 | Production RocketMQ FAQ synchronization, FAQ/product snapshot rebuilds, source-version ordering, tombstones, validation, and versioned Elasticsearch alias changes. |
 | `web` | React / TypeScript / Vite | The current demonstration surface for login, products, seckill reservation status, support chat, and the full PendingAction lifecycle including confirmation and the receipt identifier returned by the server. |
 | `litellm-proxy` boundary | OpenAI-compatible HTTP | Provider key isolation, rate limiting, same-tier provider failover, one bounded network retry, and usage/cost records when a proxy is deployed. It never makes business-tier routing decisions. Tests and the local demonstration use a deterministic compatible fake rather than a real provider. |
@@ -426,7 +426,7 @@ not by treating the product cache-invalidation consumer as a knowledge-indexer f
 | Channel | Producer → consumer | Message type | Stable payload/invariant | Failure and replay rule | State |
 |---|---|---|---|---|---|
 | Seckill order transaction | Commerce producer → commerce order consumer | Transaction | Reservation/activity/user ids, event id, version; current production payload carries no sandbox and consumer rejects the reserved sandbox property | Half message is sent after Lua admission and commits only after MySQL `ADMITTED`; pending handoff retains recovery work; checker reads MySQL, and uniqueness plus ledger movements make replay harmless | Implemented |
-| Order/payment timeout | `commerce-service` → commerce timeout consumer | Delay | Order id, expected state/version, due time, event id; current production payload carries no sandbox and consumer rejects the reserved sandbox property | Re-read MySQL; conditional cancellation and ledger restoration are idempotent; paid/final orders are not cancelled | Implemented |
+| Order/payment timeout | `commerce-service` → commerce timeout consumer | Delay | Order id, expected state/version, due time, event id; current production payload carries no sandbox and consumer rejects the reserved sandbox property | Re-read MySQL on every delivery; conditional cancellation and ledger restoration are idempotent; paid/final orders are not cancelled. Broker group policy owns retry/DLQ. EARLY changes invisibility without ACK. ACK or change-invisibility exceptions leave Broker state unconfirmed; a control failure does not itself stop later received messages, and the first control error is rethrown after the loop unless a later decode, evaluation, or business failure terminates processing first. Any redelivery re-reads MySQL | Implemented |
 | Commerce domain events | Commerce Outbox publisher → authorized consumers | Normal | Event id, aggregate/version, occurred time; current payloads carry no sandbox and production consumers reject the reserved sandbox property | Mutation and Outbox commit together; consumers are idempotent; late events cannot reverse newer state | Implemented; current product event consumer is commerce cache invalidation |
 
 <a id="contract-sequence-rocketmq"></a>
@@ -545,26 +545,30 @@ sequenceDiagram
   commerce commit therefore leaves a claim that can safely re-enter commerce and replay the
   receipt; it never leaves a local durable statement that the action was declined or never
   attempted.
+- A strict Commerce `409` Action error in category `CONFLICT` or
+  `INCONSISTENT_DURABLE_STATE` resolves that claim, its `ACTION_REJECTED` evidence, and the
+  confirming turn's `action_rejected` outcome atomically. It records that Commerce rejected the
+  request and returned no receipt; it does not infer whether an inconsistent pre-existing durable
+  state includes a business effect. Malformed errors, other 4xx statuses, rate limits, server
+  failures, transport failures, and invalid success responses leave the reference `CONFIRMING` so
+  a later exact confirmation can recover.
 - A successful Commerce ActionReceipt remains immutable action truth. The agent projects it into
   `cs_db.action_receipt_projection` in the same transaction that resolves the reference to
   `CONFIRMED` and commits the turn as `action_completed`; none of those three may exist without the
   others. Commerce is idempotent per PendingAction, so confirmation retried after a lost response
   replays the committed receipt rather than refunding twice.
-- Public SSE `token` prose is non-authoritative explanation and never action-state truth. A client
-  renders successful action or receipt status only from an `action_receipt` frame, never by
-  classifying `token` prose. The receipt leads the stream and terminal `done` carries
-  `action_completed`; neither may appear without the other, on either side.
-- Output is risk-tiered. Ordinary knowledge/chitchat may stream through a small buffer. A
-  normalized, documented, bounded action-claim lexicon blocks known unreceipted action-success
-  forms as defense in depth, but is not a complete natural-language classifier. A secondary
-  text/tool consistency guard may block contradictions but never replaces receipt truth.
-  Asynchronous grounding may create evidence or a follow-up candidate in retained designs, but
-  there is no mainline SSE retraction.
+- JSON `reply` and public SSE `token` prose are the same bounded, non-authoritative explanation of
+  one durable turn. They are structurally validated on first response and replay, but are not a
+  semantic truth classifier and may contradict business state. A client renders successful action
+  only when `action_completed` is paired with the stored receipt projection. On SSE the receipt
+  leads the stream, has exact status `REQUESTED`, and terminal `done` carries `action_completed`;
+  neither may appear without the other. The web surface keeps this distinction visible.
 - The server derives write idempotency from `turn_id`, tool identity, and argument hash. A repeated
   key returns the existing action result or receipt.
 - Internal events may include text, tool, retrieval, guard, error, PendingAction
   preparation/confirmation/decline/expiry, and completion evidence. Public `action_receipt` is
-  emitted from stored projection only, with the identifier and status durably recorded.
+  emitted from stored projection only, with the identifier and `REQUESTED` request-recording
+  status durably recorded.
 
 <a id="contract-sequence-action"></a>
 
@@ -601,7 +605,13 @@ sequenceDiagram
         alt Validation fails or business transition is illegal
             D-->>C: Roll back
             C-->>G: Structured rejection, no receipt
-            G-->>U: Safe rejection or clarification
+            alt Strict Commerce 409 CONFLICT or INCONSISTENT_DURABLE_STATE
+                G->>E: Resolve claim and turn atomically as REJECTED/action_rejected
+                G-->>U: Fixed rejection, no receipt
+            else Ambiguous, invalid, or transient response
+                Note over G,E: Keep CONFIRMING for a later exact confirmation
+                G-->>U: Fixed typed failure
+            end
         else Validation succeeds
             D->>D: Consume PendingAction once
             D->>D: Execute mutation and persist ActionReceipt
@@ -703,8 +713,8 @@ sequenceDiagram
 
 | Caller → owner | Method and path | Authentication | Required boundary | Success semantics | Rejection semantics |
 |---|---|---|---|---|---|
-| `web` or evaluator → `agent-service` | `POST /api/chat` | Direct-user JWT | Fixed issuer/user audience/type, permission, owned `X-Session-Id`, `Idempotency-Key`; evaluation also supplies matching sandbox header | Returns one complete response; exact confirmation returns `action_completed` with stored `receiptId` projection | Wrong identity/session/sandbox, idempotency conflict, policy block, or exhausted attempts rejects with typed status |
-| `web` or evaluator → `agent-service` | `POST /api/chat/stream` | Direct-user JWT | Same identity, session, idempotency, and sandbox rules as `/api/chat` | Emits only `token`, `done`, `error`, and `action_receipt`; receipt leads and appears only with `action_completed` terminal | Same failures; no raw tool/retrieval output or synthetic receipt |
+| `web` or evaluator → `agent-service` | `POST /api/chat` | Direct-user JWT | Fixed issuer/user audience/type, permission, owned `X-Session-Id`, `Idempotency-Key`; evaluation also supplies matching sandbox header | Returns one bounded explanation; exact confirmation returns either `action_completed` with its stored `receiptId` projection or `action_rejected` without a receipt for the two strict Commerce `409` categories | Wrong identity/session/sandbox, idempotency conflict, policy block, or exhausted attempts rejects with typed status |
+| `web` or evaluator → `agent-service` | `POST /api/chat/stream` | Direct-user JWT | Same identity, session, idempotency, and sandbox rules as `/api/chat` | Emits only `token`, `done`, `error`, and `action_receipt`; `retrieval_denied` is a normal `done`; receipt is `REQUESTED`, leads, and appears only with `action_completed`, while `action_rejected` has no receipt frame | Same failures; no raw tool/retrieval output or synthetic receipt |
 | `web` → `agent-service` | `POST /api/feedback` | Direct-user JWT | User principal, owned support session, `Idempotency-Key`, trace owned by persisted support evidence | Persists authorized append-only feedback in `cs_db` | Wrong identity, unknown trace, forged/cross-user session, ownership failure, or idempotency conflict rejects |
 | Authorized evaluator → `agent-service` | `GET /api/eval/evidence/{traceId}` | Independent evaluation API credential; evaluation profile only | Sandbox and trace must be associated | Returns authoritative allowed support evidence from `cs_db` | Production not found; cross-sandbox/unknown trace/invalid credential rejects |
 | `agent-service` → `commerce-service` | `POST /internal/tools/catalog.product.get` | Agent OBO only | Exact catalog-read scope; `act.azp=agent-service`; user subject; verified support session; time bounds; ownership; eval equality/liveness when applicable | Returns ToolSpec-bounded published product view and evidence metadata | Direct-user token, wrong issuer/audience/type/scope/actor, forged session, body identity substitution, cross-user resource, sandbox mismatch/inactivity, malformed input, or unavailable truth rejects |
@@ -971,7 +981,7 @@ relevant real integration evidence rather than relying on this prose.
 | Redis or Elasticsearch treated as business truth | Contract tests and reconciliation compare with MySQL. User-visible order/action success requires durable MySQL state or ActionReceipt. |
 | Cross-database or cross-service leakage | Separate bootstrap/migration/runtime identities, exact grants, no cross-database joins, API-only boundaries, token-derived ownership, and private data excluded from RAG. |
 | Evaluation sandbox leakage, orphaned test identity, or late asynchronous effects | Commerce-orchestrated auth provision/revoke, opaque TTL handles, fail-closed activation/compensation, normal completion, janitor backstop, header/claim equality, ACTIVE/DEAD registry, scoped SQL, introduction-point liveness checks, and sandbox-bound callbacks. |
-| Model text contradicts action state | Commerce ActionReceipt is authoritative. `token` is non-authoritative, bounded action-claim lexicon is defense in depth, and clients render successful action only from projected receipt. |
+| Model text contradicts action state | Commerce ActionReceipt is authoritative. JSON reply and SSE token text are explicitly non-authoritative explanations, and clients render successful action only from `action_completed` paired with the projected receipt. |
 | Committed receipt read as settled money | Receipt proves refund request is durably recorded and commerce-owned. Mock provider does not advance it: result remains `REQUESTED` and refunded amount remains zero. Client copy states request, not settlement. |
 | Private/provider credentials in repository or CI | Runtime secret injection, safe examples, redaction tests, Gitleaks, deterministic model fakes, and no real provider key in CI. |
 | Evidence or observability divergence | `commerce_db` and `cs_db` remain authoritative for their domains. Optional tracing is mirror only and may degrade to no-op. |

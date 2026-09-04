@@ -38,7 +38,7 @@ database rather than believing the HTTP response that produced it.
 |---|---|---|
 | 1 | A real order, paid through the real endpoints | Refund preparation verifies durable payment truth. A hand-written `PAID` row is rejected as `ACTION_PREPARATION_DURABLE_TRUTH_INCONSISTENT`, so the fixture has to buy and pay like anyone else. |
 | 2 | The agent answers from the knowledge base | Retrieval is a decision with a persisted record — sufficiency outcome, calibration version, candidate and evidence counts — not a hidden step inside a prompt. The citations are the indexer's own public corpus. |
-| 3 | The model claims the refund already happened | The JSON path passes the sentence through with `outcome=completed` and no receipt, so no client can render a success state from it. The SSE path refuses to tokenise it at all and fails the turn with `unsafe_output`. Commerce still holds zero refunds. |
+| 3 | The model claims the refund already happened | JSON completes the turn, then SSE replays that same durable turn under the same idempotency key. Both expose the same bounded explanation with `outcome=completed`; neither carries a receipt, so no client can render action success. Commerce still holds zero refunds. |
 | 4 | The agent prepares the refund | Preparation writes a `PendingAction` in commerce and stops. The turn carries `action_pending` and a null receipt. |
 | 5 | The user confirms | The agent claims the action, commerce records the refund request, and the agent projects an `ActionReceipt`. The receipt is the only thing that lets a client render a success state. |
 | 6 | Confirming again does not record a second refund request | The same idempotency key replays the stored turn; a fresh confirmation finds no live action on the conversation, because the agent-side reference is resolved and commerce's own action is `CONSUMED`. Exactly one refund request exists. |
@@ -56,10 +56,9 @@ Log in at <http://localhost:5173> with the credentials `make demo` printed, then
 
 1. **Support → 消息或澄清说明.** Send `retrieval-sufficient 退款政策是怎样的`. The reply renders
    with its citations underneath — title, document type and source version for each.
-2. Send `unsafe-action-claim 我的退款到账了吗` with **流式回复** ticked. The turn ends in an
-   error notice instead of the model's sentence — the client is told the stream failed, not what
-   the model wanted to say. Untick it and send again: now the sentence appears, and no success
-   state appears with it.
+2. Send `unsafe-action-claim 我的退款到账了吗` with either response mode. The model's sentence
+   appears as explanation text, while the permanent warning says that explanation may be wrong.
+   No success state or receipt card appears because the server outcome is only `completed`.
 3. Send `action-prepare 我要退款，订单 <order id>`. A **BOUNDARY NOTICE** card appears —
    敏感动作等待处理 — with 确认此动作 and 拒绝此动作. Nothing has executed.
 4. Press **确认此动作**. The card becomes 敏感动作已提交 and shows the receipt identifier. The

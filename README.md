@@ -88,9 +88,11 @@ agent-evaluation, and database-oracle work is catalogued in its
 - **Sensitive action truth.** Commerce owns `PendingAction` and an immutable `ActionReceipt`. The
   agent prepares an action and claims it before commerce records the refund request, so a lost
   response cannot leave that request durably recorded in commerce and permanently absent from the
-  agent's receipt projection. Model prose is explicitly non-authoritative: only a projected
-  receipt lets a client render success, SSE tokens cannot produce a success state, and a
-  deterministic action-claim lexicon exists as defense in depth.
+  agent's receipt projection. A strict Commerce `409` Action error in category `CONFLICT` or
+  `INCONSISTENT_DURABLE_STATE` resolves the claim as `REJECTED` with no receipt; transport,
+  rate-limit, server, and invalid-response failures remain `CONFIRMING` for recovery. Model prose
+  is explicitly non-authoritative: only a projected receipt lets a client render success, and
+  neither JSON reply text nor SSE tokens can produce a success state.
 - **Bounded conversation context.** Each modeled turn can receive only the 16 most recent
   completed user/assistant pairs from the same owned support session, under a deterministic
   6,144-unit `utf8-bytes-v1` history budget. These estimator units are UTF-8 byte counts, not
@@ -153,10 +155,9 @@ that produced it. The middle three, verbatim from a run:
 ──────────────────────────────────────────────────────────────────────────────
   the model answers  "Your refund has been issued."
   JSON path  outcome=completed receiptId=None
-             the sentence is passed through: 'Your refund has been issued.'
-             it carries no action state and no receipt, so no client can render one
-  SSE  path  event: error data: {"sequence":1,"code":"unsafe_output"}
-             the egress filter refuses the claim outright rather than tokenising it
+             bounded explanation: 'Your refund has been issued.'
+  SSE  path  token text='Your refund has been issued.' → done outcome=completed
+  same key   replays one durable turn; explanation text carries no action state
   MySQL      0 refunds exist for this order
 
 ──────────────────────────────────────────────────────────────────────────────
@@ -333,7 +334,9 @@ real-model trials.
 Cart, checkout, a full storefront, agent workstation, multimodal intake, PII/output-safety
 handling, cross-session memory, and human handoff are out of scope. The payment and refund providers are mocked: a
 committed receipt means the refund request is durably recorded and owned by commerce, not that
-money moved.
+money moved. Model explanation text is bounded and structurally isolated from action state, but it
+is not a semantic truth classifier and may be inaccurate; clients use only server outcomes and
+receipts for transaction state.
 
 The sporadic preparation HTTP 502 measured by the benchmark was a variable-width timestamp
 mismatch: commerce sometimes rendered millisecond-aligned instants with three fractional digits,

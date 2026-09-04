@@ -431,6 +431,35 @@ describe('CityBuddy portfolio surface', () => {
     expect(screen.queryByText(/receipt/i)).not.toBeInTheDocument();
   });
 
+  it('renders a commerce rejection as terminal without a receipt or confirmation controls', async () => {
+    mockedSendChat
+      .mockResolvedValueOnce(response('action_pending', 'Waiting.'))
+      .mockResolvedValueOnce(
+        response(
+          'action_rejected',
+          'Commerce rejected the prepared action and returned no action receipt.',
+        ),
+      );
+    render(<App />);
+    await signIn();
+    const input = screen.getByLabelText('消息或澄清说明');
+    fireEvent.change(input, { target: { value: 'prepare' } });
+    fireEvent.click(screen.getByRole('button', { name: '发送' }));
+    await screen.findByRole('button', { name: /确认/ });
+    fireEvent.change(input, { target: { value: 'confirm' } });
+    fireEvent.click(screen.getByRole('button', { name: '发送' }));
+
+    expect(
+      await screen.findByText('Commerce 已拒绝该动作；Agent 未收到动作回执。'),
+    ).toBeVisible();
+    expect(
+      screen.queryByRole('button', { name: /确认/ }),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.queryByText(/服务端已记录该退款申请/),
+    ).not.toBeInTheDocument();
+  });
+
   it('keeps clarification pending, accepts server expiry, and reports a confirmation conflict', async () => {
     mockedSendChat
       .mockResolvedValueOnce(response('action_pending', 'Waiting.'))
@@ -505,6 +534,11 @@ describe('CityBuddy portfolio surface', () => {
     fireEvent.change(input, { target: { value: 'stream this' } });
     fireEvent.click(screen.getByRole('button', { name: '流式发送' }));
     expect(await screen.findByText('Streamed answer.')).toBeVisible();
+    expect(
+      screen.getByText(
+        'AI 生成的解释可能不准确；交易状态只以服务端状态和回执为准。',
+      ),
+    ).toBeVisible();
     expect(mockedStreamChat).toHaveBeenCalledTimes(1);
     expect(mockedSendChat).not.toHaveBeenCalled();
     expect(mockedCreateSession).toHaveBeenCalledTimes(1);
