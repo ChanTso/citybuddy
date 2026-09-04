@@ -19,7 +19,6 @@ public final class SeckillTransactionResolutionWorker {
       fixedDelayString = "${citybuddy.seckill.order.resolution-worker-delay:1000}",
       initialDelayString = "${citybuddy.seckill.order.resolution-worker-initial-delay:1000}")
   public void resolveDueReservations() {
-    reservations.resolveDueReservations(BATCH_SIZE);
     for (ReservationAdmissionStore.AdmissionHandoff handoff :
         reservations.dueAdmissionHandoffs(BATCH_SIZE)) {
       try {

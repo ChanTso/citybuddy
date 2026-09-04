@@ -36,6 +36,7 @@ public final class SeckillReservationService {
     this.properties = properties;
   }
 
+  // Retained for explicit legacy persistence fixtures; live admission starts at preAdmit.
   public ReservationResult reserve(
       String userSubject, String activityId, String idempotencyKey, ReservationRequest request) {
     PreparedReservation intentReservation =
@@ -228,6 +229,7 @@ public final class SeckillReservationService {
     }
   }
 
+  // Only legacy MySQL-PENDING fixtures use this resolver; the worker recovers Redis handoffs.
   public int resolveDueReservations(int batchSize) {
     List<SeckillReservation> due = repository.findDuePending(batchSize);
     for (SeckillReservation reservation : due) {

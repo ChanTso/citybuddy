@@ -88,6 +88,7 @@ class RefundIntegrationTest {
     registry.add("spring.datasource.password", () -> required("MYSQL_COMMERCE_APP_PASSWORD"));
     registry.add("spring.data.redis.url", () -> required("CATALOG_REDIS_URL"));
     registry.add("citybuddy.catalog.enabled", () -> "true");
+    registry.add("citybuddy.seckill.enabled", () -> "true");
     registry.add("citybuddy.catalog.issuer", () -> "https://identity.citybuddy.test");
     registry.add("citybuddy.catalog.user-audience", () -> "citybuddy-web");
     registry.add("citybuddy.catalog.jwks-url", () -> required("IDENTITY_JWKS_URL"));

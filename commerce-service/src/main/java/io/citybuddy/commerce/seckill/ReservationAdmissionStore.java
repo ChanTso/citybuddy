@@ -162,6 +162,7 @@ public final class ReservationAdmissionStore {
             KEYS[2], anchor_payload(ARGV[1], 'ADMITTED', 'ADMITTED'),
             KEYS[3], ARGV[1], KEYS[4], reservation, KEYS[5], reservation,
             KEYS[6], handoff)
+          redis.call('PEXPIREAT', KEYS[3], math.ceil(ends_at / 1000))
           redis.call('ZADD', KEYS[7], ARGV[12], ARGV[1])
           redis.call('SADD', KEYS[9], ARGV[1])
           return output(ARGV[1], 'ADMITTED', 'ADMITTED', false, true)
@@ -176,7 +177,6 @@ public final class ReservationAdmissionStore {
           redis.call('SREM', KEYS[3], ARGV[1])
           if removed == 1 then
             redis.call('PEXPIRE', KEYS[4], ARGV[2])
-            redis.call('PEXPIRE', KEYS[5], ARGV[3])
             redis.call('PEXPIRE', KEYS[6], ARGV[3])
             redis.call('PEXPIRE', KEYS[7], ARGV[2])
           end
@@ -527,7 +527,8 @@ public final class ReservationAdmissionStore {
             local key_base = 3 + index * 3
             local argument_base = 7 + index * 5
             if ARGV[argument_base + 4] ~= '' then
-              redis.call('PEXPIRE', KEYS[key_base], ARGV[4])
+              redis.call('PEXPIREAT', KEYS[key_base],
+                math.ceil(tonumber(incoming_activity.endsAtEpochMicros) / 1000))
             end
             redis.call('PEXPIRE', KEYS[key_base + 1], ARGV[4])
             redis.call('PEXPIRE', KEYS[key_base + 2], ARGV[5])

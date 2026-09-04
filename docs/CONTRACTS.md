@@ -348,24 +348,24 @@ not by treating the product cache-invalidation consumer as a knowledge-indexer f
 
 - RocketMQ 5 runs with Broker and Proxy available to the 5.x clients. The Proxy endpoint remains
   explicit.
-- Seckill ordering uses a transaction message: send the half message, run Redis Lua admission,
-  then commit, roll back, or temporarily return `UNKNOWN`. A deterministic result writes a durable
-  transaction decision marker; admission also writes the reservation projection required by the
-  order path.
-- `UNKNOWN` is an intermediate checker result only when the MySQL reservation is missing, still
-  `PENDING`, or temporarily unreadable. It is not a permanent application terminal state. The
-  application persists one stable transaction-resolution deadline derived from configured transaction
-  timeout, check interval, maximum check count, and bounded safety margin; restart never recomputes
-  it. An indexed, bounded deadline-decision worker atomically creates a timeout marker only when no
-  durable decision exists, then idempotently converges MySQL to that marker. This
-  state-machine-specific resolver is not a generalized recovery scanner.
-- The checker reads only the durable MySQL reservation. Redis marker and reservation TTL cover the
-  complete configured timeout/check interval/maximum-check window for Lua admission and deadline
-  recovery. Application terminal convergence is
-  proven through the persisted deadline plus durable-marker compare-and-set and MySQL convergence.
-  Broker terminal behavior is proven independently with `mqadmin` evidence against the transaction
-  terminal system topic; the application does not subscribe to that system topic and does not
-  treat observed callback count as protocol truth.
+- Live seckill admission has one path: Redis Lua `preAdmit`, transaction half message, MySQL
+  admitted reservation, then broker commit. Deterministic rejections write a Redis intent
+  anchor plus reservation/decision projections, with an absolute 15-minute replay window that
+  replay does not refresh; they do not
+  access business MySQL or RocketMQ. Admitted user markers live until the activity ends, not
+  merely until the request replay window expires.
+- Lua admission records a pending handoff before returning. A bounded worker retries those
+  handoffs through the same half-message/MySQL path; MySQL rollback leaves the handoff available
+  for recovery. The existing activity rebuild lease blocks projection rebuild or cancellation
+  while a handoff is pending, so republishing quota cannot erase an admission not yet in MySQL.
+  Old MySQL-`PENDING` preparation and deadline APIs remain for legacy persistence fixtures, but
+  neither the HTTP runtime nor the worker calls them.
+- The transaction checker reads only the durable MySQL reservation and returns `UNKNOWN` when
+  it is missing, historically `PENDING`, or temporarily unreadable. Duplicate delivery is settled
+  by the existing MySQL order and ledger invariants, not by an observed callback count. This
+  path assumes a fresh fixture rather than online migration from old pending rows; it reuses the
+  existing rebuild lease without a new persistent write fence; Redis restart/data loss requires
+  operators to stop admission and rebuild from authoritative rows before reopening traffic.
 - Downstream order creation is idempotent. Database unique constraints, an inventory-ledger
   movement keyed by the business event, and conditional transitions handle repeated delivery; a
   duplicate returns or projects the existing result. Lua admission reserves per-activity quota,
@@ -401,8 +401,8 @@ not by treating the product cache-invalidation consumer as a knowledge-indexer f
 | Entity | Owner/store | Unique invariant | State or transaction boundary | Executable source |
 |---|---|---|---|---|
 | `seckill_activity` | `commerce-service`; `commerce_db` | Stable activity id; allocation cannot exceed inventory assigned to it | Quota allocation is a MySQL transaction; Redis receives only admission projection | Seckill activity migration |
-| Reservation | `commerce-service`; truth in `commerce_db`, hot projection in Commerce Redis | Unique `reservation_id`; projection is not authoritative | Admission records `PENDING/ADMITTED/REJECTED`; order consumption records `ORDERED` or admission-consuming `UNFULFILLED`; unpaid timeout may later record `CANCELLED` | Reservation and transaction-order migrations |
-| One-user-one-order | `commerce-service`; `commerce_db` plus Lua marker | Database uniqueness on `(activity_id, user_id)` and `reservation_id` | Lua blocks obvious duplicates; database uniqueness is final and repeated messages resolve to existing result | Transaction-order migration and consumer |
+| Reservation | `commerce-service`; Redis admission/replay state, admitted business truth in `commerce_db` | Unique `reservation_id`; Redis never creates an order | Live rejection remains Redis-only for 15 minutes; an admitted Redis handoff polls as `PENDING` until handoff completion; MySQL admission inserts `ADMITTED`; order consumption records `ORDERED` or admission-consuming `UNFULFILLED`, unpaid timeout may record `CANCELLED`; historical MySQL `PENDING/REJECTED` rows remain readable | Admission store, reservation service, and transaction-order migrations |
+| One-user-one-order | `commerce-service`; `commerce_db` plus Lua marker | Database uniqueness on `(activity_id, user_subject)` and `reservation_id` | Lua blocks repeat users until activity end; database uniqueness is final and repeated messages resolve to existing result | Transaction-order migration and consumer |
 | `inventory_ledger` | `commerce-service`; `commerce_db` | Unique business event/idempotency key per movement | Order creation, cancellation/restoration, payment, and refund movements reconcile against authoritative order/payment state | Commerce transaction migrations |
 
 ### 6.3 Interfaces
@@ -410,13 +410,13 @@ not by treating the product cache-invalidation consumer as a knowledge-indexer f
 | Caller → owner | Method and path | Authentication | Required boundary | Success semantics | Rejection semantics |
 |---|---|---|---|---|---|
 | `web` → `commerce-service` | `POST /api/seckill/activities/{activityId}/reservations` | Production direct-user JWT | Direct-user claims, ownership, idempotency; evaluation tokens/headers are not accepted | Starts transaction-message admission and returns reservation status, never a false completed-order claim | Identity/type/audience failure, evaluation context, no quota, duplicate user, inactive activity, or bounded indeterminate result rejects or returns explicit status |
-| `web` → `commerce-service` | `GET /api/reservations/{reservationId}` | Production direct-user JWT | Direct-user claims and ownership; evaluation tokens/headers are not accepted | Returns owned `PENDING`, `ADMITTED`, `REJECTED` (including expiry), `ORDERED`, `UNFULFILLED`, or `CANCELLED` status without inventing an order | Cross-user access, evaluation context, or unknown reservation rejects |
+| `web` → `commerce-service` | `GET /api/reservations/{reservationId}` | Production direct-user JWT | Direct-user claims and ownership; evaluation tokens/headers are not accepted | Returns Redis-only `PENDING` handoff or `REJECTED` within its replay window, otherwise owned MySQL status (`ADMITTED`, `ORDERED`, `UNFULFILLED`, `CANCELLED`, or historical `PENDING/REJECTED`) without inventing an order | Cross-user access, evaluation context, or unknown/expired Redis-only reservation rejects |
 
 ### 6.4 Asynchronous contracts
 
 | Channel | Producer → consumer | Message type | Stable payload/invariant | Failure and replay rule | State |
 |---|---|---|---|---|---|
-| Seckill order transaction | Commerce producer → commerce order consumer | Transaction | Reservation/activity/user ids, event id, version; current production payload carries no sandbox and consumer rejects the reserved sandbox property | Half message commits only after Lua admission; `UNKNOWN` is temporary; configured broker bounds define terminal window; uniqueness and ledger movements make replay harmless | Implemented |
+| Seckill order transaction | Commerce producer → commerce order consumer | Transaction | Reservation/activity/user ids, event id, version; current production payload carries no sandbox and consumer rejects the reserved sandbox property | Half message is sent after Lua admission and commits only after MySQL `ADMITTED`; pending handoff retains recovery work; checker reads MySQL, and uniqueness plus ledger movements make replay harmless | Implemented |
 | Order/payment timeout | `commerce-service` → commerce timeout consumer | Delay | Order id, expected state/version, due time, event id; current production payload carries no sandbox and consumer rejects the reserved sandbox property | Re-read MySQL; conditional cancellation and ledger restoration are idempotent; paid/final orders are not cancelled | Implemented |
 | Commerce domain events | Commerce Outbox publisher → authorized consumers | Normal | Event id, aggregate/version, occurred time; current payloads carry no sandbox and production consumers reject the reserved sandbox property | Mutation and Outbox commit together; consumers are idempotent; late events cannot reverse newer state | Implemented; current product event consumer is commerce cache invalidation |
 
@@ -434,18 +434,27 @@ sequenceDiagram
     participant D as MySQL commerce_db
 
     U->>C: Request seckill reservation
-    C->>M: Send transaction half message
-    M-->>C: Half message accepted
     C->>R: Run Lua quota, one-user, and reservation admission
 
-    alt Lua deterministically rejects and writes a rejection marker
+    alt Lua rejects and writes intent anchor plus reservation/decision projections
         R-->>C: Rejected
-        C->>M: Roll back half message
-        Note over M,W: Rolled-back message is not delivered
+        Note over C,D: No business MySQL or RocketMQ request
         C-->>U: Rejected reservation status
-    else Lua admits and writes reservation plus admission marker
-        R-->>C: Admitted with reservation id
-        C->>M: Commit half message
+    else Lua admits and writes a pending handoff with reserved quota
+        R-->>C: Admitted handoff with reservation id
+        C->>M: Send transaction half message
+        M-->>C: Half message accepted
+        C->>D: Insert ADMITTED reservation in MySQL transaction
+        alt MySQL transaction rolls back or is unavailable
+            D-->>C: No committed admission
+            Note over C,R: Keep pending handoff for bounded worker recovery
+        else MySQL admission commits
+            D-->>C: Durable ADMITTED reservation
+            C->>M: Commit half message
+            opt Broker commit acknowledged
+                C->>R: Complete handoff without shortening user-marker lifetime
+            end
+        Note over M,W: Only a committed half message can be delivered
         M-->>W: Deliver committed transaction message
         W->>D: Conditional order insert and reservation transition
         alt Locked stock is short or another reservation owns the activity-user order
@@ -462,10 +471,16 @@ sequenceDiagram
             Note over W,M: No acknowledgement, bounded retry or dead-letter policy applies
         end
         C-->>U: Reservation id, client polls durable status
-    else Lua result has no durable decision marker
+        end
+    else Lua result cannot be determined
         R-->>C: Indeterminate
-        C->>M: Report UNKNOWN
+        Note over C,D: No new half message or MySQL admission
         C-->>U: Indeterminate reservation status
+    end
+
+    opt Pending handoff remains after send, MySQL, or commit uncertainty
+        C->>R: Bounded worker reads due handoffs
+        Note over C,D: Retry the same half-message/MySQL path with reservation idempotency
     end
 
     opt Second-phase acknowledgement is missing or result is UNKNOWN
@@ -473,7 +488,7 @@ sequenceDiagram
         C->>D: Read durable reservation only
         alt MySQL state consumed admission
             C-->>M: COMMIT
-        else MySQL state is REJECTED
+        else Historical MySQL state is REJECTED
             C-->>M: ROLLBACK
         else MySQL state missing, PENDING, or temporarily unreadable
             C-->>M: UNKNOWN
