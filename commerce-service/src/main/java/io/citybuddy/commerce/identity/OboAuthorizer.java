@@ -88,7 +88,7 @@ public final class OboAuthorizer {
         !request.requiredScope().contains(" ") && !request.requiredScope().contains("*"),
         "Scope must be exact");
     Map<String, Object> actor = claims.getJSONObjectClaim("act");
-    require(actor != null && "agent-service".equals(actor.get("azp")), "Wrong actor");
+    require(actor != null && request.expectedActor().equals(actor.get("azp")), "Wrong actor");
     String sandboxId = claims.getClaimAsString("sandbox");
     if (sandboxId == null) {
       require(request.evalSandboxHeader() == null, "Production token cannot use Evaluation header");
@@ -106,7 +106,7 @@ public final class OboAuthorizer {
     require(
         request.expectedSession() == null
             || request.expectedSession().equals(claims.getClaimAsString("session")),
-        "Support session mismatch");
+        "Session mismatch");
     require(
         request.bodySubject() == null || request.bodySubject().equals(claims.getSubject()),
         "Body identity substitution");
@@ -171,7 +171,25 @@ public final class OboAuthorizer {
       String expectedSession,
       String bodySubject,
       String bodySession,
-      String evalSandboxHeader) {}
+      String evalSandboxHeader,
+      String expectedActor) {
+    public AuthorizationRequest(
+        String requiredScope,
+        String expectedSubject,
+        String expectedSession,
+        String bodySubject,
+        String bodySession,
+        String evalSandboxHeader) {
+      this(
+          requiredScope,
+          expectedSubject,
+          expectedSession,
+          bodySubject,
+          bodySession,
+          evalSandboxHeader,
+          "agent-service");
+    }
+  }
 
   public record OboPrincipal(String subject, String sessionId, String scope, String sandboxId) {}
 }

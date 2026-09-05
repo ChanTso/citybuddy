@@ -88,6 +88,17 @@ expected=(
   "GRANT SELECT, INSERT, UPDATE (state, state_version, consumed_at) ON commerce_db.pending_action TO 'commerce_app'@'%';"
   "GRANT SELECT, INSERT ON commerce_db.action_receipt TO 'commerce_app'@'%';"
   "GRANT SELECT, INSERT ON cs_db.action_receipt_projection TO 'agent_app'@'%';"
+  "GRANT CREATE VIEW ON commerce_db.* TO 'commerce_migration'@'%';"
+  "GRANT SELECT, CREATE ON commerce_db.product TO 'commerce_migration'@'%';"
+  "GRANT SELECT, CREATE ON commerce_db.seckill_activity TO 'commerce_migration'@'%';"
+  "GRANT SELECT, CREATE ON commerce_db.standard_order TO 'commerce_migration'@'%';"
+  "GRANT SELECT, CREATE ON commerce_db.seckill_order TO 'commerce_migration'@'%';"
+  "GRANT SELECT, CREATE ON commerce_db.mock_payment_attempt TO 'commerce_migration'@'%';"
+  "GRANT SELECT, CREATE ON commerce_db.merchant_paid_orders TO 'commerce_migration'@'%';"
+  "GRANT SELECT, INSERT, UPDATE ON commerce_db.merchant_price_draft TO 'commerce_app'@'%';"
+  "GRANT SELECT ON commerce_db.merchant_products TO 'commerce_app'@'%';"
+  "GRANT SELECT ON commerce_db.merchant_paid_orders TO 'commerce_app'@'%';"
+  "GRANT SELECT ON commerce_db.merchant_daily_sales TO 'commerce_app'@'%';"
 )
 mapfile -t actual < <(sed -e '/^[[:space:]]*$/d' -e '/^[[:space:]]*--/d' "$manifest")
 
@@ -158,15 +169,17 @@ fi
 echo "role-before=$fresh_role"
 
 migration_statement_count=5
-migration_sql="$(printf '%s\n' "${actual[@]:0:$migration_statement_count}")"
+# CREATE is already granted at database scope; including it in these table grants permits
+# the fixed SELECT grants before fresh migrations create their tables and the nested view.
+migration_sql="$(printf '%s\n' "${actual[@]:0:$migration_statement_count}" "${actual[@]:48:7}")"
 runtime_sql="$(printf '%s\n' "${actual[@]:$migration_statement_count}")"
 support_grant="${actual[23]}"
 support_lifecycle_grants="$(printf '%s\n' "${actual[@]:23:4}")"
 support_feedback_grants="$(printf '%s\n' "${actual[@]:23:5}")"
 legacy_runtime_sql="$(printf '%s\n' "${actual[@]:5:4}" "$support_grant")"
 agent_action_reference_grant="${actual[30]}"
-# Last in the manifest on purpose. Statements here are addressed by absolute index, so a
-# grant inserted beside the other cs_db ones repoints every index after it.
+# Keep historical positions fixed: these grants are addressed by absolute index, so new
+# grants are appended instead of being inserted beside related tables.
 receipt_projection_grant="${actual[47]}"
 evaluation_grant="${actual[31]}"
 sandbox_grants="$(printf '%s\n' "${actual[@]:32:3}")"
@@ -177,6 +190,7 @@ v013_migration_grants="$(printf '%s\n' "${actual[38]}" "${actual[39]}")"
 v013_migration_revokes="$(printf '%s\n' "${actual[40]}" "${actual[41]}")"
 faq_runtime_grants="$(printf '%s\n' "${actual[@]:42:3}")"
 action_runtime_grants="$(printf '%s\n' "${actual[@]:45:2}")"
+merchant_runtime_grants="$(printf '%s\n' "${actual[@]:55:4}")"
 
 if [[ "$v013_force_revoke" == true ]]; then
   mysql "${mysql_args[@]}" --execute="
@@ -252,7 +266,8 @@ runtime_table_state="$(mysql "${mysql_args[@]}" --execute="
       'retrieval_decision',
       'retrieval_evidence',
       'pending_action_reference',
-      'action_receipt_projection'
+      'action_receipt_projection',
+      'merchant_price_draft'
     );
   SET ROLE NONE;")"
 
@@ -281,6 +296,14 @@ retrieval_decision_present=false
 retrieval_evidence_present=false
 agent_action_reference_present=false
 receipt_projection_present=false
+merchant_draft_present=false
+if [[ ",$normalized_runtime_table_state," == *",commerce_db.merchant_price_draft,"* ]]; then
+  runtime_table_count="${normalized_runtime_table_state%%:*}"
+  runtime_table_list="${normalized_runtime_table_state#*:}"
+  runtime_table_list="$(remove_runtime_table "$runtime_table_list" commerce_db.merchant_price_draft)"
+  normalized_runtime_table_state="$((runtime_table_count - 1)):$runtime_table_list"
+  merchant_draft_present=true
+fi
 if [[ "$normalized_runtime_table_state" == *"commerce_db.auth_eval_test_principal"* ]]; then
   runtime_table_count="${normalized_runtime_table_state%%:*}"
   runtime_table_list="${normalized_runtime_table_state#*:}"
@@ -510,8 +533,11 @@ complete_runtime_table_state="18:commerce_db.auth_login_credential,commerce_db.a
 commerce_complete_runtime_table_state="17:commerce_db.auth_login_credential,commerce_db.auth_service_identity,commerce_db.auth_signing_key_metadata,commerce_db.auth_user_principal,commerce_db.catalog_metadata,commerce_db.commerce_outbox,commerce_db.crm_profile,commerce_db.inventory_ledger,commerce_db.mock_payment_attempt,commerce_db.mock_payment_callback,commerce_db.mock_refund,commerce_db.order_idempotency,commerce_db.product,commerce_db.seckill_activity,commerce_db.seckill_order,commerce_db.seckill_reservation,commerce_db.standard_order"
 cb080_runtime_table_state="21:commerce_db.auth_login_credential,commerce_db.auth_service_identity,commerce_db.auth_signing_key_metadata,commerce_db.auth_user_principal,commerce_db.catalog_metadata,commerce_db.commerce_outbox,commerce_db.crm_profile,commerce_db.inventory_ledger,commerce_db.mock_payment_attempt,commerce_db.mock_payment_callback,commerce_db.mock_refund,commerce_db.order_idempotency,commerce_db.product,commerce_db.seckill_activity,commerce_db.seckill_order,commerce_db.seckill_reservation,commerce_db.standard_order,cs_db.support_conversation,cs_db.support_event,cs_db.support_session,cs_db.support_turn"
 optional_evaluation_grants=""
+if [[ "$merchant_draft_present" == true ]]; then
+  optional_evaluation_grants="$merchant_runtime_grants"
+fi
 if [[ "$evaluation_table_present" == true ]]; then
-  optional_evaluation_grants="$evaluation_grant"
+  optional_evaluation_grants="$(printf '%s\n' "$optional_evaluation_grants" "$evaluation_grant")"
 fi
 if [[ "$sandbox_tables_present" == true ]]; then
   optional_evaluation_grants="$(printf '%s\n' "$optional_evaluation_grants" "$sandbox_grants")"

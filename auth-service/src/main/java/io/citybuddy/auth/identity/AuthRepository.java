@@ -1,5 +1,6 @@
 package io.citybuddy.auth.identity;
 
+import java.math.BigDecimal;
 import java.time.Instant;
 import java.util.Arrays;
 import java.util.List;
@@ -174,10 +175,13 @@ public final class AuthRepository {
   public List<KeyMetadata> publicKeyMetadata() {
     return jdbc.sql(
             """
-            SELECT kid, state, activated_at, retire_after
+            SELECT kid,
+                   state,
+                   UNIX_TIMESTAMP(activated_at) AS activated_epoch_seconds,
+                   UNIX_TIMESTAMP(retire_after) AS retire_epoch_seconds
               FROM auth_signing_key_metadata
              WHERE state = 'CURRENT'
-                OR (state = 'OVERLAP' AND retire_after > CURRENT_TIMESTAMP(6))
+                OR state = 'OVERLAP'
              ORDER BY state, kid
             """)
         .query(
@@ -185,11 +189,17 @@ public final class AuthRepository {
                 new KeyMetadata(
                     rs.getString("kid"),
                     rs.getString("state"),
-                    rs.getTimestamp("activated_at").toInstant(),
-                    rs.getTimestamp("retire_after") == null
+                    fromUnixSeconds(rs.getBigDecimal("activated_epoch_seconds")),
+                    rs.getBigDecimal("retire_epoch_seconds") == null
                         ? null
-                        : rs.getTimestamp("retire_after").toInstant()))
+                        : fromUnixSeconds(rs.getBigDecimal("retire_epoch_seconds"))))
         .list();
+  }
+
+  private static Instant fromUnixSeconds(BigDecimal value) {
+    long seconds = value.longValue();
+    long nanos = value.subtract(BigDecimal.valueOf(seconds)).movePointRight(9).longValueExact();
+    return Instant.ofEpochSecond(seconds, nanos);
   }
 
   private static List<String> split(String value) {

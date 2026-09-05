@@ -109,7 +109,6 @@ class SeckillTransactionIntegrationTest {
     registry.add("citybuddy.seckill.timeout.receive-await", () -> "1s");
     registry.add("citybuddy.seckill.timeout.receive-invisible-duration", () -> "10s");
     registry.add("citybuddy.seckill.timeout.dispatch-batch-size", () -> "32");
-    registry.add("citybuddy.seckill.timeout.maximum-dispatch-attempts", () -> "3");
   }
 
   @Autowired private TestRestTemplate http;
@@ -1027,7 +1026,7 @@ class SeckillTransactionIntegrationTest {
 
   @Test
   @Order(10)
-  void databaseFailureIsNotAcknowledgedAndDispatchRetryIsBoundedAndReplaySafe() throws Exception {
+  void databaseFailureIsNotAcknowledgedAndFailedDispatchRemainsRecoverable() throws Exception {
     String activityId = "cb061-database-retry";
     String reservationId =
         createOrderedReservation(
@@ -1099,16 +1098,6 @@ class SeckillTransactionIntegrationTest {
         createOrderedReservation(
             dispatchActivity, "cb061-product-dispatch-bound", "cb061-dispatch-bound-key", 1);
     forceOrderDueIn(dispatchReservation, Duration.ofMinutes(5));
-    SeckillTimeoutProperties twoAttempts =
-        new SeckillTimeoutProperties(
-            timeoutProperties.rocketmqEndpoints(),
-            timeoutProperties.rocketmqTopic(),
-            timeoutProperties.rocketmqConsumerGroup(),
-            timeoutProperties.receiveAwait(),
-            timeoutProperties.receiveInvisibleDuration(),
-            timeoutProperties.receiveBatchSize(),
-            timeoutProperties.dispatchBatchSize(),
-            2);
     SeckillTimeoutDispatchService ambiguousDispatch =
         new SeckillTimeoutDispatchService(
             orderRepository,
@@ -1117,10 +1106,10 @@ class SeckillTransactionIntegrationTest {
               throw new org.apache.rocketmq.client.apis.ClientException(
                   "controlled lost send receipt");
             },
-            twoAttempts);
+            timeoutProperties);
     assertThat(ambiguousDispatch.dispatchCurrentOnce().failed()).isGreaterThanOrEqualTo(1);
     assertThat(timeoutDispatchAttempts(dispatchReservation)).isEqualTo(1);
-    assertThat(timeoutDispatchState(dispatchReservation)).isEqualTo("PENDING");
+    assertThat(timeoutDispatchState(dispatchReservation)).isEqualTo("FAILED");
     assertThat(timeoutDispatch.dispatchCurrentOnce().sent()).isGreaterThanOrEqualTo(1);
     assertDispatchEvidence(dispatchReservation);
 
@@ -1139,13 +1128,21 @@ class SeckillTransactionIntegrationTest {
               throw new org.apache.rocketmq.client.apis.ClientException(
                   "controlled broker unavailability");
             },
-            twoAttempts);
-    while ("PENDING".equals(timeoutDispatchState(exhaustedReservation))) {
+            timeoutProperties);
+    for (int attempt = 0; attempt < 6; attempt++) {
       alwaysFailing.dispatchCurrentOnce();
     }
     assertThat(timeoutDispatchState(exhaustedReservation)).isEqualTo("FAILED");
-    assertThat(timeoutDispatchAttempts(exhaustedReservation)).isEqualTo(2);
-    assertThat(alwaysFailing.dispatchCurrentOnce().selected()).isZero();
+    assertThat(timeoutDispatchAttempts(exhaustedReservation)).isEqualTo(6);
+    String laterReservation =
+        createOrderedReservation(
+            "cb061-dispatch-later", "cb061-product-dispatch-later", "cb061-dispatch-later-key", 1);
+    forceOrderDueIn(laterReservation, Duration.ofMinutes(5));
+    assertThat(orderRepository.findRecoverableTimeoutDispatches(null, 1).getFirst().reservationId())
+        .isEqualTo(laterReservation);
+    assertThat(timeoutDispatch.dispatchCurrentOnce().sent()).isGreaterThanOrEqualTo(2);
+    assertDispatchEvidence(exhaustedReservation);
+    assertDispatchEvidence(laterReservation);
   }
 
   @Test

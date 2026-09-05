@@ -29,6 +29,7 @@ def test_catalog_contract_exposes_only_authenticated_published_reads() -> None:
         "/api/orders",
         "/api/orders/{orderId}/mock-payment",
         "/api/orders/{orderId}/refunds",
+        "/api/refunds/{refundId}",
         "/api/seckill/activities/{activityId}/reservations",
         "/api/reservations/{reservationId}",
         "/internal/tools/catalog.product.get",
@@ -37,6 +38,13 @@ def test_catalog_contract_exposes_only_authenticated_published_reads() -> None:
         "/internal/mock-payments/callback",
         "/internal/tools/actions/prepare",
         "/internal/tools/actions/{pendingActionId}/confirm",
+        "/internal/merchant/products",
+        "/internal/merchant/products/{productId}",
+        "/internal/merchant/summary",
+        "/internal/merchant/price-drafts",
+        "/internal/merchant/price-drafts/{draftId}",
+        "/internal/merchant/price-drafts/{draftId}/cancel",
+        "/api/merchant/price-drafts/{draftId}/apply",
     }
     for path in [
         contract["paths"]["/api/products"],

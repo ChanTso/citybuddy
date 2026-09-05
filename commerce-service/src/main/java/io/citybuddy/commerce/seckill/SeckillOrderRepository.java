@@ -152,23 +152,22 @@ public final class SeckillOrderRepository {
         "SELECT " + columns() + " FROM seckill_order WHERE order_id = ? FOR UPDATE", orderId);
   }
 
-  public List<OrderRecord> findPendingTimeoutDispatches(
-      Instant createdNotAfter, int maximumAttempts, int limit) {
-    if (maximumAttempts < 1 || limit < 1 || limit > 1_000) {
-      throw new IllegalArgumentException("Timeout dispatch bounds are invalid");
+  public List<OrderRecord> findRecoverableTimeoutDispatches(Instant createdNotAfter, int limit) {
+    if (limit < 1 || limit > 1_000) {
+      throw new IllegalArgumentException("Timeout dispatch batch size is invalid");
     }
     String cutoff = createdNotAfter == null ? "" : " AND created_at <= ?";
     Object[] arguments =
         createdNotAfter == null
-            ? new Object[] {maximumAttempts, limit}
-            : new Object[] {maximumAttempts, Timestamp.from(createdNotAfter), limit};
+            ? new Object[] {limit}
+            : new Object[] {Timestamp.from(createdNotAfter), limit};
     return jdbc.query(
         "SELECT "
             + columns()
-            + " FROM seckill_order WHERE timeout_dispatch_state = 'PENDING' "
-            + "AND status = 'UNPAID' AND timeout_dispatch_attempts < ?"
+            + " FROM seckill_order WHERE timeout_dispatch_state IN ('PENDING', 'FAILED') "
+            + "AND status = 'UNPAID'"
             + cutoff
-            + " ORDER BY created_at, order_id LIMIT ?",
+            + " ORDER BY timeout_dispatch_attempts, created_at, order_id LIMIT ?",
         SeckillOrderRepository::mapOrder,
         arguments);
   }
@@ -180,7 +179,8 @@ public final class SeckillOrderRepository {
             UPDATE seckill_order
             SET timeout_dispatch_state = 'SENT', timeout_broker_message_id = ?,
                 timeout_dispatched_at = CURRENT_TIMESTAMP(6), timeout_dispatch_error = NULL
-            WHERE order_id = ? AND timeout_event_id = ? AND timeout_dispatch_state = 'PENDING'
+            WHERE order_id = ? AND timeout_event_id = ?
+              AND timeout_dispatch_state IN ('PENDING', 'FAILED')
             """,
             brokerMessageId,
             order.orderId(),
@@ -196,19 +196,18 @@ public final class SeckillOrderRepository {
     }
   }
 
-  public void recordTimeoutDispatchFailure(OrderRecord order, int maximumAttempts, String failure) {
+  public void recordTimeoutDispatchFailure(OrderRecord order, String failure) {
     int nextAttempt = Math.addExact(order.timeoutDispatchAttempts(), 1);
-    String state = nextAttempt >= maximumAttempts ? "FAILED" : "PENDING";
     int changed =
         jdbc.update(
             """
             UPDATE seckill_order
-            SET timeout_dispatch_state = ?, timeout_dispatch_attempts = ?,
+            SET timeout_dispatch_state = 'FAILED', timeout_dispatch_attempts = ?,
                 timeout_dispatch_error = ?
-            WHERE order_id = ? AND timeout_event_id = ? AND timeout_dispatch_state = 'PENDING'
+            WHERE order_id = ? AND timeout_event_id = ?
+              AND timeout_dispatch_state IN ('PENDING', 'FAILED')
               AND timeout_dispatch_attempts = ?
             """,
-            state,
             nextAttempt,
             abbreviate(failure, 500),
             order.orderId(),

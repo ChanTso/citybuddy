@@ -23,6 +23,14 @@ import org.springframework.web.bind.annotation.RestController;
 public final class AuthController {
   private static final String SESSION_PERMISSION = "support:session:create";
   private static final String EXCHANGE_SERVICE = "agent-service";
+  private static final String MERCHANT_SERVICE = "merchant-agent";
+  private static final String MERCHANT_SESSION_PERMISSION = "merchant:session:create";
+  private static final Set<String> MERCHANT_SCOPES =
+      Set.of(
+          "merchant:read",
+          "merchant:price:prepare",
+          "merchant:price:read",
+          "merchant:price:cancel");
 
   private final AuthRepository repository;
   private final AuthKeySet keys;
@@ -89,7 +97,10 @@ public final class AuthController {
     AuthRepository.ServiceCredential service =
         repository
             .findService(basic.clientId())
-            .filter(candidate -> EXCHANGE_SERVICE.equals(candidate.clientId()))
+            .filter(
+                candidate ->
+                    EXCHANGE_SERVICE.equals(candidate.clientId())
+                        || MERCHANT_SERVICE.equals(candidate.clientId()))
             .filter(candidate -> "ACTIVE".equals(candidate.state()))
             .filter(
                 candidate ->
@@ -102,6 +113,7 @@ public final class AuthController {
         || !hasText(request.scope())
         || request.scope().contains(" ")
         || request.scope().contains("*")
+        || !allowsServiceScope(service.clientId(), request.scope())
         || !service.allowedScopes().contains(request.scope())
         || !properties.exchangeScopes().contains(request.scope())) {
       throw new IdentityException(403, "Exchange is not allowed");
@@ -111,7 +123,9 @@ public final class AuthController {
     DirectPrincipal principal =
         keys.validateDirect(
             parseBearer(userAuthorization),
-            SESSION_PERMISSION,
+            MERCHANT_SERVICE.equals(service.clientId())
+                ? MERCHANT_SESSION_PERMISSION
+                : SESSION_PERMISSION,
             activeSigningKids(signingMetadata),
             evalSandbox,
             evaluationProfile);
@@ -136,6 +150,12 @@ public final class AuthController {
             principal.sandboxId(),
             principal.expiresAt());
     return new TokenResponse(obo.value(), "Bearer", obo.expiresIn());
+  }
+
+  private static boolean allowsServiceScope(String clientId, String scope) {
+    return MERCHANT_SERVICE.equals(clientId)
+        ? MERCHANT_SCOPES.contains(scope)
+        : !scope.startsWith("merchant:");
   }
 
   private static BasicCredential parseBasic(String authorization) {
@@ -163,34 +183,38 @@ public final class AuthController {
     return authorization.substring(7);
   }
 
-  private void requireCurrentSigningKey() {
-    requireCurrentSigningKey(repository.publicKeyMetadata());
+  private AuthRepository.KeyMetadata requireCurrentSigningKey() {
+    return requireCurrentSigningKey(repository.publicKeyMetadata());
   }
 
-  private void requireCurrentSigningKey(
+  private AuthRepository.KeyMetadata requireCurrentSigningKey(
       java.util.List<AuthRepository.KeyMetadata> signingMetadata) {
-    boolean current =
-        signingMetadata.stream()
-            .anyMatch(
-                metadata ->
-                    properties.currentKid().equals(metadata.kid())
-                        && "CURRENT".equals(metadata.state()));
-    if (!current) {
-      throw new IllegalStateException("Current signing key is not published");
+    var currentKeys =
+        signingMetadata.stream().filter(metadata -> "CURRENT".equals(metadata.state())).toList();
+    if (currentKeys.size() != 1 || !properties.currentKid().equals(currentKeys.getFirst().kid())) {
+      throw new IllegalStateException(
+          "Exactly one configured current signing key must be published");
     }
+    return currentKeys.getFirst();
   }
 
   private Set<String> activeSigningKids(
       java.util.List<AuthRepository.KeyMetadata> signingMetadata) {
-    validateKeyOverlap(signingMetadata);
+    AuthRepository.KeyMetadata current = requireCurrentSigningKey(signingMetadata);
+    validateKeyOverlap(signingMetadata, current);
+    var now = clock.instant();
     Set<String> activeKids = new HashSet<>();
     signingMetadata.stream()
-        .filter(item -> "CURRENT".equals(item.state()) || "OVERLAP".equals(item.state()))
+        .filter(
+            item ->
+                "CURRENT".equals(item.state())
+                    || ("OVERLAP".equals(item.state()) && item.retireAfter().isAfter(now)))
         .forEach(item -> activeKids.add(item.kid()));
     return Set.copyOf(activeKids);
   }
 
-  private void validateKeyOverlap(java.util.List<AuthRepository.KeyMetadata> metadata) {
+  private void validateKeyOverlap(
+      java.util.List<AuthRepository.KeyMetadata> metadata, AuthRepository.KeyMetadata current) {
     var minimumOverlap =
         (properties.directTtl().compareTo(properties.oboTtl()) >= 0
                 ? properties.directTtl()
@@ -201,7 +225,7 @@ public final class AuthController {
         .forEach(
             item -> {
               if (item.retireAfter() == null
-                  || item.retireAfter().isBefore(item.activatedAt().plus(minimumOverlap))) {
+                  || item.retireAfter().isBefore(current.activatedAt().plus(minimumOverlap))) {
                 throw new IllegalStateException(
                     "Signing-key overlap is shorter than token lifetime");
               }

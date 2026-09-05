@@ -99,12 +99,36 @@ public final class RocketMqSeckillTransactions implements AutoCloseable {
   public int consumeOnce(SeckillOrderService orderService) throws ClientException {
     List<MessageView> messages =
         consumer.receive(properties.receiveBatchSize(), properties.receiveInvisibleDuration());
+    return consumeBatch(objectMapper, orderService, consumer, messages);
+  }
+
+  static int consumeBatch(
+      ObjectMapper objectMapper,
+      SeckillOrderService orderService,
+      SimpleConsumer consumer,
+      List<MessageView> messages)
+      throws ClientException {
     int consumed = 0;
+    Exception firstFailure = null;
     for (MessageView message : messages) {
-      rejectEvaluationContext(message);
-      orderService.create(payload(message));
-      consumer.ack(message);
-      consumed++;
+      try {
+        rejectEvaluationContext(message);
+        orderService.create(payload(objectMapper, message));
+        consumer.ack(message);
+        consumed++;
+      } catch (RuntimeException | ClientException exception) {
+        if (firstFailure == null) {
+          firstFailure = exception;
+        } else if (firstFailure != exception) {
+          firstFailure.addSuppressed(exception);
+        }
+      }
+    }
+    if (firstFailure instanceof ClientException clientException) {
+      throw clientException;
+    }
+    if (firstFailure != null) {
+      throw (RuntimeException) firstFailure;
     }
     return consumed;
   }
@@ -150,7 +174,7 @@ public final class RocketMqSeckillTransactions implements AutoCloseable {
     }
   }
 
-  private SeckillTransactionMessage payload(MessageView message) {
+  private static SeckillTransactionMessage payload(ObjectMapper objectMapper, MessageView message) {
     try {
       ByteBuffer body = message.getBody();
       byte[] bytes = new byte[body.remaining()];

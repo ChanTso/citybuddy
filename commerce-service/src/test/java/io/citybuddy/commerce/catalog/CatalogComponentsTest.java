@@ -96,6 +96,51 @@ class CatalogComponentsTest {
   }
 
   @Test
+  void invalidPriceBatchesNeverReachTheRepository() {
+    ProductRepository repository = mock(ProductRepository.class);
+    ProductCache cache = mock(ProductCache.class);
+    ProductPublicationService service = new ProductPublicationService(repository, cache);
+    var change = new ProductRepository.PriceChange("p-1", 1, 100);
+
+    assertThrows(IllegalArgumentException.class, () -> service.changePrices(List.of(), "AUD"));
+    assertThrows(
+        IllegalArgumentException.class, () -> service.changePrices(List.of(change, change), "AUD"));
+    assertThrows(
+        IllegalArgumentException.class,
+        () -> service.changePrices(List.of(new ProductRepository.PriceChange("p-1", 1, 0)), "AUD"));
+    verifyNoInteractions(repository, cache);
+  }
+
+  @Test
+  void batchCacheEvictionWaitsForCommitAndContinuesAfterOneDeleteFails() {
+    ProductRepository repository = mock(ProductRepository.class);
+    ProductCache cache = mock(ProductCache.class);
+    List<ProductRepository.PriceChange> changes =
+        List.of(
+            new ProductRepository.PriceChange("p-1", 1, 110),
+            new ProductRepository.PriceChange("p-2", 1, 110));
+    when(repository.changePrices(changes, "AUD"))
+        .thenReturn(
+            List.of(
+                new ProductRepository.PriceChangeResult("p-1", 100, 110, "AUD", 1, 2, "event-1"),
+                new ProductRepository.PriceChangeResult("p-2", 100, 110, "AUD", 1, 2, "event-2")));
+    org.mockito.Mockito.doThrow(new DataAccessResourceFailureException("controlled"))
+        .when(cache)
+        .evict("p-1");
+    TransactionSynchronizationManager.initSynchronization();
+
+    new ProductPublicationService(repository, cache).changePrices(changes, "AUD");
+
+    verifyNoInteractions(cache);
+    assertDoesNotThrow(
+        () ->
+            TransactionSynchronizationManager.getSynchronizations()
+                .forEach(synchronization -> synchronization.afterCommit()));
+    verify(cache).evict("p-1");
+    verify(cache).evict("p-2");
+  }
+
+  @Test
   void publisherFailureRemainsPendingAndVisible() throws Exception {
     ProductRepository repository = mock(ProductRepository.class);
     var event = new ProductRepository.OutboxEvent("event-1", "{}");

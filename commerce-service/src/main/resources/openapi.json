@@ -2,6 +2,391 @@
   "openapi": "3.1.0",
   "info": {"title": "CityBuddy commerce API", "version": "0.0.1"},
   "paths": {
+    "/api/refunds/{refundId}": {
+      "get": {
+        "operationId": "getRefundStatus",
+        "security": [{"directUserBearer": []}],
+        "parameters": [{"name": "refundId", "in": "path", "required": true, "schema": {"type": "string", "format": "uuid"}}],
+        "responses": {
+          "200": {"description": "Owner-scoped refund status", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/RefundResult"}}}},
+          "403": {"description": "Direct-user refund permission required"},
+          "404": {"description": "Refund not visible to the caller"}
+        }
+      }
+    },
+    "/internal/merchant/products": {
+      "get": {
+        "operationId": "listMerchantProducts",
+        "security": [
+          {
+            "agentOboBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "X-Merchant-Session-Id",
+            "in": "header",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "maxLength": 128
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Merchant operation result",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "maxItems": 100,
+                  "items": {
+                    "type": "object"
+                  }
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Wrong actor, scope, session or direct operator permission"
+          },
+          "409": {
+            "description": "Proposal conflict or persisted rejection"
+          }
+        },
+        "x-required-actor": "merchant-agent",
+        "x-required-scope": "merchant:read"
+      }
+    },
+    "/internal/merchant/products/{productId}": {
+      "get": {
+        "operationId": "getMerchantProduct",
+        "security": [
+          {
+            "agentOboBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "X-Merchant-Session-Id",
+            "in": "header",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "maxLength": 128
+            }
+          },
+          {
+            "name": "productId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Merchant operation result"
+          },
+          "403": {
+            "description": "Wrong actor, scope, session or direct operator permission"
+          },
+          "409": {
+            "description": "Proposal conflict or persisted rejection"
+          }
+        },
+        "x-required-actor": "merchant-agent",
+        "x-required-scope": "merchant:read"
+      }
+    },
+    "/internal/merchant/summary": {
+      "get": {
+        "operationId": "getMerchantSummary",
+        "security": [
+          {
+            "agentOboBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "X-Merchant-Session-Id",
+            "in": "header",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "maxLength": 128
+            }
+          },
+          {
+            "name": "start",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "date-time"
+            }
+          },
+          {
+            "name": "end",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "date-time"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Merchant operation result"
+          },
+          "403": {
+            "description": "Wrong actor, scope, session or direct operator permission"
+          },
+          "409": {
+            "description": "Proposal conflict or persisted rejection"
+          }
+        },
+        "x-required-actor": "merchant-agent",
+        "x-required-scope": "merchant:read"
+      }
+    },
+    "/internal/merchant/price-drafts": {
+      "post": {
+        "operationId": "prepareMerchantPriceDraft",
+        "security": [
+          {
+            "agentOboBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "X-Merchant-Session-Id",
+            "in": "header",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "maxLength": 128
+            }
+          },
+          {
+            "name": "Idempotency-Key",
+            "in": "header",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "maxLength": 128
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Merchant operation result",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MerchantPriceDraft"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Wrong actor, scope, session or direct operator permission"
+          },
+          "409": {
+            "description": "Proposal conflict or persisted rejection"
+          }
+        },
+        "x-required-actor": "merchant-agent",
+        "x-required-scope": "merchant:price:prepare",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": [
+                  "currency",
+                  "items"
+                ],
+                "properties": {
+                  "currency": {
+                    "type": "string",
+                    "pattern": "^[A-Z]{3}$"
+                  },
+                  "items": {
+                    "type": "array",
+                    "minItems": 1,
+                    "maxItems": 3,
+                    "items": {
+                      "type": "object",
+                      "additionalProperties": false,
+                      "required": [
+                        "productId",
+                        "newPriceMinor"
+                      ],
+                      "properties": {
+                        "productId": {
+                          "type": "string",
+                          "maxLength": 64
+                        },
+                        "newPriceMinor": {
+                          "type": "integer",
+                          "minimum": 1
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/internal/merchant/price-drafts/{draftId}": {
+      "get": {
+        "operationId": "getMerchantPriceDraft",
+        "security": [
+          {
+            "agentOboBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "X-Merchant-Session-Id",
+            "in": "header",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "maxLength": 128
+            }
+          },
+          {
+            "name": "draftId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Merchant operation result",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MerchantPriceDraft"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Wrong actor, scope, session or direct operator permission"
+          },
+          "409": {
+            "description": "Proposal conflict or persisted rejection"
+          }
+        },
+        "x-required-actor": "merchant-agent",
+        "x-required-scope": "merchant:price:read"
+      }
+    },
+    "/internal/merchant/price-drafts/{draftId}/cancel": {
+      "post": {
+        "operationId": "cancelMerchantPriceDraft",
+        "security": [
+          {
+            "agentOboBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "X-Merchant-Session-Id",
+            "in": "header",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "maxLength": 128
+            }
+          },
+          {
+            "name": "draftId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Merchant operation result",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MerchantPriceDraft"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Wrong actor, scope, session or direct operator permission"
+          },
+          "409": {
+            "description": "Proposal conflict or persisted rejection"
+          }
+        },
+        "x-required-actor": "merchant-agent",
+        "x-required-scope": "merchant:price:cancel"
+      }
+    },
+    "/api/merchant/price-drafts/{draftId}/apply": {
+      "post": {
+        "operationId": "applyMerchantPriceDraft",
+        "security": [
+          {
+            "directUserBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "draftId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Merchant operation result",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MerchantPriceDraft"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Wrong actor, scope, session or direct operator permission"
+          },
+          "409": {
+            "description": "Proposal conflict or persisted rejection"
+          }
+        },
+        "x-required-permission": "merchant:price:apply"
+      }
+    },
     "/api/products": {
       "get": {
         "operationId": "listPublishedProducts",
@@ -415,6 +800,89 @@
       "mockPaymentSignature": {"type": "apiKey", "in": "header", "name": "X-Mock-Payment-Signature", "description": "HMAC-SHA256 over the timestamp, idempotency key, complete callback intent, and exact evaluation context when present."}
     },
     "schemas": {
+      "MerchantPriceDraft": {
+        "type": "object",
+        "required": [
+          "draftId",
+          "currency",
+          "state",
+          "items",
+          "result",
+          "createdAt",
+          "resolvedAt"
+        ],
+        "properties": {
+          "draftId": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "currency": {
+            "type": "string"
+          },
+          "state": {
+            "type": "string",
+            "enum": [
+              "PREPARED",
+              "APPLIED",
+              "CANCELLED",
+              "REJECTED"
+            ]
+          },
+          "items": {
+            "type": "array",
+            "minItems": 1,
+            "maxItems": 3,
+            "items": {
+              "type": "object",
+              "required": [
+                "productId",
+                "name",
+                "oldPriceMinor",
+                "newPriceMinor",
+                "currency",
+                "expectedVersion"
+              ],
+              "properties": {
+                "productId": {
+                  "type": "string"
+                },
+                "name": {
+                  "type": "string"
+                },
+                "oldPriceMinor": {
+                  "type": "integer"
+                },
+                "newPriceMinor": {
+                  "type": "integer"
+                },
+                "currency": {
+                  "type": "string"
+                },
+                "expectedVersion": {
+                  "type": "integer"
+                }
+              }
+            }
+          },
+          "result": {
+            "type": [
+              "object",
+              "null"
+            ]
+          },
+          "createdAt": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "resolvedAt": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time"
+          }
+        }
+      },
       "KnowledgeSnapshot": {
         "type": "object",
         "additionalProperties": false,

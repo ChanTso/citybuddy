@@ -40,11 +40,35 @@ class RocketMqSeckillTimeoutsTest {
               Duration.ofSeconds(1),
               RECEIVE_INVISIBLE,
               16,
-              32,
-              5),
+              32),
           mock(ClientServiceProvider.class),
           mock(Producer.class),
           consumer);
+
+  @Test
+  void malformedAndBusinessFailuresLeaveLaterMessagesProcessable() throws Exception {
+    MessageView malformed = mock(MessageView.class);
+    when(malformed.getProperties()).thenReturn(Map.of());
+    when(malformed.getBody()).thenReturn(ByteBuffer.wrap(new byte[] {'{'}));
+    SeckillTimeoutMessage failedPayload = payload();
+    SeckillTimeoutMessage laterPayload = payload();
+    MessageView failed = message(failedPayload, 1);
+    MessageView later = message(laterPayload, 1);
+    IllegalStateException businessFailure =
+        new IllegalStateException("controlled database failure");
+    when(cancellations.cancel(failedPayload)).thenThrow(businessFailure);
+    when(cancellations.cancel(laterPayload)).thenReturn(terminal());
+    when(consumer.receive(16, RECEIVE_INVISIBLE)).thenReturn(List.of(malformed, failed, later));
+
+    IllegalArgumentException thrown =
+        assertThrows(IllegalArgumentException.class, () -> messaging.consumeOnce(cancellations));
+
+    assertThat(thrown).hasMessage("Seckill timeout message is malformed");
+    assertThat(thrown.getSuppressed()).containsExactly(businessFailure);
+    verify(consumer, never()).ack(malformed);
+    verify(consumer, never()).ack(failed);
+    verify(consumer).ack(later);
+  }
 
   @Test
   void ackFailureDoesNotBlockLaterMessageOrHigherAttemptReplay() throws Exception {

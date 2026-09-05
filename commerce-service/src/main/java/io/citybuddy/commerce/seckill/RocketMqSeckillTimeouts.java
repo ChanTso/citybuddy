@@ -87,27 +87,31 @@ public final class RocketMqSeckillTimeouts implements AutoCloseable, SeckillTime
     List<MessageView> messages =
         consumer.receive(properties.receiveBatchSize(), properties.receiveInvisibleDuration());
     int consumed = 0;
-    ClientException firstControlFailure = null;
+    Exception firstFailure = null;
     for (MessageView message : messages) {
-      rejectEvaluationContext(message);
-      SeckillCancellationService.CancellationResult result = cancellations.cancel(payload(message));
       try {
+        rejectEvaluationContext(message);
+        SeckillCancellationService.CancellationResult result =
+            cancellations.cancel(payload(message));
         if (result.outcome() == SeckillCancellationService.Outcome.EARLY) {
           consumer.changeInvisibleDuration(message, result.retryAfter());
           continue;
         }
         consumer.ack(message);
         consumed++;
-      } catch (ClientException exception) {
-        if (firstControlFailure == null) {
-          firstControlFailure = exception;
-        } else if (firstControlFailure != exception) {
-          firstControlFailure.addSuppressed(exception);
+      } catch (ClientException | RuntimeException exception) {
+        if (firstFailure == null) {
+          firstFailure = exception;
+        } else if (firstFailure != exception) {
+          firstFailure.addSuppressed(exception);
         }
       }
     }
-    if (firstControlFailure != null) {
-      throw firstControlFailure;
+    if (firstFailure instanceof ClientException clientException) {
+      throw clientException;
+    }
+    if (firstFailure instanceof RuntimeException runtimeException) {
+      throw runtimeException;
     }
     return consumed;
   }

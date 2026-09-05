@@ -22,6 +22,7 @@
     "/auth/token/exchange": {
       "post": {
         "operationId": "exchangeAgentObo",
+        "description": "The authenticated service fixes the actor and permission policy. agent-service requires support:session:create and cannot request merchant scopes. merchant-agent requires merchant:session:create and permits only merchant:read, merchant:price:prepare, merchant:price:read, or merchant:price:cancel. Both service and deployment scope grants must allow the requested scope. The service owns and validates the session-to-user binding before asserting it here; Auth verifies the asserted user against the direct token. No merchant:price:apply OBO scope is issued.",
         "security": [{"serviceBasic": []}],
         "parameters": [{"name": "X-User-Authorization", "in": "header", "required": true, "schema": {"type": "string"}}, {"name": "X-Eval-Sandbox-Id", "in": "header", "required": false, "schema": {"$ref": "#/components/schemas/SandboxId"}, "description": "Required only for an evaluation direct-user token; must equal its signed sandbox claim."}],
         "requestBody": {

@@ -187,9 +187,52 @@ assert_fails "commerce migration cannot read auth migration history" 'SELECT com
 assert_fails "commerce migration cannot insert auth-private truth" 'INSERT command denied' \
   mysql_query commerce_migration "$commerce_migration_password" commerce_db \
   "INSERT INTO auth_eval_test_principal (provisioning_id, opaque_handle, subject, sandbox_id, case_correlation, test_user_label, permissions, provision_idempotency_key, ttl_seconds, state, expires_at) VALUES ('00000000-0000-0000-0000-000000000000', 'forbidden', 'forbidden', 'forbidden', 'forbidden', 'forbidden', 'forbidden', 'forbidden', 60, 'PROVISIONED', TIMESTAMPADD(MINUTE, 2, CURRENT_TIMESTAMP(6)))"
-assert_fails "commerce migration cannot read ordinary commerce truth after V013" \
+assert_fails "commerce migration cannot read commerce data outside its view sources" \
   'SELECT command denied' \
-  mysql_query commerce_migration "$commerce_migration_password" commerce_db 'SELECT * FROM product'
+  mysql_query commerce_migration "$commerce_migration_password" commerce_db 'SELECT * FROM crm_profile'
+mysql_query commerce_migration "$commerce_migration_password" commerce_db \
+  'SELECT COUNT(*) FROM merchant_paid_orders' >/dev/null
+assert_fails "merchant view definer cannot mutate product data" 'UPDATE command denied' \
+  mysql_query commerce_migration "$commerce_migration_password" commerce_db \
+  "UPDATE product SET price_minor = price_minor WHERE product_id = 'forbidden'"
+merchant_reader_password="$(openssl rand -hex 24)"
+mysql_query bootstrap_admin "$bootstrap_password" commerce_db "
+  CREATE USER 'merchant_view_test'@'%' IDENTIFIED BY '$merchant_reader_password';
+  SET ROLE 'bootstrap_grant_role';
+  GRANT SELECT ON commerce_db.merchant_products TO 'merchant_view_test'@'%';
+  GRANT SELECT ON commerce_db.merchant_paid_orders TO 'merchant_view_test'@'%';
+  GRANT SELECT ON commerce_db.merchant_daily_sales TO 'merchant_view_test'@'%';
+  SET ROLE NONE;"
+uv run python scripts/seed_merchant_fixture.py --as-of 2026-09-05 >"$tmp_dir/merchant-fixture.sql"
+for fixture_pass in 1 2; do
+  "${compose[@]}" exec -T -e MYSQL_PWD="$bootstrap_password" mysql \
+    mysql --protocol=socket --user=root --database=commerce_db <"$tmp_dir/merchant-fixture.sql"
+  merchant_totals="$(mysql_query merchant_view_test "$merchant_reader_password" commerce_db \
+    "SELECT CONCAT(currency, ':', SUM(order_count), ':', SUM(units), ':', SUM(amount_minor)) FROM merchant_daily_sales GROUP BY currency ORDER BY currency")"
+  printf 'merchant-fixture-pass=%s\n%s\n' "$fixture_pass" "$merchant_totals"
+  test "$merchant_totals" = $'CNY:96:288:612000\nUSD:42:84:75600'
+  test "$(mysql_query commerce_app "$commerce_app_password" commerce_db \
+    "SELECT CONCAT(COUNT(*), ':', SUM(status = 'PAID')) FROM standard_order WHERE user_subject LIKE 'shopmate-fixture-buyer-%'")" = "141:138"
+done
+for merchant_view in merchant_products merchant_paid_orders merchant_daily_sales; do
+  mysql_query merchant_view_test "$merchant_reader_password" commerce_db \
+    "SELECT COUNT(*) FROM $merchant_view" >/dev/null
+  mysql_query commerce_app "$commerce_app_password" commerce_db \
+    "SELECT COUNT(*) FROM $merchant_view" >/dev/null
+done
+assert_fails "commerce runtime cannot delete merchant approvals" 'DELETE command denied' \
+  mysql_query commerce_app "$commerce_app_password" commerce_db \
+  "DELETE FROM merchant_price_draft WHERE draft_id = 'forbidden'"
+assert_fails "merchant analytics cannot read underlying payment identities" 'SELECT command denied' \
+  mysql_query merchant_view_test "$merchant_reader_password" commerce_db \
+  'SELECT * FROM mock_payment_attempt'
+assert_fails "merchant analytics cannot read underlying products" 'SELECT command denied' \
+  mysql_query merchant_view_test "$merchant_reader_password" commerce_db 'SELECT * FROM product'
+assert_fails "merchant analytics cannot write through a view" 'UPDATE command denied' \
+  mysql_query merchant_view_test "$merchant_reader_password" commerce_db \
+  "UPDATE merchant_products SET price_minor = 1 WHERE product_id = 'forbidden'"
+assert_no_admin_grants merchant_view_test "$merchant_reader_password"
+mysql_query bootstrap_admin "$bootstrap_password" commerce_db "DROP USER 'merchant_view_test'@'%';"
 assert_fails "commerce migration cannot insert ordinary commerce truth after V013" \
   'INSERT command denied' \
   mysql_query commerce_migration "$commerce_migration_password" commerce_db \

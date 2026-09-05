@@ -61,6 +61,32 @@ class OboAuthorizerTest {
   }
 
   @Test
+  void enforcesTheActorSelectedByEachEndpoint() throws Exception {
+    var merchantRequest =
+        new OboAuthorizer.AuthorizationRequest(
+            "merchant:read", "user-123", "session-123", null, null, null, "merchant-agent");
+    TokenValues merchant =
+        TokenValues.valid().withScope("merchant:read").withActor("merchant-agent");
+
+    assertThat(authorizer.authorize(token(current, merchant), merchantRequest).scope())
+        .isEqualTo("merchant:read");
+    assertThatThrownBy(
+            () ->
+                authorizer.authorize(
+                    token(current, merchant.withActor("agent-service")), merchantRequest))
+        .isInstanceOf(OboAuthorizationException.class)
+        .hasMessage("Wrong actor");
+    assertThatThrownBy(
+            () ->
+                authorizer.authorize(
+                    token(current, merchant),
+                    new OboAuthorizer.AuthorizationRequest(
+                        "merchant:read", "user-123", "session-123", null, null, null)))
+        .isInstanceOf(OboAuthorizationException.class)
+        .hasMessage("Wrong actor");
+  }
+
+  @Test
   void rejectsEveryIdentityDimensionAndBodySubstitution() throws Exception {
     assertRejected(TokenValues.valid().withIssuer("https://wrong.example"), request(null, null));
     assertRejected(TokenValues.valid().withAudience("citybuddy-web"), request(null, null));
