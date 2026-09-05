@@ -77,6 +77,7 @@ import org.springframework.jdbc.datasource.SingleConnectionDataSource;
 import org.springframework.test.context.DynamicPropertyRegistry;
 import org.springframework.test.context.DynamicPropertySource;
 import org.springframework.test.context.bean.override.mockito.MockitoSpyBean;
+import org.springframework.transaction.TransactionDefinition;
 import org.springframework.transaction.support.TransactionTemplate;
 
 @EnabledIfEnvironmentVariable(named = "CATALOG_INTEGRATION", matches = "true")
@@ -138,6 +139,7 @@ class CatalogIntegrationTest {
     proveAuthenticatedContractsAndLiveFields();
     proveRedisProtectionsAndMysqlFallback();
     provePublicationAtomicityAndNormalEventRecovery();
+    provePriceChangesPreserveInventoryAndJoinTheApprovalTransaction();
     proveProductionConsumerRejectsReservedEvaluationContext();
   }
 
@@ -1313,7 +1315,8 @@ class CatalogIntegrationTest {
         """,
         HIDDEN_ID);
     jdbc.update(
-        "INSERT INTO catalog_metadata (singleton_id, publication_generation) VALUES (1, 1)");
+        "INSERT INTO catalog_metadata (singleton_id, publication_generation) VALUES (1, 1) "
+            + "ON DUPLICATE KEY UPDATE singleton_id = singleton_id");
   }
 
   private void proveAuthenticatedContractsAndLiveFields() {
@@ -1792,6 +1795,164 @@ class CatalogIntegrationTest {
       }
     }
     throw new AssertionError("Reserved evaluation context was not delivered by the real Broker");
+  }
+
+  private void provePriceChangesPreserveInventoryAndJoinTheApprovalTransaction() throws Exception {
+    String firstId = "price-batch-a";
+    String secondId = "price-batch-b";
+    String markerId = "price-approval-marker";
+    seedOrderProduct(firstId, 10, true, "PUBLISHED", 1);
+    seedOrderProduct(secondId, 0, true, "PUBLISHED", 1);
+    seedOrderProduct(markerId, 1, true, "PUBLISHED", 1);
+    Product firstBefore = repository.findPublished(firstId).orElseThrow();
+    cache.put(firstBefore, repository.catalogGeneration());
+    jdbc.update("UPDATE product SET stock_quantity = 7 WHERE product_id = ?", firstId);
+    long generation = repository.catalogGeneration();
+    List<ProductRepository.PriceChangeResult> changed =
+        publicationService.changePrices(
+            List.of(
+                new ProductRepository.PriceChange(secondId, 1, 800),
+                new ProductRepository.PriceChange(firstId, 1, 800)),
+            "AUD");
+
+    assertThat(changed).hasSize(2);
+    assertThat(repository.catalogGeneration()).isEqualTo(generation + 2);
+    Product current = repository.findPublished(firstId).orElseThrow();
+    assertThat(current.priceMinor()).isEqualTo(800);
+    assertThat(current.publicationVersion()).isEqualTo(2);
+    assertThat(current.stockQuantity()).isEqualTo(7);
+    assertThat(current.available()).isTrue();
+    assertThat(current.name()).isEqualTo(firstBefore.name());
+    assertThat(current.description()).isEqualTo(firstBefore.description());
+    assertThat(repository.findPublished(secondId).orElseThrow().stockQuantity()).isZero();
+    for (ProductRepository.PriceChangeResult result : changed) {
+      assertThat(result.oldPriceMinor()).isEqualTo(750);
+      assertThat(result.newPriceMinor()).isEqualTo(800);
+      assertThat(result.oldVersion()).isEqualTo(1);
+      assertThat(result.newVersion()).isEqualTo(2);
+      UUID eventId = UUID.fromString(result.eventId());
+      assertThat(outboxState(eventId)).isEqualTo("PENDING:0");
+      ProductRepository.OutboxEvent outbox = outboxEvent(eventId);
+      ProductRepository.CatalogEvent event = repository.parseEvent(outbox.payload());
+      assertThat(event.productId()).isEqualTo(result.productId());
+      assertThat(event.productVersion()).isEqualTo(2);
+      invalidationHandler.handle(outbox.payload());
+    }
+    assertThat(new ProductCatalogService(repository, cache).findPublished(firstId))
+        .contains(current);
+    long committedGeneration = repository.catalogGeneration();
+    int committedOutbox =
+        jdbc.queryForObject("SELECT COUNT(*) FROM commerce_outbox", Integer.class);
+    TransactionTemplate approvalTransactions =
+        new TransactionTemplate(transactions.getTransactionManager());
+    approvalTransactions.setIsolationLevel(TransactionDefinition.ISOLATION_READ_COMMITTED);
+
+    approvalTransactions.executeWithoutResult(
+        status -> {
+          try {
+            publicationService.changePrices(
+                List.of(
+                    new ProductRepository.PriceChange(firstId, 2, 850),
+                    new ProductRepository.PriceChange(secondId, 1, 850)),
+                "AUD");
+            throw new AssertionError("The stale second product must reject the entire batch");
+          } catch (ProductPriceChangeException exception) {
+            assertThat(exception.reason())
+                .isEqualTo(ProductPriceChangeException.Reason.VERSION_CONFLICT);
+            assertThat(exception.productId()).isEqualTo(secondId);
+            assertThat(status.isRollbackOnly()).isFalse();
+            jdbc.update(
+                "UPDATE product SET description = 'approval rejected' WHERE product_id = ?",
+                markerId);
+          }
+        });
+    assertThat(repository.findPublished(markerId).orElseThrow().description())
+        .isEqualTo("approval rejected");
+    assertThat(repository.findPublished(firstId)).contains(current);
+    assertThat(repository.catalogGeneration()).isEqualTo(committedGeneration);
+    assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM commerce_outbox", Integer.class))
+        .isEqualTo(committedOutbox);
+
+    assertThatThrownBy(
+            () ->
+                approvalTransactions.executeWithoutResult(
+                    status -> {
+                      publicationService.changePrices(
+                          List.of(new ProductRepository.PriceChange(firstId, 2, 850)), "AUD");
+                      throw new IllegalStateException("controlled approval receipt failure");
+                    }))
+        .isInstanceOf(IllegalStateException.class)
+        .hasMessage("controlled approval receipt failure");
+    assertThat(repository.findPublished(firstId)).contains(current);
+    assertThat(repository.catalogGeneration()).isEqualTo(committedGeneration);
+    assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM commerce_outbox", Integer.class))
+        .isEqualTo(committedOutbox);
+
+    seedOrderProduct("price-hidden", 1, true, "UNPUBLISHED", 1);
+    seedOrderProduct("price-unavailable", 1, false, "PUBLISHED", 1);
+    seedOrderProduct("price-seckill", 1, true, "PUBLISHED", 1);
+    jdbc.update(
+        """
+        INSERT INTO seckill_activity
+          (activity_id, product_id, starts_at, ends_at, state, allocated_quota, projection_version)
+        VALUES ('price-closed-activity', 'price-seckill',
+                '2026-01-01 00:00:00', '2026-01-02 00:00:00', 'CLOSED', 1, 1)
+        """);
+    try (Connection activityConnection = jdbc.getDataSource().getConnection();
+        var executor = Executors.newSingleThreadExecutor()) {
+      activityConnection.setAutoCommit(false);
+      try {
+        JdbcTemplate activityJdbc =
+            new JdbcTemplate(new SingleConnectionDataSource(activityConnection, true));
+        activityJdbc.queryForObject(
+            "SELECT activity_id FROM seckill_activity WHERE activity_id = ? FOR UPDATE",
+            String.class,
+            "price-closed-activity");
+        Future<ProductPriceChangeException.Reason> rejection =
+            executor.submit(
+                () -> {
+                  try {
+                    publicationService.changePrices(
+                        List.of(new ProductRepository.PriceChange("price-seckill", 1, 800)), "AUD");
+                    throw new AssertionError("Seckill product must be rejected");
+                  } catch (ProductPriceChangeException exception) {
+                    return exception.reason();
+                  }
+                });
+        assertThat(rejection.get(5, TimeUnit.SECONDS))
+            .isEqualTo(ProductPriceChangeException.Reason.SECKILL_PRODUCT);
+      } finally {
+        activityConnection.rollback();
+      }
+    }
+    Map<String, ProductPriceChangeException.Reason> rejections =
+        Map.of(
+            "price-hidden", ProductPriceChangeException.Reason.NOT_ORDERABLE,
+            "price-unavailable", ProductPriceChangeException.Reason.NOT_ORDERABLE,
+            "price-seckill", ProductPriceChangeException.Reason.SECKILL_PRODUCT,
+            "price-missing", ProductPriceChangeException.Reason.NOT_FOUND);
+    for (var rejection : rejections.entrySet()) {
+      assertThatThrownBy(
+              () ->
+                  publicationService.changePrices(
+                      List.of(new ProductRepository.PriceChange(rejection.getKey(), 1, 800)),
+                      "AUD"))
+          .isInstanceOfSatisfying(
+              ProductPriceChangeException.class,
+              exception -> assertThat(exception.reason()).isEqualTo(rejection.getValue()));
+    }
+    assertThatThrownBy(
+            () ->
+                publicationService.changePrices(
+                    List.of(new ProductRepository.PriceChange(firstId, 2, 850)), "USD"))
+        .isInstanceOfSatisfying(
+            ProductPriceChangeException.class,
+            exception ->
+                assertThat(exception.reason())
+                    .isEqualTo(ProductPriceChangeException.Reason.CURRENCY_MISMATCH));
+    assertThat(repository.catalogGeneration()).isEqualTo(committedGeneration);
+    assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM commerce_outbox", Integer.class))
+        .isEqualTo(committedOutbox);
   }
 
   private String outboxState(UUID eventId) {

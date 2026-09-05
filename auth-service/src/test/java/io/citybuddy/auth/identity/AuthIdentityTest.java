@@ -39,6 +39,7 @@ class AuthIdentityTest {
   private AuthKeySet keys;
   private AuthController controller;
   private BCryptPasswordEncoder passwordEncoder;
+  private IdentityProperties properties;
   private KeyPair currentKeyPair;
   private KeyPair overlapKeyPair;
 
@@ -52,7 +53,7 @@ class AuthIdentityTest {
         writePem("current-public.pem", "PUBLIC KEY", currentKeyPair.getPublic().getEncoded());
     Path overlapPath =
         writePem("overlap-public.pem", "PUBLIC KEY", overlapKeyPair.getPublic().getEncoded());
-    IdentityProperties properties =
+    properties =
         new IdentityProperties(
             "https://identity.citybuddy.test",
             "citybuddy-web",
@@ -64,7 +65,16 @@ class AuthIdentityTest {
             Duration.ofMinutes(15),
             Duration.ofMinutes(2),
             Duration.ofSeconds(30),
-            List.of("catalog:read", "*", "catalog:*"));
+            List.of(
+                "catalog:read",
+                "*",
+                "catalog:*",
+                "merchant:read",
+                "merchant:price:prepare",
+                "merchant:price:read",
+                "merchant:price:cancel",
+                "merchant:price:apply",
+                "merchant:admin"));
     repository = mock(AuthRepository.class);
     when(repository.publicKeyMetadata())
         .thenReturn(
@@ -154,16 +164,16 @@ class AuthIdentityTest {
 
   @Test
   void jwksPublishesOnlyConfiguredCurrentAndOverlappingPublicMaterial() {
+    Instant activated = Instant.now();
     when(repository.publicKeyMetadata())
         .thenReturn(
             List.of(
-                new AuthRepository.KeyMetadata(
-                    "current-key", "CURRENT", Instant.parse("2026-07-15T00:00:00Z"), null),
+                new AuthRepository.KeyMetadata("current-key", "CURRENT", activated, null),
                 new AuthRepository.KeyMetadata(
                     "overlap-key",
                     "OVERLAP",
-                    Instant.parse("2026-07-15T00:00:00Z"),
-                    Instant.parse("2026-07-15T01:00:00Z"))));
+                    activated.minus(Duration.ofHours(1)),
+                    activated.plus(Duration.ofHours(1)))));
 
     String response = controller.jwks(null).toString();
 
@@ -175,18 +185,103 @@ class AuthIdentityTest {
   }
 
   @Test
-  void jwksRejectsOverlapShorterThanMaximumTokenLifetimeAndClockSkew() {
-    Instant activated = Instant.parse("2026-07-15T00:00:00Z");
+  void jwksRejectsOverlapOneSecondShorterThanCurrentActivationPlusTokenLifetimeAndSkew() {
+    Instant activated = Instant.now();
     when(repository.publicKeyMetadata())
         .thenReturn(
             List.of(
                 new AuthRepository.KeyMetadata("current-key", "CURRENT", activated, null),
                 new AuthRepository.KeyMetadata(
-                    "overlap-key", "OVERLAP", activated, activated.plus(Duration.ofMinutes(5)))));
+                    "overlap-key",
+                    "OVERLAP",
+                    activated.minus(Duration.ofHours(1)),
+                    activated.plusSeconds(929))));
 
     assertThatThrownBy(() -> controller.jwks(null))
         .isInstanceOf(IllegalStateException.class)
         .hasMessageContaining("overlap");
+  }
+
+  @Test
+  void jwksAcceptsOverlapAtExactCurrentActivationPlusTokenLifetimeAndSkew() {
+    Instant activated = Instant.now();
+    when(repository.publicKeyMetadata())
+        .thenReturn(
+            List.of(
+                new AuthRepository.KeyMetadata("current-key", "CURRENT", activated, null),
+                new AuthRepository.KeyMetadata(
+                    "overlap-key",
+                    "OVERLAP",
+                    activated.minus(Duration.ofHours(1)),
+                    activated.plusSeconds(930))));
+
+    assertThat(controller.jwks(null).toString()).contains("current-key", "overlap-key");
+  }
+
+  @Test
+  void jwksValidatesExpiredOverlapBeforeFilteringItFromPublication() {
+    Instant now = Instant.now();
+    when(repository.publicKeyMetadata())
+        .thenReturn(
+            List.of(
+                new AuthRepository.KeyMetadata(
+                    "current-key", "CURRENT", now.minusSeconds(60), null),
+                new AuthRepository.KeyMetadata(
+                    "overlap-key",
+                    "OVERLAP",
+                    now.minus(Duration.ofHours(1)),
+                    now.minusSeconds(1))));
+
+    assertThatThrownBy(() -> controller.jwks(null))
+        .isInstanceOf(IllegalStateException.class)
+        .hasMessageContaining("overlap");
+  }
+
+  @Test
+  void jwksDoesNotPublishAValidButRetiredOverlap() {
+    Instant now = Instant.now();
+    when(repository.publicKeyMetadata())
+        .thenReturn(
+            List.of(
+                new AuthRepository.KeyMetadata(
+                    "current-key", "CURRENT", now.minus(Duration.ofMinutes(30)), null),
+                new AuthRepository.KeyMetadata(
+                    "overlap-key",
+                    "OVERLAP",
+                    now.minus(Duration.ofHours(1)),
+                    now.minusSeconds(1))));
+
+    assertThat(controller.jwks(null).toString())
+        .contains("current-key")
+        .doesNotContain("overlap-key");
+  }
+
+  @Test
+  void jwksAndLoginRequireExactlyOneConfiguredCurrentKey() {
+    Instant activated = Instant.now();
+    when(repository.publicKeyMetadata())
+        .thenReturn(
+            List.of(
+                new AuthRepository.KeyMetadata("current-key", "CURRENT", activated, null),
+                new AuthRepository.KeyMetadata("overlap-key", "CURRENT", activated, null)));
+    when(repository.findUser("active-user"))
+        .thenReturn(
+            Optional.of(
+                new AuthRepository.UserCredential(
+                    "user-123",
+                    "ACTIVE",
+                    List.of("support:session:create"),
+                    passwordEncoder.encode("correct-password"))));
+
+    assertThatThrownBy(() -> controller.jwks(null))
+        .isInstanceOf(IllegalStateException.class)
+        .hasMessageContaining("Exactly one configured current");
+    assertThatThrownBy(
+            () ->
+                controller.login(
+                    null, new AuthController.LoginRequest("active-user", "correct-password")))
+        .isInstanceOf(IllegalStateException.class)
+        .hasMessageContaining("Exactly one configured current");
   }
 
   @Test
@@ -499,6 +594,158 @@ class AuthIdentityTest {
   }
 
   @Test
+  void merchantExchangeIssuesOnlyItsFourExactScopesWithItsOwnActor() throws Exception {
+    List<String> scopes =
+        List.of(
+            "merchant:read",
+            "merchant:price:prepare",
+            "merchant:price:read",
+            "merchant:price:cancel");
+    String basic = allowService("merchant-agent", scopes);
+    String direct = keys.directToken("user-123", List.of("merchant:session:create"));
+
+    for (String scope : scopes) {
+      AuthController.TokenResponse response =
+          controller.exchange(
+              basic,
+              "Bearer " + direct,
+              null,
+              new AuthController.ExchangeRequest("merchant-session", "user-123", scope));
+      JWTClaimsSet claims = SignedJWT.parse(response.accessToken()).getJWTClaimsSet();
+
+      assertThat(claims.getClaim("token_type")).isEqualTo("agent_obo");
+      assertThat(claims.getAudience()).containsExactly("commerce-service");
+      assertThat(claims.getSubject()).isEqualTo("user-123");
+      assertThat(claims.getClaim("session")).isEqualTo("merchant-session");
+      assertThat(claims.getClaim("scope")).isEqualTo(scope);
+      assertThat(claims.getJSONObjectClaim("act")).containsEntry("azp", "merchant-agent");
+    }
+  }
+
+  @Test
+  void exchangeKeepsMerchantAndSupportScopePoliciesSeparateEvenWithBroadGrants() {
+    String merchantBasic = allowService("merchant-agent", properties.exchangeScopes());
+    String supportBasic = allowService("agent-service", properties.exchangeScopes());
+    String direct =
+        keys.directToken("user-123", List.of("support:session:create", "merchant:session:create"));
+
+    for (String scope : List.of("catalog:read", "merchant:price:apply", "merchant:admin")) {
+      assertThatThrownBy(
+              () ->
+                  controller.exchange(
+                      merchantBasic,
+                      "Bearer " + direct,
+                      null,
+                      new AuthController.ExchangeRequest("merchant-session", "user-123", scope)))
+          .isInstanceOf(IdentityException.class)
+          .hasMessage("Exchange is not allowed");
+    }
+    for (String scope : properties.exchangeScopes()) {
+      if (scope.startsWith("merchant:")) {
+        assertThatThrownBy(
+                () ->
+                    controller.exchange(
+                        supportBasic,
+                        "Bearer " + direct,
+                        null,
+                        new AuthController.ExchangeRequest("support-session", "user-123", scope)))
+            .isInstanceOf(IdentityException.class)
+            .hasMessage("Exchange is not allowed");
+      }
+    }
+  }
+
+  @Test
+  void merchantExchangeRequiresItsOwnSessionPermissionAndBoundSubject() {
+    String merchantBasic = allowService("merchant-agent", List.of("merchant:read"));
+    String supportBasic = allowService("agent-service", List.of("catalog:read"));
+    String supportDirect = keys.directToken("user-123", List.of("support:session:create"));
+    String merchantDirect = keys.directToken("user-123", List.of("merchant:session:create"));
+
+    assertThatThrownBy(
+            () ->
+                controller.exchange(
+                    merchantBasic,
+                    "Bearer " + supportDirect,
+                    null,
+                    new AuthController.ExchangeRequest(
+                        "merchant-session", "user-123", "merchant:read")))
+        .isInstanceOf(IdentityException.class)
+        .hasMessage("Missing permission");
+    assertThatThrownBy(
+            () ->
+                controller.exchange(
+                    supportBasic,
+                    "Bearer " + merchantDirect,
+                    null,
+                    new AuthController.ExchangeRequest(
+                        "support-session", "user-123", "catalog:read")))
+        .isInstanceOf(IdentityException.class)
+        .hasMessage("Missing permission");
+    assertThatThrownBy(
+            () ->
+                controller.exchange(
+                    merchantBasic,
+                    "Bearer " + merchantDirect,
+                    null,
+                    new AuthController.ExchangeRequest(
+                        "merchant-session", "other-user", "merchant:read")))
+        .isInstanceOf(IdentityException.class)
+        .hasMessageContaining("binding");
+  }
+
+  @Test
+  void merchantExchangeStillRequiresBothServiceAndDeploymentScopeGrants() {
+    String basic = allowService("merchant-agent", List.of("merchant:read"));
+    String direct = keys.directToken("user-123", List.of("merchant:session:create"));
+
+    assertThatThrownBy(
+            () ->
+                controller.exchange(
+                    basic,
+                    "Bearer " + direct,
+                    null,
+                    new AuthController.ExchangeRequest(
+                        "merchant-session", "user-123", "merchant:price:prepare")))
+        .isInstanceOf(IdentityException.class)
+        .hasMessage("Exchange is not allowed");
+
+    IdentityProperties supportOnlyProperties =
+        new IdentityProperties(
+            properties.issuer(),
+            properties.userAudience(),
+            properties.currentKid(),
+            properties.currentPrivateKeyPath(),
+            properties.currentPublicKeyPath(),
+            properties.overlapKid(),
+            properties.overlapPublicKeyPath(),
+            properties.directTtl(),
+            properties.oboTtl(),
+            properties.clockSkew(),
+            List.of("catalog:read"));
+    AuthController supportOnlyController =
+        new AuthController(
+            repository,
+            keys,
+            passwordEncoder,
+            new ServiceCredentialVerifier(passwordEncoder),
+            supportOnlyProperties,
+            new MockEnvironment(),
+            Clock.systemUTC());
+
+    assertThatThrownBy(
+            () ->
+                supportOnlyController.exchange(
+                    basic,
+                    "Bearer " + direct,
+                    null,
+                    new AuthController.ExchangeRequest(
+                        "merchant-session", "user-123", "merchant:read")))
+        .isInstanceOf(IdentityException.class)
+        .hasMessage("Exchange is not allowed");
+  }
+
+  @Test
   void exchangeAcceptsActiveOverlapAndRejectsItAfterRetirement() throws Exception {
     when(repository.findService("agent-service"))
         .thenReturn(
@@ -543,7 +790,10 @@ class AuthIdentityTest {
                 .tokenType())
         .isEqualTo("Bearer");
 
-    when(repository.publicKeyMetadata()).thenReturn(List.of(current));
+    AuthRepository.KeyMetadata retiredOverlap =
+        new AuthRepository.KeyMetadata(
+            "overlap-key", "OVERLAP", now.minus(Duration.ofHours(1)), now.minusSeconds(1));
+    when(repository.publicKeyMetadata()).thenReturn(List.of(current, retiredOverlap));
     assertThatThrownBy(
             () ->
                 controller.exchange(
@@ -625,6 +875,17 @@ class AuthIdentityTest {
             new JWSHeader.Builder(JWSAlgorithm.RS256).keyID("current-key").build(), claims);
     jwt.sign(new RSASSASigner((RSAPrivateKey) currentKeyPair.getPrivate()));
     return jwt.serialize();
+  }
+
+  private String allowService(String clientId, List<String> scopes) {
+    when(repository.findService(clientId))
+        .thenReturn(
+            Optional.of(
+                new AuthRepository.ServiceCredential(
+                    clientId, "ACTIVE", scopes, passwordEncoder.encode("service-password"))));
+    return "Basic "
+        + Base64.getEncoder()
+            .encodeToString((clientId + ":service-password").getBytes(StandardCharsets.UTF_8));
   }
 
   private Path writePem(String name, String type, byte[] encoded) throws Exception {

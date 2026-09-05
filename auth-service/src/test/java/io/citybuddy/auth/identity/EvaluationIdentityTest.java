@@ -234,7 +234,24 @@ class EvaluationIdentityTest {
 
     assertThatThrownBy(() -> service.issueToken(HANDLE, "sandbox-1"))
         .isInstanceOf(IllegalStateException.class)
-        .hasMessage("Current signing key is not published");
+        .hasMessageContaining("Exactly one configured current");
+  }
+
+  @Test
+  void tokenIssuanceRejectsMultipleCurrentSigningKeys() {
+    EvaluationPrincipal principal = principal(HANDLE, "provision-key", "PROVISIONED", null, null);
+    when(repository.findEvaluationByHandle(HANDLE)).thenReturn(Optional.of(principal));
+    when(repository.publicKeyMetadata())
+        .thenReturn(
+            List.of(
+                new AuthRepository.KeyMetadata(
+                    "current-key", "CURRENT", NOW.minusSeconds(60), null),
+                new AuthRepository.KeyMetadata(
+                    "other-current", "CURRENT", NOW.minusSeconds(60), null)));
+
+    assertThatThrownBy(() -> service.issueToken(HANDLE, "sandbox-1"))
+        .isInstanceOf(IllegalStateException.class)
+        .hasMessageContaining("Exactly one configured current");
   }
 
   private EvaluationPrincipal principal(

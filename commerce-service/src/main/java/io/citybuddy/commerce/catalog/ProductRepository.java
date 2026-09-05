@@ -4,6 +4,8 @@ import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import java.sql.ResultSet;
 import java.sql.SQLException;
+import java.util.ArrayList;
+import java.util.Comparator;
 import java.util.List;
 import java.util.Optional;
 import java.util.UUID;
@@ -119,6 +121,98 @@ public final class ProductRepository {
           version,
           draft.productId());
     }
+    return recordPublication(draft.productId(), version, draft.published(), eventId);
+  }
+
+  public List<PriceChangeResult> changePrices(List<PriceChange> changes, String currency) {
+    List<PriceChange> ordered =
+        changes.stream().sorted(Comparator.comparing(PriceChange::productId)).toList();
+    List<PriceSnapshot> snapshots = new ArrayList<>();
+    // Lock every product before taking catalog_metadata, also used by single-product publication.
+    for (PriceChange change : ordered) {
+      snapshots.add(
+          jdbc
+              .query(
+                  """
+                  SELECT price_minor, currency, available, publication_state, publication_version
+                  FROM product WHERE product_id = ? FOR UPDATE
+                  """,
+                  (result, row) ->
+                      new PriceSnapshot(
+                          result.getLong("price_minor"),
+                          result.getString("currency"),
+                          result.getBoolean("available"),
+                          result.getString("publication_state"),
+                          result.getLong("publication_version")),
+                  change.productId())
+              .stream()
+              .findFirst()
+              .orElseThrow(() -> rejected(ProductPriceChangeException.Reason.NOT_FOUND, change)));
+    }
+    List<Long> nextVersions = new ArrayList<>();
+    // Business rejections must precede writes so the caller can commit a rejected approval receipt.
+    for (int index = 0; index < ordered.size(); index++) {
+      PriceChange change = ordered.get(index);
+      PriceSnapshot current = snapshots.get(index);
+      if (current.version() != change.expectedVersion()) {
+        throw rejected(ProductPriceChangeException.Reason.VERSION_CONFLICT, change);
+      }
+      if (!"PUBLISHED".equals(current.publicationState()) || !current.available()) {
+        throw rejected(ProductPriceChangeException.Reason.NOT_ORDERABLE, change);
+      }
+      if (!currency.equals(current.currency())) {
+        throw rejected(ProductPriceChangeException.Reason.CURRENCY_MISMATCH, change);
+      }
+      // READ_COMMITTED sees completed activity creation without reversing activity/product locks.
+      if (!jdbc.queryForList(
+              "SELECT activity_id FROM seckill_activity WHERE product_id = ? LIMIT 1",
+              String.class,
+              change.productId())
+          .isEmpty()) {
+        throw rejected(ProductPriceChangeException.Reason.SECKILL_PRODUCT, change);
+      }
+      nextVersions.add(Math.addExact(current.version(), 1));
+    }
+    List<PriceChangeResult> results = new ArrayList<>();
+    for (int index = 0; index < ordered.size(); index++) {
+      PriceChange change = ordered.get(index);
+      PriceSnapshot current = snapshots.get(index);
+      long nextVersion = nextVersions.get(index);
+      int changed =
+          jdbc.update(
+              """
+              UPDATE product SET price_minor = ?, publication_version = ?
+              WHERE product_id = ? AND publication_version = ?
+              """,
+              change.newPriceMinor(),
+              nextVersion,
+              change.productId(),
+              current.version());
+      if (changed != 1) {
+        throw new IllegalStateException("Product changed during its locked price update");
+      }
+      Publication publication =
+          recordPublication(change.productId(), nextVersion, true, UUID.randomUUID());
+      results.add(
+          new PriceChangeResult(
+              change.productId(),
+              current.priceMinor(),
+              change.newPriceMinor(),
+              currency,
+              current.version(),
+              nextVersion,
+              publication.event().eventId()));
+    }
+    return List.copyOf(results);
+  }
+
+  private static ProductPriceChangeException rejected(
+      ProductPriceChangeException.Reason reason, PriceChange change) {
+    return new ProductPriceChangeException(reason, change.productId());
+  }
+
+  private Publication recordPublication(
+      String productId, long version, boolean published, UUID eventId) {
     jdbc.update(
         """
         INSERT INTO catalog_metadata (singleton_id, publication_generation)
@@ -129,10 +223,10 @@ public final class ProductRepository {
     CatalogEvent event =
         new CatalogEvent(
             eventId.toString(),
-            draft.productId(),
+            productId,
             version,
             generation,
-            draft.published() ? "PUBLISHED" : "UNPUBLISHED");
+            published ? "PUBLISHED" : "UNPUBLISHED");
     jdbc.update(
         """
         INSERT INTO commerce_outbox
@@ -143,7 +237,7 @@ public final class ProductRepository {
         event.productId(),
         event.productVersion(),
         eventJson(event));
-    return new Publication(event, draft.published());
+    return new Publication(event, published);
   }
 
   public List<OutboxEvent> pendingOutbox(int limit) {
@@ -229,6 +323,20 @@ public final class ProductRepository {
       long stockQuantity,
       boolean available,
       long publicationVersion) {}
+
+  public record PriceChange(String productId, long expectedVersion, long newPriceMinor) {}
+
+  public record PriceChangeResult(
+      String productId,
+      long oldPriceMinor,
+      long newPriceMinor,
+      String currency,
+      long oldVersion,
+      long newVersion,
+      String eventId) {}
+
+  private record PriceSnapshot(
+      long priceMinor, String currency, boolean available, String publicationState, long version) {}
 
   public record CatalogEvent(
       String eventId,

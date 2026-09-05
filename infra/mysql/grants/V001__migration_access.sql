@@ -46,3 +46,14 @@ GRANT SELECT, INSERT ON commerce_db.faq_publication_command TO 'commerce_app'@'%
 GRANT SELECT, INSERT, UPDATE (state, state_version, consumed_at) ON commerce_db.pending_action TO 'commerce_app'@'%';
 GRANT SELECT, INSERT ON commerce_db.action_receipt TO 'commerce_app'@'%';
 GRANT SELECT, INSERT ON cs_db.action_receipt_projection TO 'agent_app'@'%';
+GRANT CREATE VIEW ON commerce_db.* TO 'commerce_migration'@'%';
+GRANT SELECT, CREATE ON commerce_db.product TO 'commerce_migration'@'%';
+GRANT SELECT, CREATE ON commerce_db.seckill_activity TO 'commerce_migration'@'%';
+GRANT SELECT, CREATE ON commerce_db.standard_order TO 'commerce_migration'@'%';
+GRANT SELECT, CREATE ON commerce_db.seckill_order TO 'commerce_migration'@'%';
+GRANT SELECT, CREATE ON commerce_db.mock_payment_attempt TO 'commerce_migration'@'%';
+GRANT SELECT, CREATE ON commerce_db.merchant_paid_orders TO 'commerce_migration'@'%';
+GRANT SELECT, INSERT, UPDATE ON commerce_db.merchant_price_draft TO 'commerce_app'@'%';
+GRANT SELECT ON commerce_db.merchant_products TO 'commerce_app'@'%';
+GRANT SELECT ON commerce_db.merchant_paid_orders TO 'commerce_app'@'%';
+GRANT SELECT ON commerce_db.merchant_daily_sales TO 'commerce_app'@'%';

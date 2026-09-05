@@ -31,8 +31,7 @@ public final class SeckillTimeoutDispatchService {
 
   private DispatchBatch dispatchOnce(Instant activationCutoff) {
     List<SeckillOrderRepository.OrderRecord> batch =
-        orders.findPendingTimeoutDispatches(
-            activationCutoff, properties.maximumDispatchAttempts(), properties.dispatchBatchSize());
+        orders.findRecoverableTimeoutDispatches(activationCutoff, properties.dispatchBatchSize());
     int sent = 0;
     int failed = 0;
     for (SeckillOrderRepository.OrderRecord order : batch) {
@@ -40,8 +39,7 @@ public final class SeckillTimeoutDispatchService {
       try {
         brokerMessageId = publisher.send(SeckillTimeoutMessage.from(order));
       } catch (ClientException exception) {
-        orders.recordTimeoutDispatchFailure(
-            order, properties.maximumDispatchAttempts(), failure(exception));
+        orders.recordTimeoutDispatchFailure(order, failure(exception));
         failed++;
         continue;
       }

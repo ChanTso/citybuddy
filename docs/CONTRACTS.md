@@ -11,6 +11,41 @@ Historical development slices and route decisions are archived under [docs/archi
 they explain provenance but do not define current behavior or process. Verified engineering
 pitfalls are collected in [docs/LESSONS.md](LESSONS.md).
 
+## Merchant analysis and approved price changes
+
+The merchant API is enabled with `citybuddy.merchant.enabled=true`, alongside catalog and OBO
+identity. ShopMate owns its operator-bound sessions. Auth accepts the `merchant-agent` service
+identity only with a direct user holding `merchant:session:create`, issuing one exact read,
+prepare, draft-read or cancel scope. Commerce endpoints require that actor and a matching
+`X-Merchant-Session-Id`; the customer-support actor cannot access them. Auth does not query an
+agent's session database.
+
+`POST /internal/merchant/price-drafts` snapshots the authoritative product price and version for
+one to three products. Its operator/session/idempotency key names an immutable intent. It does
+not change product prices. Only a direct user with `merchant:price:apply` can approve the draft
+through `POST /api/merchant/price-drafts/{draftId}/apply`, and the user must own that draft. An OBO
+token or an approval statement in chat cannot substitute for this direct request.
+
+Apply locks the draft and then all products in sorted ID order. The transaction uses READ
+COMMITTED and checks activity association after taking product locks, without acquiring an
+oppositely ordered activity lock. Products associated with any seckill activity are ineligible.
+All versions and conditions are checked before writes; only price and publication version change.
+The same transaction advances catalog generation, writes each `PRODUCT_PUBLICATION_CHANGED`
+event, and persists the APPLIED receipt. A business conflict records REJECTED without product
+writes. Cancellation records CANCELLED. Repeated approval returns the stored terminal result.
+Database or unexpected failures roll back the complete transaction rather than becoming a
+successful business rejection.
+
+The three `merchant_*` reporting views expose catalog context and historical paid
+order facts, with no user identities. Reporting connections use UTC and a bounded query timeout.
+Analysis users have SELECT only on the views. Paid amount is gross before refunds, grouped by
+currency and payment-success time in a half-open interval; current catalog prices never rewrite
+historical sales. The deterministic fixture generator is `scripts/seed_merchant_fixture.py`.
+
+Outbox completion is event-type specific: product and FAQ events have configured publishers.
+Order and refund outbox records are retained transaction facts, not a promise that a worker
+publishes every PENDING row. Backlog measurements must select the relevant delivery mechanism.
+
 <a id="contracts-project-context"></a>
 
 ## 1. System context and current capabilities
@@ -153,16 +188,16 @@ When two stores disagree, resolve the conflict in this order:
 - Authentication failure is never converted into an anonymous business request.
 - Missing audience, scope, actor, owner, session, or required sandbox context rejects; it does not
   fall back to a broader query.
-- Production rejects `X-Eval-Sandbox-Id` and does not load `/api/eval/*` or evidence routes.
+- Production identity and protected tool boundaries reject `X-Eval-Sandbox-Id`; production does
+  not load `/api/eval/*` or evidence routes. Public health endpoints do not authenticate that header.
 - Evaluation requests require both management authentication and sandbox-bound user identity for
   black-box chat. The management credential is not a substitute for a user JWT.
 - SQL repositories, batch updates, deletes, and asynchronous consumers that participate in
   evaluation are covered by tests proving sandbox filtering. An absent sandbox context in an
   evaluation path fails before SQL mutation.
-- Before model calls, personal data is masked. Any reversible mapping is session-scoped,
-  short-lived, and excluded from logs. ToolAdapter restores only fields explicitly allowed by that
-  tool; final output does not automatically restore every masked value. Stable business
-  identifiers needed for tool use follow their explicit ToolSpec policy.
+- Tool inputs and outputs follow their explicit allowlists and bounded-view policies. A reversible
+  personal-data masking layer is not implemented; callers must not assume that arbitrary text is
+  anonymized before a model request.
 - Tool results are stored server-side in full only where evidence policy allows. The model receives
   a bounded view, and SSE receives a smaller allowlisted view.
 - Secrets are injected at runtime, excluded from logs, absent from committed examples, and scanned
@@ -382,6 +417,12 @@ not by treating the product cache-invalidation consumer as a knowledge-indexer f
   activity-user uniqueness key. A positive stock shortfall or an order held by another reservation
   on that key records terminal `UNFULFILLED` with the original `ADMITTED` decision, projection
   version 3, no durable order, and no activity-quota refund; retries replay that result.
+- Transaction and timeout consumers leave failed messages unacknowledged, process the remaining
+  received messages, then rethrow the first failure with later failures suppressed. The Broker
+  owns delivery retries and dead-letter policy. Timeout dispatch scans both `PENDING` and `FAILED`
+  unpaid orders in bounded batches, prioritizing the lowest failed-send count. A failed activation
+  batch exits the startup cutoff so newer orders remain eligible; a send failure is recoverable
+  until a durable Broker message identity is recorded.
 - The inventory ledger covers seckill order creation and replay idempotency, atomic unpaid
   cancellation with inventory/activity-quota restoration, payment movements, refund movements,
   and full reconciliation.
@@ -426,7 +467,7 @@ not by treating the product cache-invalidation consumer as a knowledge-indexer f
 | Channel | Producer → consumer | Message type | Stable payload/invariant | Failure and replay rule | State |
 |---|---|---|---|---|---|
 | Seckill order transaction | Commerce producer → commerce order consumer | Transaction | Reservation/activity/user ids, event id, version; current production payload carries no sandbox and consumer rejects the reserved sandbox property | Half message is sent after Lua admission and commits only after MySQL `ADMITTED`; pending handoff retains recovery work; checker reads MySQL, and uniqueness plus ledger movements make replay harmless | Implemented |
-| Order/payment timeout | `commerce-service` → commerce timeout consumer | Delay | Order id, expected state/version, due time, event id; current production payload carries no sandbox and consumer rejects the reserved sandbox property | Re-read MySQL on every delivery; conditional cancellation and ledger restoration are idempotent; paid/final orders are not cancelled. Broker group policy owns retry/DLQ. EARLY changes invisibility without ACK. ACK or change-invisibility exceptions leave Broker state unconfirmed; a control failure does not itself stop later received messages, and the first control error is rethrown after the loop unless a later decode, evaluation, or business failure terminates processing first. Any redelivery re-reads MySQL | Implemented |
+| Order/payment timeout | `commerce-service` → commerce timeout consumer | Delay | Order id, expected state/version, due time, event id; current production payload carries no sandbox and consumer rejects the reserved sandbox property | Re-read MySQL on every delivery; conditional cancellation and ledger restoration are idempotent; paid/final orders are not cancelled. Broker group policy owns retry/DLQ. EARLY changes invisibility without ACK. ACK or change-invisibility exceptions leave Broker state unconfirmed; malformed, business and control failures leave their message unacknowledged while later received messages continue. The first failure is rethrown after the batch. Any redelivery re-reads MySQL | Implemented |
 | Commerce domain events | Commerce Outbox publisher → authorized consumers | Normal | Event id, aggregate/version, occurred time; current payloads carry no sandbox and production consumers reject the reserved sandbox property | Mutation and Outbox commit together; consumers are idempotent; late events cannot reverse newer state | Implemented; current product event consumer is commerce cache invalidation |
 
 <a id="contract-sequence-rocketmq"></a>
