@@ -17,12 +17,33 @@ sequence at 800 offered requests/s across 32 already-sold-out activities. Both r
 rejection p99 beyond the pre-registered within-arm variation: **205.7–241.0 ms → 2.66–3.04 ms**,
 with zero dropped iterations in all four windows. Each window used the same fixed 256-request
 preparation; no early seconds were discarded. This is a local rejection-entry result, not
-successful-order capacity. The plentiful-admission comparison remained incomplete, so the
-added admission-path performance cost is unquantified. The report retains every window, CPU
-regression, source revision, raw point stream and the earlier failed experiment.
+successful-order capacity. That session's plentiful-admission comparison remained incomplete.
+A later normal-awake session added one fresh 800/s pair; its lower p50 but higher p99 was mixed,
+so it is not reported as an overall speedup. The report retains every window, CPU regression,
+source revision, raw point stream and the earlier failed experiment.
 
 The tradeoff is to reject in Redis before business MySQL/MQ, while retaining complete admission
 decision inputs in the projection and a pending handoff/recovery path for admitted work.
+
+## Current Redis-first capacity boundaries
+
+The [2026-09-05 sold-out session](results/seckill_rejection_capacity_20260905.md) used a fresh
+32-activity fixture at every point, legally consumed all 3,200 quota units before timing, then
+measured only `409 / EXHAUSTED` responses. At **3,000 offered requests/s**, all 90,000 requests
+completed with zero drops and p99 29.59 ms. At 4,000/s, 117,681 completed, 2,321 were dropped and
+p99 reached 1,188.89 ms, so 3,000/s was the last clean tested point and 4,000/s the first bad point.
+Post-window SQL retained only the 3,200 preparation rows: formal rejections added no reservation,
+order or ledger row. This is sold-out rejection-entry capacity, not successful admission or order
+completion. Commerce and k6 both consumed substantial CPU at 4,000/s, so the run does not isolate
+which side imposed the first limit.
+
+The [positive-admission session](results/seckill_admission_capacity_20260905.md) used fresh
+high-quota fixtures and a 30-second excluded warmup immediately before each 30-second formal
+window. The current Redis-first path was clean at **1,000 offered requests/s** with p99 94.00 ms;
+1,200/s completed without drops or HTTP errors but reached p99 204.05 ms, crossing the registered
+two-times line. These are admission-entry results with an intentional asynchronous backlog, not
+order-completion throughput. One fresh 800/s old/new pair moved p50 6.27→2.35 ms but p99
+34.79→62.73 ms; the mixed single pair does not establish a performance improvement.
 
 ## Environment
 
@@ -34,8 +55,9 @@ decision inputs in the projection and a pending handoff/recovery path for admitt
 | Dependencies | MySQL 8, Redis (commerce), Elasticsearch 8 + IK, RocketMQ 5 Broker/Proxy — all pinned by digest |
 | Generators | k6 v2.2.0 and memtier_benchmark 2.5.1 |
 
-Everything runs on one machine. These are **not** capacity or production claims; the value is
-the shape of the curve and the observed workload boundaries, not the absolute number.
+Everything runs on one machine. Capacity labels in this document mean only the registered local
+workload boundary; none is a production sizing or SLO claim. The value is the shape of the curve
+and the observed workload boundaries, not an unqualified absolute number.
 The four-CPU commerce limit is a local fixture choice. The repository contains no production-sizing
 derivation or other rationale for choosing four rather than another share of the eight allocated
 CPUs, so results at that boundary do not establish a production resource requirement.

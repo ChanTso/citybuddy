@@ -1,0 +1,44 @@
+c5af89d5e07fa5a20f0a32b865557fbbbb08aabd
+Sat Sep  5 04:07:31 UTC 2026
+observed_at_utc
+2026-09-05 04:07:31.105248
+state	decision_code	reservation_count
+ORDERED	ADMITTED	3200
+status	timeout_dispatch_state	order_count	first_created_at	first_unpaid_deadline
+UNPAID	SENT	3200	2026-09-05 03:56:14.738344	2026-09-05 04:11:14.733947
+movement_type	ledger_count	SUM(inventory_delta)	SUM(activity_quota_delta)
+SECKILL_ORDER_CREATE	3200	-3200	-3200
+product_id	stock_quantity
+bench-product	1996800
+bench-activity-0 remainingQuota=0 handoff=0
+bench-activity-1 remainingQuota=0 handoff=0
+bench-activity-2 remainingQuota=0 handoff=0
+bench-activity-3 remainingQuota=0 handoff=0
+bench-activity-4 remainingQuota=0 handoff=0
+bench-activity-5 remainingQuota=0 handoff=0
+bench-activity-6 remainingQuota=0 handoff=0
+bench-activity-7 remainingQuota=0 handoff=0
+bench-activity-8 remainingQuota=0 handoff=0
+bench-activity-9 remainingQuota=0 handoff=0
+bench-activity-10 remainingQuota=0 handoff=0
+bench-activity-11 remainingQuota=0 handoff=0
+bench-activity-12 remainingQuota=0 handoff=0
+bench-activity-13 remainingQuota=0 handoff=0
+bench-activity-14 remainingQuota=0 handoff=0
+bench-activity-15 remainingQuota=0 handoff=0
+bench-activity-16 remainingQuota=0 handoff=0
+bench-activity-17 remainingQuota=0 handoff=0
+bench-activity-18 remainingQuota=0 handoff=0
+bench-activity-19 remainingQuota=0 handoff=0
+bench-activity-20 remainingQuota=0 handoff=0
+bench-activity-21 remainingQuota=0 handoff=0
+bench-activity-22 remainingQuota=0 handoff=0
+bench-activity-23 remainingQuota=0 handoff=0
+bench-activity-24 remainingQuota=0 handoff=0
+bench-activity-25 remainingQuota=0 handoff=0
+bench-activity-26 remainingQuota=0 handoff=0
+bench-activity-27 remainingQuota=0 handoff=0
+bench-activity-28 remainingQuota=0 handoff=0
+bench-activity-29 remainingQuota=0 handoff=0
+bench-activity-30 remainingQuota=0 handoff=0
+bench-activity-31 remainingQuota=0 handoff=0

@@ -1,0 +1,51 @@
+citybuddy_commit=c5af89d5e07fa5a20f0a32b865557fbbbb08aabd
+sut_commit=c5af89d5e07fa5a20f0a32b865557fbbbb08aabd
+benchmark_harness_commit=c5af89d5e07fa5a20f0a32b865557fbbbb08aabd
+correlation_boundary=capacityS4-prepare-r60-20260905T0603Z-prepare-
+evidence_role=authoritative_business_truth_sql
+
+SQL:
+SET @boundary = 'capacityS4-prepare-r60-20260905T0603Z-prepare-';
+SELECT 'support_turn_decision' AS evidence,
+       CAST(SUBSTRING(SUBSTRING_INDEX(SUBSTRING(CAST(t.correlation_key AS CHAR),
+         CHAR_LENGTH(@boundary) + 1), '-', 1), 6) AS UNSIGNED) AS rate,
+       t.state, t.outcome, COUNT(*) AS row_count
+FROM cs_db.support_turn t
+WHERE LEFT(CAST(t.correlation_key AS BINARY), OCTET_LENGTH(@boundary))
+      = CAST(@boundary AS BINARY)
+GROUP BY rate, t.state, t.outcome ORDER BY rate;
+SELECT 'commerce_pending_action' AS evidence,
+       CAST(SUBSTRING(SUBSTRING_INDEX(SUBSTRING(CAST(t.correlation_key AS CHAR),
+         CHAR_LENGTH(@boundary) + 1), '-', 1), 6) AS UNSIGNED) AS rate,
+       p.state, COUNT(*) AS row_count
+FROM cs_db.support_turn t JOIN commerce_db.pending_action p ON p.turn_id=t.turn_id
+WHERE LEFT(CAST(t.correlation_key AS BINARY), OCTET_LENGTH(@boundary))
+      = CAST(@boundary AS BINARY)
+GROUP BY rate, p.state ORDER BY rate;
+SELECT 'agent_pending_reference' AS evidence,
+       CAST(SUBSTRING(SUBSTRING_INDEX(SUBSTRING(CAST(t.correlation_key AS CHAR),
+         CHAR_LENGTH(@boundary) + 1), '-', 1), 6) AS UNSIGNED) AS rate,
+       r.state, COUNT(*) AS row_count
+FROM cs_db.support_turn t JOIN cs_db.pending_action_reference r ON r.source_turn_id=t.turn_id
+WHERE LEFT(CAST(t.correlation_key AS BINARY), OCTET_LENGTH(@boundary))
+      = CAST(@boundary AS BINARY)
+GROUP BY rate, r.state ORDER BY rate;
+SELECT 'action_receipt' AS evidence, COUNT(*) AS row_count
+FROM commerce_db.action_receipt a
+JOIN commerce_db.pending_action p USING (pending_action_id)
+JOIN cs_db.support_turn t ON t.turn_id=p.turn_id
+WHERE LEFT(CAST(t.correlation_key AS BINARY), OCTET_LENGTH(@boundary))
+      = CAST(@boundary AS BINARY);
+
+RAW OUTPUT:
+evidence	rate	state	outcome	row_count
+support_turn_decision	5	COMPLETED	action_pending	151
+support_turn_decision	60	COMPLETED	action_pending	1801
+evidence	rate	state	row_count
+commerce_pending_action	5	PREPARED	151
+commerce_pending_action	60	PREPARED	1801
+evidence	rate	state	row_count
+agent_pending_reference	5	PENDING	151
+agent_pending_reference	60	PENDING	1801
+evidence	row_count
+action_receipt	0

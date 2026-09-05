@@ -1,5 +1,38 @@
 # Agent workload latency
 
+## Measured local capacity boundary at c5af89d
+
+Sessions 3 and 4 measured full commit `c5af89d5e07fa5a20f0a32b865557fbbbb08aabd`
+as one combined local configuration: four Agent workers, the shared outbound HTTP-client layout,
+attempt budget 16, MySQL `max_connections=1000`, and the local deterministic model fixture. Each
+classification below uses a 30-second formal target step.
+
+| Path | Last clean tested point | First bad tested point | Registered boundary | Evidence |
+| --- | ---: | ---: | --- | --- |
+| Retrieval | 90 requests/s; p99 59.123500 ms | 120 requests/s; p99 152.306167 ms | Both points served every started request with zero nonserved, dropped, interrupted, 5xx, or error outcomes; 120 was bad because its p99 exceeded twice the adjacent clean p99 (118.247000 ms). | [Session 3](../results/agent_capacity_session3_20260905.md) |
+| Delivery chat/read | 150 requests/s; p99 39.877125 ms | 200 requests/s; p99 1185.239417 ms | Both points served every started request with zero nonserved, dropped, interrupted, 5xx, or error outcomes; 200 was bad because its p99 exceeded twice the adjacent clean p99 (79.754250 ms). | [Session 3](../results/agent_capacity_session3_20260905.md) |
+| Refund prepare | 60 requests/s; p99 34.582250 ms | 90 requests/s; p99 227.595376 ms | At 90, 2681 of 2701 started requests produced `PREPARED` pending actions; the other 20 persisted as `FAILED / agent_execution_failed` support turns. Drops, interruptions, and 5xx remained zero. Its p99 also exceeded twice the adjacent clean p99 (69.164500 ms). | [Session 4](../results/agent_capacity_session4_prepare_20260905.md) |
+
+These are adjacent-tested, 30-second local boundaries, not sustained or production limits. The
+sessions varied the configuration as a bundle, so they do not isolate the effect of worker count,
+HTTP-client reuse, MySQL capacity, the earlier TLS work, or generated-credential digests. They do
+not support attributing the boundary movement to any one of those changes.
+
+The current program and benchmark setup default `AGENT_WORKERS` to 4 and default the HTTP-client
+layout to `shared`. The historical worker factorial below compared only one worker with two and
+supports two relative to one at that measured boundary; it neither tested four workers as an
+isolated treatment nor establishes four as optimal. Session 3/4 therefore supplies combined-config
+compatibility evidence for four workers, not an isolated worker-count advantage.
+
+### Real-model normal-task acceptance gate
+
+The [normal-task acceptance attempt](../results/normal_task_acceptance_attempt_20260905.md) stopped
+at the first provider-auth smoke: the real Agent selected primary model `gpt-5.4` but returned
+`provider_denied`; its trace contained no retrieval or reranker event. A later direct diagnosis
+reported `auth_unavailable`. The other two smokes and the 36 formal cases were not run. A/B/C are
+each 0/12 executed and unscored, so the overall 0/36 is an unexecuted provider-auth blocker, not a
+zero quality score.
+
 This document reports the current four-path empty-history baseline and worker × outbound-client
 factorial at `cdbe1cbd40d6463270aa5652151f8330bc38773f`, the formal warm-history comparison at
 `65bb40e7c04bbdcc0b4be22531bb16040af49274`, and the historical three-path measurement of a plain
@@ -464,9 +497,10 @@ the load with zero aggregate drops and zero errors. `2PA-2S` p99 changes sign ac
 three rates, and its ranges all cross zero. Per-authority clients therefore have no consistent
 advantage at two workers. `1PA` was directionally better than `1S`, including fewer aggregate
 drops in every block, but those saturated cells do not isolate latency from their differing
-delivery mixes. The evidence-backed setting for this measured boundary is `AGENT_WORKERS=2` with
-the simpler shared client; the result does not support making per-authority clients the default.
-The program retains its backward-compatible one-worker default when `AGENT_WORKERS` is unset.
+delivery mixes. The evidence-backed setting for this historical measured boundary is
+`AGENT_WORKERS=2` with the simpler shared client; the result does not support making per-authority
+clients the default. It compares two workers only with one and provides no evidence that four
+workers are optimal.
 
 This is a single-host end-to-end layout effect with the deterministic model fixture, not a
 production-capacity claim. The worker result is consistent with a remaining process-local
@@ -1052,7 +1086,7 @@ The next measurement varies worker count and outbound-client ownership independe
 is frozen here; no result is claimed until the fixed schedule below has completed from one
 committed, source-clean SHA.
 
-`AGENT_WORKERS` defaults to `1` when unset or blank and otherwise accepts only an ASCII positive
+`AGENT_WORKERS` defaults to `4` when unset or blank and otherwise accepts only an ASCII positive
 integer. `AGENT_HTTP_CLIENT_LAYOUT` defaults to `shared` when unset or blank and otherwise accepts
 exactly `shared` or `per-authority`. Setup passes both resolved values explicitly into the agent
 container. `shared` means one client per worker. `per-authority` means one client per worker for
@@ -1200,8 +1234,8 @@ numbers of any retried blocks. It contains no achieved measurements and no artif
 
 Run the four default baselines first. This phase performs `BENCH_USERS=10000` base setup, requires
 the untouched MySQL `max_connections` value to be exactly 151, and uses a fresh setup before each
-path with `AGENT_WORKERS` and `AGENT_HTTP_CLIENT_LAYOUT` unset. The observed treatment must resolve
-to one worker and the shared layout.
+path with `AGENT_WORKERS` and `AGENT_HTTP_CLIENT_LAYOUT` unset. On the current program, the observed
+treatment must resolve to four workers and the shared layout.
 
 ```bash
 ./bench/agent/run_worker_http_layout.sh baseline

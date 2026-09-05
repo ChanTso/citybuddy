@@ -1,0 +1,13 @@
+citybuddy_commit=c5af89d5e07fa5a20f0a32b865557fbbbb08aabd
+setup_window_utc=2026-09-05T05:17:00Z/2026-09-05T05:18:05Z
+run_started_at_utc=2026-09-05T05:19:14Z
+run_completed_at_utc=2026-09-05T05:19:50Z
+label=capacityPawake_20260905T045921Z_b1000_c5af89d activities=32 rates=1000 step_seconds=30 gap_seconds=0 nominal_iterations=30000
+fixture_users=60100 fixture_activities=32 fixture_quota=1000000 fixture_stock=2000000 topic_suffix=pcapawake20260905T045921Z-b1000-c5af89d
+docker_cpus=8 docker_memory_bytes=14638391296 commerce_cpu_limit=4
+k6_image=grafana/k6@sha256:5221b620a4f874faff6e32ba597aa667c058391fe4898b1c6f6377f062c6cdec
+
+=== capacityPawake_20260905T045921Z_b1000_c5af89d ===
+ target  nominal     done  dropped  failed  fail %  achieved/s    p50 ms    p95 ms    p99 ms    max ms  decisions
+-----------------------------------------------------------------------------------------------------------------
+   1000    30000    30001        0       0    0.00      1000.0       3.3      33.3      94.0     219.9  ADMITTED=30001

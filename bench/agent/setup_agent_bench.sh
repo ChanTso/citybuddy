@@ -32,7 +32,7 @@ trim_ascii_whitespace() {
 
 AGENT_WORKERS="$(trim_ascii_whitespace "${AGENT_WORKERS:-}")"
 AGENT_HTTP_CLIENT_LAYOUT="$(trim_ascii_whitespace "${AGENT_HTTP_CLIENT_LAYOUT:-}")"
-[ -n "$AGENT_WORKERS" ] || AGENT_WORKERS=1
+[ -n "$AGENT_WORKERS" ] || AGENT_WORKERS=4
 [ -n "$AGENT_HTTP_CLIENT_LAYOUT" ] || AGENT_HTTP_CLIENT_LAYOUT=shared
 run_dir="$repo_root/bench/.run"
 mkdir -p "$run_dir"

@@ -1,0 +1,25 @@
+{
+  "citybuddyCommit": "c5af89d5e07fa5a20f0a32b865557fbbbb08aabd",
+  "observedAtUtc": "2026-09-05T06:37:41Z",
+  "httpStatus": 503,
+  "request": {
+    "method": "POST",
+    "path": "/v1/chat/completions",
+    "model": "gpt-5.4",
+    "temperature": 0,
+    "messageBoundary": "one harmless no-tool response request"
+  },
+  "connectionBoundary": {
+    "base": "same normalized protected CLIPROXY_BASE_URL used for the Agent smoke; value not recorded",
+    "credential": "same protected CLIPROXY_API_KEY used for the Agent smoke; value not recorded"
+  },
+  "response": {
+    "contentType": "application/json",
+    "contentLength": 145,
+    "error": {
+      "message": "auth_unavailable: no auth available (providers=codex, model=gpt-5.4)",
+      "type": "server_error",
+      "code": "internal_server_error"
+    }
+  }
+}

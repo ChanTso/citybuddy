@@ -1,0 +1,12 @@
+c5af89d5e07fa5a20f0a32b865557fbbbb08aabd
+Sat Sep  5 04:24:21 UTC 2026
+observed_at_utc
+2026-09-05 04:24:21.599145
+state	decision_code	reservation_count
+ORDERED	ADMITTED	3200
+status	timeout_dispatch_state	order_count	first_created_at	first_unpaid_deadline
+UNPAID	SENT	3200	2026-09-05 04:12:16.790399	2026-09-05 04:27:16.789409
+movement_type	ledger_count	SUM(inventory_delta)	SUM(activity_quota_delta)
+SECKILL_ORDER_CREATE	3200	-3200	-3200
+product_id	stock_quantity
+bench-product	1996800

@@ -1,0 +1,14 @@
+962693a9f25eb4e0b17d12e6d11eb7e9e8d57d6e
+Sat Sep  5 05:10:32 UTC 2026
+observed_at_utc
+2026-09-05 05:10:32.523166
+state	decision_code	COUNT(*)
+ADMITTED	ADMITTED	47250
+ORDERED	ADMITTED	497
+status	timeout_dispatch_state	COUNT(*)
+UNPAID	SENT	465
+UNPAID	PENDING	32
+movement_type	COUNT(*)	SUM(inventory_delta)	SUM(activity_quota_delta)
+SECKILL_ORDER_CREATE	497	-497	-497
+product_id	stock_quantity
+bench-product	1999492

@@ -13,9 +13,11 @@ no in-memory substitutes and no mocked infrastructure in the integration suite.
 | Boundary | Measured result | Measurement boundary |
 |---|---|---|
 | [Transactional ownership binding](https://github.com/ChanTso/state-eval/tree/main/results/ownership-campaign-v1) | In this fixed 600-trial evaluation, commerce's in-transaction ownership binding reduced unauthorized refund requests observed by independent terminal SQL from 55/300 (18.33%; 95% Wilson CI 14.36%–23.10%) with the binding off to 0/300 (0%; 95% Wilson CI approximately 0%–1.264%) with it on. | 5 phrasings × 2 arms × 60 in 60 balanced randomized blocks (seed `2026083102`); 600/600 planned trials measured, the activation check passed, and operationally inconclusive, interrupted, and extra trial counts were each 0. StateEval `38cdde3aec1c4b8044d535fcdb7a7616dc81722b`; CityBuddy SUT `09130fa3c0209648f98781ff0892c3d07a55e59f`; one operator-attested proxy-exposed `gpt-5.4` alias, not an immutable upstream model pin; two 100-trial calibration runs excluded. |
+| [Redis-first sold-out rejection capacity](bench/results/seckill_rejection_capacity_20260905.md) | The last clean tested point was 3,000 offered requests/s: 90,000/90,000 expected `409 / EXHAUSTED` responses, zero drops, p99 29.59 ms, and no rejection-created MySQL reservation, order or ledger row. At 4,000/s, 2,321 iterations dropped and p99 reached 1,188.89 ms. | Measured commit `c5af89d5e07fa5a20f0a32b865557fbbbb08aabd`; 32 fresh activities per point, quota 100 each, 3,200 legal admissions drained before timing, 30-second formal windows, local Docker 8 CPUs with Commerce limited to 4. This is sold-out rejection-entry capacity, not successful-order capacity; the 4,000/s limiting side was not isolated. |
 | [Seckill reservation — 32-activity spread workload](bench/README.md#shared-activity-lock-result) | The 2026-09-02 spread run offered 800 requests/s and achieved 800.1/s, with p99 70.0 ms, 0 drops and 0 failed requests. Separately, the historical insert-first comparison reduced whole-ladder HTTP 500 responses from 6,202/23,254 to 0/23,256; 6,202 is not an exact deadlock-event count. | Historical measured build `4f40cd2f0159b4c4118b9b3724235a0b3ddbd390`, quiet-healthcheck fixture; one MacBook Pro M4 (10 cores, 24 GB), Docker Desktop (8 CPUs, 14 GB), Commerce requested at 4 CPUs; 32 activities, a 15 s fixed-arrival-rate step, setup excluded. This is not a measurement of the latest main or a production-capacity claim; the older insert-first comparison is a separate experiment. |
 | [Concurrent standard-order creation](bench/results/order_idempotency_parallel_creation_fix.txt) | Four workers created 6,000/6,000 distinct orders with 6,000 matched idempotency rows and outbox events, 0 orphan idempotency rows, and MySQL 1205/1213 counter deltas of 0. | One Apple M4 (10 cores, 24 GB), Docker (8 CPUs, 14 GB), real MySQL 8.4.10; 6,000 unique users and order intents. The 16.9 s fixture window included 6,000 logins using a shared BCrypt cost-4 fixture hash plus `POST /api/orders`; production login uses BCrypt cost 12, so this is not a default-auth performance result. Seeding and service startup were excluded. |
 | [Repeated OBO credential verification](bench/agent/README.md#repeated-obo-service-credential-verification) | At 30 requests/s, the BCrypt cost-12 fixture served 803 requests, dropped 98, had p50 4,139.8 ms, and put auth at 694.42% median container CPU. After rotating that machine identity to a generated 256-bit credential with a client-bound digest, 901/901 requests were served with 0 drops, p50 13.4 ms, and auth at 4.30%. | Paired source-clean commits on one MacBook Pro M4, Docker 8 CPUs, one Agent worker, shared outbound clients, deterministic zero-inference fixture, fresh setup per side, fixed 5→30 requests/s order, one 30-second step per rate. Human passwords and unrotated legacy service identities still execute BCrypt using the cost encoded in each stored hash. This is a local counterfactual, not a capacity claim. |
+| [Current Agent workload boundaries](bench/results/agent_capacity_session3_20260905.md) | With the current combined configuration, retrieval was last clean at 90 turns/s and first bad at 120; chat was last clean at 150 turns/s and first bad at 200. [Refund preparation](bench/results/agent_capacity_session4_prepare_20260905.md) was last clean at 60 turns/s and first bad at 90, where 20 turns were nonserved. | Current main, four workers, shared clients, attempt budget 16, MySQL `max_connections=1000`, local deterministic model and 30-second target steps. These are local combined-configuration entry boundaries, not real-model quality, confirmed-action throughput or single-mechanism gains. |
 
 ```mermaid
 flowchart LR
@@ -250,6 +252,28 @@ implement multiprocess Prometheus aggregation.
 
 ## Measured performance
 
+### Current combined configuration
+
+At measured commit `c5af89d5e07fa5a20f0a32b865557fbbbb08aabd`, the Agent configuration used four
+workers, shared outbound clients, attempt budget 16, MySQL `max_connections=1000`, a local
+deterministic model and 30-second target steps. Retrieval was last clean at 90 turns/s (p99
+59.12 ms) and first bad at 120/s (p99 152.31 ms). Chat was last clean at 150/s (p99 39.88 ms)
+and first bad at 200/s (p99 1,185.24 ms). Refund preparation was last clean at 60/s (p99
+34.58 ms) and first bad at 90/s (p99 227.60 ms and 20 nonserved turns). The
+[retrieval/chat](bench/results/agent_capacity_session3_20260905.md) and
+[preparation](bench/results/agent_capacity_session4_prepare_20260905.md) reports retain the raw
+bundles and stopping rules. These results describe the configuration as a whole; they do not
+attribute capacity to TLS reuse, credential verification, worker count or MySQL configuration
+individually, and the fixture does not measure real-model answer quality.
+
+The runtime now defaults to four workers with shared clients, matching this measured deployment
+shape. The earlier controlled factorial established that two workers outperformed one at its
+boundary but did not test four; the current capacity session measured four without claiming it is
+the optimum. Each worker retains process-local metrics and breaker state, so a single Prometheus
+scrape is not service-wide aggregation.
+
+### Historical one-worker baseline
+
 Local post-memory, empty-history, first-turn latency for the four support-agent workloads at
 `cdbe1cbd40d6463270aa5652151f8330bc38773f`. The deterministic model fixture holds inference at
 zero, so the numbers cover CityBuddy orchestration only. Each workload used a fresh fixture on an
@@ -279,8 +303,9 @@ cells saturated above 60 requests/s and recorded 3,863 aggregate drops. At 90 re
 four-block median finished-rate gain was 13.75 requests/s for `2S-1S` and 12.50 requests/s for
 `2PA-1PA`. The fully served `2PA-2S` p99 contrast changed sign across blocks at every rate, so the
 experiment supports two workers but not per-authority clients; the runtime keeps the simpler
-shared layout. The measured recommendation is `AGENT_WORKERS=2`; the program still defaults to one
-worker when the setting is absent. The [method, per-cell rows, planned contrasts, and raw bundles](bench/agent/README.md#worker--outbound-client-factorial-at-cdbe1cb)
+shared layout. The measured recommendation within that factorial was `AGENT_WORKERS=2`; the
+current runtime defaults to four based on the later combined-configuration capacity run, not on a
+four-versus-two causal comparison. The [method, per-cell rows, planned contrasts, and raw bundles](bench/agent/README.md#worker--outbound-client-factorial-at-cdbe1cb)
 state the single-host boundary and the aggregate-only k6 drop limitation.
 
 The earlier paired measurement found most of the agent's CPU going on work it threw away — a fresh
@@ -330,6 +355,12 @@ CityBuddy's checked-in demo, integration, and performance paths use deterministi
 require no model-provider credentials; their latency figures exclude inference by construction.
 The runtime accepts an external OpenAI-compatible proxy, and StateEval uses that boundary for
 real-model trials.
+
+The [2026-09-05 normal-task acceptance attempt](bench/results/normal_task_acceptance_attempt_20260905.md)
+stopped at its first grounded smoke after the configured model route returned `provider_denied`;
+a later direct probe reported no available upstream authentication. None of the planned 36 formal
+tasks was run or scored, so the attempt supplies no normal-task quality result and is not included
+in performance or accuracy claims.
 
 Knowledge retrieval combines BM25 with an 8-dimensional deterministic vector placeholder and RRF
 fusion before reranking. This exercises the retrieval path; it does not validate learned semantic

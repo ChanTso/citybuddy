@@ -1,0 +1,13 @@
+citybuddy_commit=c5af89d5e07fa5a20f0a32b865557fbbbb08aabd
+observation_utc=2026-09-04T17:19:00Z
+source_command=pmset -g log (selected raw power-transition lines; local timezone +0800)
+2026-09-05 00:11:00 +0800 Sleep               	Entering Sleep state due to 'Clamshell Sleep':TCPKeepAlive=active Using AC (Charge:80%) 30 secs
+2026-09-05 00:12:16 +0800 Sleep               	Entering Sleep state due to 'Maintenance Sleep':TCPKeepAlive=active Using AC (Charge:80%) 1034 secs
+2026-09-05 00:29:30 +0800 DarkWake            	DarkWake from Deep Idle [CDNPB] : due to NUB.SPMI0.SW3 nub-spmi0.0x02 rtc/SleepService Using AC (Charge:80%) 1451 secs
+2026-09-05 00:53:41 +0800 Sleep               	Entering Sleep state due to 'Dark Wake Thermal Emergency':TCPKeepAlive=active Using AC (Charge:80%) 936 secs
+2026-09-05 01:09:17 +0800 DarkWake            	DarkWake from Deep Idle [CDNPB] : due to NUB.SPMI0.SW3 nub-spmi0.0x02 rtc/SleepService Using AC (Charge:80%)
+source_command=ioreg -r -k AppleClamshellState -d 4 (selected properties)
+  |   "AppleClamshellCausesSleep" = No
+  |   "AppleClamshellState" = Yes
+interpretation=The recorded 16:53:41-17:09:17 UTC sleep interval overlaps the aborted 2000/s setup and both token expirations. It is not evidence of slow login throughput or a service capacity stop. The 1500/s formal window preceded that sleep transition but ran during the recorded dark-wake period; preserve raw observations without promoting it to a normal-awake capacity claim.
+operator_action=Further benchmark load paused. Temporary caffeinate -is -t 21600 was started before the detailed thermal transition was read and stopped immediately after the transition was confirmed; no persistent power settings changed and no thermal protection was bypassed.

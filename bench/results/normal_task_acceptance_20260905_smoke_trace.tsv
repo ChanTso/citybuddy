@@ -1,0 +1,12 @@
+citybuddy_commit	c5af89d5e07fa5a20f0a32b865557fbbbb08aabd
+turn_id	trace_id	session_id	user_subject	correlation_key	state	outcome	failure_code
+43ddabd2-37fc-4bf6-a583-6a431341cdf2	b3c60217-35eb-4a6e-894b-cc3dbee0bc2a	Nr0MDckecX_rfTzcvS0UXx5JHXJfIG1K23NaYrxUdUU	demo-user	normal-v1-smoke-A-question	COMPLETED	provider_denied	NULL
+turn_id	trace_id	sequence	event_type	payload_json
+43ddabd2-37fc-4bf6-a583-6a431341cdf2	b3c60217-35eb-4a6e-894b-cc3dbee0bc2a	1	USER_INPUT	{"accepted": true}
+43ddabd2-37fc-4bf6-a583-6a431341cdf2	b3c60217-35eb-4a6e-894b-cc3dbee0bc2a	2	CONTEXT_WINDOW	{"tokenBudget": 6144, "policyVersion": "session-context-v1", "includedTokens": 0, "tokenEstimator": "utf8-bytes-v1", "tokenWatermark": "low", "candidateTokens": 0, "includedTurnIds": [], "loadedTurnCount": 0, "olderTurnsAvailable": false, "omittedLoadedTurnCount": 0}
+43ddabd2-37fc-4bf6-a583-6a431341cdf2	b3c60217-35eb-4a6e-894b-cc3dbee0bc2a	3	ROUTING_DECISION	{"tier": "standard", "signals": {"chitchat": false, "refundContext": false, "refundContextSource": "none"}, "toolProfile": "read", "attemptLimit": 16, "sessionPropagationEnabled": true}
+43ddabd2-37fc-4bf6-a583-6a431341cdf2	b3c60217-35eb-4a6e-894b-cc3dbee0bc2a	4	BUDGET_CHARGED	{"kind": "model_http", "limit": 16, "target": "primary", "attempt": 1}
+43ddabd2-37fc-4bf6-a583-6a431341cdf2	b3c60217-35eb-4a6e-894b-cc3dbee0bc2a	5	MODEL_OUTCOME	{"alias": "gpt-5.4", "result": "denied", "provider": "primary"}
+43ddabd2-37fc-4bf6-a583-6a431341cdf2	b3c60217-35eb-4a6e-894b-cc3dbee0bc2a	6	AGENT_OUTCOME	{"outcome": "provider_denied"}
+43ddabd2-37fc-4bf6-a583-6a431341cdf2	b3c60217-35eb-4a6e-894b-cc3dbee0bc2a	7	ASSISTANT_RESPONSE	{"outcome": "provider_denied"}
+43ddabd2-37fc-4bf6-a583-6a431341cdf2	b3c60217-35eb-4a6e-894b-cc3dbee0bc2a	8	TURN_COMPLETED	{"outcome": "provider_denied"}

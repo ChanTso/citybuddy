@@ -1,0 +1,6 @@
+{
+  "citybuddyCommit": "c5af89d5e07fa5a20f0a32b865557fbbbb08aabd",
+  "status": 200,
+  "elapsedSeconds": 4.2601905829505995,
+  "body": "{\"conversationId\":\"a234e3b1-b421-46f6-a91d-35605ff69be8\",\"traceId\":\"b3c60217-35eb-4a6e-894b-cc3dbee0bc2a\",\"turnId\":\"43ddabd2-37fc-4bf6-a583-6a431341cdf2\",\"reply\":\"I could not complete this request through the approved model route.\",\"outcome\":\"provider_denied\",\"citations\":[],\"receiptId\":null}"
+}

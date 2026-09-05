@@ -1,0 +1,13 @@
+citybuddy_commit=c5af89d5e07fa5a20f0a32b865557fbbbb08aabd
+setup_window_utc=2026-09-05T03:54:47Z/2026-09-05T03:55:44Z
+run_started_at_utc=2026-09-05T04:07:54Z
+run_completed_at_utc=2026-09-05T04:08:30Z
+label=capacityEawake_20260905T035120Z_c5af89d_r1500retry1 activities=32 rates=1500 step_seconds=30 gap_seconds=0 nominal_iterations=45000
+fixture_users=48600 fixture_activities=32 fixture_quota=100 fixture_stock=2000000 topic_suffix=ecapawake20260905T035120Z-r1500retry1-c5af89d
+docker_cpus=8 docker_memory_bytes=14638391296 commerce_cpu_limit=4
+k6_image=grafana/k6@sha256:5221b620a4f874faff6e32ba597aa667c058391fe4898b1c6f6377f062c6cdec
+
+=== capacityEawake_20260905T035120Z_c5af89d_r1500retry1 ===
+ target  nominal     done  dropped  failed  fail %  achieved/s    p50 ms    p95 ms    p99 ms    max ms  decisions
+-----------------------------------------------------------------------------------------------------------------
+   1500    45000    44999        0   44999  100.00      1500.0       0.4      26.9     329.9     670.1  EXHAUSTED=44999

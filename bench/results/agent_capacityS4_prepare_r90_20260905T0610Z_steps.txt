@@ -1,0 +1,8 @@
+citybuddy_commit=c5af89d5e07fa5a20f0a32b865557fbbbb08aabd
+sut_commit=c5af89d5e07fa5a20f0a32b865557fbbbb08aabd
+benchmark_harness_commit=c5af89d5e07fa5a20f0a32b865557fbbbb08aabd
+
+=== capacityS4_prepare_r90_20260905T0610Z (30s steps) ===
+rate nominal_offered started finished served nonserved dropped interrupted 5xx errors finished/s p50_ms p95_ms p99_ms max_ms
+5 150 150 150 150 0 0 0 0 0 5.00 17.3 22.5 32.8 55.3
+90 2700 2701 2701 2681 20 0 0 0 20 90.03 21.2 70.5 227.6 354.2

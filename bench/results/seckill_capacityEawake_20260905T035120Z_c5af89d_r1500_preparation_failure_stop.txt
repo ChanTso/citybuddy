@@ -1,0 +1,13 @@
+citybuddy_commit=c5af89d5e07fa5a20f0a32b865557fbbbb08aabd
+session_started_at_utc=2026-09-05T03:51:20Z
+setup_attempt_started_at_utc=2026-09-05T03:51:49Z
+setup_attempt_stopped_at_utc=2026-09-05T03:52:30Z
+candidate_rate_per_second=1500
+formal_started=false
+preparation_http_started=false
+bench_env_created=false
+failure_stage=commerce_service_startup
+failure=RocketMQ CODE 17: No topic route info in name server for cb060-seckill-transaction-ecapawake20260905T035120Z-r1500-c5af89d
+broker_preflight_failure=RocketMQ CODE 17: No topic route info in name server for cb013-readiness
+capacity_interpretation=preparation failure; no clean or bad formal capacity point
+raw_operator_log=bench/.run/capacity-e-awake-20260905T035120Z/r1500-setup.log

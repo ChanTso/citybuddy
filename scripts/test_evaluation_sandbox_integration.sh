@@ -467,6 +467,7 @@ start_agent() {
   local log_offset
   port_log_offset log_offset "$tmp_dir/agent.log"
   AGENT_PORT=0 \
+  AGENT_WORKERS=1 \
   AGENT_IDENTITY_ENABLED=true \
   AGENT_EVALUATION_ENABLED="$evaluation_enabled" \
   AGENT_EVALUATION_SESSION_PROPAGATION_ENABLED="$evaluation_session_propagation_enabled" \

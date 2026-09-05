@@ -1,0 +1,8 @@
+citybuddy_commit=c5af89d5e07fa5a20f0a32b865557fbbbb08aabd
+sut_commit=c5af89d5e07fa5a20f0a32b865557fbbbb08aabd
+benchmark_harness_commit=c5af89d5e07fa5a20f0a32b865557fbbbb08aabd
+
+=== capacityS3_chat_r150_20260905T0550Z (30s steps) ===
+rate nominal_offered started finished served nonserved dropped interrupted 5xx errors finished/s p50_ms p95_ms p99_ms max_ms
+5 150 151 151 151 0 0 0 0 0 5.03 9.4 12.9 14.3 19.8
+150 4500 4501 4501 4501 0 0 0 0 0 150.03 8.1 22.5 39.9 129.1
