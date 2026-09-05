@@ -203,7 +203,7 @@ mysql_query bootstrap_admin "$bootstrap_password" commerce_db "
   GRANT SELECT ON commerce_db.merchant_paid_orders TO 'merchant_view_test'@'%';
   GRANT SELECT ON commerce_db.merchant_daily_sales TO 'merchant_view_test'@'%';
   SET ROLE NONE;"
-uv run python scripts/seed_merchant_fixture.py --as-of 2026-09-05 >"$tmp_dir/merchant-fixture.sql"
+python3 scripts/seed_merchant_fixture.py --as-of 2026-09-05 >"$tmp_dir/merchant-fixture.sql"
 for fixture_pass in 1 2; do
   "${compose[@]}" exec -T -e MYSQL_PWD="$bootstrap_password" mysql \
     mysql --protocol=socket --user=root --database=commerce_db <"$tmp_dir/merchant-fixture.sql"
