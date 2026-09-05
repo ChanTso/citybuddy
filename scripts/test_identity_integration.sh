@@ -491,6 +491,7 @@ assert_status 200 "second active principal login" \
 other_token="$(uv run python scripts/read_json_field.py "$tmp_dir/http-response.json" accessToken)"
 
 AGENT_PORT=0 \
+AGENT_WORKERS=1 \
 AGENT_IDENTITY_ENABLED=true \
 CITYBUDDY_ENVIRONMENT=integration \
 IDENTITY_ISSUER=https://identity.citybuddy.test \
@@ -970,6 +971,7 @@ budget_trace="$(uv run python scripts/read_json_field.py "$tmp_dir/http-response
 test "$(mysql_query agent_app "$agent_app_password" cs_db "SELECT COUNT(*) FROM support_event WHERE trace_id = '$budget_trace' AND event_type = 'BUDGET_CHARGED'")" = 8
 
 AGENT_PORT=0 \
+AGENT_WORKERS=1 \
 AGENT_IDENTITY_ENABLED=true \
 CITYBUDDY_ENVIRONMENT=integration \
 IDENTITY_ISSUER=https://identity.citybuddy.test \
