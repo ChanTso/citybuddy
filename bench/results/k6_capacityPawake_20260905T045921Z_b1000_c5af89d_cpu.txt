@@ -1,0 +1,38 @@
+citybuddy_commit=c5af89d5e07fa5a20f0a32b865557fbbbb08aabd
+setup_window_utc=2026-09-05T05:17:00Z/2026-09-05T05:18:05Z
+run_started_at_utc=2026-09-05T05:19:14Z
+label=capacityPawake_20260905T045921Z_b1000_c5af89d activities=32 rates=1000 step_seconds=30 gap_seconds=0 nominal_iterations=30000
+fixture_users=60100 fixture_activities=32 fixture_quota=1000000 fixture_stock=2000000 topic_suffix=pcapawake20260905T045921Z-b1000-c5af89d
+docker_cpus=8 docker_memory_bytes=14638391296 commerce_cpu_limit=4
+k6_image=grafana/k6@sha256:5221b620a4f874faff6e32ba597aa667c058391fe4898b1c6f6377f062c6cdec
+
+05:19:14 citybuddy-bench-k6 cpu=76.91% mem=346.9MiB / 13.63GiB
+05:19:14 citybuddy-bench-commerce cpu=91.13% mem=587.7MiB / 13.63GiB
+05:19:14 citybuddy-mysql-1 cpu=88.63% mem=1.208GiB / 13.63GiB
+05:19:14 citybuddy-redis-commerce-1 cpu=8.29% mem=79.69MiB / 13.63GiB
+05:19:19 citybuddy-bench-k6 cpu=62.03% mem=427MiB / 13.63GiB
+05:19:19 citybuddy-bench-commerce cpu=83.32% mem=589.2MiB / 13.63GiB
+05:19:19 citybuddy-mysql-1 cpu=43.83% mem=1.208GiB / 13.63GiB
+05:19:19 citybuddy-redis-commerce-1 cpu=15.50% mem=90.58MiB / 13.63GiB
+05:19:24 citybuddy-bench-k6 cpu=44.87% mem=479.4MiB / 13.63GiB
+05:19:24 citybuddy-bench-commerce cpu=75.80% mem=589.3MiB / 13.63GiB
+05:19:24 citybuddy-mysql-1 cpu=52.63% mem=1.208GiB / 13.63GiB
+05:19:24 citybuddy-redis-commerce-1 cpu=12.23% mem=96.53MiB / 13.63GiB
+05:19:29 citybuddy-bench-k6 cpu=52.29% mem=486.4MiB / 13.63GiB
+05:19:29 citybuddy-bench-commerce cpu=82.07% mem=589.6MiB / 13.63GiB
+05:19:29 citybuddy-mysql-1 cpu=41.86% mem=1.209GiB / 13.63GiB
+05:19:29 citybuddy-redis-commerce-1 cpu=11.78% mem=102.1MiB / 13.63GiB
+05:19:35 citybuddy-bench-k6 cpu=39.58% mem=486.6MiB / 13.63GiB
+05:19:35 citybuddy-bench-commerce cpu=81.65% mem=589.1MiB / 13.63GiB
+05:19:35 citybuddy-mysql-1 cpu=43.94% mem=1.21GiB / 13.63GiB
+05:19:35 citybuddy-redis-commerce-1 cpu=11.59% mem=111.4MiB / 13.63GiB
+05:19:40 citybuddy-bench-k6 cpu=51.69% mem=487.1MiB / 13.63GiB
+05:19:40 citybuddy-bench-commerce cpu=80.00% mem=588.7MiB / 13.63GiB
+05:19:40 citybuddy-mysql-1 cpu=48.05% mem=1.209GiB / 13.63GiB
+05:19:40 citybuddy-redis-commerce-1 cpu=12.01% mem=119.6MiB / 13.63GiB
+05:19:45 citybuddy-bench-k6 cpu=0.00% mem=0B / 0B
+05:19:45 citybuddy-bench-commerce cpu=7.08% mem=585.9MiB / 13.63GiB
+05:19:45 citybuddy-mysql-1 cpu=4.71% mem=1.21GiB / 13.63GiB
+05:19:45 citybuddy-redis-commerce-1 cpu=1.60% mem=124.9MiB / 13.63GiB
+
+run_completed_at_utc=2026-09-05T05:19:50Z

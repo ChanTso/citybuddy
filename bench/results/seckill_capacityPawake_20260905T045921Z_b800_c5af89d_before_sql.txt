@@ -1,0 +1,8 @@
+c5af89d5e07fa5a20f0a32b865557fbbbb08aabd
+Sat Sep  5 05:14:00 UTC 2026
+observed_at_utc
+2026-09-05 05:14:00.387183
+state	decision_code	COUNT(*)
+ADMITTED	ADMITTED	1
+product_id	stock_quantity
+bench-product	1999999

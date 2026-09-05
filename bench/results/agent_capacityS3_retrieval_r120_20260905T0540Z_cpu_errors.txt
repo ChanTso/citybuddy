@@ -1,0 +1,4 @@
+citybuddy_commit=c5af89d5e07fa5a20f0a32b865557fbbbb08aabd
+sut_commit=c5af89d5e07fa5a20f0a32b865557fbbbb08aabd
+benchmark_harness_commit=c5af89d5e07fa5a20f0a32b865557fbbbb08aabd
+columns=docker_stats_stderr

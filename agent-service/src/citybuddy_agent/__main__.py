@@ -101,7 +101,7 @@ def main() -> None:
         host="127.0.0.1",
         port=int(os.environ.get("AGENT_PORT", "8001")),
         factory=True,
-        workers=_positive_ascii_integer("AGENT_WORKERS", default=1),
+        workers=_positive_ascii_integer("AGENT_WORKERS", default=4),
     )
 
 

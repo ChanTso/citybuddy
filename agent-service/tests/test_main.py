@@ -9,7 +9,7 @@ from citybuddy_agent.application import AgentSettings
 
 
 @pytest.mark.parametrize("value", (None, "", "   "))
-def test_workers_default_to_one_when_unset_or_blank(
+def test_workers_default_to_four_when_unset_or_blank(
     monkeypatch: pytest.MonkeyPatch, value: str | None
 ) -> None:
     if value is None:
@@ -17,7 +17,7 @@ def test_workers_default_to_one_when_unset_or_blank(
     else:
         monkeypatch.setenv("AGENT_WORKERS", value)
 
-    assert main_module._positive_ascii_integer("AGENT_WORKERS", default=1) == 1
+    assert main_module._positive_ascii_integer("AGENT_WORKERS", default=4) == 4
 
 
 @pytest.mark.parametrize(("value", "expected"), (("1", 1), ("2", 2), (" 12 ", 12)))
@@ -26,7 +26,7 @@ def test_workers_accept_ascii_positive_integers(
 ) -> None:
     monkeypatch.setenv("AGENT_WORKERS", value)
 
-    assert main_module._positive_ascii_integer("AGENT_WORKERS", default=1) == expected
+    assert main_module._positive_ascii_integer("AGENT_WORKERS", default=4) == expected
 
 
 @pytest.mark.parametrize("value", ("0", "-1", "+1", "1.0", "two", "２", "١"))
@@ -36,7 +36,7 @@ def test_workers_reject_zero_negative_non_integer_and_non_ascii_values(
     monkeypatch.setenv("AGENT_WORKERS", value)
 
     with pytest.raises(ValueError, match="positive ASCII integer"):
-        main_module._positive_ascii_integer("AGENT_WORKERS", default=1)
+        main_module._positive_ascii_integer("AGENT_WORKERS", default=4)
 
 
 @pytest.mark.parametrize(
@@ -112,8 +112,9 @@ def test_evaluation_session_propagation_rejects_other_nonempty_values(
         main_module._settings()
 
 
-def test_main_always_uses_the_zero_argument_factory_and_explicit_workers(
-    monkeypatch: pytest.MonkeyPatch,
+@pytest.mark.parametrize(("value", "expected_workers"), ((None, 4), ("2", 2)))
+def test_main_uses_the_zero_argument_factory_and_resolved_workers(
+    monkeypatch: pytest.MonkeyPatch, value: str | None, expected_workers: int
 ) -> None:
     call: dict[str, Any] = {}
 
@@ -122,7 +123,10 @@ def test_main_always_uses_the_zero_argument_factory_and_explicit_workers(
         call.update(kwargs)
 
     monkeypatch.setattr("citybuddy_agent.__main__.uvicorn.run", run)
-    monkeypatch.setenv("AGENT_WORKERS", "2")
+    if value is None:
+        monkeypatch.delenv("AGENT_WORKERS", raising=False)
+    else:
+        monkeypatch.setenv("AGENT_WORKERS", value)
     monkeypatch.setenv("WEB_CONCURRENCY", "99")
 
     main_module.main()
@@ -132,6 +136,6 @@ def test_main_always_uses_the_zero_argument_factory_and_explicit_workers(
         "host": "127.0.0.1",
         "port": 8001,
         "factory": True,
-        "workers": 2,
+        "workers": expected_workers,
     }
     assert tuple(inspect.signature(main_module.create_runtime_app).parameters) == ()

@@ -1,0 +1,13 @@
+citybuddy_commit=c5af89d5e07fa5a20f0a32b865557fbbbb08aabd
+setup_window_utc=2026-09-05T04:26:04Z/2026-09-05T04:27:23Z
+run_started_at_utc=2026-09-05T04:38:39Z
+run_completed_at_utc=2026-09-05T04:39:45Z
+label=capacityEawake_20260905T035120Z_c5af89d_r3000 activities=32 rates=3000 step_seconds=30 gap_seconds=0 nominal_iterations=90000
+fixture_users=93600 fixture_activities=32 fixture_quota=100 fixture_stock=2000000 topic_suffix=ecapawake20260905T035120Z-r3000-c5af89d
+docker_cpus=8 docker_memory_bytes=14638391296 commerce_cpu_limit=4
+k6_image=grafana/k6@sha256:5221b620a4f874faff6e32ba597aa667c058391fe4898b1c6f6377f062c6cdec
+
+=== capacityEawake_20260905T035120Z_c5af89d_r3000 ===
+ target  nominal     done  dropped  failed  fail %  achieved/s    p50 ms    p95 ms    p99 ms    max ms  decisions
+-----------------------------------------------------------------------------------------------------------------
+   3000    90000    90000        0   90000  100.00      3000.0       0.4       4.9      29.6      95.0  EXHAUSTED=90000

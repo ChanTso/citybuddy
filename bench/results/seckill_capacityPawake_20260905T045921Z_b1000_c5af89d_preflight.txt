@@ -1,0 +1,4 @@
+citybuddy_commit=c5af89d5e07fa5a20f0a32b865557fbbbb08aabd
+observed_at_utc=2026-09-05T05:18:38.643845+00:00
+user_index=60099 fresh_status=201 body={"reservationId":"d4d4b8e1-3e84-4743-8b56-53a184ba163f","activityId":"bench-activity-0","quantity":1,"activityProjectionVersion":1,"state":"ADMITTED","decisionCode":"ADMITTED","projectionVersion":2,"replay":false,"durableOrderCreated":false,"orderId":null}
+user_index=60099 replay_status=200 body={"reservationId":"d4d4b8e1-3e84-4743-8b56-53a184ba163f","activityId":"bench-activity-0","quantity":1,"activityProjectionVersion":1,"state":"ADMITTED","decisionCode":"ADMITTED","projectionVersion":2,"replay":true,"durableOrderCreated":false,"orderId":null}
