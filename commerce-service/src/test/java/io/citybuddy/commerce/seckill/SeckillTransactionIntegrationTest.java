@@ -1217,6 +1217,93 @@ class SeckillTransactionIntegrationTest {
     assertThat(reservationService.hasPendingAdmissionHandoff(activityId)).isFalse();
   }
 
+  @Test
+  @Order(13)
+  void recoveredOrderCanCommitWhileCancellationWaitsToPublishItsProjection() throws Exception {
+    String activityId = "cb061-consumer-overlap";
+    String productId = "cb061-product-consumer-overlap";
+    seedActivity(activityId, productId, SeckillActivityState.ACTIVE, 2, 2);
+    String cancelledReservation =
+        coordinator
+            .submit(
+                USER,
+                activityId,
+                "cb061-consumer-overlap-old",
+                request(Map.of("quantity", 1, "expectedActivityVersion", 1)))
+            .reservationId();
+    consumeUntilOrdered(cancelledReservation);
+    var pending =
+        reservationService.preAdmit(
+            "cb061-consumer-overlap-new-user",
+            activityId,
+            "cb061-consumer-overlap-new",
+            request(Map.of("quantity", 1, "expectedActivityVersion", 1)));
+    recoverHandoff(pending.handoff());
+    forceOrderDueIn(cancelledReservation, Duration.ofSeconds(-1));
+    var oldOrder = orderRepository.findByReservation(cancelledReservation).orElseThrow();
+    CountDownLatch cancellationCommitted = new CountDownLatch(1);
+    CountDownLatch allowProjection = new CountDownLatch(1);
+    TransactionTemplate isolated = new TransactionTemplate(transactionManager);
+    isolated.setPropagationBehavior(TransactionDefinition.PROPAGATION_REQUIRES_NEW);
+    SeckillCancellationService pausedCancellation =
+        new SeckillCancellationService(
+            orderRepository,
+            reservationRepository,
+            activityRepository,
+            admissionStore,
+            (activity, remainingQuota) -> {
+              cancellationCommitted.countDown();
+              try {
+                if (!allowProjection.await(30, TimeUnit.SECONDS)) {
+                  throw new IllegalStateException("Timed out waiting to publish cancellation");
+                }
+              } catch (InterruptedException exception) {
+                Thread.currentThread().interrupt();
+                throw new IllegalStateException(
+                    "Cancellation publication was interrupted", exception);
+              }
+              projections.publish(activity, remainingQuota);
+            },
+            isolated,
+            Clock.systemUTC());
+    CompletableFuture<SeckillCancellationService.CancellationResult> cancellation =
+        CompletableFuture.supplyAsync(
+            () -> pausedCancellation.cancel(SeckillTimeoutMessage.from(oldOrder)));
+    String newReservation = pending.handoff().reservationId();
+    try {
+      assertThat(cancellationCommitted.await(10, TimeUnit.SECONDS)).isTrue();
+      assertThat(redis.hasKey(projections.key(activityId))).isFalse();
+      consumeUntilOrdered(newReservation);
+      assertThat(cancellation.isDone()).isFalse();
+      assertThat(orderStatus(newReservation)).isEqualTo("UNPAID");
+      assertDurableCancelledAndRestored(cancelledReservation, 1);
+    } finally {
+      allowProjection.countDown();
+      assertThat(cancellation.get(10, TimeUnit.SECONDS).outcome())
+          .isEqualTo(SeckillCancellationService.Outcome.CANCELLED);
+    }
+
+    orderService.create(SeckillTransactionMessage.from(pending.handoff()));
+    assertThat(cancellationService.cancel(SeckillTimeoutMessage.from(oldOrder)).outcome())
+        .isEqualTo(SeckillCancellationService.Outcome.ALREADY_CANCELLED);
+    assertCancelledAndRestored(cancelledReservation, 1, 1);
+    assertThat(orderCreateMovementCount(cancelledReservation)).isEqualTo(1);
+    assertThat(orderCreateMovementCount(newReservation)).isEqualTo(1);
+    assertThat(reservationService.hasPendingAdmissionHandoff(activityId)).isFalse();
+    assertThat(
+            jdbc.queryForObject(
+                "SELECT COUNT(*) FROM seckill_order WHERE activity_id = ?",
+                Integer.class,
+                activityId))
+        .isEqualTo(2);
+    assertThat(
+            jdbc.queryForObject(
+                "SELECT SUM(inventory_delta) FROM inventory_ledger WHERE activity_id = ?",
+                Long.class,
+                activityId))
+        .isEqualTo(-1);
+  }
+
   private void recoverHandoff(ReservationAdmissionStore.AdmissionHandoff handoff) {
     redis.opsForZSet().add(ReservationAdmissionStore.HANDOFF_INDEX, handoff.reservationId(), 0);
     resolutionWorker.resolveDueReservations();
