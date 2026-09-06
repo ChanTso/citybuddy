@@ -44,7 +44,7 @@ def test_catalog_contract_exposes_only_authenticated_published_reads() -> None:
         "/internal/shopping/cart",
         "/internal/shopping/cart/items",
         "/internal/shopping/cart/items/{productId}",
-        "/internal/shopping/cart/commands/{commandKey}",
+        "/internal/shopping/cart/commands",
         "/api/shopping/checkouts",
         "/internal/shopping/checkouts/{checkoutId}",
         "/internal/shopping/actions/prepare",

@@ -1131,22 +1131,28 @@ direct checkout requires `citybuddy.orders.enabled`. No new feature switch is in
 
 | Operation | Authority and behavior |
 | --- | --- |
-| `GET /internal/shopping/cart` | `shopping:cart:read`; live SKU state and strong version ETag, such as `"12"` |
+| `GET /internal/shopping/cart` | `shopping:cart:read`; live SKU state, body version and `Cache-Control: no-store`; no response ETag |
 | `POST /internal/shopping/cart/items` | `shopping:cart:write`; required Idempotency-Key, `{productId, quantity}`; quantity is an increment |
 | `PUT /internal/shopping/cart/items/{productId}` | `shopping:cart:write`; required key, `{quantity, expectedCartVersion}`; quantity replaces the line quantity |
-| `DELETE /internal/shopping/cart/items/{productId}` | `shopping:cart:write`; required key and one strong, quoted numeric `If-Match` cart version |
-| `GET /internal/shopping/cart/commands/{commandKey}` | `shopping:cart:read`; only reads the original receipt plus the current cart; unknown and another user's keys both return 404 |
+| `DELETE /internal/shopping/cart/items/{productId}?expectedCartVersion=...` | `shopping:cart:write`; required key and exactly one nonnegative signed-long query version |
+| `GET /internal/shopping/cart/commands?key=...` | `shopping:cart:read`; exactly one key query parameter; only reads the original receipt plus the current cart; unknown and another user's keys both return 404 |
 | `POST /api/shopping/checkouts` | Direct user with the configured order permission (`order:create` by default); required key and complete confirmed quote; OBO cannot approve or create the checkout |
 | `GET /internal/shopping/checkouts/{checkoutId}` | `shopping:orders:read`; owned checkout receipt and authoritative child-order/payment/refund facts; unknown and other users' checkouts both return 404 |
 
 Cart writes return 200. The first checkout commit returns 201; matching replay returns 200.
-Keys are nonblank, at most 128 Java characters, and retain their exact value; URI-encode a
-key used in the command lookup path. A key is bound to the owner and original command.
+Keys are nonblank, at most 128 Java characters, and retain their exact value; encode a
+key as one query-parameter value when looking up its receipt. Slash, question mark and hash
+characters are valid key data, not path or fragment delimiters. A key is bound to the owner and original command.
 Reusing it for another intent returns a conflict. Successful cart mutation, version advance
 and command receipt share one transaction. Receipt replay does not repeat an increment;
 `receipt.appliedVersion` describes that command, while `cart.version` describes the current
 cart. Reading an empty cart or an unknown command does not create a cart root or apply an
 unconfirmed write.
+
+The cart body version protects cart edits; it does not version the live product prices or
+stock in a read response. GET therefore does not issue an ETag or return 304 for
+`If-None-Match`. DELETE uses the explicit query version, and PUT keeps its JSON version;
+HTTP conditional-cache headers are not the business concurrency precondition.
 
 Setting or removing a missing line is an acknowledged no-op; setting does not add a line.
 A no-op records its receipt without advancing the cart version, which may still be zero.

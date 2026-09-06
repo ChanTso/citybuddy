@@ -1447,11 +1447,11 @@
               }
             },
             "headers": {
-              "ETag": {
-                "description": "Strong quoted numeric cart version, for example \"12\".",
+              "Cache-Control": {
+                "description": "Live product price and stock are not versioned by cart.version. This response does not emit ETag or use If-None-Match to return 304.",
                 "schema": {
                   "type": "string",
-                  "pattern": "^\"(0|[1-9][0-9]*)\"$"
+                  "const": "no-store"
                 }
               }
             }
@@ -1790,17 +1790,19 @@
             "description": "Nonblank, exact owner-bound command key. Reuse this value after a timeout; never trim or replace it on retry."
           },
           {
-            "name": "If-Match",
-            "in": "header",
+            "name": "expectedCartVersion",
+            "in": "query",
             "required": true,
             "schema": {
-              "type": "string",
-              "pattern": "^\"(0|[1-9][0-9]*)\"$"
+              "type": "integer",
+              "format": "int64",
+              "minimum": 0,
+              "maximum": 9223372036854775807
             },
-            "description": "Exactly one strong quoted version, bounded to signed int64; weak ETags, lists and * are rejected."
+            "description": "Exactly one decimal nonnegative signed-long cart version. Missing or repeated parameters, signs, fractions and overflow are rejected. HTTP If-Match is not the cart concurrency precondition."
           }
         ],
-        "description": "Requires shopping-agent and the exact shopping:cart:write scope; the authenticated subject owns the cart across sessions. Evaluation tokens/headers are rejected. Remove the line only at the strong If-Match version. Matching key replay does not remove a later re-added line.",
+        "description": "Requires shopping-agent and the exact shopping:cart:write scope; the authenticated subject owns the cart across sessions. Evaluation tokens/headers are rejected. Remove the line only at the explicit expectedCartVersion query version. Matching key replay does not remove a later re-added line.",
         "responses": {
           "200": {
             "description": "Cart result",
@@ -1855,7 +1857,7 @@
         }
       }
     },
-    "/internal/shopping/cart/commands/{commandKey}": {
+    "/internal/shopping/cart/commands": {
       "get": {
         "operationId": "getShoppingCartCommand",
         "security": [
@@ -1885,15 +1887,15 @@
             "description": "Any presence is rejected on production cart and checkout routes."
           },
           {
-            "name": "commandKey",
-            "in": "path",
+            "name": "key",
+            "in": "query",
             "required": true,
             "schema": {
               "type": "string",
               "minLength": 1,
               "maxLength": 128
             },
-            "description": "Original exact command key; URI-encode it in this path."
+            "description": "Exactly one original nonblank command key, retaining its exact value. Use HTTP query-parameter encoding; slash, question mark and hash are valid key data. Missing or repeated key parameters are rejected."
           }
         ],
         "description": "Requires shopping-agent and the exact shopping:cart:read scope; the authenticated subject owns the cart across sessions. Evaluation tokens/headers are rejected. Read-only lookup of the original successful command receipt and the current cart. Unknown and other users' keys both return 404. This request never applies or retries a mutation; an absent receipt does not prove an in-flight request cannot commit.",

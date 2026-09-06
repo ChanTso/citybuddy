@@ -22,6 +22,7 @@ import com.nimbusds.jose.jwk.RSAKey;
 import com.nimbusds.jwt.JWTClaimsSet;
 import com.nimbusds.jwt.SignedJWT;
 import io.citybuddy.commerce.cart.CartModels.CartView;
+import io.citybuddy.commerce.cart.CartModels.Item;
 import io.citybuddy.commerce.cart.CartModels.Receipt;
 import io.citybuddy.commerce.cart.CartModels.Result;
 import io.citybuddy.commerce.identity.OboAuthorizer;
@@ -80,7 +81,8 @@ class CartControllerTest {
     when(service.remove("buyer", "remove-key", "sku", 12)).thenReturn(result);
     mvc.perform(authorized(get("/internal/shopping/cart"), "shopping:cart:read"))
         .andExpect(status().isOk())
-        .andExpect(header().string("ETag", "\"12\""));
+        .andExpect(header().string("Cache-Control", "no-store"))
+        .andExpect(header().doesNotExist("ETag"));
     mvc.perform(
             authorized(post("/internal/shopping/cart/items"), "shopping:cart:write")
                 .header("Idempotency-Key", "add-key")
@@ -97,7 +99,7 @@ class CartControllerTest {
     mvc.perform(
             authorized(delete("/internal/shopping/cart/items/sku"), "shopping:cart:write")
                 .header("Idempotency-Key", "remove-key")
-                .header("If-Match", "\"12\""))
+                .queryParam("expectedCartVersion", "12"))
         .andExpect(status().isOk());
     verify(service).get("buyer");
     verify(service).add("buyer", "add-key", "sku", 2);
@@ -114,16 +116,93 @@ class CartControllerTest {
             true);
     when(service.command("buyer", "done")).thenReturn(Optional.of(receipt));
     when(service.command("buyer", "unknown")).thenReturn(Optional.empty());
-    mvc.perform(authorized(get("/internal/shopping/cart/commands/done"), "shopping:cart:read"))
+    mvc.perform(
+            authorized(
+                get("/internal/shopping/cart/commands").queryParam("key", "done"),
+                "shopping:cart:read"))
         .andExpect(status().isOk())
         .andExpect(jsonPath("$.receipt.appliedVersion").value(1))
         .andExpect(jsonPath("$.cart.version").value(5));
-    mvc.perform(authorized(get("/internal/shopping/cart/commands/unknown"), "shopping:cart:read"))
+    mvc.perform(
+            authorized(
+                get("/internal/shopping/cart/commands").queryParam("key", "unknown"),
+                "shopping:cart:read"))
         .andExpect(status().isNotFound())
         .andExpect(jsonPath("$.category").value("NOT_FOUND"));
     verify(service).command("buyer", "done");
     verify(service).command("buyer", "unknown");
     verifyNoMoreInteractions(service);
+  }
+
+  @Test
+  void queryKeysPreserveSlashQuestionAndFragmentCharactersInReadOnlyRecovery() throws Exception {
+    for (String commandKey :
+        List.of("add/1", "add?variant=blue", "add#chosen", "add/1?variant#chosen")) {
+      Result receipt =
+          new Result(
+              new Receipt(commandKey, "ADD", "sku", 0, 2, 1),
+              new CartView(5, null, 0L, false, List.of()),
+              true);
+      when(service.command("buyer", commandKey)).thenReturn(Optional.of(receipt));
+      mvc.perform(
+              authorized(
+                  get("/internal/shopping/cart/commands").queryParam("key", commandKey),
+                  "shopping:cart:read"))
+          .andExpect(status().isOk())
+          .andExpect(jsonPath("$.receipt.key").value(commandKey));
+      verify(service).command("buyer", commandKey);
+    }
+    verifyNoMoreInteractions(service);
+  }
+
+  @Test
+  void commandLookupRequiresExactlyOneKeyAndHasNoLegacyPathAlias() throws Exception {
+    mvc.perform(authorized(get("/internal/shopping/cart/commands"), "shopping:cart:read"))
+        .andExpect(status().isBadRequest());
+    mvc.perform(
+            authorized(
+                get("/internal/shopping/cart/commands").queryParam("key", "done", "other"),
+                "shopping:cart:read"))
+        .andExpect(status().isBadRequest());
+    mvc.perform(authorized(get("/internal/shopping/cart/commands/done"), "shopping:cart:read"))
+        .andExpect(status().isNotFound());
+    verifyNoInteractions(service);
+  }
+
+  @Test
+  void staleConditionalReadStillReturnsCurrentProductFactsAtTheSameCartVersion() throws Exception {
+    CartView current =
+        new CartView(
+            12,
+            "CNY",
+            3000L,
+            false,
+            List.of(
+                new Item(
+                    "sku",
+                    2,
+                    "SKU",
+                    1500,
+                    "CNY",
+                    8,
+                    0,
+                    true,
+                    "PUBLISHED",
+                    3000L,
+                    false,
+                    null,
+                    Map.of(),
+                    null)));
+    when(service.get("buyer")).thenReturn(current);
+    mvc.perform(
+            authorized(get("/internal/shopping/cart"), "shopping:cart:read")
+                .header("If-None-Match", "\"12\""))
+        .andExpect(status().isOk())
+        .andExpect(header().string("Cache-Control", "no-store"))
+        .andExpect(header().doesNotExist("ETag"))
+        .andExpect(jsonPath("$.version").value(12))
+        .andExpect(jsonPath("$.items[0].unitPriceMinor").value(1500))
+        .andExpect(jsonPath("$.items[0].stockQuantity").value(0));
   }
 
   @Test
@@ -149,7 +228,7 @@ class CartControllerTest {
         .andExpect(status().isForbidden());
     mvc.perform(
             authorized(delete("/internal/shopping/cart/items/sku"), "shopping:cart:read")
-                .header("If-Match", "\"0\""))
+                .queryParam("expectedCartVersion", "0"))
         .andExpect(status().isForbidden());
     verifyNoInteractions(service);
   }
@@ -237,26 +316,22 @@ class CartControllerTest {
   }
 
   @Test
-  void deleteRequiresOneStrongQuotedNumericVersion() throws Exception {
-    for (String version :
-        List.of(
-            "12",
-            "W/\"12\"",
-            "*",
-            "\"12\", \"13\"",
-            "\"-1\"",
-            "\"01\"",
-            "\"9223372036854775808\"")) {
+  void deleteRequiresExactlyOneNonnegativeLongQueryVersion() throws Exception {
+    for (String version : List.of("", "+12", "*", "12,13", "-1", "1.5", "9223372036854775808")) {
       mvc.perform(
               authorized(delete("/internal/shopping/cart/items/sku"), "shopping:cart:write")
-                  .header("If-Match", version))
+                  .queryParam("expectedCartVersion", version))
           .andExpect(status().isBadRequest());
     }
     mvc.perform(authorized(delete("/internal/shopping/cart/items/sku"), "shopping:cart:write"))
         .andExpect(status().isBadRequest());
     mvc.perform(
             authorized(delete("/internal/shopping/cart/items/sku"), "shopping:cart:write")
-                .header("If-Match", "\"12\"", "\"13\""))
+                .queryParam("expectedCartVersion", "12", "13"))
+        .andExpect(status().isBadRequest());
+    mvc.perform(
+            authorized(delete("/internal/shopping/cart/items/sku"), "shopping:cart:write")
+                .header("If-Match", "\"12\""))
         .andExpect(status().isBadRequest());
     verifyNoInteractions(service);
   }
@@ -268,7 +343,7 @@ class CartControllerTest {
     mvc.perform(
             authorized(delete("/internal/shopping/cart/items/sku"), "shopping:cart:write")
                 .header("Idempotency-Key", "key")
-                .header("If-Match", "\"1\""))
+                .queryParam("expectedCartVersion", "1"))
         .andExpect(status().isConflict())
         .andExpect(jsonPath("$.category").value("VERSION_CONFLICT"))
         .andExpect(jsonPath("$.message").value("Cart version is stale"))

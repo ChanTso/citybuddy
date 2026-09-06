@@ -3,13 +3,27 @@ package io.citybuddy.commerce.cart;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
-import com.fasterxml.jackson.databind.ObjectMapper;
-import com.zaxxer.hikari.HikariConfig;
-import com.zaxxer.hikari.HikariDataSource;
+import com.fasterxml.jackson.databind.JsonNode;
+import com.nimbusds.jose.JWSAlgorithm;
+import com.nimbusds.jose.JWSHeader;
+import com.nimbusds.jose.crypto.RSASSASigner;
+import com.nimbusds.jwt.JWTClaimsSet;
+import com.nimbusds.jwt.SignedJWT;
 import io.citybuddy.commerce.cart.CartModels.Result;
-import io.citybuddy.commerce.mysql.BoundedMySqlTransactions;
+import io.citybuddy.commerce.identity.OboIdentityConfiguration;
+import java.net.URI;
+import java.net.URLEncoder;
+import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.security.KeyFactory;
+import java.security.interfaces.RSAPrivateKey;
+import java.security.spec.PKCS8EncodedKeySpec;
 import java.sql.DriverManager;
+import java.time.Instant;
 import java.util.ArrayList;
+import java.util.Base64;
+import java.util.Date;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
@@ -18,48 +32,132 @@ import java.util.concurrent.Callable;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
-import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.condition.EnabledIfEnvironmentVariable;
+import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.boot.autoconfigure.EnableAutoConfiguration;
+import org.springframework.boot.test.context.SpringBootTest;
+import org.springframework.boot.test.context.SpringBootTest.WebEnvironment;
+import org.springframework.boot.test.web.client.TestRestTemplate;
+import org.springframework.boot.test.web.server.LocalServerPort;
+import org.springframework.context.annotation.Configuration;
+import org.springframework.context.annotation.Import;
+import org.springframework.http.HttpEntity;
+import org.springframework.http.HttpHeaders;
+import org.springframework.http.HttpMethod;
+import org.springframework.http.HttpStatus;
+import org.springframework.http.MediaType;
+import org.springframework.http.ResponseEntity;
 import org.springframework.jdbc.core.JdbcTemplate;
-import org.springframework.jdbc.datasource.DataSourceTransactionManager;
 import org.springframework.jdbc.datasource.SingleConnectionDataSource;
-import org.springframework.transaction.support.TransactionTemplate;
+import org.springframework.test.context.DynamicPropertyRegistry;
+import org.springframework.test.context.DynamicPropertySource;
 
 @EnabledIfEnvironmentVariable(named = "CATALOG_INTEGRATION", matches = "true")
+@SpringBootTest(
+    classes = CartIntegrationTest.Application.class,
+    webEnvironment = WebEnvironment.RANDOM_PORT)
 class CartIntegrationTest {
-  private HikariDataSource dataSource;
-  private JdbcTemplate jdbc;
-  private CartService service;
-  private String owner;
-  private String sku;
+  @Configuration(proxyBeanMethods = false)
+  @EnableAutoConfiguration
+  @Import({
+    CartConfiguration.class,
+    CartController.class,
+    CartExceptionHandler.class,
+    OboIdentityConfiguration.class
+  })
+  static class Application {}
 
-  @BeforeEach
-  void setup() {
-    var config = new HikariConfig();
-    config.setJdbcUrl(required("CATALOG_MYSQL_URL"));
-    config.setUsername("commerce_app");
-    config.setPassword(required("MYSQL_COMMERCE_APP_PASSWORD"));
-    config.setMinimumIdle(0);
-    config.setMaximumPoolSize(4);
-    dataSource = new HikariDataSource(config);
-    jdbc = new JdbcTemplate(dataSource);
-    var transactionTemplate = new TransactionTemplate(new DataSourceTransactionManager(dataSource));
-    service =
-        new CartService(
-            new CartRepository(jdbc, new ObjectMapper()),
-            new BoundedMySqlTransactions(jdbc, transactionTemplate, 1));
-    owner = "cart-it-" + UUID.randomUUID().toString().substring(0, 8);
-    sku = owner + "-sku";
-    product(sku, "USD");
+  @DynamicPropertySource
+  static void properties(DynamicPropertyRegistry registry) {
+    registry.add("spring.datasource.url", () -> required("CATALOG_MYSQL_URL"));
+    registry.add("spring.datasource.username", () -> "commerce_app");
+    registry.add("spring.datasource.password", () -> required("MYSQL_COMMERCE_APP_PASSWORD"));
+    registry.add("spring.datasource.hikari.maximum-pool-size", () -> "4");
+    registry.add("citybuddy.orders.enabled", () -> "true");
+    registry.add("citybuddy.obo.enabled", () -> "true");
+    registry.add("citybuddy.obo.issuer", () -> "https://identity.citybuddy.test");
+    registry.add("citybuddy.obo.jwks-url", () -> required("IDENTITY_JWKS_URL"));
   }
 
-  @AfterEach
-  void closePool() {
-    if (dataSource != null) {
-      dataSource.close();
-    }
+  @Autowired private TestRestTemplate http;
+  @Autowired private JdbcTemplate jdbc;
+  @Autowired private CartService service;
+  @LocalServerPort private int port;
+  private String owner;
+  private String sku;
+  private String session;
+  private RSAPrivateKey signingKey;
+
+  @BeforeEach
+  void setup() throws Exception {
+    owner = "cart-it-" + UUID.randomUUID().toString().substring(0, 8);
+    sku = owner + "-sku";
+    session = "shop-" + UUID.randomUUID();
+    product(sku, "USD");
+    String pem = Files.readString(Path.of(required("CATALOG_TEST_SIGNING_PRIVATE_KEY_PATH")));
+    String encoded =
+        pem.replace("-----BEGIN PRIVATE KEY-----", "")
+            .replace("-----END PRIVATE KEY-----", "")
+            .replaceAll("\\s", "");
+    signingKey =
+        (RSAPrivateKey)
+            KeyFactory.getInstance("RSA")
+                .generatePrivate(new PKCS8EncodedKeySpec(Base64.getDecoder().decode(encoded)));
+  }
+
+  @Test
+  void committedCommandWithUrlDelimitersCanBeRecoveredThroughAnEncodedQuery() throws Exception {
+    String key = "segment/a?query=1#anchor";
+    HttpHeaders writeHeaders = headers("shopping:cart:write");
+    writeHeaders.setContentType(MediaType.APPLICATION_JSON);
+    writeHeaders.set("Idempotency-Key", key);
+    var committed =
+        http.exchange(
+            uri("/internal/shopping/cart/items"),
+            HttpMethod.POST,
+            new HttpEntity<>(Map.of("productId", sku, "quantity", 2), writeHeaders),
+            JsonNode.class);
+    assertThat(committed.getStatusCode()).isEqualTo(HttpStatus.OK);
+    assertThat(committed.getBody().path("receipt").path("key").asText()).isEqualTo(key);
+    var recovered =
+        get(
+            "/internal/shopping/cart/commands?key="
+                + URLEncoder.encode(key, StandardCharsets.UTF_8),
+            null);
+    assertThat(recovered.getStatusCode()).isEqualTo(HttpStatus.OK);
+    assertThat(recovered.getBody().path("receipt")).isEqualTo(committed.getBody().path("receipt"));
+    assertThat(recovered.getBody().path("replayed").asBoolean()).isTrue();
+    assertThat(recovered.getBody().path("cart").path("version").asLong()).isEqualTo(1);
+    assertThat(count("shopping_cart_command")).isEqualTo(1);
+    assertThat(quantity()).isEqualTo(2);
+  }
+
+  @Test
+  void oldCartVersionValidatorCannotHideLivePriceAndStockChanges() throws Exception {
+    service.add(owner, "quote", sku, 2);
+    var first = get("/internal/shopping/cart", null);
+    assertThat(first.getStatusCode()).isEqualTo(HttpStatus.OK);
+    assertThat(first.getHeaders().getETag()).isNull();
+    assertThat(first.getHeaders().getCacheControl()).contains("no-store");
+    long version = first.getBody().path("version").asLong();
+    assertThat(first.getBody().path("items").get(0).path("unitPriceMinor").asLong()).isEqualTo(500);
+    jdbc.update(
+        "UPDATE product SET price_minor=777,stock_quantity=1,publication_version=2 WHERE product_id=?",
+        sku);
+    var refreshed = get("/internal/shopping/cart", "\"" + version + "\"");
+    assertThat(refreshed.getStatusCode()).isEqualTo(HttpStatus.OK);
+    assertThat(refreshed.getHeaders().getETag()).isNull();
+    assertThat(refreshed.getHeaders().getCacheControl()).contains("no-store");
+    assertThat(refreshed.getBody().path("version").asLong()).isEqualTo(version);
+    JsonNode item = refreshed.getBody().path("items").get(0);
+    assertThat(item.path("unitPriceMinor").asLong()).isEqualTo(777);
+    assertThat(item.path("stockQuantity").asLong()).isEqualTo(1);
+    assertThat(item.path("orderable").asBoolean()).isFalse();
+    assertThat(refreshed.getBody().path("checkoutReady").asBoolean()).isFalse();
+    assertThat(service.get(owner).version()).isEqualTo(version);
+    assertThat(count("shopping_cart_command")).isEqualTo(1);
   }
 
   @Test
@@ -352,6 +450,46 @@ class CartIntegrationTest {
       return List.of(
           futures.get(0).get(30, TimeUnit.SECONDS), futures.get(1).get(30, TimeUnit.SECONDS));
     }
+  }
+
+  private ResponseEntity<JsonNode> get(String path, String ifNoneMatch) throws Exception {
+    HttpHeaders requestHeaders = headers("shopping:cart:read");
+    if (ifNoneMatch != null) {
+      requestHeaders.setIfNoneMatch(ifNoneMatch);
+    }
+    return http.exchange(
+        uri(path), HttpMethod.GET, new HttpEntity<>(requestHeaders), JsonNode.class);
+  }
+
+  private URI uri(String path) {
+    return URI.create("http://localhost:" + port + path);
+  }
+
+  private HttpHeaders headers(String scope) throws Exception {
+    Instant now = Instant.now();
+    var claims =
+        new JWTClaimsSet.Builder()
+            .issuer("https://identity.citybuddy.test")
+            .audience("commerce-service")
+            .subject(owner)
+            .claim("user_id", owner)
+            .claim("session", session)
+            .claim("scope", scope)
+            .claim("token_type", "agent_obo")
+            .claim("act", Map.of("azp", "shopping-agent"))
+            .issueTime(Date.from(now))
+            .notBeforeTime(Date.from(now))
+            .expirationTime(Date.from(now.plusSeconds(300)))
+            .jwtID(UUID.randomUUID().toString())
+            .build();
+    var jwt =
+        new SignedJWT(
+            new JWSHeader.Builder(JWSAlgorithm.RS256).keyID("catalog-current").build(), claims);
+    jwt.sign(new RSASSASigner(signingKey));
+    HttpHeaders headers = new HttpHeaders();
+    headers.setBearerAuth(jwt.serialize());
+    headers.set("X-Shopping-Session-Id", session);
+    return headers;
   }
 
   private static String required(String name) {

@@ -13,11 +13,10 @@ import io.citybuddy.commerce.identity.OboAuthorizer;
 import io.citybuddy.commerce.identity.SupportSessionId;
 import jakarta.servlet.http.HttpServletRequest;
 import java.io.IOException;
-import java.util.Collections;
 import java.util.Map;
 import java.util.Set;
-import java.util.regex.Pattern;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
+import org.springframework.http.CacheControl;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.DeleteMapping;
 import org.springframework.web.bind.annotation.ExceptionHandler;
@@ -34,7 +33,6 @@ import org.springframework.web.bind.annotation.RestControllerAdvice;
     havingValue = "true")
 public final class CartController {
   private static final int MAXIMUM_BODY_BYTES = 8192;
-  private static final Pattern VERSION_ETAG = Pattern.compile("\"(0|[1-9][0-9]*)\"");
   private final OboAuthorizer obo;
   private final CartService service;
   private final ObjectReader reader;
@@ -52,7 +50,7 @@ public final class CartController {
   @GetMapping("/internal/shopping/cart")
   public ResponseEntity<CartView> get(HttpServletRequest request) {
     CartView cart = service.get(owner(request, "shopping:cart:read"));
-    return ResponseEntity.ok().eTag(Long.toString(cart.version())).body(cart);
+    return ResponseEntity.ok().cacheControl(CacheControl.noStore()).body(cart);
   }
 
   @PostMapping(value = "/internal/shopping/cart/items", consumes = "application/json")
@@ -86,29 +84,35 @@ public final class CartController {
   @DeleteMapping("/internal/shopping/cart/items/{productId}")
   public Result remove(@PathVariable String productId, HttpServletRequest request) {
     String owner = owner(request, "shopping:cart:write");
-    String etag = request.getHeader("If-Match");
-    if (etag == null
-        || Collections.list(request.getHeaders("If-Match")).size() != 1
-        || !VERSION_ETAG.matcher(etag).matches()) {
+    String suppliedVersion = oneParameter(request, "expectedCartVersion");
+    if (!suppliedVersion.matches("[0-9]+")) {
       throw invalid();
     }
     long version;
     try {
-      version = Long.parseLong(etag.substring(1, etag.length() - 1));
+      version = Long.parseLong(suppliedVersion);
     } catch (NumberFormatException exception) {
       throw invalid();
     }
     return service.remove(owner, request.getHeader("Idempotency-Key"), productId, version);
   }
 
-  @GetMapping("/internal/shopping/cart/commands/{commandKey}")
-  public ResponseEntity<Result> command(
-      @PathVariable String commandKey, HttpServletRequest request) {
+  @GetMapping("/internal/shopping/cart/commands")
+  public ResponseEntity<Result> command(HttpServletRequest request) {
     String owner = owner(request, "shopping:cart:read");
+    String commandKey = oneParameter(request, "key");
     return ResponseEntity.ok(
         service
             .command(owner, commandKey)
             .orElseThrow(() -> new CartException(404, "NOT_FOUND", "Cart command not found")));
+  }
+
+  private static String oneParameter(HttpServletRequest request, String name) {
+    String[] values = request.getParameterValues(name);
+    if (values == null || values.length != 1) {
+      throw invalid();
+    }
+    return values[0];
   }
 
   private String owner(HttpServletRequest request, String scope) {
