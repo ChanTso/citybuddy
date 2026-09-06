@@ -334,10 +334,7 @@ class MerchantMarketingIntegrationTest {
             "family",
             promotion(List.of(family), 10, NOW.minusSeconds(1), NOW.plusSeconds(60)));
     String third = product("family-c", 30000);
-    fixture.update(
-        "INSERT INTO retail_product_metadata(product_id,family_id,content,option_values,metadata_version) VALUES (?,?,'{}','{}',1)",
-        third,
-        family);
+    familyMember(family, third, 2);
     var rejected = changes.apply(context.operatorSubject(), proposal.changeId());
     assertThat(rejected.state()).isEqualTo("REJECTED");
     assertThat(rejected.result().path("reason").asText()).isEqualTo("FAMILY_VERSION_CONFLICT");
@@ -378,10 +375,7 @@ class MerchantMarketingIntegrationTest {
     }
     assertThat(promotionCount(proposal.changeId())).isZero();
     String extra = product("bounded-extra", 10000);
-    fixture.update(
-        "INSERT INTO retail_product_metadata(product_id,family_id,content,option_values,metadata_version) VALUES (?,?,'{}','{}',1)",
-        extra,
-        family);
+    familyMember(family, extra, 25);
     assertThatThrownBy(
             () ->
                 changes.prepare(
@@ -619,17 +613,27 @@ class MerchantMarketingIntegrationTest {
 
   private String family(List<String> members) {
     String id = prefix + "-family";
+    List<String> sizes = new ArrayList<>();
+    for (int index = 0; index <= members.size(); index++) {
+      sizes.add("size-" + index);
+    }
     fixture.update(
-        "INSERT INTO retail_product_family(family_id,name,description,content,options,metadata_version) VALUES (?,?,'family','{}','[]',1)",
+        "INSERT INTO retail_product_family(family_id,name,description,content,options,metadata_version) VALUES (?,?,'family','{}',?,1)",
         id,
-        id);
-    for (String member : members) {
-      fixture.update(
-          "INSERT INTO retail_product_metadata(product_id,family_id,content,option_values,metadata_version) VALUES (?,?,'{}','{}',1)",
-          member,
-          id);
+        id,
+        mapper.valueToTree(List.of(Map.of("name", "size", "values", sizes))).toString());
+    for (int index = 0; index < members.size(); index++) {
+      familyMember(id, members.get(index), index);
     }
     return id;
+  }
+
+  private void familyMember(String family, String product, int size) {
+    fixture.update(
+        "INSERT INTO retail_product_metadata(product_id,family_id,content,option_values,metadata_version) VALUES (?,?,'{}',?,1)",
+        product,
+        family,
+        mapper.valueToTree(Map.of("size", "size-" + size)).toString());
   }
 
   private Command promotion(List<String> ids, double discount, Instant start, Instant end) {

@@ -234,8 +234,14 @@ test "$(mysql_query merchant_view_test "$merchant_reader_password" commerce_db \
 for marketing_table in retail_promotion retail_promotion_item retail_campaign; do
   mysql_query commerce_app "$commerce_app_password" commerce_db \
     "SELECT COUNT(*) FROM $marketing_table" >/dev/null
-  mysql_query commerce_app "$commerce_app_password" commerce_db \
-    "INSERT INTO $marketing_table SELECT * FROM $marketing_table WHERE FALSE"
+  if [[ "$marketing_table" == retail_campaign ]]; then
+    campaign_plan_columns="campaign_id, name, objective, audience, copy_text, channel, currency, budget_minor, starts_at, ends_at, state, version, created_at, updated_at, source_change_id"
+    mysql_query commerce_app "$commerce_app_password" commerce_db \
+      "INSERT INTO retail_campaign ($campaign_plan_columns) SELECT $campaign_plan_columns FROM retail_campaign WHERE FALSE"
+  else
+    mysql_query commerce_app "$commerce_app_password" commerce_db \
+      "INSERT INTO $marketing_table SELECT * FROM $marketing_table WHERE FALSE"
+  fi
   assert_fails "commerce runtime cannot delete marketing facts" 'DELETE command denied' \
     mysql_query commerce_app "$commerce_app_password" commerce_db \
     "DELETE FROM $marketing_table WHERE FALSE"
@@ -243,6 +249,9 @@ done
 mysql_query commerce_app "$commerce_app_password" commerce_db \
   "UPDATE retail_campaign SET budget_minor=budget_minor,name=name,version=version WHERE FALSE"
 for observation_column in spend_minor revenue_minor observation_start observation_end observation_source_kind observation_source_ref observed_at fixture_version; do
+  assert_fails "campaign creation cannot manufacture attributed observations" 'INSERT command denied' \
+    mysql_query commerce_app "$commerce_app_password" commerce_db \
+    "INSERT INTO retail_campaign (campaign_id,name,currency,state,version,created_at,updated_at,$observation_column) SELECT campaign_id,name,currency,state,version,created_at,updated_at,$observation_column FROM retail_campaign WHERE FALSE"
   assert_fails "campaign approval cannot overwrite attributed observations" 'UPDATE command denied' \
     mysql_query commerce_app "$commerce_app_password" commerce_db \
     "UPDATE retail_campaign SET $observation_column=$observation_column WHERE FALSE"

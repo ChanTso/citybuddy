@@ -77,7 +77,7 @@ GRANT SELECT, CREATE ON commerce_db.retail_store_traffic_daily TO 'commerce_migr
 GRANT SELECT, CREATE ON commerce_db.retail_campaign TO 'commerce_migration'@'%';
 GRANT SELECT, INSERT ON commerce_db.retail_promotion TO 'commerce_app'@'%';
 GRANT SELECT, INSERT ON commerce_db.retail_promotion_item TO 'commerce_app'@'%';
-GRANT SELECT, INSERT, UPDATE (name, objective, audience, copy_text, channel, currency, budget_minor, starts_at, ends_at, state, version, updated_at, source_change_id) ON commerce_db.retail_campaign TO 'commerce_app'@'%';
+GRANT SELECT, INSERT (campaign_id, name, objective, audience, copy_text, channel, currency, budget_minor, starts_at, ends_at, state, version, created_at, updated_at, source_change_id), UPDATE (name, objective, audience, copy_text, channel, currency, budget_minor, starts_at, ends_at, state, version, updated_at, source_change_id) ON commerce_db.retail_campaign TO 'commerce_app'@'%';
 GRANT SELECT ON commerce_db.retail_store_traffic_daily TO 'commerce_app'@'%';
 GRANT SELECT ON commerce_db.merchant_listing_facts TO 'commerce_app'@'%';
 GRANT SELECT ON commerce_db.merchant_store_traffic_daily TO 'commerce_app'@'%';
