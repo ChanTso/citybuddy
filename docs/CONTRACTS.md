@@ -139,11 +139,66 @@ Listing metadata, current SKU fields, publication versions, catalog generation, 
 and the stored terminal commit together. A business version or eligibility conflict persists
 REJECTED without partial writes. Repeated apply/cancel returns the same persisted terminal.
 
-The three `merchant_*` reporting views expose catalog context and historical paid
-order facts, with no user identities. Reporting connections use UTC and a bounded query timeout.
+The `merchant_*` reporting views expose catalog context, historical paid order facts and
+explicit operating observations, with no user identities. Reporting connections use UTC and a bounded query timeout.
 Analysis users have SELECT only on the views. Paid amount is gross before refunds, grouped by
 currency and payment-success time in a half-open interval; current catalog prices never rewrite
 historical sales. The deterministic fixture generator is `scripts/seed_merchant_fixture.py`.
+
+### Complete merchant catalog and marketing facts
+
+`GET /internal/merchant/listings`, `/listings/{id}`, `/inventory-alerts`,
+`/campaigns[/{id}]` and `/promotions[/{id}]` require the fixed merchant actor and exact
+`merchant:read` scope, matching merchant session and no evaluation context. Responses are
+uncached. Lists use limit 1–50 and offset 0–10000; catalog and alert pages return nextOffset.
+Marketing lists end with a short page. Query parameters occur once, and unknown parameters fail.
+
+Merchant catalog pagination groups actual family members before paging and includes draft,
+unpublished, paused and out-of-stock products. Family price is the minimum of all actual leaf
+prices, stock is their sum, and the family is not an orderable SKU. Individual leaves preserve
+publication state and selected variant dimensions. Private cost, quality, missing fields and
+observation metadata come from retail_product_operations; absence stays unknown. There is no
+inferred cost floor, physical return rate or last-price-change timestamp. Price sorting requires
+a currency. Inventory alerts use current stock and the preceding 30 complete Asia/Shanghai days
+of authoritative paid orders; a future asOf is rejected. Low stock is stock <= known threshold, and the demo slow-mover
+rule is stock > threshold with at most five sold units. Cover is unknown when no units sold.
+Refund percentages count distinct paid-cohort orders with effective refund requests, not returns.
+
+PROMOTION and CAMPAIGN use the same owned change ledger, precise prepare/read/cancel scopes and
+direct-operator apply endpoint. Their typed payloads cannot accept caller-supplied before values,
+versions, results or observations. Money in proposals, differences and receipts is integer minor
+units; dates are normalized to UTC. Date-only input uses Shanghai: a starts date begins that day,
+and an ends date includes that day; explicit offset timestamps use their exact half-open window.
+
+A promotion expands one to twenty-five actual unique SKUs, freezes current prices/versions and
+rounds a positive discount of at most 50% to the nearest minor unit, half up. All targets must be
+eligible ordinary published available products, and family membership is rechecked at approval.
+Before the start, approval returns promotion_not_started and retains PREPARED; a first approval
+after the end resolves REJECTED. Inside the window, all official product prices, catalog
+versions/generation, product Outbox, promotion/target records and the approval receipt commit
+atomically. A stale target rejects the whole batch; repeat approval replays the terminal.
+The current product price is the only checkout authority. Old quotes are stale, and historical
+order/payment/refund amounts keep their original order price. Ending the operating window does
+not restore an old price: the approval interaction must explain that restoration needs another
+confirmed change. No automatic start/end pricing job is scheduled. Promotion reads include actual
+current price/currency/version and mark a differing price or currency, rather than presenting historical target prices
+as current payable amounts.
+
+Campaign approval really creates or updates a local marketing plan: name, objective, audience,
+copy, bounded budget (at most 1,000,000 minor units) and optional dates. New plans use CNY, start
+in draft state and have no attributed spend/revenue. Updating a plan uses its saved version and
+does not change observed results. It does not send ads, deliver email or spend money. Existing
+campaign observations retain their explicit window/source/version; missing revenue is not zero.
+ROAS requires positive spend and known attributed revenue from the same observed window.
+
+The narrow merchant_listing_facts, merchant_store_traffic_daily and merchant_campaign_facts
+views add current classification/operating facts, whole-store visits and campaign observations.
+Paid sales still come from merchant_paid_orders at historical order prices. Store traffic dates
+are Shanghai calendar days; missing dates are unknown, not zero. Traffic and conversion have no
+invented SKU/category/currency attribution. Whole-store conversion divides successful single-SKU
+orders by visits over the same complete window, not unique shoppers or checkout groups. Analysis
+accounts receive SELECT on views only; commerce cannot overwrite observed visits or campaign
+attribution. The existing UTC merchant_daily_sales view retains its historical semantics.
 
 Outbox completion is event-type specific: product and FAQ events have configured publishers.
 Order and refund outbox records are retained transaction facts, not a promise that a worker

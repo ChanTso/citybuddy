@@ -28,6 +28,7 @@ public class MerchantChangeService {
   private final MerchantChangeRepository repository;
   private final MerchantService prices;
   private final MerchantProductOperations products;
+  private final MerchantMarketingOperations marketing;
   private final ObjectMapper mapper;
   private final Clock clock;
 
@@ -35,11 +36,13 @@ public class MerchantChangeService {
       MerchantChangeRepository repository,
       MerchantService prices,
       MerchantProductOperations products,
+      MerchantMarketingOperations marketing,
       ObjectMapper mapper,
       Clock clock) {
     this.repository = repository;
     this.prices = prices;
     this.products = products;
+    this.marketing = marketing;
     this.mapper = mapper;
     this.clock = clock;
   }
@@ -58,7 +61,7 @@ public class MerchantChangeService {
       var prepared = prices.prepare(context, key, priceCommand(command.payload()));
       return repository.find(prepared.draftId(), false).orElseThrow().view();
     }
-    if (!Set.of("LISTING_UPDATE", "INVENTORY_ACTION").contains(kind)) {
+    if (!Set.of("LISTING_UPDATE", "INVENTORY_ACTION", "PROMOTION", "CAMPAIGN").contains(kind)) {
       throw MerchantService.invalid("Unsupported merchant change kind");
     }
     String hash = intentHash(command);
@@ -66,9 +69,16 @@ public class MerchantChangeService {
     if (existing.isPresent()) {
       return replay(existing.get(), kind, hash);
     }
-    MerchantProductOperations.PreparedOperation operation;
+    MerchantMarketingModels.PreparedOperation operation;
     try {
-      operation = products.prepare(kind, command.payload());
+      if (Set.of("PROMOTION", "CAMPAIGN").contains(kind)) {
+        operation = marketing.prepare(kind, command.payload());
+      } else {
+        var productOperation = products.prepare(kind, command.payload());
+        operation =
+            new MerchantMarketingModels.PreparedOperation(
+                productOperation.currency(), productOperation.items(), productOperation.snapshot());
+      }
     } catch (MerchantException rejected) {
       // The competing request may have committed its immutable proposal after our first read.
       return repository
@@ -132,7 +142,10 @@ public class MerchantChangeService {
       return repository.find(id, true).orElseThrow().view();
     }
     try {
-      JsonNode changes = products.apply(stored.view().kind(), stored.snapshot());
+      JsonNode changes =
+          Set.of("PROMOTION", "CAMPAIGN").contains(stored.view().kind())
+              ? marketing.apply(stored.view().kind(), stored.snapshot(), id)
+              : products.apply(stored.view().kind(), stored.snapshot());
       return repository.resolve(
           id,
           "APPLIED",

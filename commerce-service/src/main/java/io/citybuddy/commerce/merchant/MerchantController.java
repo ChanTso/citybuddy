@@ -192,23 +192,31 @@ public final class MerchantController {
 }
 
 @RestControllerAdvice(
-    assignableTypes = {MerchantController.class, MerchantOrderIssueController.class})
+    assignableTypes = {
+      MerchantController.class,
+      MerchantOrderIssueController.class,
+      MerchantListingController.class,
+      MerchantMarketingController.class
+    })
 final class MerchantExceptionHandler {
   @ExceptionHandler(MerchantException.class)
   ResponseEntity<Map<String, String>> merchant(MerchantException exception) {
     return ResponseEntity.status(exception.status())
+        .cacheControl(org.springframework.http.CacheControl.noStore())
         .body(Map.of("category", exception.category(), "message", exception.getMessage()));
   }
 
   @ExceptionHandler(OboAuthorizationException.class)
   ResponseEntity<Map<String, String>> obo() {
     return ResponseEntity.status(403)
+        .cacheControl(org.springframework.http.CacheControl.noStore())
         .body(Map.of("category", "AUTHORIZATION", "message", "Forbidden"));
   }
 
   @ExceptionHandler(CatalogException.class)
   ResponseEntity<Map<String, String>> direct(CatalogException exception) {
     return ResponseEntity.status(exception.status())
+        .cacheControl(org.springframework.http.CacheControl.noStore())
         .body(
             Map.of("category", "AUTHORIZATION", "message", "Direct operator authorization failed"));
   }
@@ -216,6 +224,7 @@ final class MerchantExceptionHandler {
   @ExceptionHandler(IdentityVerificationUnavailableException.class)
   ResponseEntity<Map<String, String>> unavailable() {
     return ResponseEntity.status(503)
+        .cacheControl(org.springframework.http.CacheControl.noStore())
         .body(
             Map.of(
                 "category",

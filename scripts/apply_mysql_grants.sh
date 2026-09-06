@@ -112,6 +112,18 @@ expected=(
   "GRANT SELECT, UPDATE (missing_attributes, content_quality, facts_version, observed_at) ON commerce_db.retail_product_operations TO 'commerce_app'@'%';"
   "GRANT UPDATE (name, description, content, metadata_version) ON commerce_db.retail_product_family TO 'commerce_app'@'%';"
   "GRANT INSERT, UPDATE (content, metadata_version) ON commerce_db.retail_product_metadata TO 'commerce_app'@'%';"
+  "GRANT SELECT, CREATE ON commerce_db.retail_product_metadata TO 'commerce_migration'@'%';"
+  "GRANT SELECT, CREATE ON commerce_db.retail_product_family TO 'commerce_migration'@'%';"
+  "GRANT SELECT, CREATE ON commerce_db.retail_product_operations TO 'commerce_migration'@'%';"
+  "GRANT SELECT, CREATE ON commerce_db.retail_store_traffic_daily TO 'commerce_migration'@'%';"
+  "GRANT SELECT, CREATE ON commerce_db.retail_campaign TO 'commerce_migration'@'%';"
+  "GRANT SELECT, INSERT ON commerce_db.retail_promotion TO 'commerce_app'@'%';"
+  "GRANT SELECT, INSERT ON commerce_db.retail_promotion_item TO 'commerce_app'@'%';"
+  "GRANT SELECT, INSERT (campaign_id, name, objective, audience, copy_text, channel, currency, budget_minor, starts_at, ends_at, state, version, created_at, updated_at, source_change_id), UPDATE (name, objective, audience, copy_text, channel, currency, budget_minor, starts_at, ends_at, state, version, updated_at, source_change_id) ON commerce_db.retail_campaign TO 'commerce_app'@'%';"
+  "GRANT SELECT ON commerce_db.retail_store_traffic_daily TO 'commerce_app'@'%';"
+  "GRANT SELECT ON commerce_db.merchant_listing_facts TO 'commerce_app'@'%';"
+  "GRANT SELECT ON commerce_db.merchant_store_traffic_daily TO 'commerce_app'@'%';"
+  "GRANT SELECT ON commerce_db.merchant_campaign_facts TO 'commerce_app'@'%';"
 )
 mapfile -t actual < <(sed -e '/^[[:space:]]*$/d' -e '/^[[:space:]]*--/d' "$manifest")
 
@@ -184,7 +196,7 @@ echo "role-before=$fresh_role"
 migration_statement_count=5
 # CREATE is already granted at database scope; including it in these table grants permits
 # the fixed SELECT grants before fresh migrations create their tables and the nested view.
-migration_sql="$(printf '%s\n' "${actual[@]:0:$migration_statement_count}" "${actual[@]:48:7}")"
+migration_sql="$(printf '%s\n' "${actual[@]:0:$migration_statement_count}" "${actual[@]:48:7}" "${actual[@]:72:5}")"
 runtime_sql="$(printf '%s\n' "${actual[@]:$migration_statement_count}")"
 support_grant="${actual[23]}"
 support_lifecycle_grants="$(printf '%s\n' "${actual[@]:23:4}")"
@@ -208,6 +220,8 @@ retail_runtime_grants="$(printf '%s\n' "${actual[@]:59:2}")"
 shopping_runtime_grants="$(printf '%s\n' "${actual[@]:61:5}")"
 retail_facts_runtime_grants="$(printf '%s\n' "${actual[@]:66:3}")"
 merchant_operations_runtime_grants="$(printf '%s\n' "${actual[@]:69:3}")"
+merchant_marketing_runtime_grants="$(printf '%s\n' "${actual[@]:77:3}")"
+merchant_facts_runtime_grants="$(printf '%s\n' "${actual[@]:80:4}")"
 
 if [[ "$v013_force_revoke" == true ]]; then
   mysql "${mysql_args[@]}" --execute="
@@ -295,7 +309,11 @@ runtime_table_state="$(mysql "${mysql_args[@]}" --execute="
       'retail_fulfillment_config',
       'retail_order_fulfillment',
       'retail_order_issue',
-      'retail_product_operations'
+      'retail_product_operations',
+      'retail_promotion',
+      'retail_promotion_item',
+      'retail_campaign',
+      'retail_store_traffic_daily'
     );
   SET ROLE NONE;")"
 
@@ -329,6 +347,34 @@ retail_tables_present=false
 shopping_tables_present=false
 retail_facts_tables_present=false
 merchant_operations_present=false
+merchant_marketing_present=false
+merchant_facts_present=false
+merchant_marketing_count=0
+merchant_marketing_tables=(retail_promotion retail_promotion_item retail_campaign)
+for marketing_table in "${merchant_marketing_tables[@]}"; do
+  if [[ ",$normalized_runtime_table_state," == *",commerce_db.$marketing_table,"* ]]; then
+    merchant_marketing_count=$((merchant_marketing_count + 1))
+  fi
+done
+if (( merchant_marketing_count != 0 && merchant_marketing_count != 3 )); then
+  echo "Grant job refuses a partial merchant marketing schema." >&2
+  exit 1
+elif (( merchant_marketing_count == 3 )); then
+  runtime_table_count="${normalized_runtime_table_state%%:*}"
+  runtime_table_list="${normalized_runtime_table_state#*:}"
+  for marketing_table in "${merchant_marketing_tables[@]}"; do
+    runtime_table_list="$(remove_runtime_table "$runtime_table_list" "commerce_db.$marketing_table")"
+  done
+  normalized_runtime_table_state="$((runtime_table_count - 3)):$runtime_table_list"
+  merchant_marketing_present=true
+fi
+if [[ ",$normalized_runtime_table_state," == *",commerce_db.retail_store_traffic_daily,"* ]]; then
+  runtime_table_count="${normalized_runtime_table_state%%:*}"
+  runtime_table_list="${normalized_runtime_table_state#*:}"
+  runtime_table_list="$(remove_runtime_table "$runtime_table_list" commerce_db.retail_store_traffic_daily)"
+  normalized_runtime_table_state="$((runtime_table_count - 1)):$runtime_table_list"
+  merchant_facts_present=true
+fi
 if [[ ",$normalized_runtime_table_state," == *",commerce_db.retail_product_operations,"* ]]; then
   runtime_table_count="${normalized_runtime_table_state%%:*}"
   runtime_table_list="${normalized_runtime_table_state#*:}"
@@ -645,6 +691,20 @@ if [[ "$merchant_operations_present" == true ]]; then
     exit 1
   fi
   optional_evaluation_grants="$(printf '%s\n' "$optional_evaluation_grants" "$merchant_operations_runtime_grants")"
+fi
+if [[ "$merchant_marketing_present" == true ]]; then
+  if [[ "$merchant_operations_present" != true || "$merchant_draft_present" != true ]]; then
+    echo "Grant job refuses merchant marketing without its approval and product schema." >&2
+    exit 1
+  fi
+  optional_evaluation_grants="$(printf '%s\n' "$optional_evaluation_grants" "$merchant_marketing_runtime_grants")"
+fi
+if [[ "$merchant_facts_present" == true ]]; then
+  if [[ "$merchant_marketing_present" != true || "$merchant_operations_present" != true ]]; then
+    echo "Grant job refuses merchant operating facts without their view sources." >&2
+    exit 1
+  fi
+  optional_evaluation_grants="$(printf '%s\n' "$optional_evaluation_grants" "$merchant_facts_runtime_grants")"
 fi
 if [[ "$evaluation_table_present" == true ]]; then
   optional_evaluation_grants="$(printf '%s\n' "$optional_evaluation_grants" "$evaluation_grant")"

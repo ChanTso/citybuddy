@@ -202,6 +202,9 @@ mysql_query bootstrap_admin "$bootstrap_password" commerce_db "
   GRANT SELECT ON commerce_db.merchant_products TO 'merchant_view_test'@'%';
   GRANT SELECT ON commerce_db.merchant_paid_orders TO 'merchant_view_test'@'%';
   GRANT SELECT ON commerce_db.merchant_daily_sales TO 'merchant_view_test'@'%';
+  GRANT SELECT ON commerce_db.merchant_listing_facts TO 'merchant_view_test'@'%';
+  GRANT SELECT ON commerce_db.merchant_store_traffic_daily TO 'merchant_view_test'@'%';
+  GRANT SELECT ON commerce_db.merchant_campaign_facts TO 'merchant_view_test'@'%';
   SET ROLE NONE;"
 python3 scripts/seed_merchant_fixture.py --as-of 2026-09-05 >"$tmp_dir/merchant-fixture.sql"
 for fixture_pass in 1 2; do
@@ -214,11 +217,68 @@ for fixture_pass in 1 2; do
   test "$(mysql_query commerce_app "$commerce_app_password" commerce_db \
     "SELECT CONCAT(COUNT(*), ':', SUM(status = 'PAID')) FROM standard_order WHERE user_subject LIKE 'shopmate-fixture-buyer-%'")" = "141:138"
 done
-for merchant_view in merchant_products merchant_paid_orders merchant_daily_sales; do
+for merchant_view in merchant_products merchant_paid_orders merchant_daily_sales merchant_listing_facts merchant_store_traffic_daily merchant_campaign_facts; do
   mysql_query merchant_view_test "$merchant_reader_password" commerce_db \
     "SELECT COUNT(*) FROM $merchant_view" >/dev/null
   mysql_query commerce_app "$commerce_app_password" commerce_db \
     "SELECT COUNT(*) FROM $merchant_view" >/dev/null
+done
+"${compose[@]}" exec -T -e MYSQL_PWD="$bootstrap_password" mysql \
+  mysql --protocol=socket --user=root --database=commerce_db --execute="
+    INSERT INTO retail_store_traffic_daily
+      (local_date,visits,observed_at,source_ref,fixture_version)
+    VALUES ('2026-09-04',1234,'2026-09-05 00:00:00','mysql-integration','merchant-facts-v1');"
+test "$(mysql_query merchant_view_test "$merchant_reader_password" commerce_db \
+  "SELECT CONCAT(local_date, ':', visits, ':', source_ref, ':', fixture_version) FROM merchant_store_traffic_daily")" = \
+  "2026-09-04:1234:mysql-integration:merchant-facts-v1"
+for marketing_table in retail_promotion retail_promotion_item retail_campaign; do
+  mysql_query commerce_app "$commerce_app_password" commerce_db \
+    "SELECT COUNT(*) FROM $marketing_table" >/dev/null
+  if [[ "$marketing_table" == retail_campaign ]]; then
+    campaign_plan_columns="campaign_id, name, objective, audience, copy_text, channel, currency, budget_minor, starts_at, ends_at, state, version, created_at, updated_at, source_change_id"
+    mysql_query commerce_app "$commerce_app_password" commerce_db \
+      "INSERT INTO retail_campaign ($campaign_plan_columns) SELECT $campaign_plan_columns FROM retail_campaign WHERE FALSE"
+  else
+    mysql_query commerce_app "$commerce_app_password" commerce_db \
+      "INSERT INTO $marketing_table SELECT * FROM $marketing_table WHERE FALSE"
+  fi
+  assert_fails "commerce runtime cannot delete marketing facts" 'DELETE command denied' \
+    mysql_query commerce_app "$commerce_app_password" commerce_db \
+    "DELETE FROM $marketing_table WHERE FALSE"
+done
+mysql_query commerce_app "$commerce_app_password" commerce_db \
+  "UPDATE retail_campaign SET budget_minor=budget_minor,name=name,version=version WHERE FALSE"
+for observation_column in spend_minor revenue_minor observation_start observation_end observation_source_kind observation_source_ref observed_at fixture_version; do
+  assert_fails "campaign creation cannot manufacture attributed observations" 'INSERT command denied' \
+    mysql_query commerce_app "$commerce_app_password" commerce_db \
+    "INSERT INTO retail_campaign (campaign_id,name,currency,state,version,created_at,updated_at,$observation_column) SELECT campaign_id,name,currency,state,version,created_at,updated_at,$observation_column FROM retail_campaign WHERE FALSE"
+  assert_fails "campaign approval cannot overwrite attributed observations" 'UPDATE command denied' \
+    mysql_query commerce_app "$commerce_app_password" commerce_db \
+    "UPDATE retail_campaign SET $observation_column=$observation_column WHERE FALSE"
+done
+for promotion_table in retail_promotion retail_promotion_item; do
+  assert_fails "commerce runtime cannot rewrite approved promotion facts" 'UPDATE command denied' \
+    mysql_query commerce_app "$commerce_app_password" commerce_db \
+    "UPDATE $promotion_table SET promotion_id=promotion_id WHERE FALSE"
+done
+assert_fails "commerce runtime cannot manufacture store visits" 'INSERT command denied' \
+  mysql_query commerce_app "$commerce_app_password" commerce_db \
+  "INSERT INTO retail_store_traffic_daily SELECT * FROM retail_store_traffic_daily WHERE FALSE"
+assert_fails "commerce runtime cannot overwrite observed visits" 'UPDATE command denied' \
+  mysql_query commerce_app "$commerce_app_password" commerce_db \
+  "UPDATE retail_store_traffic_daily SET visits=visits WHERE FALSE"
+assert_fails "commerce runtime cannot delete observed visits" 'DELETE command denied' \
+  mysql_query commerce_app "$commerce_app_password" commerce_db \
+  "DELETE FROM retail_store_traffic_daily WHERE FALSE"
+for facts_table in retail_store_traffic_daily retail_campaign retail_product_operations; do
+  assert_fails "merchant analytics reads only the granted operating views" 'SELECT command denied' \
+    mysql_query merchant_view_test "$merchant_reader_password" commerce_db \
+    "SELECT * FROM $facts_table"
+done
+for facts_view in merchant_listing_facts merchant_store_traffic_daily merchant_campaign_facts; do
+  assert_fails "merchant analytics cannot insert operating facts through views" 'INSERT command denied' \
+    mysql_query merchant_view_test "$merchant_reader_password" commerce_db \
+    "INSERT INTO $facts_view SELECT * FROM $facts_view WHERE FALSE"
 done
 for retail_table in retail_product_family retail_product_metadata retail_product_operations; do
   mysql_query commerce_app "$commerce_app_password" commerce_db \
