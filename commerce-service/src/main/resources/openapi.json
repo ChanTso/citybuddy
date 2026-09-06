@@ -723,7 +723,7 @@
             }
           }
         },
-        "description": "Explicit direct operator approval; an OBO token or model text cannot approve. The original operator must own the proposal. APPLIED is 200; a stored CANCELLED or REJECTED terminal is 409. Repeated approval replays its exact stored terminal."
+        "description": "Explicit direct operator approval; an OBO token or model text cannot approve. The original operator must own the proposal. APPLIED is 200; a stored CANCELLED or REJECTED terminal is 409. Repeated approval replays its exact stored terminal. PROMOTION before its start returns promotion_not_started and keeps PREPARED; first approval after end is rejected. Approval within the window atomically changes official product prices; no automatic end-price restoration. CAMPAIGN persists only local plan fields."
       }
     },
     "/internal/shopping/preferences": {
@@ -3225,6 +3225,712 @@
           }
         }
       }
+    },
+    "/internal/merchant/campaigns": {
+      "get": {
+        "operationId": "listMerchantCampaigns",
+        "security": [
+          {
+            "agentOboBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "X-Merchant-Session-Id",
+            "in": "header",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 128
+            }
+          },
+          {
+            "name": "X-Eval-Sandbox-Id",
+            "in": "header",
+            "required": false,
+            "description": "Any supplied evaluation context is rejected.",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "format": "int64",
+              "minimum": 1,
+              "maximum": 50,
+              "default": 20
+            }
+          },
+          {
+            "name": "offset",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "format": "int64",
+              "minimum": 0,
+              "maximum": 10000,
+              "default": 0
+            }
+          }
+        ],
+        "x-required-actor": "merchant-agent",
+        "x-required-scope": "merchant:read",
+        "description": "Stable bounded page of actual persisted marketing records. Iterate limit/offset until a short page; no fixed cross-request snapshot.",
+        "responses": {
+          "200": {
+            "description": "Current merchant facts",
+            "headers": {
+              "Cache-Control": {
+                "schema": {
+                  "type": "string",
+                  "const": "no-store"
+                }
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/MerchantCampaign"
+                  },
+                  "maxItems": 50
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid, unknown or repeated query parameters"
+          },
+          "403": {
+            "description": "Invalid merchant actor, exact scope, session or evaluation context"
+          },
+          "404": {
+            "description": "Unknown resource"
+          },
+          "503": {
+            "description": "Identity verification unavailable"
+          }
+        }
+      }
+    },
+    "/internal/merchant/campaigns/{id}": {
+      "get": {
+        "operationId": "getMerchantCampaign",
+        "security": [
+          {
+            "agentOboBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "X-Merchant-Session-Id",
+            "in": "header",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 128
+            }
+          },
+          {
+            "name": "X-Eval-Sandbox-Id",
+            "in": "header",
+            "required": false,
+            "description": "Any supplied evaluation context is rejected.",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 64
+            }
+          }
+        ],
+        "x-required-actor": "merchant-agent",
+        "x-required-scope": "merchant:read",
+        "description": "Reads a persisted marketing record under the same merchant read identity.",
+        "responses": {
+          "200": {
+            "description": "Current merchant facts",
+            "headers": {
+              "Cache-Control": {
+                "schema": {
+                  "type": "string",
+                  "const": "no-store"
+                }
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MerchantCampaign"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid, unknown or repeated query parameters"
+          },
+          "403": {
+            "description": "Invalid merchant actor, exact scope, session or evaluation context"
+          },
+          "404": {
+            "description": "Unknown resource"
+          },
+          "503": {
+            "description": "Identity verification unavailable"
+          }
+        }
+      }
+    },
+    "/internal/merchant/promotions": {
+      "get": {
+        "operationId": "listMerchantPromotions",
+        "security": [
+          {
+            "agentOboBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "X-Merchant-Session-Id",
+            "in": "header",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 128
+            }
+          },
+          {
+            "name": "X-Eval-Sandbox-Id",
+            "in": "header",
+            "required": false,
+            "description": "Any supplied evaluation context is rejected.",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "format": "int64",
+              "minimum": 1,
+              "maximum": 50,
+              "default": 20
+            }
+          },
+          {
+            "name": "offset",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "format": "int64",
+              "minimum": 0,
+              "maximum": 10000,
+              "default": 0
+            }
+          }
+        ],
+        "x-required-actor": "merchant-agent",
+        "x-required-scope": "merchant:read",
+        "description": "Stable bounded page of actual persisted marketing records. Iterate limit/offset until a short page; no fixed cross-request snapshot.",
+        "responses": {
+          "200": {
+            "description": "Current merchant facts",
+            "headers": {
+              "Cache-Control": {
+                "schema": {
+                  "type": "string",
+                  "const": "no-store"
+                }
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/MerchantPromotion"
+                  },
+                  "maxItems": 50
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid, unknown or repeated query parameters"
+          },
+          "403": {
+            "description": "Invalid merchant actor, exact scope, session or evaluation context"
+          },
+          "404": {
+            "description": "Unknown resource"
+          },
+          "503": {
+            "description": "Identity verification unavailable"
+          }
+        }
+      }
+    },
+    "/internal/merchant/promotions/{id}": {
+      "get": {
+        "operationId": "getMerchantPromotion",
+        "security": [
+          {
+            "agentOboBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "X-Merchant-Session-Id",
+            "in": "header",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 128
+            }
+          },
+          {
+            "name": "X-Eval-Sandbox-Id",
+            "in": "header",
+            "required": false,
+            "description": "Any supplied evaluation context is rejected.",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 64
+            }
+          }
+        ],
+        "x-required-actor": "merchant-agent",
+        "x-required-scope": "merchant:read",
+        "description": "Reads a persisted marketing record under the same merchant read identity.",
+        "responses": {
+          "200": {
+            "description": "Current merchant facts",
+            "headers": {
+              "Cache-Control": {
+                "schema": {
+                  "type": "string",
+                  "const": "no-store"
+                }
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MerchantPromotion"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid, unknown or repeated query parameters"
+          },
+          "403": {
+            "description": "Invalid merchant actor, exact scope, session or evaluation context"
+          },
+          "404": {
+            "description": "Unknown resource"
+          },
+          "503": {
+            "description": "Identity verification unavailable"
+          }
+        }
+      }
+    },
+    "/internal/merchant/listings": {
+      "get": {
+        "operationId": "searchMerchantListings",
+        "security": [
+          {
+            "agentOboBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "X-Merchant-Session-Id",
+            "in": "header",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 128
+            }
+          },
+          {
+            "name": "X-Eval-Sandbox-Id",
+            "in": "header",
+            "required": false,
+            "description": "Any supplied evaluation context is rejected.",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "query",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "maxLength": 256
+            }
+          },
+          {
+            "name": "status",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "enum": [
+                "active",
+                "paused",
+                "draft",
+                "out_of_stock"
+              ]
+            }
+          },
+          {
+            "name": "category",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "maxLength": 100
+            }
+          },
+          {
+            "name": "maxStock",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "format": "int64",
+              "minimum": 0
+            }
+          },
+          {
+            "name": "contentQuality",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "enum": [
+                "good",
+                "needs_work",
+                "poor"
+              ]
+            }
+          },
+          {
+            "name": "currency",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "pattern": "[A-Z]{3}"
+            }
+          },
+          {
+            "name": "sort",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "enum": [
+                "relevance",
+                "stock_asc",
+                "price_asc",
+                "price_desc",
+                "sales_desc"
+              ],
+              "default": "relevance"
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "format": "int64",
+              "minimum": 1,
+              "maximum": 50,
+              "default": 20
+            }
+          },
+          {
+            "name": "offset",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "format": "int64",
+              "minimum": 0,
+              "maximum": 10000,
+              "default": 0
+            }
+          },
+          {
+            "name": "asOf",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "format": "date-time"
+            },
+            "description": "Defaults to the server clock; a future instant is rejected."
+          }
+        ],
+        "x-required-actor": "merchant-agent",
+        "x-required-scope": "merchant:read",
+        "description": "Groups complete actual families before paging summary roots; family detail includes the actual variants. Price sorting requires a currency. Includes paused/draft/unpublished products and does not depend on legacy /products LIMIT 100.",
+        "responses": {
+          "200": {
+            "description": "Current merchant facts",
+            "headers": {
+              "Cache-Control": {
+                "schema": {
+                  "type": "string",
+                  "const": "no-store"
+                }
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MerchantListingPage"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid, unknown or repeated query parameters"
+          },
+          "403": {
+            "description": "Invalid merchant actor, exact scope, session or evaluation context"
+          },
+          "404": {
+            "description": "Unknown resource"
+          },
+          "503": {
+            "description": "Identity verification unavailable"
+          }
+        }
+      }
+    },
+    "/internal/merchant/listings/{id}": {
+      "get": {
+        "operationId": "getMerchantListing",
+        "security": [
+          {
+            "agentOboBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "X-Merchant-Session-Id",
+            "in": "header",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 128
+            }
+          },
+          {
+            "name": "X-Eval-Sandbox-Id",
+            "in": "header",
+            "required": false,
+            "description": "Any supplied evaluation context is rejected.",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 64
+            }
+          },
+          {
+            "name": "asOf",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "format": "date-time"
+            },
+            "description": "Defaults to the server clock; a future instant is rejected."
+          }
+        ],
+        "x-required-actor": "merchant-agent",
+        "x-required-scope": "merchant:read",
+        "description": "Reads an actual family or SKU, its inherited content, private operating facts and paid-order window.",
+        "responses": {
+          "200": {
+            "description": "Current merchant facts",
+            "headers": {
+              "Cache-Control": {
+                "schema": {
+                  "type": "string",
+                  "const": "no-store"
+                }
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MerchantListing"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid, unknown or repeated query parameters"
+          },
+          "403": {
+            "description": "Invalid merchant actor, exact scope, session or evaluation context"
+          },
+          "404": {
+            "description": "Unknown resource"
+          },
+          "503": {
+            "description": "Identity verification unavailable"
+          }
+        }
+      }
+    },
+    "/internal/merchant/inventory-alerts": {
+      "get": {
+        "operationId": "listMerchantInventoryAlerts",
+        "security": [
+          {
+            "agentOboBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "X-Merchant-Session-Id",
+            "in": "header",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 128
+            }
+          },
+          {
+            "name": "X-Eval-Sandbox-Id",
+            "in": "header",
+            "required": false,
+            "description": "Any supplied evaluation context is rejected.",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "format": "int64",
+              "minimum": 1,
+              "maximum": 50,
+              "default": 20
+            }
+          },
+          {
+            "name": "offset",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "format": "int64",
+              "minimum": 0,
+              "maximum": 10000,
+              "default": 0
+            }
+          },
+          {
+            "name": "asOf",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "format": "date-time"
+            },
+            "description": "Defaults to the server clock; a future instant is rejected."
+          }
+        ],
+        "x-required-actor": "merchant-agent",
+        "x-required-scope": "merchant:read",
+        "description": "Scans the full authoritative inventory and paid-order facts, with bounded output. No fabricated cost or return rate.",
+        "responses": {
+          "200": {
+            "description": "Current merchant facts",
+            "headers": {
+              "Cache-Control": {
+                "schema": {
+                  "type": "string",
+                  "const": "no-store"
+                }
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MerchantInventoryAlertPage"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid, unknown or repeated query parameters"
+          },
+          "403": {
+            "description": "Invalid merchant actor, exact scope, session or evaluation context"
+          },
+          "404": {
+            "description": "Unknown resource"
+          },
+          "503": {
+            "description": "Identity verification unavailable"
+          }
+        }
+      }
     }
   },
   "components": {
@@ -3288,6 +3994,40 @@
               },
               "payload": {
                 "$ref": "#/components/schemas/MerchantInventoryChangePayload"
+              }
+            }
+          },
+          {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "kind",
+              "payload"
+            ],
+            "properties": {
+              "kind": {
+                "type": "string",
+                "const": "PROMOTION"
+              },
+              "payload": {
+                "$ref": "#/components/schemas/MerchantPromotionPayload"
+              }
+            }
+          },
+          {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "kind",
+              "payload"
+            ],
+            "properties": {
+              "kind": {
+                "type": "string",
+                "const": "CAMPAIGN"
+              },
+              "payload": {
+                "$ref": "#/components/schemas/MerchantCampaignPayload"
               }
             }
           }
@@ -3456,7 +4196,9 @@
             "enum": [
               "PRICE_UPDATE",
               "LISTING_UPDATE",
-              "INVENTORY_ACTION"
+              "INVENTORY_ACTION",
+              "PROMOTION",
+              "CAMPAIGN"
             ]
           },
           "state": {
@@ -5368,6 +6110,784 @@
         "properties": {
           "category": {"type": "string", "enum": ["AUTHENTICATION", "AUTHORIZATION", "VALIDATION", "CONFLICT", "UNAVAILABLE"]},
           "message": {"type": "string"}
+        }
+      },
+      "MerchantPromotionPayload": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "name",
+          "listingIds",
+          "discountPct",
+          "starts",
+          "ends"
+        ],
+        "properties": {
+          "name": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 80
+          },
+          "listingIds": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 64
+            },
+            "minItems": 1,
+            "maxItems": 25,
+            "uniqueItems": true
+          },
+          "discountPct": {
+            "type": "number",
+            "exclusiveMinimum": 0,
+            "maximum": 50,
+            "multipleOf": 0.01
+          },
+          "starts": {
+            "type": "string",
+            "description": "ISO local date in Asia/Shanghai, or an offset timestamp. An ends date includes that calendar day; an ends timestamp is exclusive."
+          },
+          "ends": {
+            "type": "string",
+            "description": "ISO local date in Asia/Shanghai, or an offset timestamp. An ends date includes that calendar day; an ends timestamp is exclusive."
+          }
+        },
+        "description": "Expands actual family members to at most 25 unique SKUs; freezes half-up rounded integer minor prices. Approval inside the operating window changes the official product price. No automatic start or end-price restoration."
+      },
+      "MerchantCampaignPayload": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "name"
+        ],
+        "properties": {
+          "campaignId": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "minLength": 1,
+            "maxLength": 64
+          },
+          "name": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 80
+          },
+          "objective": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "maxLength": 200
+          },
+          "audience": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "maxLength": 300
+          },
+          "budgetMinor": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "minimum": 0,
+            "maximum": 1000000
+          },
+          "copyText": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "maxLength": 600
+          },
+          "starts": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "ISO local date in Asia/Shanghai, or an offset timestamp. An ends date includes that calendar day; an ends timestamp is exclusive."
+          },
+          "ends": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "ISO local date in Asia/Shanghai, or an offset timestamp. An ends date includes that calendar day; an ends timestamp is exclusive."
+          }
+        },
+        "description": "Creates or changes a local marketing plan. Omitted optional fields retain their previous value on update; null clears them. New plans use CNY and have no attributed spend/revenue. Cannot execute external advertising."
+      },
+      "MerchantCampaign": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "campaignId",
+          "name",
+          "objective",
+          "audience",
+          "copyText",
+          "channel",
+          "currency",
+          "budgetMinor",
+          "startsAt",
+          "endsAt",
+          "state",
+          "version",
+          "createdAt",
+          "updatedAt",
+          "sourceChangeId",
+          "spendMinor",
+          "revenueMinor",
+          "observationSourceKind",
+          "observationSourceRef",
+          "observedAt",
+          "observationStart",
+          "observationEnd",
+          "fixtureVersion"
+        ],
+        "properties": {
+          "campaignId": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          },
+          "objective": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "audience": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "copyText": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "channel": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "currency": {
+            "type": "string"
+          },
+          "budgetMinor": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64"
+          },
+          "startsAt": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time"
+          },
+          "endsAt": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time"
+          },
+          "state": {
+            "type": "string",
+            "enum": [
+              "draft",
+              "active",
+              "paused",
+              "ended"
+            ]
+          },
+          "version": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "createdAt": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "updatedAt": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "sourceChangeId": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "spendMinor": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64"
+          },
+          "revenueMinor": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64"
+          },
+          "observationSourceKind": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "observationSourceRef": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "observedAt": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time"
+          },
+          "observationStart": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time"
+          },
+          "observationEnd": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time"
+          },
+          "fixtureVersion": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "description": "Persisted local plan plus independent nullable observations. Changing a plan does not manufacture or alter attributed results. Compare revenue/spend only for their shared observed window; missing revenue is not zero."
+      },
+      "MerchantPromotionTarget": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "productId",
+          "approvedBasePriceMinor",
+          "promotionPriceMinor",
+          "beforeVersion",
+          "afterVersion",
+          "eventId",
+          "currentPriceMinor",
+          "currentVersion",
+          "overridden",
+          "currentCurrency"
+        ],
+        "properties": {
+          "productId": {
+            "type": "string"
+          },
+          "approvedBasePriceMinor": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "promotionPriceMinor": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "beforeVersion": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "afterVersion": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "eventId": {
+            "type": "string"
+          },
+          "currentPriceMinor": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "currentVersion": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "overridden": {
+            "type": "boolean"
+          },
+          "currentCurrency": {
+            "type": "string"
+          }
+        },
+        "description": "The approved promotion price/currency is historical. Current price and currency remain authoritative product facts; overridden means the current price or currency differs, while currentVersion separately exposes later publication."
+      },
+      "MerchantPromotion": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "promotionId",
+          "name",
+          "currency",
+          "discountBasisPoints",
+          "startsAt",
+          "endsAt",
+          "state",
+          "version",
+          "createdAt",
+          "updatedAt",
+          "appliedAt",
+          "sourceChangeId",
+          "targets"
+        ],
+        "properties": {
+          "promotionId": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          },
+          "currency": {
+            "type": "string"
+          },
+          "discountBasisPoints": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 1,
+            "maximum": 5000
+          },
+          "startsAt": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "endsAt": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "state": {
+            "type": "string",
+            "enum": [
+              "active",
+              "ended"
+            ]
+          },
+          "version": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "createdAt": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "updatedAt": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "appliedAt": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "sourceChangeId": {
+            "type": "string"
+          },
+          "targets": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/MerchantPromotionTarget"
+            },
+            "maxItems": 25
+          }
+        },
+        "description": "Applied price change and its operating window. Ended does not mean the prior price was restored; restoration requires another explicit approval."
+      },
+      "MerchantSalesWindow": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "start",
+          "end",
+          "timeZone"
+        ],
+        "properties": {
+          "start": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "end": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "timeZone": {
+            "type": "string",
+            "const": "Asia/Shanghai"
+          }
+        },
+        "description": "Thirty complete Shanghai calendar days before asOf; paid-time interval is [start,end)."
+      },
+      "MerchantOperatingFacts": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "unitCostMinor",
+          "lowStockThreshold",
+          "contentQuality",
+          "missingAttributes",
+          "factsVersion",
+          "observedAt",
+          "sourceRef"
+        ],
+        "properties": {
+          "unitCostMinor": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64"
+          },
+          "lowStockThreshold": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "contentQuality": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "missingAttributes": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "factsVersion": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "observedAt": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "sourceRef": {
+            "type": "string"
+          }
+        }
+      },
+      "MerchantListingSales": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "orderCount",
+          "units",
+          "refundRequestedOrderCount",
+          "refundRequestedOrderPct"
+        ],
+        "properties": {
+          "orderCount": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "units": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "refundRequestedOrderCount": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "refundRequestedOrderPct": {
+            "type": [
+              "number",
+              "null"
+            ]
+          }
+        },
+        "description": "Actual paid-order cohort. Refund count is distinct orders with valid refund requests, not physical returns. Historical amounts are queried separately by currency."
+      },
+      "MerchantListing": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "id",
+          "kind",
+          "variantOf",
+          "title",
+          "shortDescription",
+          "priceMinor",
+          "currency",
+          "stockQuantity",
+          "available",
+          "publicationState",
+          "status",
+          "publicationVersion",
+          "metadataVersion",
+          "familyMetadataVersion",
+          "content",
+          "options",
+          "optionValues",
+          "contentQuality",
+          "operations",
+          "salesLast30d",
+          "marginPct",
+          "priceEditable",
+          "window",
+          "variants"
+        ],
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "kind": {
+            "type": "string"
+          },
+          "variantOf": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "title": {
+            "type": "string"
+          },
+          "shortDescription": {
+            "type": "string"
+          },
+          "priceMinor": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "currency": {
+            "type": "string"
+          },
+          "stockQuantity": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "available": {
+            "type": "boolean"
+          },
+          "publicationState": {
+            "type": "string"
+          },
+          "status": {
+            "type": "string"
+          },
+          "publicationVersion": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64"
+          },
+          "metadataVersion": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "familyMetadataVersion": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64"
+          },
+          "content": {
+            "type": "object",
+            "additionalProperties": true
+          },
+          "options": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "additionalProperties": true
+            }
+          },
+          "optionValues": {
+            "type": "object",
+            "additionalProperties": {
+              "type": "string"
+            }
+          },
+          "contentQuality": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "operations": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/MerchantOperatingFacts"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "salesLast30d": {
+            "$ref": "#/components/schemas/MerchantListingSales"
+          },
+          "marginPct": {
+            "type": [
+              "number",
+              "null"
+            ]
+          },
+          "priceEditable": {
+            "type": "boolean"
+          },
+          "window": {
+            "$ref": "#/components/schemas/MerchantSalesWindow"
+          },
+          "variants": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/MerchantListing"
+            }
+          }
+        },
+        "description": "Merchant catalog includes unavailable and unpublished products. Family aggregates all actual SKUs and is not directly tradeable. Unknown operating cost/quality/margin is null; there is no inferred price-change timestamp."
+      },
+      "MerchantInventoryAlert": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "listingId",
+          "title",
+          "kind",
+          "variantOf",
+          "optionValues",
+          "stock",
+          "threshold",
+          "salesLast30d",
+          "daysOfCover",
+          "storefrontVisible"
+        ],
+        "properties": {
+          "listingId": {
+            "type": "string"
+          },
+          "title": {
+            "type": "string"
+          },
+          "kind": {
+            "type": "string",
+            "enum": [
+              "low_stock",
+              "slow_mover"
+            ]
+          },
+          "variantOf": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "optionValues": {
+            "type": "object",
+            "additionalProperties": {
+              "type": "string"
+            }
+          },
+          "stock": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "threshold": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "salesLast30d": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "daysOfCover": {
+            "type": [
+              "number",
+              "null"
+            ]
+          },
+          "storefrontVisible": {
+            "type": "boolean"
+          }
+        },
+        "description": "Low stock means stock <= known threshold. Slow mover means stock > known threshold and <= 5 units in the complete 30-day window. Cover is null with zero sales."
+      },
+      "MerchantListingPage": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "items",
+          "nextOffset",
+          "window"
+        ],
+        "properties": {
+          "items": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/MerchantListing"
+            },
+            "maxItems": 50
+          },
+          "nextOffset": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64"
+          },
+          "window": {
+            "$ref": "#/components/schemas/MerchantSalesWindow"
+          }
+        }
+      },
+      "MerchantInventoryAlertPage": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "items",
+          "nextOffset",
+          "window"
+        ],
+        "properties": {
+          "items": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/MerchantInventoryAlert"
+            },
+            "maxItems": 50
+          },
+          "nextOffset": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64"
+          },
+          "window": {
+            "$ref": "#/components/schemas/MerchantSalesWindow"
+          }
         }
       }
     }

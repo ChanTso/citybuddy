@@ -18,6 +18,22 @@ public class MerchantChangeConfiguration {
   }
 
   @Bean
+  MerchantMarketingRepository merchantMarketingRepository(
+      JdbcTemplate jdbc, @Qualifier("catalogClock") Clock clock) {
+    return new MerchantMarketingRepository(jdbc, clock);
+  }
+
+  @Bean
+  MerchantMarketingOperations merchantMarketingOperations(
+      JdbcTemplate jdbc,
+      ObjectMapper mapper,
+      MerchantMarketingRepository repository,
+      ProductPublicationService publication,
+      @Qualifier("catalogClock") Clock clock) {
+    return new MerchantMarketingOperations(jdbc, mapper, repository, publication, clock);
+  }
+
+  @Bean
   MerchantProductOperations merchantProductOperations(
       JdbcTemplate jdbc, ObjectMapper mapper, ProductPublicationService publication) {
     return new MerchantProductOperations(jdbc, mapper, publication);
@@ -28,8 +44,9 @@ public class MerchantChangeConfiguration {
       MerchantChangeRepository repository,
       MerchantService prices,
       MerchantProductOperations products,
+      MerchantMarketingOperations marketing,
       ObjectMapper mapper,
       @Qualifier("catalogClock") Clock clock) {
-    return new MerchantChangeService(repository, prices, products, mapper, clock);
+    return new MerchantChangeService(repository, prices, products, marketing, mapper, clock);
   }
 }
