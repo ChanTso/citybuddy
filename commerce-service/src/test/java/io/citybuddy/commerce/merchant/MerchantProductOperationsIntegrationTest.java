@@ -312,6 +312,52 @@ class MerchantProductOperationsIntegrationTest {
   }
 
   @Test
+  void optionDimensionsCannotBeEditedAsContentButPlainDescriptiveSizeCan() {
+    String sku = product("variant", 9, true, "PUBLISHED");
+    String family = family(List.of(sku));
+    fixture.update(
+        "UPDATE retail_product_family SET content=JSON_SET(content,'$.attributes',CAST(? AS JSON)),options=CAST(? AS JSON) WHERE family_id=?",
+        "{\"size\":\"M\",\"SiZe\":\"M\",\"width\":\"standard\"}",
+        "[{\"name\":\"size\",\"values\":[\"M\",\"L\"]},{\"name\":\"material\",\"values\":[\"Cotton\",\"Linen\"]}]",
+        family);
+    fixture.update(
+        "UPDATE retail_product_metadata SET content=CAST(? AS JSON),option_values=CAST(? AS JSON) WHERE product_id=?",
+        "{\"attributes\":{\"size\":\"M\",\"SiZe\":\"M\",\"width\":\"standard\"}}",
+        "{\"size\":\"M\",\"width\":\"standard\"}",
+        sku);
+    for (String target : List.of(family, sku)) {
+      for (String dimension : List.of("size", "SiZe", "width", "material")) {
+        assertThatThrownBy(() -> listing(target, Map.of(dimension, "L")))
+            .isInstanceOfSatisfying(
+                MerchantException.class,
+                exception -> {
+                  assertThat(exception.category()).isEqualTo("validation");
+                  assertThat(exception.getMessage()).contains("Protected listing field");
+                });
+      }
+    }
+    String plain = product("plain", 5, true, "PUBLISHED");
+    fixture.update(
+        "INSERT INTO retail_product_metadata(product_id,content,option_values) VALUES (?,CAST(? AS JSON),'{}')",
+        plain,
+        "{\"attributes\":{\"size\":\"Compact\"}}");
+    operations.apply("LISTING_UPDATE", listing(plain, Map.of("size", "Large")).snapshot());
+    assertThat(
+            jdbc.queryForObject(
+                "SELECT JSON_UNQUOTE(JSON_EXTRACT(content,'$.attributes.size')) FROM retail_product_metadata WHERE product_id=?",
+                String.class,
+                plain))
+        .isEqualTo("Large");
+    assertThat(
+            jdbc.queryForObject(
+                "SELECT JSON_UNQUOTE(JSON_EXTRACT(option_values,'$.size')) FROM retail_product_metadata WHERE product_id=?",
+                String.class,
+                sku))
+        .isEqualTo("M");
+    assertThat(number(sku, "publication_version")).isEqualTo(1);
+  }
+
+  @Test
   void familyPauseAndActivateRespectStockWhileRestockNeverRemovesAnExplicitPause() {
     String a = product("a", 9, true, "PUBLISHED");
     String b = product("b", 0, true, "PUBLISHED");

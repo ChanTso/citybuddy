@@ -162,9 +162,26 @@ public class MerchantProductOperations {
     if (!fields.isObject() || fields.isEmpty() || fields.size() > 25) {
       throw invalid("Listing updates require 1 to 25 fields");
     }
+    Map<String, FamilyState> families = new TreeMap<>();
+    if (target.family() != null) {
+      families.put(target.id(), target.family());
+    } else if (target.products().getFirst().familyId() != null) {
+      String familyId = target.products().getFirst().familyId();
+      families.put(familyId, family(familyId, false));
+    }
+    Set<String> optionDimensions = new HashSet<>();
+    for (FamilyState family : families.values()) {
+      family.optionNames().forEach(name -> optionDimensions.add(name.toLowerCase(Locale.ROOT)));
+    }
+    for (ProductState product : target.products()) {
+      product
+          .optionValues()
+          .fieldNames()
+          .forEachRemaining(name -> optionDimensions.add(name.toLowerCase(Locale.ROOT)));
+    }
     JsonNode effective =
         target.family() == null
-            ? inheritedContent(target.products().getFirst())
+            ? inheritedContent(target.products().getFirst(), families)
             : target.family().content();
     ArrayNode items = mapper.createArrayNode();
     ObjectNode normalized = mapper.createObjectNode();
@@ -180,7 +197,8 @@ public class MerchantProductOperations {
             "shared_family_content",
             "Edit shared content on family " + target.products().getFirst().familyId());
       }
-      if (PROTECTED.contains(name.toLowerCase(Locale.ROOT))) {
+      if (PROTECTED.contains(name.toLowerCase(Locale.ROOT))
+          || optionDimensions.contains(name.toLowerCase(Locale.ROOT))) {
         throw invalid("Protected listing field: " + name);
       }
       if (!SHARED.contains(name)
@@ -201,10 +219,6 @@ public class MerchantProductOperations {
     for (ProductState product : target.products()) {
       ensureEligible(product);
       products.put(product.productId(), product);
-    }
-    Map<String, FamilyState> families = new TreeMap<>();
-    if (target.family() != null) {
-      families.put(target.id(), target.family());
     }
     return prepared(
         "LISTING_UPDATE", target.id(), normalized, products, families, List.of(), items);
@@ -569,6 +583,7 @@ public class MerchantProductOperations {
                     null,
                     0,
                     mapper.createObjectNode(),
+                    mapper.createObjectNode(),
                     null),
             id);
     if (rows.isEmpty()) {
@@ -622,23 +637,25 @@ public class MerchantProductOperations {
   private Metadata metadata(String id, boolean lock) {
     return jdbc
         .query(
-            "SELECT family_id,metadata_version,content FROM retail_product_metadata WHERE product_id=?"
+            "SELECT family_id,metadata_version,content,option_values FROM retail_product_metadata WHERE product_id=?"
                 + (lock ? " FOR UPDATE" : ""),
             (row, index) ->
                 new Metadata(
                     row.getString("family_id"),
                     row.getLong("metadata_version"),
-                    object(row.getString("content"))),
+                    object(row.getString("content")),
+                    object(row.getString("option_values"))),
             id)
         .stream()
         .findFirst()
-        .orElseGet(() -> new Metadata(null, 0, mapper.createObjectNode()));
+        .orElseGet(
+            () -> new Metadata(null, 0, mapper.createObjectNode(), mapper.createObjectNode()));
   }
 
   private FamilyState family(String id, boolean lock) {
     var rows =
         jdbc.query(
-            "SELECT family_id,name,description,content,metadata_version FROM retail_product_family WHERE family_id=?"
+            "SELECT family_id,name,description,content,options,metadata_version FROM retail_product_family WHERE family_id=?"
                 + (lock ? " FOR UPDATE" : ""),
             (row, index) ->
                 new FamilyState(
@@ -646,6 +663,7 @@ public class MerchantProductOperations {
                     row.getString("name"),
                     row.getString("description"),
                     object(row.getString("content")),
+                    optionNames(row.getString("options")),
                     row.getLong("metadata_version"),
                     List.of()),
             id);
@@ -663,15 +681,16 @@ public class MerchantProductOperations {
         family.name(),
         family.description(),
         family.content(),
+        family.optionNames(),
         family.version(),
         members);
   }
 
-  private JsonNode inheritedContent(ProductState product) {
+  private JsonNode inheritedContent(ProductState product, Map<String, FamilyState> families) {
     if (product.familyId() == null) {
       return product.content();
     }
-    var family = family(product.familyId(), false);
+    FamilyState family = families.get(product.familyId());
     ObjectNode result = family.content().deepCopy();
     product
         .content()
@@ -727,6 +746,23 @@ public class MerchantProductOperations {
       throw new IllegalStateException("Stored product content must be an object");
     } catch (JsonProcessingException exception) {
       throw new IllegalStateException("Invalid stored product content", exception);
+    }
+  }
+
+  private List<String> optionNames(String json) {
+    try {
+      JsonNode options = mapper.readTree(json);
+      List<String> names = new ArrayList<>();
+      for (JsonNode option : options) {
+        JsonNode name = option.get("name");
+        if (name == null || !name.isTextual() || name.textValue().isBlank()) {
+          throw new IllegalStateException("Stored family option requires a name");
+        }
+        names.add(name.textValue());
+      }
+      return List.copyOf(names);
+    } catch (JsonProcessingException exception) {
+      throw new IllegalStateException("Invalid stored family options", exception);
     }
   }
 
@@ -803,6 +839,7 @@ public class MerchantProductOperations {
       String name,
       String description,
       ObjectNode content,
+      List<String> optionNames,
       long version,
       List<String> members) {}
 
@@ -819,6 +856,7 @@ public class MerchantProductOperations {
       String familyId,
       long metadataVersion,
       ObjectNode content,
+      ObjectNode optionValues,
       FactsState facts) {
     ProductState withMetadata(Metadata metadata) {
       return new ProductState(
@@ -834,6 +872,7 @@ public class MerchantProductOperations {
           metadata.familyId(),
           metadata.version(),
           metadata.content(),
+          metadata.optionValues(),
           facts);
     }
 
@@ -851,13 +890,15 @@ public class MerchantProductOperations {
           familyId,
           metadataVersion,
           content,
+          optionValues,
           value);
     }
   }
 
   public record FactsState(long version, String quality, List<String> missing) {}
 
-  private record Metadata(String familyId, long version, ObjectNode content) {}
+  private record Metadata(
+      String familyId, long version, ObjectNode content, ObjectNode optionValues) {}
 
   private record Target(String id, FamilyState family, List<ProductState> products) {}
 
