@@ -57,3 +57,5 @@ GRANT SELECT, INSERT, UPDATE ON commerce_db.merchant_price_draft TO 'commerce_ap
 GRANT SELECT ON commerce_db.merchant_products TO 'commerce_app'@'%';
 GRANT SELECT ON commerce_db.merchant_paid_orders TO 'commerce_app'@'%';
 GRANT SELECT ON commerce_db.merchant_daily_sales TO 'commerce_app'@'%';
+GRANT SELECT ON commerce_db.retail_product_family TO 'commerce_app'@'%';
+GRANT SELECT ON commerce_db.retail_product_metadata TO 'commerce_app'@'%';

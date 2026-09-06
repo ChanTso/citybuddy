@@ -2,6 +2,166 @@
   "openapi": "3.1.0",
   "info": {"title": "CityBuddy commerce API", "version": "0.0.1"},
   "paths": {
+    "/api/retail/products": {
+      "get": {
+        "operationId": "listRetailProducts",
+        "security": [
+          {
+            "directUserBearer": []
+          }
+        ],
+        "x-required-permission": "catalog:read",
+        "parameters": [
+          {
+            "name": "X-Eval-Sandbox-Id",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Default retail catalog summaries, at most 20",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "maxItems": 50,
+                  "items": {
+                    "$ref": "#/components/schemas/RetailProduct"
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid retail search or product identifier"
+          },
+          "401": {
+            "description": "Invalid direct-user identity or evaluation context"
+          },
+          "403": {
+            "description": "Missing catalog:read permission"
+          }
+        }
+      }
+    },
+    "/api/retail/products/search": {
+      "post": {
+        "operationId": "searchRetailProducts",
+        "security": [
+          {
+            "directUserBearer": []
+          }
+        ],
+        "x-required-permission": "catalog:read",
+        "parameters": [
+          {
+            "name": "X-Eval-Sandbox-Id",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Matching plain products and families; explicit filters are not relaxed",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "maxItems": 50,
+                  "items": {
+                    "$ref": "#/components/schemas/RetailProduct"
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid retail search or product identifier"
+          },
+          "401": {
+            "description": "Invalid direct-user identity or evaluation context"
+          },
+          "403": {
+            "description": "Missing catalog:read permission"
+          },
+          "413": {
+            "description": "Request exceeds 8192 bytes"
+          }
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/RetailSearch"
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/retail/products/{id}": {
+      "get": {
+        "operationId": "getRetailProduct",
+        "security": [
+          {
+            "directUserBearer": []
+          }
+        ],
+        "x-required-permission": "catalog:read",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 64
+            }
+          },
+          {
+            "name": "X-Eval-Sandbox-Id",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Retail product detail with actual published variants",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RetailProduct"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid retail search or product identifier"
+          },
+          "401": {
+            "description": "Invalid direct-user identity or evaluation context"
+          },
+          "403": {
+            "description": "Missing catalog:read permission"
+          },
+          "404": {
+            "description": "Missing or unpublished retail product"
+          }
+        }
+      }
+    },
     "/api/refunds/{refundId}": {
       "get": {
         "operationId": "getRefundStatus",
@@ -800,6 +960,243 @@
       "mockPaymentSignature": {"type": "apiKey", "in": "header", "name": "X-Mock-Payment-Signature", "description": "HMAC-SHA256 over the timestamp, idempotency key, complete callback intent, and exact evaluation context when present."}
     },
     "schemas": {
+      "RetailContent": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "brand": {
+            "type": "string"
+          },
+          "category": {
+            "type": "string"
+          },
+          "imageUrl": {
+            "type": "string"
+          },
+          "longDescription": {
+            "type": "string"
+          },
+          "rating": {
+            "type": "number",
+            "minimum": 0,
+            "maximum": 5
+          },
+          "reviewCount": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "labels": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "reviewHighlights": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "attributes": {
+            "type": "object",
+            "additionalProperties": {
+              "type": "string"
+            }
+          },
+          "specs": {
+            "type": "object",
+            "additionalProperties": {
+              "type": "string"
+            }
+          }
+        }
+      },
+      "RetailSearch": {
+        "type": "object",
+        "additionalProperties": false,
+        "description": "Price filters and price sorting require currency. All attribute and price constraints must match one actual SKU. Request body limit 8192 bytes.",
+        "properties": {
+          "query": {
+            "type": "string",
+            "maxLength": 256
+          },
+          "category": {
+            "type": "string",
+            "maxLength": 100
+          },
+          "currency": {
+            "type": "string",
+            "pattern": "^[A-Za-z]{3}$"
+          },
+          "minPriceMinor": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "maxPriceMinor": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "minRating": {
+            "type": "number",
+            "minimum": 0,
+            "maximum": 5
+          },
+          "attributes": {
+            "type": "object",
+            "maxProperties": 10,
+            "propertyNames": {
+              "minLength": 1,
+              "maxLength": 80
+            },
+            "additionalProperties": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 200
+            }
+          },
+          "sort": {
+            "type": "string",
+            "enum": [
+              "relevance",
+              "price_asc",
+              "price_desc",
+              "rating"
+            ],
+            "default": "relevance"
+          },
+          "limit": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 50,
+            "default": 20
+          }
+        }
+      },
+      "RetailProduct": {
+        "type": "object",
+        "required": [
+          "id",
+          "kind",
+          "productId",
+          "variantOf",
+          "title",
+          "shortDescription",
+          "priceMinor",
+          "currency",
+          "stockQuantity",
+          "available",
+          "inStock",
+          "publicationVersion",
+          "metadataVersion",
+          "familyMetadataVersion",
+          "content",
+          "options",
+          "optionValues"
+        ],
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "kind": {
+            "type": "string",
+            "enum": [
+              "plain",
+              "family",
+              "variant"
+            ]
+          },
+          "productId": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "variantOf": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "title": {
+            "type": "string"
+          },
+          "shortDescription": {
+            "type": "string"
+          },
+          "priceMinor": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "currency": {
+            "type": "string"
+          },
+          "stockQuantity": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "available": {
+            "type": "boolean"
+          },
+          "inStock": {
+            "type": "boolean"
+          },
+          "publicationVersion": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "minimum": 1
+          },
+          "metadataVersion": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "familyMetadataVersion": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "minimum": 1
+          },
+          "content": {
+            "$ref": "#/components/schemas/RetailContent"
+          },
+          "options": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "required": [
+                "name",
+                "values"
+              ],
+              "properties": {
+                "name": {
+                  "type": "string"
+                },
+                "values": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  }
+                }
+              }
+            }
+          },
+          "optionValues": {
+            "type": "object",
+            "additionalProperties": {
+              "type": "string"
+            }
+          },
+          "variants": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/RetailProduct"
+            }
+          }
+        },
+        "description": "Buyer projection with live product truth. Summaries omit variants and long detail fields; family publicationVersion is null."
+      },
       "MerchantPriceDraft": {
         "type": "object",
         "required": [

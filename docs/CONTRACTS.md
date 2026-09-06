@@ -11,6 +11,58 @@ Historical development slices and route decisions are archived under [docs/archi
 they explain provenance but do not define current behavior or process. Verified engineering
 pitfalls are collected in [docs/LESSONS.md](LESSONS.md).
 
+## Retail catalog reads
+
+The retail catalog adds display metadata and SKU families without changing the existing
+eight-field `Product` or order request. A plain product or variant points to one authoritative
+`product` row. A family has its own catalog ID and no transaction row, so it cannot be ordered.
+Fixture importers use disjoint family/SKU IDs and lower-case, knowledge-compatible SKU IDs.
+
+`retail_product_family` stores the family title, description, ordered option dimensions and
+content version. `retail_product_metadata` links each actual SKU to its family, records its
+option values and display order, and holds an independent content version. Only the stored SKU
+rows exist; option value domains do not imply a Cartesian product. Leaf content overrides family
+content; attributes and specs merge by key. Metadata permits brand, category, image URL, long
+description, rating/review count, labels, attributes, specs and review highlights. It cannot store
+price, currency, stock, sale eligibility or publication version. Those fields always come from
+`product`, including after ordinary ordering and merchant repricing. The application currently
+has SELECT-only access to the two extension tables.
+
+All three retail read routes require a direct user token with `catalog:read`; production routes
+reject evaluation context. Published legacy products without extension metadata remain plain
+products with empty content and `metadataVersion=0`. Paused or empty-stock SKUs remain visible
+with `inStock=false`; unpublished SKUs are absent.
+
+| Route | Result |
+| --- | --- |
+| `GET /api/retail/products` | Default bounded search; up to 20 plain/family summaries |
+| `POST /api/retail/products/search` | Filtered summaries; variants stay under their family |
+| `GET /api/retail/products/{id}` | Plain/variant detail or a family with its actual published variants |
+
+Search accepts `query`, `category`, integer `minPriceMinor`/`maxPriceMinor`, `minRating`,
+`currency`, an `attributes` string map, `sort` and `limit`. Sort values are `relevance`,
+`price_asc`, `price_desc` and `rating`; the limit is 1–50, default 20. Price filters and price
+sorting require currency. Explicit attributes and price constraints must match the same actual
+SKU. An absent specification combination returns no match; the server never relaxes requested
+filters. Category and rating use the displayed listing's content; a variant's rating override
+does not raise its family's displayed rating. Search can also match published but unavailable
+SKUs, so a matching family is not a promise that the requested option is purchasable. Its
+detail supplies each actual option's availability; the transaction rechecks the selected SKU.
+Input is at most 8 KiB, rejects unknown/duplicate fields and fractional integer values,
+and is bound as SQL parameters. This path uses MySQL keyword/filter reads, not the support
+knowledge index or a vector search.
+
+Buyer family price is the lowest price among in-stock eligible SKUs, or the lowest published
+SKU price if all are unavailable. `inStock` requires publication, availability and positive
+stock. Family stock is the sum of published SKU stock; its publication version is null and it
+has its own metadata version. Mixed-currency family data is invalid. Merchant operations must
+use individual SKU truth or their separately defined aggregate, not the buyer's minimum
+in-stock price as a price-change input. Summaries omit full variants and long detail fields.
+
+The existing publication transaction and product Outbox remain responsible for SKU publication.
+Importing a published SKU must include its publication event; display metadata does not create a
+second cache or an Elasticsearch indexing pipeline.
+
 ## Merchant analysis and approved price changes
 
 The merchant API is enabled with `citybuddy.merchant.enabled=true`, alongside catalog and OBO

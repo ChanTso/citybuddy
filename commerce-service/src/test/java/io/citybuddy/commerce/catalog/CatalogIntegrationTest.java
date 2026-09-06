@@ -144,6 +144,225 @@ class CatalogIntegrationTest {
   }
 
   @Test
+  void provesRetailSkuTruthFiltersAndNonPurchasableFamilies() throws Exception {
+    String family = "retail-test-bedding";
+    String small = "retail-test-bedding-small-black";
+    String king = "retail-test-bedding-king-black";
+    String paused = "retail-test-bedding-king-white";
+    String hidden = "retail-test-bedding-small-white";
+    String plain = "retail-test-lamp";
+    publicationService.publish(
+        new ProductRepository.ProductDraft(
+            small, "Small black bedding", "Cotton", 1000, "CNY", 0, true, true),
+        UUID.randomUUID());
+    publicationService.publish(
+        new ProductRepository.ProductDraft(
+            king, "King black bedding", "Cotton", 3000, "CNY", 3, true, true),
+        UUID.randomUUID());
+    publicationService.publish(
+        new ProductRepository.ProductDraft(
+            paused, "King white bedding", "Cotton", 1500, "CNY", 4, false, true),
+        UUID.randomUUID());
+    publicationService.publish(
+        new ProductRepository.ProductDraft(
+            hidden, "Small white bedding", "Cotton", 500, "CNY", 4, true, false),
+        UUID.randomUUID());
+    publicationService.publish(
+        new ProductRepository.ProductDraft(
+            plain, "Reading lamp", "Desk light", 5000, "CNY", 5, true, true),
+        UUID.randomUUID());
+    try (Connection fixtureConnection =
+        DriverManager.getConnection(
+            required("CATALOG_MYSQL_URL"),
+            "bootstrap_admin",
+            required("MYSQL_BOOTSTRAP_PASSWORD"))) {
+      JdbcTemplate fixture =
+          new JdbcTemplate(new SingleConnectionDataSource(fixtureConnection, true));
+      fixture.execute("SET ROLE 'bootstrap_grant_role'");
+      try {
+        fixture.update(
+            """
+        INSERT INTO retail_product_family
+          (family_id, name, description, content, options, metadata_version, display_order)
+        VALUES (?, 'Cotton bedding', 'Two sizes and colours', ?, ?, 2, 1)
+        """,
+            family,
+            json(
+                Map.of(
+                    "category",
+                    "bedding",
+                    "rating",
+                    4.5,
+                    "attributes",
+                    Map.of("material", "cotton"),
+                    "longDescription",
+                    "Woven cotton bedding",
+                    "specs",
+                    Map.of("care", "machine wash"))),
+            json(
+                List.of(
+                    Map.of("name", "size", "values", List.of("small", "king")),
+                    Map.of("name", "color", "values", List.of("black", "white")))));
+        int order = 0;
+        for (String id : List.of(small, king, paused, hidden)) {
+          fixture.update(
+              """
+          INSERT INTO retail_product_metadata
+            (product_id, family_id, content, option_values, metadata_version, display_order)
+          VALUES (?, ?, ?, ?, 3, ?)
+          """,
+              id,
+              family,
+              json(
+                  id.equals(king)
+                      ? Map.of("rating", 5.0, "attributes", Map.of("finish", "matte"))
+                      : Map.of()),
+              json(
+                  Map.of(
+                      "size",
+                      id.contains("small") ? "small" : "king",
+                      "color",
+                      id.contains("black") ? "black" : "white")),
+              order++);
+        }
+        fixture.update(
+            """
+        INSERT INTO retail_product_metadata
+          (product_id, family_id, content, option_values, metadata_version, display_order)
+        VALUES (?, NULL, '{"category":"lighting","rating":4.8}', '{}', 1, 2)
+        """,
+            plain);
+      } finally {
+        fixture.execute("SET ROLE NONE");
+      }
+    }
+
+    ResponseEntity<JsonNode> detail = get("/api/retail/products/" + family, token(), null);
+    assertThat(detail.getStatusCode()).isEqualTo(HttpStatus.OK);
+    JsonNode familyView = detail.getBody();
+    assertThat(familyView.path("kind").asText()).isEqualTo("family");
+    assertThat(familyView.path("productId").isNull()).isTrue();
+    assertThat(familyView.path("publicationVersion").isNull()).isTrue();
+    assertThat(familyView.path("metadataVersion").asLong()).isEqualTo(2);
+    assertThat(familyView.path("priceMinor").asLong()).isEqualTo(3000);
+    assertThat(familyView.path("stockQuantity").asLong()).isEqualTo(7);
+    assertThat(familyView.path("inStock").asBoolean()).isTrue();
+    assertThat(familyView.path("variants").size()).isEqualTo(3);
+    assertThat(familyView.path("options").get(0).path("name").asText()).isEqualTo("size");
+    assertThat(get("/api/retail/products/" + hidden, token(), null).getStatusCode())
+        .isEqualTo(HttpStatus.NOT_FOUND);
+    JsonNode sku = get("/api/retail/products/" + king, token(), null).getBody();
+    assertThat(sku.path("kind").asText()).isEqualTo("variant");
+    assertThat(sku.path("content").path("attributes").path("material").asText())
+        .isEqualTo("cotton");
+    assertThat(sku.path("content").path("attributes").path("finish").asText()).isEqualTo("matte");
+    assertThat(sku.path("metadataVersion").asLong()).isEqualTo(3);
+    assertThat(sku.path("familyMetadataVersion").asLong()).isEqualTo(2);
+    assertThat(
+            get("/api/retail/products/" + king.toUpperCase(java.util.Locale.ROOT), token(), null)
+                .getBody()
+                .path("id")
+                .asText())
+        .isEqualTo(king);
+    assertThat(
+            get("/api/retail/products/" + paused, token(), null)
+                .getBody()
+                .path("inStock")
+                .asBoolean())
+        .isFalse();
+
+    ResponseEntity<JsonNode> constrained =
+        searchRetail(
+            Map.of(
+                "attributes",
+                Map.of("size", "king", "color", "black"),
+                "maxPriceMinor",
+                2000,
+                "currency",
+                "CNY"));
+    assertThat(constrained.getStatusCode()).isEqualTo(HttpStatus.OK);
+    assertThat(constrained.getBody().size()).isZero();
+    assertThat(
+            searchRetail(Map.of("attributes", Map.of("size", "small", "color", "white")))
+                .getBody()
+                .size())
+        .isZero();
+    JsonNode matches = searchRetail(Map.of("category", "bedding")).getBody();
+    assertThat(matches.size()).isEqualTo(1);
+    assertThat(matches.get(0).path("id").asText()).isEqualTo(family);
+    assertThat(matches.get(0).path("variants").isEmpty()).isTrue();
+    assertThat(matches.get(0).path("content").has("longDescription")).isFalse();
+    assertThat(searchRetail(Map.of("query", "bedding")).getBody().size()).isEqualTo(1);
+    assertThat(searchRetail(Map.of("category", "bedding", "minRating", 4.8)).getBody().size())
+        .isZero();
+    JsonNode sorted = searchRetail(Map.of("query", "bedding lamp", "sort", "rating")).getBody();
+    assertThat(sorted.get(0).path("id").asText()).isEqualTo(plain);
+    assertThat(sorted.get(1).path("id").asText()).isEqualTo(family);
+    JsonNode byPrice =
+        searchRetail(Map.of("query", "bedding lamp", "sort", "price_asc", "currency", "CNY"))
+            .getBody();
+    assertThat(byPrice.get(0).path("id").asText()).isEqualTo(family);
+    assertThat(byPrice.get(1).path("id").asText()).isEqualTo(plain);
+    assertThat(searchRetail(Map.of("query", "x%'OR1=1--")).getBody().size()).isZero();
+    assertThat(searchRetail(Map.of("limit", 0)).getStatusCode()).isEqualTo(HttpStatus.BAD_REQUEST);
+    assertThat(searchRetail(Map.of("maxPriceMinor", 2000)).getStatusCode())
+        .isEqualTo(HttpStatus.BAD_REQUEST);
+    assertThat(searchRetail(Map.of("unknown", true)).getStatusCode())
+        .isEqualTo(HttpStatus.BAD_REQUEST);
+    assertThat(get("/api/retail/products", null, null).getStatusCode())
+        .isEqualTo(HttpStatus.UNAUTHORIZED);
+    assertThat(
+            get(
+                    "/api/retail/products",
+                    signedTestToken(
+                        "https://identity.citybuddy.test", "citybuddy-web", "direct_user"),
+                    null)
+                .getStatusCode())
+        .isEqualTo(HttpStatus.FORBIDDEN);
+    assertThat(get("/api/retail/products", token(), "forbidden").getStatusCode())
+        .isEqualTo(HttpStatus.UNAUTHORIZED);
+
+    assertThat(
+            postOrder(
+                    token(),
+                    "retail-family-order",
+                    Map.of("productId", family, "quantity", 1, "expectedProductVersion", 1))
+                .getStatusCode())
+        .isEqualTo(HttpStatus.UNPROCESSABLE_ENTITY);
+    assertThat(
+            jdbc.queryForObject(
+                "SELECT COUNT(*) FROM standard_order WHERE product_id = ?", Integer.class, family))
+        .isZero();
+    publicationService.changePrices(
+        List.of(new ProductRepository.PriceChange(king, 1, 2500)), "CNY");
+    ResponseEntity<JsonNode> purchase =
+        postOrder(
+            token(),
+            "retail-sku-order",
+            Map.of("productId", king, "quantity", 3, "expectedProductVersion", 2));
+    assertThat(purchase.getStatusCode()).isEqualTo(HttpStatus.CREATED);
+    assertThat(purchase.getBody().path("totalPriceMinor").asLong()).isEqualTo(7500);
+    JsonNode after = get("/api/retail/products/" + family, token(), null).getBody();
+    assertThat(after.path("inStock").asBoolean()).isFalse();
+    assertThat(after.path("priceMinor").asLong()).isEqualTo(1000);
+    assertThat(after.path("stockQuantity").asLong()).isEqualTo(4);
+    assertThat(
+            jdbc.queryForObject(
+                "SELECT stock_quantity FROM product WHERE product_id = ?", Long.class, king))
+        .isZero();
+  }
+
+  private ResponseEntity<JsonNode> searchRetail(Object body) {
+    HttpHeaders headers = new HttpHeaders();
+    headers.setBearerAuth(token());
+    return rest.exchange(
+        "http://127.0.0.1:" + port + "/api/retail/products/search",
+        HttpMethod.POST,
+        new HttpEntity<>(body, headers),
+        JsonNode.class);
+  }
+
+  @Test
   void provesStandardOrderApiAtomicityIdempotencyAndConcurrency() throws Exception {
     orderIdempotencyBaseline =
         jdbc.queryForObject("SELECT COUNT(*) FROM order_idempotency", Integer.class);
