@@ -14,7 +14,7 @@ public final class SeckillOrderWorker {
   @Scheduled(
       scheduler = "seckillOrderScheduler",
       initialDelayString = "${citybuddy.seckill.order.worker-initial-delay-ms:5000}",
-      fixedDelayString = "${citybuddy.seckill.order.worker-delay-ms:1000}")
+      fixedDelayString = "${citybuddy.seckill.order.worker-delay-ms:50}")
   public int runOnce() throws Exception {
     return messaging.consumeOnce(orders);
   }

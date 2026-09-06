@@ -45,6 +45,21 @@ two-times line. These are admission-entry results with an intentional asynchrono
 order-completion throughput. One fresh 800/s old/new pair moved p50 6.27→2.35 ms but p99
 34.79→62.73 ms; the mixed single pair does not establish a performance improvement.
 
+## Sustained completed orders
+
+The [five-minute results](results/seckill_sustained_orders_20260906.md) and
+[registration](results/seckill_sustained_registration_20260906.md) separate admission from order production and timeout-message dispatch. The initial
+20/s point remained bounded; 40/s accumulated work despite complete HTTP admission.
+The [cadence comparison](results/seckill_cadence_comparison_registration_20260906.md)
+records the resulting batch-delay adjustment and the next loads before execution.
+Neither a short admission rate nor a finite batch average is stable order capacity.
+
+`run_ladder.sh` uses the result label as the request-key prefix. Standalone k6 callers
+can supply `REQUEST_KEY_PREFIX` (default `k6`); use a new prefix when repeating a rate
+with synthetic users whose previous Redis intent has not expired. The decision counter
+also records the response's replay boolean. Completed terminal keys may remain until
+normal expiry, but pending handoffs and unfinished business must clear before reset.
+
 ## Environment
 
 | | |
@@ -75,8 +90,9 @@ CPUs, so results at that boundary do not establish a production resource require
 3. **Steps, not a continuous ramp.** Each rate is its own `constant-arrival-rate` scenario with a
    fixed steady-state window, so percentiles come from a constant arrival rate. The open-model
    executor keeps request generation independent of server response time.
-4. **The generator is measured too.** Generator CPU is sampled throughout. A percentile taken
-   while the generator is saturated describes the generator, not the server, and is discarded.
+4. **The generator is measured too.** Generator CPU is sampled throughout. If scheduling falls
+   behind, retain its dropped/completed counts and latency output, but do not attribute the
+   resulting boundary to the service without separate resource or topology evidence.
 5. **Two vantage points for Redis.** Docker Desktop is a virtual machine, so a host-to-container
    measurement includes a transport cost that can exceed the work being measured. Redis is
    measured from both the host and inside the compose network, and the difference is reported

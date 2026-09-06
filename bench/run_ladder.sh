@@ -106,6 +106,7 @@ metadata() {
   printf 'docker_cpus=%s docker_memory_bytes=%s commerce_cpu_limit=%s\n' \
     "$DOCKER_CPUS" "$DOCKER_MEMORY_BYTES" "$COMMERCE_CPU_LIMIT"
   printf 'k6_image=%s\n' "$K6_IMAGE_REFERENCE"
+  printf 'request_key_prefix=%s\n' "$LABEL"
 }
 { metadata; echo; } > "$out/$cpu_name"
 
@@ -118,6 +119,7 @@ k6_container_id="$(docker run --detach --name citybuddy-bench-k6 \
   --env TOKENS_FILE=/run-data/tokens.json \
   --env RATES="$RATES" --env STEP_SECONDS="$STEP_SECONDS" --env GAP_SECONDS="$GAP_SECONDS" \
   --env ACTIVITIES="$ACTIVITIES" \
+  --env REQUEST_KEY_PREFIX="$LABEL" \
   --entrypoint k6 "$K6_IMAGE_REFERENCE" run \
   --tag "citybuddy_commit=$CITYBUDDY_COMMIT" --tag "bench_label=$LABEL" \
   --tag "run_started_at_utc=$run_started_at" --tag "activities=$ACTIVITIES" \
@@ -146,6 +148,7 @@ document["citybuddyCommit"] = sys.argv[2]
 document["benchmark"] = {
     "windowUtc": {"startedAt": sys.argv[3], "completedAt": sys.argv[4]},
     "label": sys.argv[5], "activities": int(sys.argv[6]),
+    "requestKeyPrefix": sys.argv[5],
     "rates": [int(value) for value in sys.argv[7].split(",")],
     "stepSeconds": int(sys.argv[8]), "gapSeconds": int(sys.argv[9]), "k6Image": sys.argv[10],
 }
