@@ -67,3 +67,6 @@ GRANT SELECT, INSERT ON commerce_db.shopping_checkout_order TO 'commerce_app'@'%
 GRANT SELECT ON commerce_db.retail_fulfillment_config TO 'commerce_app'@'%';
 GRANT SELECT ON commerce_db.retail_order_fulfillment TO 'commerce_app'@'%';
 GRANT SELECT ON commerce_db.retail_order_issue TO 'commerce_app'@'%';
+GRANT SELECT, UPDATE (missing_attributes, content_quality, facts_version, observed_at) ON commerce_db.retail_product_operations TO 'commerce_app'@'%';
+GRANT UPDATE (name, description, content, metadata_version) ON commerce_db.retail_product_family TO 'commerce_app'@'%';
+GRANT INSERT, UPDATE (content, metadata_version) ON commerce_db.retail_product_metadata TO 'commerce_app'@'%';

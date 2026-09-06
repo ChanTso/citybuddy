@@ -2,6 +2,7 @@ package io.citybuddy.commerce.retail;
 
 import com.fasterxml.jackson.core.StreamReadFeature;
 import com.fasterxml.jackson.databind.DeserializationFeature;
+import com.fasterxml.jackson.databind.MapperFeature;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.ObjectReader;
 import io.citybuddy.commerce.catalog.CatalogException;
@@ -11,6 +12,7 @@ import io.citybuddy.commerce.retail.RetailCatalogModels.View;
 import jakarta.servlet.http.HttpServletRequest;
 import java.io.IOException;
 import java.util.List;
+import java.util.Set;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PathVariable;
@@ -32,6 +34,8 @@ public final class RetailCatalogController {
     this.catalog = catalog;
     this.searchReader =
         mapper
+            .copy()
+            .disable(MapperFeature.ALLOW_COERCION_OF_SCALARS)
             .readerFor(Search.class)
             .with(StreamReadFeature.STRICT_DUPLICATE_DETECTION.mappedFeature())
             .with(DeserializationFeature.FAIL_ON_UNKNOWN_PROPERTIES)
@@ -42,9 +46,30 @@ public final class RetailCatalogController {
   @GetMapping("/api/retail/products")
   public List<View> products(
       @RequestHeader(value = "Authorization", required = false) String authorization,
-      @RequestHeader(value = "X-Eval-Sandbox-Id", required = false) String evalSandbox) {
+      @RequestHeader(value = "X-Eval-Sandbox-Id", required = false) String evalSandbox,
+      HttpServletRequest request) {
     authorizer.authorize(authorization, evalSandbox, "catalog:read");
-    return catalog.search(defaultSearch());
+    if (!Set.of("limit", "offset").containsAll(request.getParameterMap().keySet())) {
+      throw new CatalogException(400, "Invalid retail pagination");
+    }
+    Search search;
+    try {
+      search =
+          new Search(
+              null,
+              null,
+              null,
+              null,
+              null,
+              null,
+              null,
+              null,
+              integerParameter(request, "limit"),
+              integerParameter(request, "offset"));
+    } catch (IllegalArgumentException exception) {
+      throw new CatalogException(400, "Invalid retail pagination");
+    }
+    return catalog.search(search);
   }
 
   @PostMapping("/api/retail/products/search")
@@ -83,7 +108,14 @@ public final class RetailCatalogController {
         .orElseThrow(() -> new CatalogException(404, "Retail product not found"));
   }
 
-  private static Search defaultSearch() {
-    return new Search(null, null, null, null, null, null, null, null, null);
+  private static Integer integerParameter(HttpServletRequest request, String name) {
+    String[] values = request.getParameterValues(name);
+    if (values == null) {
+      return null;
+    }
+    if (values.length != 1 || !values[0].matches("[0-9]{1,5}")) {
+      throw new IllegalArgumentException("Pagination requires one integer");
+    }
+    return Integer.valueOf(values[0]);
   }
 }

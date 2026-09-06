@@ -220,19 +220,32 @@ for merchant_view in merchant_products merchant_paid_orders merchant_daily_sales
   mysql_query commerce_app "$commerce_app_password" commerce_db \
     "SELECT COUNT(*) FROM $merchant_view" >/dev/null
 done
-for retail_table in retail_product_family retail_product_metadata; do
+for retail_table in retail_product_family retail_product_metadata retail_product_operations; do
   mysql_query commerce_app "$commerce_app_password" commerce_db \
     "SELECT COUNT(*) FROM $retail_table" >/dev/null
-  assert_fails "commerce runtime cannot insert retail display data" 'INSERT command denied' \
-    mysql_query commerce_app "$commerce_app_password" commerce_db \
-    "INSERT INTO $retail_table SELECT * FROM $retail_table WHERE FALSE"
-  assert_fails "commerce runtime cannot update retail display data" 'UPDATE command denied' \
-    mysql_query commerce_app "$commerce_app_password" commerce_db \
-    "UPDATE $retail_table SET metadata_version = metadata_version + 1 WHERE FALSE"
-  assert_fails "commerce runtime cannot delete retail display data" 'DELETE command denied' \
+  assert_fails "commerce runtime cannot delete retail facts" 'DELETE command denied' \
     mysql_query commerce_app "$commerce_app_password" commerce_db \
     "DELETE FROM $retail_table WHERE FALSE"
 done
+for retail_table in retail_product_family retail_product_operations; do
+  assert_fails "commerce runtime cannot manufacture families or operational observations" 'INSERT command denied' \
+    mysql_query commerce_app "$commerce_app_password" commerce_db \
+    "INSERT INTO $retail_table SELECT * FROM $retail_table WHERE FALSE"
+done
+mysql_query commerce_app "$commerce_app_password" commerce_db \
+  "INSERT INTO retail_product_metadata SELECT * FROM retail_product_metadata WHERE FALSE"
+mysql_query commerce_app "$commerce_app_password" commerce_db \
+  "UPDATE retail_product_metadata SET content=content,metadata_version=metadata_version WHERE FALSE"
+mysql_query commerce_app "$commerce_app_password" commerce_db \
+  "UPDATE retail_product_family SET name=name,description=description,content=content,metadata_version=metadata_version WHERE FALSE"
+mysql_query commerce_app "$commerce_app_password" commerce_db \
+  "UPDATE retail_product_operations SET missing_attributes=missing_attributes,content_quality=content_quality,facts_version=facts_version,observed_at=observed_at WHERE FALSE"
+assert_fails "commerce runtime cannot move an existing SKU to another family" 'UPDATE command denied' \
+  mysql_query commerce_app "$commerce_app_password" commerce_db \
+  "UPDATE retail_product_metadata SET family_id=family_id WHERE FALSE"
+assert_fails "commerce runtime cannot overwrite observed product costs" 'UPDATE command denied' \
+  mysql_query commerce_app "$commerce_app_password" commerce_db \
+  "UPDATE retail_product_operations SET unit_cost_minor=unit_cost_minor WHERE FALSE"
 for facts_table in retail_fulfillment_config retail_order_fulfillment retail_order_issue; do
   mysql_query commerce_app "$commerce_app_password" commerce_db \
     "SELECT COUNT(*) FROM $facts_table" >/dev/null

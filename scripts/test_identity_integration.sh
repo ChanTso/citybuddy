@@ -160,6 +160,7 @@ other_password="$(openssl rand -hex 24)"
 disabled_password="$(openssl rand -hex 24)"
 service_password="$(uv run python scripts/service_credential.py generate)"
 shopping_service_password="$(uv run python scripts/service_credential.py generate)"
+merchant_service_password="$(uv run python scripts/service_credential.py generate)"
 user_hash="$(uv run python scripts/hash_test_credential.py "$user_password")"
 other_hash="$(uv run python scripts/hash_test_credential.py "$other_password")"
 disabled_hash="$(uv run python scripts/hash_test_credential.py "$disabled_password")"
@@ -167,6 +168,8 @@ service_hash="$(printf '%s' "$service_password" \
   | uv run python scripts/service_credential.py hash agent-service)"
 shopping_service_hash="$(printf '%s' "$shopping_service_password" \
   | uv run python scripts/service_credential.py hash shopping-agent)"
+merchant_service_hash="$(printf '%s' "$merchant_service_password" \
+  | uv run python scripts/service_credential.py hash merchant-agent)"
 
 "${compose[@]}" up --detach --wait --wait-timeout 60 mysql
 compose_host_port MYSQL_PORT mysql 3306
@@ -361,7 +364,7 @@ echo "Verified warm-history fixture against the real MySQL loader and context po
 
 mysql_query auth_app "$auth_app_password" commerce_db "
 INSERT INTO auth_user_principal (principal_id, subject, login_identifier, state, permissions) VALUES
-  ('00000000-0000-0000-0000-000000000020', 'user-integration', 'integration-user', 'ACTIVE', 'support:session:create support:chat shopping:session:create'),
+  ('00000000-0000-0000-0000-000000000020', 'user-integration', 'integration-user', 'ACTIVE', 'support:session:create support:chat shopping:session:create merchant:session:create'),
   ('00000000-0000-0000-0000-000000000021', 'other-user', 'other-user', 'ACTIVE', 'support:session:create support:chat'),
   ('00000000-0000-0000-0000-000000000022', 'disabled-user', 'disabled-user', 'DISABLED', 'support:session:create support:chat');
 INSERT INTO auth_login_credential (principal_id, password_hash) VALUES
@@ -370,7 +373,8 @@ INSERT INTO auth_login_credential (principal_id, password_hash) VALUES
   ('00000000-0000-0000-0000-000000000022', '$disabled_hash');
 INSERT INTO auth_service_identity (service_id, client_id, credential_hash, state, allowed_scopes) VALUES
   ('00000000-0000-0000-0000-000000000023', 'agent-service', '$service_hash', 'ACTIVE', 'catalog:read'),
-  ('00000000-0000-0000-0000-000000000024', 'shopping-agent', '$shopping_service_hash', 'ACTIVE', 'shopping:orders:read shopping:cart:read shopping:cart:write shopping:profile:read refund:create');
+  ('00000000-0000-0000-0000-000000000024', 'shopping-agent', '$shopping_service_hash', 'ACTIVE', 'shopping:orders:read shopping:cart:read shopping:cart:write shopping:profile:read refund:create'),
+  ('00000000-0000-0000-0000-000000000025', 'merchant-agent', '$merchant_service_hash', 'ACTIVE', 'merchant:change:prepare merchant:change:read merchant:change:cancel merchant:change:apply');
 INSERT INTO auth_signing_key_metadata (kid, state, activated_at, retire_after) VALUES
   ('current-key', 'CURRENT', CURRENT_TIMESTAMP(6), NULL),
   ('overlap-key', 'OVERLAP', CURRENT_TIMESTAMP(6), TIMESTAMPADD(HOUR, 1, CURRENT_TIMESTAMP(6)));
@@ -437,6 +441,10 @@ SPRING_DATASOURCE_PASSWORD="$auth_app_password" java -jar auth-service/target/au
   '--citybuddy.identity.exchange-scopes[3]=shopping:cart:read' \
   '--citybuddy.identity.exchange-scopes[4]=shopping:cart:write' \
   '--citybuddy.identity.exchange-scopes[5]=shopping:profile:read' \
+  '--citybuddy.identity.exchange-scopes[6]=merchant:change:prepare' \
+  '--citybuddy.identity.exchange-scopes[7]=merchant:change:read' \
+  '--citybuddy.identity.exchange-scopes[8]=merchant:change:cancel' \
+  '--citybuddy.identity.exchange-scopes[9]=merchant:change:apply' \
   >"$tmp_dir/auth.log" 2>&1 &
 auth_pid=$!
 process_bound_port auth_port spring "$auth_pid" "$tmp_dir/auth.log" 0
@@ -499,6 +507,58 @@ assert_status 200 "second active principal login" \
   --data "{\"loginIdentifier\":\"other-user\",\"password\":\"$other_password\"}"
 other_token="$(uv run python scripts/read_json_field.py "$tmp_dir/http-response.json" accessToken)"
 
+for merchant_scope in merchant:change:prepare merchant:change:read merchant:change:cancel; do
+  assert_status 200 "merchant digest credential exchanges exact $merchant_scope" \
+    --request POST "http://127.0.0.1:$auth_port/auth/token/exchange" \
+    --user "merchant-agent:$merchant_service_password" \
+    --header "X-User-Authorization: Bearer $direct_token" \
+    --header 'Content-Type: application/json' \
+    --data "{\"sessionId\":\"merchant-integration\",\"userSubject\":\"user-integration\",\"scope\":\"$merchant_scope\"}"
+  uv run python - "$tmp_dir/http-response.json" "$tmp_dir/jwks.json" "$merchant_scope" <<'PYTOKEN'
+import json
+import sys
+from pathlib import Path
+
+import jwt
+
+response = json.loads(Path(sys.argv[1]).read_text())
+token = response["accessToken"]
+header = jwt.get_unverified_header(token)
+matching = [key for key in json.loads(Path(sys.argv[2]).read_text())["keys"] if key["kid"] == header["kid"]]
+assert len(matching) == 1
+claims = jwt.decode(
+    token, jwt.PyJWK.from_dict(matching[0]).key, algorithms=["RS256"],
+    audience="commerce-service", issuer="https://identity.citybuddy.test",
+    options={"require": ["exp", "iat", "nbf", "iss", "aud", "sub", "jti"]},
+)
+assert claims["sub"] == claims["user_id"] == "user-integration"
+assert claims["token_type"] == "agent_obo"
+assert claims["session"] == "merchant-integration"
+assert claims["scope"] == sys.argv[3]
+assert claims["act"] == {"azp": "merchant-agent"}
+assert "sandbox" not in claims and "evaluation_handle" not in claims
+assert 0 < claims["exp"] - claims["iat"] <= 120
+PYTOKEN
+done
+assert_status 403 "merchant apply permission cannot become delegated authority even with broad grants" \
+  --request POST "http://127.0.0.1:$auth_port/auth/token/exchange" \
+  --user "merchant-agent:$merchant_service_password" \
+  --header "X-User-Authorization: Bearer $direct_token" \
+  --header 'Content-Type: application/json' \
+  --data '{"sessionId":"merchant-integration","userSubject":"user-integration","scope":"merchant:change:apply"}'
+assert_status 401 "merchant changes require signed merchant session permission" \
+  --request POST "http://127.0.0.1:$auth_port/auth/token/exchange" \
+  --user "merchant-agent:$merchant_service_password" \
+  --header "X-User-Authorization: Bearer $other_token" \
+  --header 'Content-Type: application/json' \
+  --data '{"sessionId":"merchant-integration","userSubject":"other-user","scope":"merchant:change:read"}'
+assert_status 403 "merchant changes cannot assert another operator" \
+  --request POST "http://127.0.0.1:$auth_port/auth/token/exchange" \
+  --user "merchant-agent:$merchant_service_password" \
+  --header "X-User-Authorization: Bearer $direct_token" \
+  --header 'Content-Type: application/json' \
+  --data '{"sessionId":"merchant-integration","userSubject":"other-user","scope":"merchant:change:read"}'
+
 for shopping_scope in shopping:orders:read shopping:cart:read shopping:cart:write shopping:profile:read refund:create; do
   assert_status 200 "shopping digest credential exchanges exact $shopping_scope" \
     --request POST "http://127.0.0.1:$auth_port/auth/token/exchange" \
@@ -555,10 +615,24 @@ assert_status 403 "shopping exchange rejects another user assertion" \
   --data '{"sessionId":"shop-integration","userSubject":"other-user","scope":"shopping:orders:read"}'
 # Broad database grants must not widen the actor policy even when deployment allows the scope.
 mysql_query auth_app "$auth_app_password" commerce_db "
-UPDATE auth_service_identity SET allowed_scopes = 'catalog:read shopping:orders:read shopping:profile:read'
+UPDATE auth_service_identity SET allowed_scopes = 'catalog:read shopping:orders:read shopping:profile:read merchant:change:prepare merchant:change:read merchant:change:cancel'
  WHERE client_id = 'agent-service';
-UPDATE auth_service_identity SET allowed_scopes = 'shopping:orders:read shopping:cart:read shopping:cart:write shopping:profile:read refund:create catalog:read'
+UPDATE auth_service_identity SET allowed_scopes = 'shopping:orders:read shopping:cart:read shopping:cart:write shopping:profile:read refund:create catalog:read merchant:change:prepare merchant:change:read merchant:change:cancel'
  WHERE client_id = 'shopping-agent';"
+for merchant_scope in merchant:change:prepare merchant:change:read merchant:change:cancel; do
+  assert_status 403 "support actor cannot acquire $merchant_scope with broad grants" \
+    --request POST "http://127.0.0.1:$auth_port/auth/token/exchange" \
+    --user "agent-service:$service_password" \
+    --header "X-User-Authorization: Bearer $direct_token" \
+    --header 'Content-Type: application/json' \
+    --data "{\"sessionId\":\"support-integration\",\"userSubject\":\"user-integration\",\"scope\":\"$merchant_scope\"}"
+  assert_status 403 "shopping actor cannot acquire $merchant_scope with broad grants" \
+    --request POST "http://127.0.0.1:$auth_port/auth/token/exchange" \
+    --user "shopping-agent:$shopping_service_password" \
+    --header "X-User-Authorization: Bearer $direct_token" \
+    --header 'Content-Type: application/json' \
+    --data "{\"sessionId\":\"shop-integration\",\"userSubject\":\"user-integration\",\"scope\":\"$merchant_scope\"}"
+done
 assert_status 403 "support actor cannot acquire a shopping scope with broad grants" \
   --request POST "http://127.0.0.1:$auth_port/auth/token/exchange" \
   --user "agent-service:$service_password" \

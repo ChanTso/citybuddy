@@ -25,8 +25,9 @@ rows exist; option value domains do not imply a Cartesian product. Leaf content 
 content; attributes and specs merge by key. Metadata permits brand, category, image URL, long
 description, rating/review count, labels, attributes, specs and review highlights. It cannot store
 price, currency, stock, sale eligibility or publication version. Those fields always come from
-`product`, including after ordinary ordering and merchant repricing. The application currently
-has SELECT-only access to the two extension tables.
+`product`, including after ordinary ordering and merchant repricing. Buyer reads do not mutate
+these extension tables; approved merchant listing changes update their display content and
+versions inside the same transaction as the affected SKU publication events.
 
 All three retail read routes require a direct user token with `catalog:read`; production routes
 reject evaluation context. Published legacy products without extension metadata remain plain
@@ -35,20 +36,25 @@ with `inStock=false`; unpublished SKUs are absent.
 
 | Route | Result |
 | --- | --- |
-| `GET /api/retail/products` | Default bounded search; up to 20 plain/family summaries |
+| `GET /api/retail/products?limit=20&offset=0` | A bounded page of plain/family summaries |
 | `POST /api/retail/products/search` | Filtered summaries; variants stay under their family |
 | `GET /api/retail/products/{id}` | Plain/variant detail or a family with its actual published variants |
 
 Search accepts `query`, `category`, integer `minPriceMinor`/`maxPriceMinor`, `minRating`,
-`currency`, an `attributes` string map, `sort` and `limit`. Sort values are `relevance`,
-`price_asc`, `price_desc` and `rating`; the limit is 1–50, default 20. Price filters and price
+`currency`, an `attributes` string map, `sort`, `limit` and `offset`. Sort values are `relevance`,
+`price_asc`, `price_desc` and `rating`; the limit is 1–50, default 20, and offset is 0–10000,
+default 0. GET accepts only one value each for `limit` and `offset`. Root selection uses stable
+sort/display-order/ID ordering and applies LIMIT/OFFSET before hydrating complete families;
+individual variants never consume page positions. A short or empty page ends enumeration.
+Each page selects and hydrates in one repeatable-read transaction. Separate requests may
+observe intervening changes and do not promise a shared catalog snapshot. Price filters and price
 sorting require currency. Explicit attributes and price constraints must match the same actual
 SKU. An absent specification combination returns no match; the server never relaxes requested
 filters. Category and rating use the displayed listing's content; a variant's rating override
 does not raise its family's displayed rating. Search can also match published but unavailable
 SKUs, so a matching family is not a promise that the requested option is purchasable. Its
 detail supplies each actual option's availability; the transaction rechecks the selected SKU.
-Input is at most 8 KiB, rejects unknown/duplicate fields and fractional integer values,
+Input is at most 8 KiB, rejects unknown/duplicate fields and coerced integer values,
 and is bound as SQL parameters. This path uses MySQL keyword/filter reads, not the support
 knowledge index or a vector search.
 
@@ -73,7 +79,7 @@ prepare, draft-read or cancel scope. Commerce endpoints require that actor and a
 agent's session database.
 
 `POST /internal/merchant/price-drafts` snapshots the authoritative product price and version for
-one to three products. Its operator/session/idempotency key names an immutable intent. It does
+one to 25 products. Its operator/session/idempotency key names an immutable intent. It does
 not change product prices. Only a direct user with `merchant:price:apply` can approve the draft
 through `POST /api/merchant/price-drafts/{draftId}/apply`, and the user must own that draft. An OBO
 token or an approval statement in chat cannot substitute for this direct request.
@@ -87,6 +93,51 @@ event, and persists the APPLIED receipt. A business conflict records REJECTED wi
 writes. Cancellation records CANCELLED. Repeated approval returns the stored terminal result.
 Database or unexpected failures roll back the complete transaction rather than becoming a
 successful business rejection.
+
+### Approved retail operations
+
+The same owned draft ledger also stores `PRICE_UPDATE`, `LISTING_UPDATE` and
+`INVENTORY_ACTION`. The existing price-draft endpoints remain compatible: a price proposal has
+one identity, state and receipt whichever supported API reads or approves it. Generic change
+endpoints do not create a second approval ledger.
+
+| Route | Authority and result |
+| --- | --- |
+| `POST /internal/merchant/changes` | `merchant:change:prepare`, exact `Idempotency-Key`, `{kind,payload}`; returns a proposal with before/after items, without applying it |
+| `GET /internal/merchant/changes?state=PREPARED&limit=20&offset=0` | `merchant:change:read`; only the signed operator and session, ordered by creation time descending then ID |
+| `GET /internal/merchant/changes/{changeId}` | `merchant:change:read`; unknown or unowned changes return 404 |
+| `POST /internal/merchant/changes/{changeId}/cancel` | `merchant:change:cancel`; empty body, resolves or replays the stored terminal |
+| `POST /api/merchant/changes/{changeId}/apply` | Direct user with `merchant:change:apply`, original operator ownership, empty body; APPLIED returns 200, a stored non-APPLIED terminal returns 409 |
+
+Internal routes fix `act.azp=merchant-agent` and require the matching
+`X-Merchant-Session-Id`. Auth issues only the three exact change scopes after both deployment
+and service grants and the direct user's `merchant:session:create` permission pass. Neither
+`merchant:change:apply` nor the original `merchant:price:apply` can be delegated through OBO.
+Evaluation context is rejected. All change responses use `Cache-Control: no-store`.
+Requests are limited to 64 KiB, reject duplicate JSON and unknown top-level fields, and cannot
+take owner or replacement approval data from a model. List queries allow one value per parameter,
+limit 1–100 and offset 0–10000; state is one of PREPARED/APPLIED/CANCELLED/REJECTED or omitted.
+
+PRICE_UPDATE contains currency and 1–25 actual SKU price items. LISTING_UPDATE contains
+`listingId` and 1–25 string fields: shared title/short description/long description/category,
+supported supplemental attributes, or existing descriptive attributes. Shared content must be
+edited on a family rather than one variant. Protected transaction, variant identity, cost,
+compliance and content-quality bookkeeping fields are not editable through this payload.
+INVENTORY_ACTION accepts `restock` for a leaf SKU with an increment of 1–500, or `pause`/`activate`
+for a leaf or its actual family members. Expanded operations touch at most 25 actual SKUs and
+25 stock/availability changes, and cannot target the same SKU field twice. Pause/activate only
+accept PUBLISHED SKUs; their approval items show the actual `available` boolean, so activating
+a zero-stock SKU does not imply it has stock. Content maintenance and restocking may touch a
+draft without publishing it. Missing variant combinations are never invented. Products referenced
+by a seckill activity remain ineligible.
+
+Preparation snapshots the affected SKU publication versions, family membership/content versions
+and applicable display/operations metadata versions. Apply locks the draft and its actual
+products in stable order, rechecks the stored snapshot and validates all changes before writing.
+Stock increments use the locked current quantity; availability changes do not overwrite stock.
+Listing metadata, current SKU fields, publication versions, catalog generation, product Outbox
+and the stored terminal commit together. A business version or eligibility conflict persists
+REJECTED without partial writes. Repeated apply/cancel returns the same persisted terminal.
 
 The three `merchant_*` reporting views expose catalog context and historical paid
 order facts, with no user identities. Reporting connections use UTC and a bounded query timeout.

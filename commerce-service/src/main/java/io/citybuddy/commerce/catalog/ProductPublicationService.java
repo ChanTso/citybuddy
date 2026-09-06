@@ -38,7 +38,7 @@ public class ProductPublicationService {
       List<ProductRepository.PriceChange> changes, String currency) {
     if (changes == null
         || changes.isEmpty()
-        || changes.size() > 3
+        || changes.size() > 25
         || currency == null
         || !currency.matches("[A-Z]{3}")) {
       throw new IllegalArgumentException("Invalid product price changes");
@@ -58,6 +58,14 @@ public class ProductPublicationService {
     List<ProductRepository.PriceChangeResult> results = repository.changePrices(changes, currency);
     evictAfterCommit(results.stream().map(ProductRepository.PriceChangeResult::productId).toList());
     return results;
+  }
+
+  @Transactional(isolation = Isolation.READ_COMMITTED)
+  public List<ProductRepository.Publication> publishLockedChanges(
+      List<ProductRepository.LockedPublication> changes) {
+    List<ProductRepository.Publication> publications = repository.publishLockedChanges(changes);
+    evictAfterCommit(changes.stream().map(ProductRepository.LockedPublication::productId).toList());
+    return publications;
   }
 
   private void evictAfterCommit(List<String> productIds) {

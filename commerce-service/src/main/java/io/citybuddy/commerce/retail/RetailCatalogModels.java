@@ -19,7 +19,31 @@ public final class RetailCatalogModels {
       String currency,
       Map<String, String> attributes,
       String sort,
-      Integer limit) {
+      Integer limit,
+      Integer offset) {
+    public Search(
+        String query,
+        String category,
+        Long minPriceMinor,
+        Long maxPriceMinor,
+        Double minRating,
+        String currency,
+        Map<String, String> attributes,
+        String sort,
+        Integer limit) {
+      this(
+          query,
+          category,
+          minPriceMinor,
+          maxPriceMinor,
+          minRating,
+          currency,
+          attributes,
+          sort,
+          limit,
+          0);
+    }
+
     public Search {
       query = text(query, 256, "query");
       category = text(category, 100, "category");
@@ -37,6 +61,10 @@ public final class RetailCatalogModels {
       limit = limit == null ? 20 : limit;
       if (limit < 1 || limit > 50) {
         throw new IllegalArgumentException("limit must be between 1 and 50");
+      }
+      offset = offset == null ? 0 : offset;
+      if (offset < 0 || offset > 10_000) {
+        throw new IllegalArgumentException("offset must be between 0 and 10000");
       }
       if ((minPriceMinor != null && minPriceMinor < 0)
           || (maxPriceMinor != null && maxPriceMinor < 0)

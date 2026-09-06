@@ -2,6 +2,730 @@
   "openapi": "3.1.0",
   "info": {"title": "CityBuddy commerce API", "version": "0.0.1"},
   "paths": {
+    "/internal/merchant/changes": {
+      "post": {
+        "operationId": "prepareMerchantChange",
+        "security": [
+          {
+            "agentOboBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "X-Merchant-Session-Id",
+            "in": "header",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 128
+            }
+          },
+          {
+            "name": "X-Eval-Sandbox-Id",
+            "in": "header",
+            "required": false,
+            "description": "Any supplied evaluation context is rejected.",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "Idempotency-Key",
+            "in": "header",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 128
+            },
+            "description": "Exact nonblank intent key; no trimming or owner supplied by the model."
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Persisted merchant change result",
+            "headers": {
+              "Cache-Control": {
+                "schema": {
+                  "type": "string",
+                  "const": "no-store"
+                }
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MerchantChange"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid or ambiguous request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MerchantChangeError"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Invalid direct operator identity",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MerchantChangeError"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Wrong actor, exact scope, session or operator permission",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MerchantChangeError"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Unknown or unowned proposal",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MerchantChangeError"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Idempotency conflict or persisted non-APPLIED approval result",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MerchantChangeError"
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "Request exceeds 65536 bytes",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MerchantChangeError"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Identity verification unavailable",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MerchantChangeError"
+                }
+              }
+            }
+          }
+        },
+        "x-required-actor": "merchant-agent",
+        "x-required-scope": "merchant:change:prepare",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/MerchantChangeRequest"
+              }
+            }
+          }
+        },
+        "description": "Snapshots an owned operator/session proposal; no business write is applied. Reusing the same intent replays its stored proposal. A key already naming another kind or intent conflicts."
+      },
+      "get": {
+        "operationId": "listMerchantChanges",
+        "security": [
+          {
+            "agentOboBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "X-Merchant-Session-Id",
+            "in": "header",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 128
+            }
+          },
+          {
+            "name": "X-Eval-Sandbox-Id",
+            "in": "header",
+            "required": false,
+            "description": "Any supplied evaluation context is rejected.",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "state",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "enum": [
+                "PREPARED",
+                "APPLIED",
+                "CANCELLED",
+                "REJECTED"
+              ]
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 100,
+              "default": 20
+            }
+          },
+          {
+            "name": "offset",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 10000,
+              "default": 0
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Owned merchant change results",
+            "headers": {
+              "Cache-Control": {
+                "schema": {
+                  "type": "string",
+                  "const": "no-store"
+                }
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "maxItems": 100,
+                  "items": {
+                    "$ref": "#/components/schemas/MerchantChange"
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid or ambiguous request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MerchantChangeError"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Invalid direct operator identity",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MerchantChangeError"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Wrong actor, exact scope, session or operator permission",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MerchantChangeError"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Unknown or unowned proposal",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MerchantChangeError"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Idempotency conflict or persisted non-APPLIED approval result",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MerchantChangeError"
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "Request exceeds 65536 bytes",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MerchantChangeError"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Identity verification unavailable",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MerchantChangeError"
+                }
+              }
+            }
+          }
+        },
+        "x-required-actor": "merchant-agent",
+        "x-required-scope": "merchant:change:read",
+        "description": "Only this signed operator and merchant session. Ordered by createdAt descending, then changeId; each query parameter occurs at most once and unknown parameters are rejected."
+      }
+    },
+    "/internal/merchant/changes/{changeId}": {
+      "get": {
+        "operationId": "getMerchantChange",
+        "security": [
+          {
+            "agentOboBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "X-Merchant-Session-Id",
+            "in": "header",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 128
+            }
+          },
+          {
+            "name": "changeId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "X-Eval-Sandbox-Id",
+            "in": "header",
+            "required": false,
+            "description": "Any supplied evaluation context is rejected.",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Persisted merchant change result",
+            "headers": {
+              "Cache-Control": {
+                "schema": {
+                  "type": "string",
+                  "const": "no-store"
+                }
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MerchantChange"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid or ambiguous request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MerchantChangeError"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Invalid direct operator identity",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MerchantChangeError"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Wrong actor, exact scope, session or operator permission",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MerchantChangeError"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Unknown or unowned proposal",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MerchantChangeError"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Idempotency conflict or persisted non-APPLIED approval result",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MerchantChangeError"
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "Request exceeds 65536 bytes",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MerchantChangeError"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Identity verification unavailable",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MerchantChangeError"
+                }
+              }
+            }
+          }
+        },
+        "x-required-actor": "merchant-agent",
+        "x-required-scope": "merchant:change:read"
+      }
+    },
+    "/internal/merchant/changes/{changeId}/cancel": {
+      "post": {
+        "operationId": "cancelMerchantChange",
+        "security": [
+          {
+            "agentOboBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "X-Merchant-Session-Id",
+            "in": "header",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 128
+            }
+          },
+          {
+            "name": "changeId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "X-Eval-Sandbox-Id",
+            "in": "header",
+            "required": false,
+            "description": "Any supplied evaluation context is rejected.",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Persisted merchant change result",
+            "headers": {
+              "Cache-Control": {
+                "schema": {
+                  "type": "string",
+                  "const": "no-store"
+                }
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MerchantChange"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid or ambiguous request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MerchantChangeError"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Invalid direct operator identity",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MerchantChangeError"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Wrong actor, exact scope, session or operator permission",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MerchantChangeError"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Unknown or unowned proposal",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MerchantChangeError"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Idempotency conflict or persisted non-APPLIED approval result",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MerchantChangeError"
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "Request exceeds 65536 bytes",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MerchantChangeError"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Identity verification unavailable",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MerchantChangeError"
+                }
+              }
+            }
+          }
+        },
+        "x-required-actor": "merchant-agent",
+        "x-required-scope": "merchant:change:cancel",
+        "requestBody": {
+          "required": false,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "additionalProperties": false,
+                "maxProperties": 0
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/merchant/changes/{changeId}/apply": {
+      "post": {
+        "operationId": "applyMerchantChange",
+        "security": [
+          {
+            "directUserBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "changeId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "X-Eval-Sandbox-Id",
+            "in": "header",
+            "required": false,
+            "description": "Any supplied evaluation context is rejected.",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Persisted merchant change result",
+            "headers": {
+              "Cache-Control": {
+                "schema": {
+                  "type": "string",
+                  "const": "no-store"
+                }
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MerchantChange"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid or ambiguous request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MerchantChangeError"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Invalid direct operator identity",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MerchantChangeError"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Wrong actor, exact scope, session or operator permission",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MerchantChangeError"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Unknown or unowned proposal",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MerchantChangeError"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Idempotency conflict or persisted non-APPLIED approval result",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "oneOf": [
+                    {
+                      "$ref": "#/components/schemas/MerchantChange"
+                    },
+                    {
+                      "$ref": "#/components/schemas/MerchantChangeError"
+                    }
+                  ]
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "Request exceeds 65536 bytes",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MerchantChangeError"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Identity verification unavailable",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MerchantChangeError"
+                }
+              }
+            }
+          }
+        },
+        "x-required-permission": "merchant:change:apply",
+        "requestBody": {
+          "required": false,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "additionalProperties": false,
+                "maxProperties": 0
+              }
+            }
+          }
+        },
+        "description": "Explicit direct operator approval; an OBO token or model text cannot approve. The original operator must own the proposal. APPLIED is 200; a stored CANCELLED or REJECTED terminal is 409. Repeated approval replays its exact stored terminal."
+      }
+    },
     "/internal/shopping/preferences": {
       "get": {
         "operationId": "getShoppingPreferences",
@@ -757,11 +1481,33 @@
             "schema": {
               "type": "string"
             }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 50,
+              "default": 20
+            }
+          },
+          {
+            "name": "offset",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 10000,
+              "default": 0
+            }
           }
         ],
         "responses": {
           "200": {
-            "description": "Default retail catalog summaries, at most 20",
+            "description": "Plain/family summaries, default 20 and at most 50 per page",
             "content": {
               "application/json": {
                 "schema": {
@@ -783,7 +1529,8 @@
           "403": {
             "description": "Missing catalog:read permission"
           }
-        }
+        },
+        "description": "Each query parameter may occur once; unknown parameters are rejected. Stable root-level ordering is paginated before SKU hydration. Each page has a repeatable-read snapshot; separate pages do not promise one shared snapshot. Continue until a short or empty page."
       }
     },
     "/api/retail/products/search": {
@@ -1118,7 +1865,7 @@
                   "items": {
                     "type": "array",
                     "minItems": 1,
-                    "maxItems": 3,
+                    "maxItems": 25,
                     "items": {
                       "type": "object",
                       "additionalProperties": false,
@@ -2490,6 +3237,341 @@
       "mockPaymentSignature": {"type": "apiKey", "in": "header", "name": "X-Mock-Payment-Signature", "description": "HMAC-SHA256 over the timestamp, idempotency key, complete callback intent, and exact evaluation context when present."}
     },
     "schemas": {
+      "MerchantChangeRequest": {
+        "description": "Strict JSON, no duplicate or unknown fields, at most 65536 bytes. Never accepts owner, approval authority or a replacement snapshot.",
+        "oneOf": [
+          {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "kind",
+              "payload"
+            ],
+            "properties": {
+              "kind": {
+                "type": "string",
+                "const": "PRICE_UPDATE"
+              },
+              "payload": {
+                "$ref": "#/components/schemas/MerchantPriceChangePayload"
+              }
+            }
+          },
+          {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "kind",
+              "payload"
+            ],
+            "properties": {
+              "kind": {
+                "type": "string",
+                "const": "LISTING_UPDATE"
+              },
+              "payload": {
+                "$ref": "#/components/schemas/MerchantListingChangePayload"
+              }
+            }
+          },
+          {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "kind",
+              "payload"
+            ],
+            "properties": {
+              "kind": {
+                "type": "string",
+                "const": "INVENTORY_ACTION"
+              },
+              "payload": {
+                "$ref": "#/components/schemas/MerchantInventoryChangePayload"
+              }
+            }
+          }
+        ]
+      },
+      "MerchantPriceChangePayload": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "currency",
+          "items"
+        ],
+        "properties": {
+          "currency": {
+            "type": "string",
+            "pattern": "^[A-Z]{3}$"
+          },
+          "items": {
+            "type": "array",
+            "minItems": 1,
+            "maxItems": 25,
+            "items": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "productId",
+                "newPriceMinor"
+              ],
+              "properties": {
+                "productId": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 64
+                },
+                "newPriceMinor": {
+                  "type": "integer",
+                  "minimum": 1,
+                  "maximum": 9223372036854775807
+                }
+              }
+            }
+          }
+        }
+      },
+      "MerchantListingChangePayload": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "listingId",
+          "fields"
+        ],
+        "description": "Fields are title, short_description, long_description, category, supported supplemental attributes, or existing descriptive attribute names. Shared content on a variant must be edited on its family. Price, inventory, identities, option dimensions, tax, compliance, cost and quality bookkeeping are protected. At most 25 actual SKUs may be affected.",
+        "properties": {
+          "listingId": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 64
+          },
+          "fields": {
+            "type": "object",
+            "minProperties": 1,
+            "maxProperties": 25,
+            "properties": {
+              "title": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 200
+              }
+            },
+            "additionalProperties": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 2000
+            }
+          }
+        }
+      },
+      "MerchantInventoryChangePayload": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "items"
+        ],
+        "description": "Restock applies to a leaf SKU. Pause and activate may expand a family into its real leaf SKUs. At most 25 stock/status field changes and 25 leaf SKUs; duplicate changes to the same field are rejected. No fabricated cartesian variants.",
+        "properties": {
+          "items": {
+            "type": "array",
+            "minItems": 1,
+            "maxItems": 25,
+            "items": {
+              "oneOf": [
+                {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "required": [
+                    "listingId",
+                    "action",
+                    "quantity"
+                  ],
+                  "properties": {
+                    "listingId": {
+                      "type": "string",
+                      "minLength": 1,
+                      "maxLength": 64
+                    },
+                    "action": {
+                      "type": "string",
+                      "const": "restock"
+                    },
+                    "quantity": {
+                      "type": "integer",
+                      "minimum": 1,
+                      "maximum": 500
+                    }
+                  }
+                },
+                {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "required": [
+                    "listingId",
+                    "action"
+                  ],
+                  "properties": {
+                    "listingId": {
+                      "type": "string",
+                      "minLength": 1,
+                      "maxLength": 64
+                    },
+                    "action": {
+                      "type": "string",
+                      "enum": [
+                        "pause",
+                        "activate"
+                      ]
+                    }
+                  }
+                }
+              ]
+            }
+          }
+        }
+      },
+      "MerchantChange": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "changeId",
+          "kind",
+          "state",
+          "currency",
+          "items",
+          "payload",
+          "result",
+          "createdAt",
+          "resolvedAt"
+        ],
+        "description": "Server-owned proposal and persisted terminal. PRICE_UPDATE uses the same draft IDs, snapshots and receipts as the existing price-draft API; its payload is null and items carry the price snapshot. Other kinds return the stored request plus structured before/after items. Result is null until terminal resolution.",
+        "properties": {
+          "changeId": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "kind": {
+            "type": "string",
+            "enum": [
+              "PRICE_UPDATE",
+              "LISTING_UPDATE",
+              "INVENTORY_ACTION"
+            ]
+          },
+          "state": {
+            "type": "string",
+            "enum": [
+              "PREPARED",
+              "APPLIED",
+              "CANCELLED",
+              "REJECTED"
+            ]
+          },
+          "currency": {
+            "type": "string"
+          },
+          "items": {
+            "type": "array",
+            "minItems": 1,
+            "maxItems": 25,
+            "items": {
+              "oneOf": [
+                {
+                  "type": "object",
+                  "required": [
+                    "productId",
+                    "name",
+                    "oldPriceMinor",
+                    "newPriceMinor",
+                    "currency",
+                    "expectedVersion"
+                  ],
+                  "properties": {
+                    "productId": {
+                      "type": "string"
+                    },
+                    "name": {
+                      "type": "string"
+                    },
+                    "oldPriceMinor": {
+                      "type": "integer"
+                    },
+                    "newPriceMinor": {
+                      "type": "integer"
+                    },
+                    "currency": {
+                      "type": "string"
+                    },
+                    "expectedVersion": {
+                      "type": "integer"
+                    }
+                  }
+                },
+                {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "required": [
+                    "target",
+                    "field",
+                    "before",
+                    "after"
+                  ],
+                  "properties": {
+                    "target": {
+                      "type": "string"
+                    },
+                    "field": {
+                      "type": "string"
+                    },
+                    "before": {},
+                    "after": {}
+                  }
+                }
+              ]
+            }
+          },
+          "payload": {
+            "type": [
+              "object",
+              "null"
+            ]
+          },
+          "result": {
+            "type": [
+              "object",
+              "null"
+            ]
+          },
+          "createdAt": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "resolvedAt": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time"
+          }
+        }
+      },
+      "MerchantChangeError": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "category",
+          "message"
+        ],
+        "properties": {
+          "category": {
+            "type": "string"
+          },
+          "message": {
+            "type": "string"
+          }
+        }
+      },
       "ShoppingPreferences": {
         "type": "object",
         "additionalProperties": false,
@@ -3355,7 +4437,7 @@
       "RetailSearch": {
         "type": "object",
         "additionalProperties": false,
-        "description": "Price filters and price sorting require currency. All attribute and price constraints must match one actual SKU. Request body limit 8192 bytes.",
+        "description": "Price filters and price sorting require currency. All attribute and price constraints must match one actual SKU. Request body limit 8192 bytes. Offset paginates plain/family roots, never individual variants; each page uses one repeatable-read snapshot. Separate requests may observe intervening catalog changes.",
         "properties": {
           "query": {
             "type": "string",
@@ -3410,6 +4492,12 @@
             "minimum": 1,
             "maximum": 50,
             "default": 20
+          },
+          "offset": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 10000,
+            "default": 0
           }
         }
       },
@@ -3569,7 +4657,7 @@
           "items": {
             "type": "array",
             "minItems": 1,
-            "maxItems": 3,
+            "maxItems": 25,
             "items": {
               "type": "object",
               "required": [

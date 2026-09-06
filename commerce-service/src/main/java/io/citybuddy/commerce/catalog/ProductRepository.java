@@ -211,6 +211,16 @@ public final class ProductRepository {
     return new ProductPriceChangeException(reason, change.productId());
   }
 
+  public List<Publication> publishLockedChanges(List<LockedPublication> changes) {
+    List<Publication> publications = new ArrayList<>();
+    for (LockedPublication change : changes) {
+      publications.add(
+          recordPublication(
+              change.productId(), change.version(), change.published(), UUID.randomUUID()));
+    }
+    return List.copyOf(publications);
+  }
+
   private Publication recordPublication(
       String productId, long version, boolean published, UUID eventId) {
     jdbc.update(
@@ -325,6 +335,9 @@ public final class ProductRepository {
       long publicationVersion) {}
 
   public record PriceChange(String productId, long expectedVersion, long newPriceMinor) {}
+
+  // The caller holds each product lock and has already written its next publication version.
+  public record LockedPublication(String productId, long version, boolean published) {}
 
   public record PriceChangeResult(
       String productId,
