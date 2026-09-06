@@ -39,6 +39,7 @@ import org.springframework.http.HttpMethod;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
 import org.springframework.jdbc.core.JdbcTemplate;
+import org.springframework.jdbc.datasource.DriverManagerDataSource;
 import org.springframework.test.context.DynamicPropertyRegistry;
 import org.springframework.test.context.DynamicPropertySource;
 
@@ -109,6 +110,7 @@ class ShoppingOrderIntegrationTest {
 
     ResponseEntity<JsonNode> result = get("/internal/shopping/orders", owner, null);
     assertThat(result.getStatusCode()).isEqualTo(HttpStatus.OK);
+    assertThat(result.getHeaders().getCacheControl()).contains("no-store");
     JsonNode orders = result.getBody();
     assertThat(orders.size()).isEqualTo(4);
     assertThat(orders.get(0).path("orderId").asText()).isEqualTo(noAttempt);
@@ -133,7 +135,8 @@ class ShoppingOrderIntegrationTest {
     assertThat(states.get("REQUESTED").path("count").asLong()).isEqualTo(1);
     assertThat(states.get("REQUESTED").path("refundedAmountMinor").asLong()).isZero();
     assertThat(states.get("SUCCEEDED").path("refundedAmountMinor").asLong()).isEqualTo(500);
-    assertThat(old.has("fulfillment") || old.has("trackingUrl")).isFalse();
+    assertThat(old.path("fulfillment").isNull()).isTrue();
+    assertThat(old.has("trackingUrl")).isFalse();
     assertThat(get("/internal/shopping/orders/" + paid, owner, null).getBody()).isEqualTo(old);
     JsonNode limited = get("/internal/shopping/orders?limit=2", owner, null).getBody();
     assertThat(limited.size()).isEqualTo(2);
@@ -179,6 +182,91 @@ class ShoppingOrderIntegrationTest {
     payment(order, "STANDARD", owner, "PENDING", null, 0);
     assertThat(get("/internal/shopping/orders/" + order, owner, null).getStatusCode())
         .isEqualTo(HttpStatus.INTERNAL_SERVER_ERROR);
+  }
+
+  @Test
+  void ownedFulfillmentUsesObservedStagesAndActualDeliveryInsteadOfEstimatedDates()
+      throws Exception {
+    Instant created = Instant.parse("2026-09-01T12:00:00Z");
+    String shipped = standard(owner, "PAID", created, null);
+    String delivered = standard(owner, "PAID", created.plusSeconds(1), null);
+    String delayed = standard(owner, "PAID", created.plusSeconds(2), null);
+    String noFacts = standard(owner, "UNPAID", created.plusSeconds(3), null);
+    for (String id : List.of(shipped, delivered, delayed)) {
+      String attempt = payment(id, "STANDARD", owner, "SUCCEEDED", null, 0);
+      jdbc.update(
+          "UPDATE mock_payment_attempt SET succeeded_at=? WHERE attempt_id=?",
+          Timestamp.from(created.plusSeconds(10)),
+          attempt);
+    }
+    fulfillment(shipped, "SHIPPED", null);
+    fulfillment(delivered, "DELIVERED", null);
+    fulfillment(delayed, "PROCESSING", "Warehouse preparation delay");
+    JsonNode shipment =
+        get("/internal/shopping/orders/" + shipped, owner, null).getBody().path("fulfillment");
+    assertThat(shipment.path("stage").asText()).isEqualTo("SHIPPED");
+    assertThat(shipment.path("shippedAt").asText()).isEqualTo("2026-09-02T12:00:00Z");
+    assertThat(shipment.path("deliveredAt").isNull()).isTrue();
+    JsonNode arrived =
+        get("/internal/shopping/orders/" + delivered, owner, null).getBody().path("fulfillment");
+    assertThat(arrived.path("deliveredAt").asText()).isEqualTo("2026-09-03T12:00:00Z");
+    assertThat(arrived.path("estimatedDeliveryAt").asText()).isEqualTo("2026-09-05T12:00:00Z");
+    JsonNode late =
+        get("/internal/shopping/orders/" + delayed, owner, null).getBody().path("fulfillment");
+    assertThat(late.path("delayReason").asText()).isEqualTo("Warehouse preparation delay");
+    assertThat(late.path("shippedAt").isNull()).isTrue();
+    assertThat(
+            get("/internal/shopping/orders/" + noFacts, owner, null)
+                .getBody()
+                .path("fulfillment")
+                .isNull())
+        .isTrue();
+    assertThat(
+            get("/internal/shopping/orders/" + shipped, owner.toUpperCase(Locale.ROOT), null)
+                .getStatusCode())
+        .isEqualTo(HttpStatus.NOT_FOUND);
+    assertThat(
+            jdbc.queryForObject(
+                "SELECT SUM(state_version) FROM standard_order WHERE user_subject=?",
+                Long.class,
+                owner))
+        .isEqualTo(7);
+    assertThat(
+            new ShoppingOrderRepository(jdbc)
+                .findStandardOrders(owner, List.of(delivered))
+                .getFirst()
+                .fulfillment()
+                .deliveredAt())
+        .isEqualTo(Instant.parse("2026-09-03T12:00:00Z"));
+  }
+
+  @Test
+  void fulfillmentCannotTurnAnUnpaidOrderIntoAnApparentShipment() throws Exception {
+    String unpaid = standard(owner, "UNPAID", Instant.parse("2026-09-01T12:00:00Z"), null);
+    fulfillment(unpaid, "SHIPPED", null);
+    assertThat(get("/internal/shopping/orders/" + unpaid, owner, null).getStatusCode())
+        .isEqualTo(HttpStatus.INTERNAL_SERVER_ERROR);
+  }
+
+  private void fulfillment(String order, String stage, String delayReason) {
+    JdbcTemplate fixture =
+        new JdbcTemplate(
+            new DriverManagerDataSource(
+                required("CATALOG_MYSQL_URL"), "root", required("MYSQL_BOOTSTRAP_PASSWORD")));
+    fixture.update(
+        """
+        INSERT INTO retail_order_fulfillment
+          (order_id,method,stage,promised_delivery_at,estimated_delivery_at,shipped_at,delivered_at,
+           delay_reason,source_kind,source_ref,observed_at)
+        VALUES (?,'STANDARD',?,'2026-09-04 12:00:00','2026-09-05 12:00:00',?,?,?,'FIXTURE',?,
+          '2026-09-04 12:00:00')
+        """,
+        order,
+        stage,
+        stage.equals("PROCESSING") ? null : Timestamp.from(Instant.parse("2026-09-02T12:00:00Z")),
+        stage.equals("DELIVERED") ? Timestamp.from(Instant.parse("2026-09-03T12:00:00Z")) : null,
+        delayReason,
+        owner);
   }
 
   private String standard(String subject, String status, Instant created, String sandbox) {

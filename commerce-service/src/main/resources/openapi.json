@@ -2,6 +2,288 @@
   "openapi": "3.1.0",
   "info": {"title": "CityBuddy commerce API", "version": "0.0.1"},
   "paths": {
+    "/internal/shopping/preferences": {
+      "get": {
+        "operationId": "getShoppingPreferences",
+        "security": [
+          {
+            "agentOboBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "X-Shopping-Session-Id",
+            "in": "header",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 64
+            },
+            "description": "Must match the signed shopping session and the existing SupportSessionId syntax."
+          },
+          {
+            "name": "X-Eval-Sandbox-Id",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string"
+            },
+            "description": "Any presence is rejected; evaluation tokens are not accepted."
+          }
+        ],
+        "description": "Requires shopping-agent and exact shopping:profile:read. Reads only the verified subject from crm_profile; no profile returns the same userId with NONE/null/empty preferences and creates no row. Email is never returned. Membership is a stored demonstration entitlement; defaultLocation is profile text, not a validated shipping address. No ETag is returned.",
+        "responses": {
+          "200": {
+            "description": "Owned profile or an empty profile for the actual caller",
+            "headers": {
+              "Cache-Control": {
+                "schema": {
+                  "type": "string",
+                  "const": "no-store"
+                }
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ShoppingPreferences"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Invalid shopping actor, scope, session or evaluation context"
+          },
+          "503": {
+            "description": "Identity verification unavailable"
+          }
+        }
+      }
+    },
+    "/api/retail/policies": {
+      "get": {
+        "operationId": "searchRetailPolicies",
+        "security": [
+          {
+            "directUserBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "X-Eval-Sandbox-Id",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string"
+            },
+            "description": "Any presence is rejected; evaluation tokens are not accepted."
+          },
+          {
+            "name": "query",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 200
+            },
+            "description": "Exactly one nonblank query, at most eight whitespace-separated words; no other query fields. Standard URL encoding is preserved."
+          }
+        ],
+        "description": "Requires direct-user catalog:read. Searches only published retail-policy-* and retail-guide-* FAQ content, scoring title three and body one per literal keyword; score descending then policyId, at most three results. A later draft does not replace the last published answer.",
+        "responses": {
+          "200": {
+            "description": "Ranked published policy records",
+            "headers": {
+              "Cache-Control": {
+                "schema": {
+                  "type": "string",
+                  "const": "no-store"
+                }
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/RetailPolicy"
+                  },
+                  "maxItems": 3
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid request"
+          },
+          "401": {
+            "description": "Invalid direct-user identity or evaluation context"
+          },
+          "403": {
+            "description": "Missing permission"
+          },
+          "503": {
+            "description": "Identity verification unavailable"
+          }
+        }
+      }
+    },
+    "/api/retail/fulfillment-options": {
+      "post": {
+        "operationId": "estimateRetailFulfillment",
+        "security": [
+          {
+            "directUserBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "X-Eval-Sandbox-Id",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string"
+            },
+            "description": "Any presence is rejected; evaluation tokens are not accepted."
+          }
+        ],
+        "description": "Requires direct-user catalog:read. Uses verified owner membership and current SKU prices/stock/category in a read-only snapshot. Request maximum 16384 bytes; strict types, duplicate/unknown fields and trailing JSON rejected. Empty items request general rules only. Canonical duplicates, families, unknown/unpublished/unavailable/zero-price/insufficient-stock SKUs and unsupported currencies reject the whole estimate. Estimates are not shipping purchases: checkout and simulated payment remain goods-only. Business weekdays are Monday-Friday without holiday coverage; dates and pickup readyAt use configured store timeZone. Standard and member express free thresholds are strict greater-than; freight is an additional option. Missing or invalid stored rules fail as a service error.",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/RetailEstimateRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Current delivery estimate, excluded from checkout/payment totals",
+            "headers": {
+              "Cache-Control": {
+                "schema": {
+                  "type": "string",
+                  "const": "no-store"
+                }
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RetailDeliveryEstimate"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid request"
+          },
+          "401": {
+            "description": "Invalid direct-user identity or evaluation context"
+          },
+          "403": {
+            "description": "Missing permission"
+          },
+          "503": {
+            "description": "Identity verification unavailable"
+          },
+          "413": {
+            "description": "Request exceeds 16384 bytes"
+          },
+          "422": {
+            "description": "This complete SKU set cannot be quoted",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RetailFactsError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/internal/merchant/order-issues": {
+      "get": {
+        "operationId": "listMerchantOrderIssues",
+        "security": [
+          {
+            "agentOboBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "X-Merchant-Session-Id",
+            "in": "header",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 128
+            }
+          },
+          {
+            "name": "X-Eval-Sandbox-Id",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string"
+            },
+            "description": "Any presence is rejected; evaluation tokens are not accepted."
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "format": "int64",
+              "minimum": 1,
+              "maximum": 100,
+              "default": 20
+            }
+          }
+        ],
+        "description": "Requires merchant-agent and exact merchant:read. Lists unresolved production order issues, openedAt descending then issueId; listingId comes from the actual order. Buyer messages are untrusted business content. Delayed issues share the owned-order fulfillment fact. Refund-request counts are distinct paid STANDARD orders of the same SKU with REQUESTED/PROCESSING/SUCCEEDED refunds created in [windowStart,windowEnd), excluding FAILED and sandbox records; a partial-refund pair on one order counts once. No issue or shipment state is changed by reading.",
+        "responses": {
+          "200": {
+            "description": "Unresolved production issues",
+            "headers": {
+              "Cache-Control": {
+                "schema": {
+                  "type": "string",
+                  "const": "no-store"
+                }
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/MerchantOrderIssue"
+                  },
+                  "maxItems": 100
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid limit"
+          },
+          "403": {
+            "description": "Invalid merchant actor, scope, session or evaluation context"
+          },
+          "503": {
+            "description": "Identity verification unavailable"
+          }
+        }
+      }
+    },
     "/internal/shopping/orders": {
       "get": {
         "operationId": "listShoppingOrders",
@@ -81,7 +363,7 @@
             }
           }
         },
-        "description": "Requires shopping-agent and exact shopping:orders:read. Owner is taken from verified OBO, never query input; the host owns the buyer session. Production reads exclude evaluation records and reject evaluation tokens/headers. Order price/name/currency come from historical snapshots, not current product data. Payment and refund records are read within one read-only repeatable-read transaction. No delivery status is inferred. Contradictory order/payment facts fail instead of being reported as successful."
+        "description": "Requires shopping-agent and exact shopping:orders:read. Owner is taken from verified OBO, never query input; the host owns the buyer session. Production reads exclude evaluation records and reject evaluation tokens/headers. Order price/name/currency come from historical snapshots, not current product data. Payment and refund records are read within one read-only repeatable-read transaction. Fulfillment is an optional persisted FIXTURE fact for paid STANDARD orders, shared by checkout child orders; missing/SECKILL facts are null. Delivery status is never inferred from payment or the current date. Contradictory order/payment facts fail instead of being reported as successful."
       }
     },
     "/internal/shopping/orders/{orderId}": {
@@ -160,7 +442,7 @@
             "description": "Missing, another owner, or evaluation order; no body"
           }
         },
-        "description": "Requires shopping-agent and exact shopping:orders:read. Owner is taken from verified OBO, never query input; the host owns the buyer session. Production reads exclude evaluation records and reject evaluation tokens/headers. Order price/name/currency come from historical snapshots, not current product data. Payment and refund records are read within one read-only repeatable-read transaction. No delivery status is inferred. Contradictory order/payment facts fail instead of being reported as successful."
+        "description": "Requires shopping-agent and exact shopping:orders:read. Owner is taken from verified OBO, never query input; the host owns the buyer session. Production reads exclude evaluation records and reject evaluation tokens/headers. Order price/name/currency come from historical snapshots, not current product data. Payment and refund records are read within one read-only repeatable-read transaction. Fulfillment is an optional persisted FIXTURE fact for paid STANDARD orders, shared by checkout child orders; missing/SECKILL facts are null. Delivery status is never inferred from payment or the current date. Contradictory order/payment facts fail instead of being reported as successful."
       }
     },
     "/internal/shopping/actions/prepare": {
@@ -2208,6 +2490,559 @@
       "mockPaymentSignature": {"type": "apiKey", "in": "header", "name": "X-Mock-Payment-Signature", "description": "HMAC-SHA256 over the timestamp, idempotency key, complete callback intent, and exact evaluation context when present."}
     },
     "schemas": {
+      "ShoppingPreferences": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "userId",
+          "displayName",
+          "loyaltyTier",
+          "defaultLocation",
+          "preferences"
+        ],
+        "properties": {
+          "userId": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 128
+          },
+          "displayName": {
+            "anyOf": [
+              {
+                "type": "string",
+                "maxLength": 160
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "loyaltyTier": {
+            "type": "string",
+            "enum": [
+              "NONE",
+              "MEMBER"
+            ]
+          },
+          "defaultLocation": {
+            "anyOf": [
+              {
+                "type": "string",
+                "maxLength": 160
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "preferences": {
+            "type": "object",
+            "maxProperties": 20,
+            "propertyNames": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 64
+            },
+            "additionalProperties": {
+              "type": "string",
+              "maxLength": 500
+            }
+          }
+        }
+      },
+      "RetailPolicy": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "policyId",
+          "title",
+          "category",
+          "content",
+          "publicationVersion",
+          "publishedAt"
+        ],
+        "properties": {
+          "policyId": {
+            "type": "string",
+            "maxLength": 64
+          },
+          "title": {
+            "type": "string"
+          },
+          "category": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "content": {
+            "type": "string"
+          },
+          "publicationVersion": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 1
+          },
+          "publishedAt": {
+            "type": "string",
+            "format": "date-time"
+          }
+        }
+      },
+      "RetailEstimateItem": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "productId",
+          "quantity"
+        ],
+        "properties": {
+          "productId": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 64
+          },
+          "quantity": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 1,
+            "maximum": 24
+          }
+        }
+      },
+      "RetailEstimateRequest": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "items"
+        ],
+        "properties": {
+          "items": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/RetailEstimateItem"
+            },
+            "maxItems": 100
+          }
+        }
+      },
+      "RetailQuotedItem": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "productId",
+          "quantity",
+          "unitPriceMinor",
+          "productVersion"
+        ],
+        "properties": {
+          "productId": {
+            "type": "string"
+          },
+          "quantity": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 1,
+            "maximum": 24
+          },
+          "unitPriceMinor": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 1
+          },
+          "productVersion": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 1
+          }
+        }
+      },
+      "RetailDeliveryOption": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "code",
+          "method",
+          "feeMinor",
+          "earliestDate",
+          "latestDate",
+          "readyAt",
+          "location"
+        ],
+        "properties": {
+          "code": {
+            "type": "string",
+            "enum": [
+              "STANDARD",
+              "EXPRESS",
+              "FREIGHT",
+              "PICKUP"
+            ]
+          },
+          "method": {
+            "type": "string",
+            "enum": [
+              "delivery",
+              "shipping",
+              "pickup"
+            ]
+          },
+          "feeMinor": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "earliestDate": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "date"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "latestDate": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "date"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "readyAt": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "date-time"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "location": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        }
+      },
+      "RetailDeliveryEstimate": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "quotedAt",
+          "configVersion",
+          "currency",
+          "timeZone",
+          "itemSubtotalMinor",
+          "items",
+          "estimateOnly",
+          "options"
+        ],
+        "properties": {
+          "quotedAt": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "configVersion": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 1
+          },
+          "currency": {
+            "type": "string",
+            "pattern": "^[A-Z]{3}$"
+          },
+          "timeZone": {
+            "type": "string"
+          },
+          "itemSubtotalMinor": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "items": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/RetailQuotedItem"
+            },
+            "maxItems": 100
+          },
+          "estimateOnly": {
+            "type": "boolean",
+            "const": true
+          },
+          "options": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/RetailDeliveryOption"
+            },
+            "maxItems": 4
+          }
+        }
+      },
+      "RetailFactsError": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "category",
+          "message"
+        ],
+        "properties": {
+          "category": {
+            "type": "string"
+          },
+          "message": {
+            "type": "string"
+          }
+        }
+      },
+      "ShoppingFulfillmentFacts": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "method",
+          "stage",
+          "promisedDeliveryAt",
+          "estimatedDeliveryAt",
+          "packedAt",
+          "shippedAt",
+          "deliveredAt",
+          "delayReason",
+          "sourceKind",
+          "sourceRef",
+          "observedAt"
+        ],
+        "properties": {
+          "method": {
+            "type": "string",
+            "enum": [
+              "STANDARD",
+              "EXPRESS",
+              "FREIGHT",
+              "PICKUP"
+            ]
+          },
+          "stage": {
+            "type": "string",
+            "enum": [
+              "PROCESSING",
+              "PACKED",
+              "SHIPPED",
+              "OUT_FOR_DELIVERY",
+              "DELIVERED"
+            ]
+          },
+          "promisedDeliveryAt": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "date-time"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "estimatedDeliveryAt": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "date-time"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "packedAt": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "date-time"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "shippedAt": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "date-time"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "deliveredAt": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "date-time"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "delayReason": {
+            "anyOf": [
+              {
+                "type": "string",
+                "maxLength": 500
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "sourceKind": {
+            "type": "string",
+            "enum": [
+              "FIXTURE"
+            ]
+          },
+          "sourceRef": {
+            "type": "string",
+            "maxLength": 128
+          },
+          "observedAt": {
+            "type": "string",
+            "format": "date-time"
+          }
+        }
+      },
+      "MerchantOrderIssue": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "issueId",
+          "orderId",
+          "kind",
+          "summary",
+          "listingId",
+          "buyerMessageExcerpt",
+          "openedAt",
+          "fulfillment",
+          "refundRequestedOrderCount",
+          "windowStart",
+          "windowEnd",
+          "sourceKind",
+          "sourceRef"
+        ],
+        "properties": {
+          "issueId": {
+            "type": "string",
+            "maxLength": 64
+          },
+          "orderId": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "kind": {
+            "type": "string",
+            "enum": [
+              "delayed",
+              "return_spike",
+              "buyer_message",
+              "damaged"
+            ]
+          },
+          "summary": {
+            "type": "string"
+          },
+          "listingId": {
+            "type": "string"
+          },
+          "buyerMessageExcerpt": {
+            "anyOf": [
+              {
+                "type": "string",
+                "maxLength": 4000
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "openedAt": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "fulfillment": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ShoppingFulfillmentFacts"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "refundRequestedOrderCount": {
+            "anyOf": [
+              {
+                "type": "integer",
+                "format": "int64",
+                "minimum": 0
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "windowStart": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "date-time"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "windowEnd": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "date-time"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "sourceKind": {
+            "type": "string",
+            "enum": [
+              "FIXTURE"
+            ]
+          },
+          "sourceRef": {
+            "type": "string",
+            "maxLength": 128
+          }
+        }
+      },
       "ShoppingOrderProduct": {
         "type": "object",
         "additionalProperties": false,
@@ -2388,7 +3223,8 @@
           "unpaidDeadline",
           "product",
           "payment",
-          "refunds"
+          "refunds",
+          "fulfillment"
         ],
         "properties": {
           "orderKind": {
@@ -2445,7 +3281,8 @@
           },
           "refunds": {
             "$ref": "#/components/schemas/ShoppingOrderRefunds"
-          }
+          },
+          "fulfillment": {"anyOf": [{"$ref": "#/components/schemas/ShoppingFulfillmentFacts"}, {"type": "null"}]}
         }
       },
       "ShoppingOrderAuthorizationError": {

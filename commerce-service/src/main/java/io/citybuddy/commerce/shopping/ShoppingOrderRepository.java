@@ -46,9 +46,11 @@ public final class ShoppingOrderRepository {
       ORDER BY o.created_at DESC, o.order_id DESC, o.order_kind
       """;
   private final JdbcTemplate jdbc;
+  private final OrderFulfillmentRepository fulfillment;
 
   public ShoppingOrderRepository(JdbcTemplate jdbc) {
     this.jdbc = jdbc;
+    this.fulfillment = new OrderFulfillmentRepository(jdbc);
   }
 
   public List<OrderView> list(String owner, int limit) {
@@ -70,7 +72,7 @@ public final class ShoppingOrderRepository {
             owner,
             limit,
             limit);
-    return withRefunds(orders);
+    return withFulfillment(withRefunds(orders));
   }
 
   public Optional<OrderView> find(String owner, String orderId) {
@@ -92,7 +94,7 @@ public final class ShoppingOrderRepository {
     if (orders.size() > 1) {
       throw new IllegalStateException("Shopping order identifier is ambiguous");
     }
-    return withRefunds(orders).stream().findFirst();
+    return withFulfillment(withRefunds(orders)).stream().findFirst();
   }
 
   public List<OrderView> findStandardOrders(String owner, List<String> ids) {
@@ -104,16 +106,41 @@ public final class ShoppingOrderRepository {
     parameters.add(owner);
     parameters.add(owner);
     parameters.addAll(ids);
-    return withRefunds(
-        jdbc.query(
-            "WITH page AS ("
-                + STANDARD
-                + " AND order_id IN ("
-                + placeholders
-                + ")) "
-                + PAYMENT_JOIN,
-            ShoppingOrderRepository::order,
-            parameters.toArray()));
+    return withFulfillment(
+        withRefunds(
+            jdbc.query(
+                "WITH page AS ("
+                    + STANDARD
+                    + " AND order_id IN ("
+                    + placeholders
+                    + ")) "
+                    + PAYMENT_JOIN,
+                ShoppingOrderRepository::order,
+                parameters.toArray())));
+  }
+
+  private List<OrderView> withFulfillment(List<OrderView> orders) {
+    var delivery =
+        fulfillment.find(
+            orders.stream()
+                .filter(order -> order.orderKind().equals("STANDARD"))
+                .map(OrderView::orderId)
+                .toList());
+    return orders.stream()
+        .map(
+            order ->
+                new OrderView(
+                    order.orderKind(),
+                    order.orderId(),
+                    order.status(),
+                    order.stateVersion(),
+                    order.createdAt(),
+                    order.unpaidDeadline(),
+                    order.product(),
+                    order.payment(),
+                    order.refunds(),
+                    order.orderKind().equals("STANDARD") ? delivery.get(order.orderId()) : null))
+        .toList();
   }
 
   private List<OrderView> withRefunds(List<OrderView> orders) {
@@ -173,7 +200,8 @@ public final class ShoppingOrderRepository {
                   order.unpaidDeadline(),
                   order.product(),
                   order.payment(),
-                  new RefundFacts(reserved, byState));
+                  new RefundFacts(reserved, byState),
+                  order.fulfillment());
             })
         .toList();
   }
@@ -215,7 +243,8 @@ public final class ShoppingOrderRepository {
         instant(row, "unpaid_deadline"),
         product,
         payment,
-        new RefundFacts(0, List.of()));
+        new RefundFacts(0, List.of()),
+        null);
   }
 
   private static Instant instant(ResultSet row, String column) throws SQLException {

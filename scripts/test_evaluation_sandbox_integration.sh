@@ -2730,9 +2730,13 @@ mysql_query root "$root_password" commerce_db \
   "ALTER TABLE mock_payment_attempt DROP INDEX uq_mock_payment_callback_correlation,
     ADD CONSTRAINT uq_mock_payment_callback_correlation UNIQUE (callback_correlation_id)"
 
-# The duplicate-parent fixture temporarily detaches the checkout FK, then restores both constraints.
+# The duplicate-parent fixture temporarily detaches order FKs, then restores all constraints.
 mysql_query root "$root_password" commerce_db \
   "ALTER TABLE shopping_checkout_order DROP FOREIGN KEY fk_shopping_checkout_order_order"
+mysql_query root "$root_password" commerce_db \
+  "ALTER TABLE retail_order_fulfillment DROP FOREIGN KEY fk_retail_fulfillment_order"
+mysql_query root "$root_password" commerce_db \
+  "ALTER TABLE retail_order_issue DROP FOREIGN KEY fk_retail_issue_order"
 mysql_query root "$root_password" commerce_db \
   "ALTER TABLE standard_order DROP PRIMARY KEY"
 mysql_query root "$root_password" commerce_db "
@@ -2751,6 +2755,12 @@ mysql_query root "$root_password" commerce_db \
   "ALTER TABLE standard_order ADD PRIMARY KEY (order_id)"
 mysql_query root "$root_password" commerce_db \
   "ALTER TABLE shopping_checkout_order ADD CONSTRAINT fk_shopping_checkout_order_order
+    FOREIGN KEY (order_id) REFERENCES standard_order (order_id)"
+mysql_query root "$root_password" commerce_db \
+  "ALTER TABLE retail_order_fulfillment ADD CONSTRAINT fk_retail_fulfillment_order
+    FOREIGN KEY (order_id) REFERENCES standard_order (order_id)"
+mysql_query root "$root_password" commerce_db \
+  "ALTER TABLE retail_order_issue ADD CONSTRAINT fk_retail_issue_order
     FOREIGN KEY (order_id) REFERENCES standard_order (order_id)"
 
 cross_type_reservation_id='00000000-0000-0000-0000-000000000211'

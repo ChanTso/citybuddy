@@ -7,6 +7,8 @@ import io.citybuddy.commerce.identity.SupportSessionId;
 import io.citybuddy.commerce.order.BatchOrderService;
 import jakarta.servlet.http.HttpServletRequest;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
+import org.springframework.http.CacheControl;
+import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PathVariable;
 import org.springframework.web.bind.annotation.RestController;
@@ -25,7 +27,7 @@ public final class CheckoutReadController {
   }
 
   @GetMapping("/internal/shopping/checkouts/{checkoutId}")
-  public View find(@PathVariable String checkoutId, HttpServletRequest request) {
+  public ResponseEntity<View> find(@PathVariable String checkoutId, HttpServletRequest request) {
     if (request.getHeader("X-Eval-Sandbox-Id") != null) {
       throw new OboAuthorizationException("Evaluation context is not supported");
     }
@@ -47,8 +49,10 @@ public final class CheckoutReadController {
     if (principal.sandboxId() != null || principal.subject().length() > 128) {
       throw new OboAuthorizationException("Shopping identity is invalid");
     }
-    return service
-        .find(principal.subject(), checkoutId)
-        .orElseThrow(() -> new CheckoutException(404, "not_found", "Checkout not found"));
+    View result =
+        service
+            .find(principal.subject(), checkoutId)
+            .orElseThrow(() -> new CheckoutException(404, "not_found", "Checkout not found"));
+    return ResponseEntity.ok().cacheControl(CacheControl.noStore()).body(result);
   }
 }

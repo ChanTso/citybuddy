@@ -80,6 +80,7 @@ class AuthIdentityTest {
                 "shopping:orders:read",
                 "shopping:cart:read",
                 "shopping:cart:write",
+                "shopping:profile:read",
                 "shopping:cart:admin",
                 "refund:create"));
     repository = mock(AuthRepository.class);
@@ -756,7 +757,11 @@ class AuthIdentityTest {
   void shoppingExchangeUsesDigestCredentialAndSignsItsExactScopes() throws Exception {
     List<String> scopes =
         List.of(
-            "shopping:orders:read", "shopping:cart:read", "shopping:cart:write", "refund:create");
+            "shopping:orders:read",
+            "shopping:cart:read",
+            "shopping:cart:write",
+            "shopping:profile:read",
+            "refund:create");
     String basic = allowDigestService("shopping-agent", scopes);
     String direct = keys.directToken("user-123", List.of("shopping:session:create"));
 
@@ -802,12 +807,14 @@ class AuthIdentityTest {
                     "shopping:orders:read",
                     "shopping:cart:read",
                     "shopping:cart:write",
+                    "shopping:profile:read",
                     "merchant:read");
             case "merchant-agent" ->
                 List.of(
                     "shopping:orders:read",
                     "shopping:cart:read",
                     "shopping:cart:write",
+                    "shopping:profile:read",
                     "refund:create");
             default ->
                 List.of("catalog:read", "shopping:cart:admin", "merchant:read", "*", "catalog:*");
@@ -870,6 +877,17 @@ class AuthIdentityTest {
         .isInstanceOf(IdentityException.class)
         .hasMessage("Exchange is not allowed");
 
+    assertThatThrownBy(
+            () ->
+                controller.exchange(
+                    basic,
+                    "Bearer " + direct,
+                    null,
+                    new AuthController.ExchangeRequest(
+                        "shop-session", "user-123", "shopping:profile:read")))
+        .isInstanceOf(IdentityException.class)
+        .hasMessage("Exchange is not allowed");
+
     IdentityProperties deploymentWithoutShoppingOrders =
         new IdentityProperties(
             properties.issuer(),
@@ -883,6 +901,9 @@ class AuthIdentityTest {
             properties.oboTtl(),
             properties.clockSkew(),
             List.of("refund:create"));
+    String profileBasic =
+        allowDigestService(
+            "shopping-agent", List.of("shopping:orders:read", "shopping:profile:read"));
     AuthController restricted =
         new AuthController(
             repository,
@@ -895,11 +916,21 @@ class AuthIdentityTest {
     assertThatThrownBy(
             () ->
                 restricted.exchange(
-                    basic,
+                    profileBasic,
                     "Bearer " + direct,
                     null,
                     new AuthController.ExchangeRequest(
                         "shop-session", "user-123", "shopping:orders:read")))
+        .isInstanceOf(IdentityException.class)
+        .hasMessage("Exchange is not allowed");
+    assertThatThrownBy(
+            () ->
+                restricted.exchange(
+                    profileBasic,
+                    "Bearer " + direct,
+                    null,
+                    new AuthController.ExchangeRequest(
+                        "shop-session", "user-123", "shopping:profile:read")))
         .isInstanceOf(IdentityException.class)
         .hasMessage("Exchange is not allowed");
   }
