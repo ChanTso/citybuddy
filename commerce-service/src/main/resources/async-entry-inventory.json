@@ -63,7 +63,7 @@
       "producer": "OrderRepository and RefundRepository",
       "consumer": "none",
       "evidence": [
-        "real evaluation JWTs are rejected by the real order and refund controllers",
+        "real evaluation JWTs are rejected by the real order, checkout and refund controllers",
         "the durable Outbox payloads have no sandbox field",
         "no runtime publisher selects STANDARD_ORDER or refund Outbox event types"
       ]

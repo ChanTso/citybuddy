@@ -236,6 +236,32 @@ done
 assert_fails "commerce runtime cannot delete merchant approvals" 'DELETE command denied' \
   mysql_query commerce_app "$commerce_app_password" commerce_db \
   "DELETE FROM merchant_price_draft WHERE draft_id = 'forbidden'"
+for shopping_table in shopping_cart shopping_cart_item shopping_cart_command shopping_checkout shopping_checkout_order; do
+  mysql_query commerce_app "$commerce_app_password" commerce_db \
+    "SELECT COUNT(*) FROM $shopping_table" >/dev/null
+  mysql_query commerce_app "$commerce_app_password" commerce_db \
+    "INSERT INTO $shopping_table SELECT * FROM $shopping_table WHERE FALSE"
+  if [[ "$shopping_table" != shopping_cart_item ]]; then
+    assert_fails "commerce runtime cannot delete shopping roots or receipts" 'DELETE command denied' \
+      mysql_query commerce_app "$commerce_app_password" commerce_db \
+      "DELETE FROM $shopping_table WHERE FALSE"
+  fi
+done
+mysql_query commerce_app "$commerce_app_password" commerce_db \
+  'UPDATE shopping_cart SET cart_version = cart_version WHERE FALSE'
+mysql_query commerce_app "$commerce_app_password" commerce_db \
+  'UPDATE shopping_cart_item SET quantity = quantity WHERE FALSE'
+mysql_query commerce_app "$commerce_app_password" commerce_db \
+  'DELETE FROM shopping_cart_item WHERE FALSE'
+for receipt_table in shopping_cart_command shopping_checkout shopping_checkout_order; do
+  receipt_column=created_at
+  if [[ "$receipt_table" == shopping_checkout_order ]]; then
+    receipt_column=line_no
+  fi
+  assert_fails "commerce runtime cannot rewrite committed shopping receipts" 'UPDATE command denied' \
+    mysql_query commerce_app "$commerce_app_password" commerce_db \
+    "UPDATE $receipt_table SET $receipt_column = $receipt_column WHERE FALSE"
+done
 assert_fails "merchant analytics cannot read underlying payment identities" 'SELECT command denied' \
   mysql_query merchant_view_test "$merchant_reader_password" commerce_db \
   'SELECT * FROM mock_payment_attempt'

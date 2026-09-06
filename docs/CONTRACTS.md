@@ -1019,7 +1019,7 @@ sandbox where applicable; duplicates are idempotent and inactive sandbox work dr
 The current implementation does not include MemoryPacker summaries/watermarks, cross-session
 memory or its proposal/confirmation/update/delete/expiry lifecycle, the associated
 PII/prompt lane, handoff tickets, failure-candidate export, multimodal input, image/audio/video
-storage, a full shopping site or cart, a multi-page commerce product, a full human-agent
+storage, a full shopping site, a multi-page commerce product, a full human-agent
 workstation, multi-agent orchestration, a decomposer model, long-term vector memory, a second
 vector database, a service gateway or registry, Kubernetes, production return of evaluation
 evidence, automatic code changes by an evaluator, or a recovery scanner that can repeat committed
@@ -1093,7 +1093,8 @@ ruleset.
 ShopMate owns buyer sessions and validates their authenticated owner before each token
 exchange. Auth accepts the `shopping-agent` service using the existing machine credential
 verifier, requires `shopping:session:create` on the direct user token, and issues only
-`shopping:orders:read` or `refund:create` when both the service and deployment grant them.
+`shopping:orders:read`, `shopping:cart:read`, `shopping:cart:write`, or `refund:create` when
+both the service and deployment grant them.
 The actor comes from the authenticated service, never from model arguments. Merchant and
 legacy support services cannot exchange shopping scopes. This does not add a dependency on
 the legacy `cs_db.support_session` table.
@@ -1118,3 +1119,69 @@ when confirming. A successful confirmation records `REQUESTED`, not a finished r
 Repeated confirmation returns the original receipt and creates no second refund or Outbox
 event. Existing production ownership checks and evaluation-only ablation behavior remain
 inside the same transaction service.
+
+### Durable shopping cart and buyer-approved checkout
+
+These seven operations are production-only. Internal routes fix the actor to
+`shopping-agent`, require an exact scope and a matching, valid `X-Shopping-Session-Id`,
+and reject evaluation tokens and any `X-Eval-Sandbox-Id` header. The cart belongs to the
+authenticated user across buyer sessions. User identity never comes from a JSON field.
+Internal controllers require both `citybuddy.orders.enabled` and `citybuddy.obo.enabled`;
+direct checkout requires `citybuddy.orders.enabled`. No new feature switch is introduced.
+
+| Operation | Authority and behavior |
+| --- | --- |
+| `GET /internal/shopping/cart` | `shopping:cart:read`; live SKU state and strong version ETag, such as `"12"` |
+| `POST /internal/shopping/cart/items` | `shopping:cart:write`; required Idempotency-Key, `{productId, quantity}`; quantity is an increment |
+| `PUT /internal/shopping/cart/items/{productId}` | `shopping:cart:write`; required key, `{quantity, expectedCartVersion}`; quantity replaces the line quantity |
+| `DELETE /internal/shopping/cart/items/{productId}` | `shopping:cart:write`; required key and one strong, quoted numeric `If-Match` cart version |
+| `GET /internal/shopping/cart/commands/{commandKey}` | `shopping:cart:read`; only reads the original receipt plus the current cart; unknown and another user's keys both return 404 |
+| `POST /api/shopping/checkouts` | Direct user with the configured order permission (`order:create` by default); required key and complete confirmed quote; OBO cannot approve or create the checkout |
+| `GET /internal/shopping/checkouts/{checkoutId}` | `shopping:orders:read`; owned checkout receipt and authoritative child-order/payment/refund facts; unknown and other users' checkouts both return 404 |
+
+Cart writes return 200. The first checkout commit returns 201; matching replay returns 200.
+Keys are nonblank, at most 128 Java characters, and retain their exact value; URI-encode a
+key used in the command lookup path. A key is bound to the owner and original command.
+Reusing it for another intent returns a conflict. Successful cart mutation, version advance
+and command receipt share one transaction. Receipt replay does not repeat an increment;
+`receipt.appliedVersion` describes that command, while `cart.version` describes the current
+cart. Reading an empty cart or an unknown command does not create a cart root or apply an
+unconfirmed write.
+
+Setting or removing a missing line is an acknowledged no-op; setting does not add a line.
+A no-op records its receipt without advancing the cart version, which may still be zero.
+
+Each cart holds at most 100 actual SKUs and 1–24 units per SKU. Adding or setting checks
+current availability, published state, stock and currency, but does not reserve stock.
+Family display IDs cannot be ordered. Cart reads retain lines whose product later became
+unavailable or has a zero price; only positive-price SKUs can be checked out because the
+existing mock-payment path requires a positive amount. `orderable` and `checkoutReady`
+report whether a new checkout is possible. The historical single-order API is unchanged.
+Names, prices, versions and stock are current product facts, with image/options/family
+metadata for display. Currency/subtotal can be null for an incompatible or overflowing
+cart; an empty cart has version 0 when no root exists, null currency, subtotal 0 and
+`checkoutReady=false`. Live cart prices are not historical order prices.
+
+Checkout requires `{expectedCartVersion, currency, items}` and 1–100 items, each exactly
+`{productId, quantity, expectedProductVersion, expectedUnitPriceMinor}`. The server rejects
+duplicate SKUs, partial carts, stale cart versions, stale prices or product versions,
+unavailable products and insufficient stock. JSON scalar types are strict: numeric strings,
+fractional integers, missing values, unknown fields, duplicate keys and trailing JSON are
+rejected. Cart write bodies are bounded to 8 KiB; checkout bodies to 32 KiB. HTTP validates
+the wire shape; the services validate monetary, quantity, identifier and version ranges.
+
+The checkout transaction locks the user's cart, matches the complete quote, takes product
+locks in product-ID order, creates ordinary unpaid child orders using the shared standard
+order writer, and records their inventory/Outbox effects. The checkout receipt, child orders,
+stock changes and cart clearing/version advance commit together or all roll back. Retries
+with the same key return the committed checkout before checking the now-cleared cart. A
+different quote on that key is a conflict. Product publication/cache fields and the original
+single-order transaction entry point remain in use.
+
+Checkout is not payment. The receipt reports `UNPAID`, `PARTIALLY_PAID` or `PAID` from child
+order/payment facts; payment continues through the existing mock-payment path for each child
+order. No delivery or completed refund is inferred. A timeout or retryable concurrency result
+can be unconfirmed: retry the same key, never a new key. Host cancellation cannot roll back a
+Java transaction that already committed. The read-only cart command receipt route allows a
+future buyer host to restore such results without applying a write merely by opening a page;
+an absent receipt is not proof that an in-flight request will never commit.

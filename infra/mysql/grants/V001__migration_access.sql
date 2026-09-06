@@ -59,3 +59,8 @@ GRANT SELECT ON commerce_db.merchant_paid_orders TO 'commerce_app'@'%';
 GRANT SELECT ON commerce_db.merchant_daily_sales TO 'commerce_app'@'%';
 GRANT SELECT ON commerce_db.retail_product_family TO 'commerce_app'@'%';
 GRANT SELECT ON commerce_db.retail_product_metadata TO 'commerce_app'@'%';
+GRANT SELECT, INSERT, UPDATE ON commerce_db.shopping_cart TO 'commerce_app'@'%';
+GRANT SELECT, INSERT, UPDATE, DELETE ON commerce_db.shopping_cart_item TO 'commerce_app'@'%';
+GRANT SELECT, INSERT ON commerce_db.shopping_cart_command TO 'commerce_app'@'%';
+GRANT SELECT, INSERT ON commerce_db.shopping_checkout TO 'commerce_app'@'%';
+GRANT SELECT, INSERT ON commerce_db.shopping_checkout_order TO 'commerce_app'@'%';
