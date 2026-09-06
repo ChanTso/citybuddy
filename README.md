@@ -15,15 +15,16 @@ Commerce contracts for paid-order analysis and operator-approved price changes.
 | Path or change | Observed result | Workload and source |
 |---|---|---|
 | Redis-first sold-out rejection | 3,000 requests/s; 90,000 expected rejections; zero dropped iterations | 32 activities, 30-second input window. [Report and raw k6/SQL](bench/results/seckill_rejection_capacity_20260905.md). |
-| Admission → order → backlog drain | All 600 admitted reservations became orders; stock, quota and ledger matched | 1 activity, 600 stock/quota, 10 requests/s × 60 seconds; asynchronous completion followed. [Closed-loop report](bench/results/seckill_closedloopA_69be167_20260905T171447Z_r10_q600_summary.md). |
+| Blocking consumer scheduling | Order-wait p99 64.0 s → 0.541 s; 600/600 orders completed on both sides | Same 10 requests/s × 60 seconds, 600 stock/quota and diagnostic sampling. After isolation, order/dispatch drain was confirmed within five seconds. [Comparison and raw output](bench/results/local_seckill_diagnosis_20260906.md). |
 | Activity lock: `FOR UPDATE` → `FOR SHARE` | p50 1,535.1 → 6.1 ms; dropped iterations 949 → 0 | Historical one-activity comparison at 800 requests/s. [Paired results](bench/README.md#shared-activity-lock-result). |
 | Generated machine credential: BCrypt → digest | Refund-preparation p50 4,139.8 → 13.4 ms; Auth median CPU 694.42% → 4.30% | Historical 30 requests/s step, one Agent worker and deterministic model. [Paired results](bench/agent/README.md#repeated-obo-service-credential-verification). |
 | In-transaction resource ownership binding | Unauthorized refund requests 55/300 → 0/300 | StateEval's fixed 600 real-model trials, graded against independent SQL. [Campaign artifacts](https://github.com/ChanTso/state-eval/tree/main/results/ownership-campaign-v1/formal). |
 
 Performance measurements ran on a MacBook Pro M4, Docker 8 CPUs / 14 GB, with Commerce limited to
 4 CPUs. Each linked report records its measured revision, workload and raw output.
-The closed-loop run measured `69be167a3df030bf45795c49f444d6e7c24d0423`; the other comparisons retain
-their historical revisions and are not combined into a single before/after result.
+The scheduling comparison measured `69be167a3df030bf45795c49f444d6e7c24d0423` and
+`cd213a846769b40cfbc95e791847f338fd7917c3`; the other comparisons retain their
+historical revisions and are not combined into a single before/after result.
 
 The sold-out path ends before business MySQL/MQ work; at the historical 4,000/s point, the
 limiting side between Commerce and the co-located generator was not isolated. The 600-order result
@@ -176,6 +177,7 @@ also run local `make ci`. Development and review requirements are in [AGENTS.md]
 - [Business, identity and interface contracts](docs/CONTRACTS.md).
 - [Concurrency, recovery and debugging notes](docs/LESSONS.md).
 - [Seckill/Redis workloads, comparisons and reproduction](bench/README.md).
+- [Local diagnosis and retained raw archives](bench/results/archives_20260906.md).
 - [Buyer Agent workload history, TLS investigation and raw-result links](bench/agent/README.md).
 - [Buyer walkthrough and fixture boundaries](docs/DEMO.md).
 - [StateEval campaign](https://github.com/ChanTso/state-eval/tree/main/results/ownership-campaign-v1/formal)
