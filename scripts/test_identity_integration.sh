@@ -159,11 +159,14 @@ user_password="$(openssl rand -hex 24)"
 other_password="$(openssl rand -hex 24)"
 disabled_password="$(openssl rand -hex 24)"
 service_password="$(uv run python scripts/service_credential.py generate)"
+shopping_service_password="$(uv run python scripts/service_credential.py generate)"
 user_hash="$(uv run python scripts/hash_test_credential.py "$user_password")"
 other_hash="$(uv run python scripts/hash_test_credential.py "$other_password")"
 disabled_hash="$(uv run python scripts/hash_test_credential.py "$disabled_password")"
 service_hash="$(printf '%s' "$service_password" \
   | uv run python scripts/service_credential.py hash agent-service)"
+shopping_service_hash="$(printf '%s' "$shopping_service_password" \
+  | uv run python scripts/service_credential.py hash shopping-agent)"
 
 "${compose[@]}" up --detach --wait --wait-timeout 60 mysql
 compose_host_port MYSQL_PORT mysql 3306
@@ -358,7 +361,7 @@ echo "Verified warm-history fixture against the real MySQL loader and context po
 
 mysql_query auth_app "$auth_app_password" commerce_db "
 INSERT INTO auth_user_principal (principal_id, subject, login_identifier, state, permissions) VALUES
-  ('00000000-0000-0000-0000-000000000020', 'user-integration', 'integration-user', 'ACTIVE', 'support:session:create support:chat'),
+  ('00000000-0000-0000-0000-000000000020', 'user-integration', 'integration-user', 'ACTIVE', 'support:session:create support:chat shopping:session:create'),
   ('00000000-0000-0000-0000-000000000021', 'other-user', 'other-user', 'ACTIVE', 'support:session:create support:chat'),
   ('00000000-0000-0000-0000-000000000022', 'disabled-user', 'disabled-user', 'DISABLED', 'support:session:create support:chat');
 INSERT INTO auth_login_credential (principal_id, password_hash) VALUES
@@ -366,7 +369,8 @@ INSERT INTO auth_login_credential (principal_id, password_hash) VALUES
   ('00000000-0000-0000-0000-000000000021', '$other_hash'),
   ('00000000-0000-0000-0000-000000000022', '$disabled_hash');
 INSERT INTO auth_service_identity (service_id, client_id, credential_hash, state, allowed_scopes) VALUES
-  ('00000000-0000-0000-0000-000000000023', 'agent-service', '$service_hash', 'ACTIVE', 'catalog:read');
+  ('00000000-0000-0000-0000-000000000023', 'agent-service', '$service_hash', 'ACTIVE', 'catalog:read'),
+  ('00000000-0000-0000-0000-000000000024', 'shopping-agent', '$shopping_service_hash', 'ACTIVE', 'shopping:orders:read refund:create');
 INSERT INTO auth_signing_key_metadata (kid, state, activated_at, retire_after) VALUES
   ('current-key', 'CURRENT', CURRENT_TIMESTAMP(6), NULL),
   ('overlap-key', 'OVERLAP', CURRENT_TIMESTAMP(6), TIMESTAMPADD(HOUR, 1, CURRENT_TIMESTAMP(6)));
@@ -428,6 +432,8 @@ SPRING_DATASOURCE_PASSWORD="$auth_app_password" java -jar auth-service/target/au
   --citybuddy.identity.overlap-kid=overlap-key \
   --citybuddy.identity.overlap-public-key-path="$tmp_dir/overlap-public.pem" \
   '--citybuddy.identity.exchange-scopes[0]=catalog:read' \
+  '--citybuddy.identity.exchange-scopes[1]=shopping:orders:read' \
+  '--citybuddy.identity.exchange-scopes[2]=refund:create' \
   >"$tmp_dir/auth.log" 2>&1 &
 auth_pid=$!
 process_bound_port auth_port spring "$auth_pid" "$tmp_dir/auth.log" 0
@@ -489,6 +495,83 @@ assert_status 200 "second active principal login" \
   --header 'Content-Type: application/json' \
   --data "{\"loginIdentifier\":\"other-user\",\"password\":\"$other_password\"}"
 other_token="$(uv run python scripts/read_json_field.py "$tmp_dir/http-response.json" accessToken)"
+
+for shopping_scope in shopping:orders:read refund:create; do
+  assert_status 200 "shopping digest credential exchanges exact $shopping_scope" \
+    --request POST "http://127.0.0.1:$auth_port/auth/token/exchange" \
+    --user "shopping-agent:$shopping_service_password" \
+    --header "X-User-Authorization: Bearer $direct_token" \
+    --header 'Content-Type: application/json' \
+    --data "{\"sessionId\":\"shop-integration\",\"userSubject\":\"user-integration\",\"scope\":\"$shopping_scope\"}"
+  uv run python - "$tmp_dir/http-response.json" "$tmp_dir/jwks.json" "$shopping_scope" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+import jwt
+
+response = json.loads(Path(sys.argv[1]).read_text())
+token = response["accessToken"]
+header = jwt.get_unverified_header(token)
+published = json.loads(Path(sys.argv[2]).read_text())["keys"]
+matching = [key for key in published if key["kid"] == header["kid"]]
+assert len(matching) == 1
+claims = jwt.decode(
+    token, jwt.PyJWK.from_dict(matching[0]).key, algorithms=["RS256"],
+    audience="commerce-service", issuer="https://identity.citybuddy.test",
+    options={"require": ["exp", "iat", "nbf", "iss", "aud", "sub", "jti"]},
+)
+assert claims["sub"] == claims["user_id"] == "user-integration"
+assert claims["aud"] in ("commerce-service", ["commerce-service"])
+assert claims["token_type"] == "agent_obo"
+assert claims["session"] == "shop-integration"
+assert claims["scope"] == sys.argv[3]
+assert claims["act"] == {"azp": "shopping-agent"}
+assert "sandbox" not in claims and "evaluation_handle" not in claims
+assert 0 < claims["exp"] - claims["iat"] <= 120
+assert response["tokenType"] == "Bearer" and 0 < response["expiresIn"] <= 120
+PY
+done
+assert_status 401 "shopping exchange requires signed shopping permission" \
+  --request POST "http://127.0.0.1:$auth_port/auth/token/exchange" \
+  --user "shopping-agent:$shopping_service_password" \
+  --header "X-User-Authorization: Bearer $other_token" \
+  --header 'Content-Type: application/json' \
+  --data '{"sessionId":"shop-integration","userSubject":"other-user","scope":"shopping:orders:read"}'
+assert_status 400 "shopping permission cannot be supplied in request body" \
+  --request POST "http://127.0.0.1:$auth_port/auth/token/exchange" \
+  --user "shopping-agent:$shopping_service_password" \
+  --header "X-User-Authorization: Bearer $other_token" \
+  --header 'Content-Type: application/json' \
+  --data '{"sessionId":"shop-integration","userSubject":"other-user","scope":"shopping:orders:read","permissions":["shopping:session:create"]}'
+assert_status 403 "shopping exchange rejects another user assertion" \
+  --request POST "http://127.0.0.1:$auth_port/auth/token/exchange" \
+  --user "shopping-agent:$shopping_service_password" \
+  --header "X-User-Authorization: Bearer $direct_token" \
+  --header 'Content-Type: application/json' \
+  --data '{"sessionId":"shop-integration","userSubject":"other-user","scope":"shopping:orders:read"}'
+# Broad database grants must not widen the actor policy even when deployment allows the scope.
+mysql_query auth_app "$auth_app_password" commerce_db "
+UPDATE auth_service_identity SET allowed_scopes = 'catalog:read shopping:orders:read'
+ WHERE client_id = 'agent-service';
+UPDATE auth_service_identity SET allowed_scopes = 'shopping:orders:read refund:create catalog:read'
+ WHERE client_id = 'shopping-agent';"
+assert_status 403 "support actor cannot acquire a shopping scope with broad grants" \
+  --request POST "http://127.0.0.1:$auth_port/auth/token/exchange" \
+  --user "agent-service:$service_password" \
+  --header "X-User-Authorization: Bearer $direct_token" \
+  --header 'Content-Type: application/json' \
+  --data '{"sessionId":"shop-integration","userSubject":"user-integration","scope":"shopping:orders:read"}'
+assert_status 403 "shopping actor cannot acquire a catalog scope with broad grants" \
+  --request POST "http://127.0.0.1:$auth_port/auth/token/exchange" \
+  --user "shopping-agent:$shopping_service_password" \
+  --header "X-User-Authorization: Bearer $direct_token" \
+  --header 'Content-Type: application/json' \
+  --data '{"sessionId":"shop-integration","userSubject":"user-integration","scope":"catalog:read"}'
+mysql_query auth_app "$auth_app_password" commerce_db "
+UPDATE auth_service_identity SET allowed_scopes = 'catalog:read' WHERE client_id = 'agent-service';
+UPDATE auth_service_identity SET allowed_scopes = 'shopping:orders:read refund:create'
+ WHERE client_id = 'shopping-agent';"
 
 AGENT_PORT=0 \
 AGENT_WORKERS=1 \

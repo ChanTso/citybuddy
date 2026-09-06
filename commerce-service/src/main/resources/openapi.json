@@ -2,6 +2,462 @@
   "openapi": "3.1.0",
   "info": {"title": "CityBuddy commerce API", "version": "0.0.1"},
   "paths": {
+    "/internal/shopping/orders": {
+      "get": {
+        "operationId": "listShoppingOrders",
+        "security": [
+          {
+            "agentOboBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "X-Shopping-Session-Id",
+            "in": "header",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 64
+            }
+          },
+          {
+            "name": "X-Eval-Sandbox-Id",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string"
+            },
+            "description": "Any presence is rejected on these production reads."
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 50,
+              "default": 20
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Latest owned standard and seckill orders; createdAt descending, then orderId descending, then orderKind.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "maxItems": 50,
+                  "items": {
+                    "$ref": "#/components/schemas/ShoppingOrder"
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid limit or query parameter"
+          },
+          "403": {
+            "description": "Invalid shopping OBO actor, exact scope, session, or evaluation context",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ShoppingOrderAuthorizationError"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Identity verification unavailable",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ShoppingOrderAuthorizationError"
+                }
+              }
+            }
+          }
+        },
+        "description": "Requires shopping-agent and exact shopping:orders:read. Owner is taken from verified OBO, never query input; the host owns the buyer session. Production reads exclude evaluation records and reject evaluation tokens/headers. Order price/name/currency come from historical snapshots, not current product data. Payment and refund records are read within one read-only repeatable-read transaction. No delivery status is inferred. Contradictory order/payment facts fail instead of being reported as successful."
+      }
+    },
+    "/internal/shopping/orders/{orderId}": {
+      "get": {
+        "operationId": "getShoppingOrder",
+        "security": [
+          {
+            "agentOboBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "X-Shopping-Session-Id",
+            "in": "header",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 64
+            }
+          },
+          {
+            "name": "X-Eval-Sandbox-Id",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string"
+            },
+            "description": "Any presence is rejected on these production reads."
+          },
+          {
+            "name": "orderId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Owned historical order and current payment/refund facts",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ShoppingOrder"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid limit or query parameter"
+          },
+          "403": {
+            "description": "Invalid shopping OBO actor, exact scope, session, or evaluation context",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ShoppingOrderAuthorizationError"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Identity verification unavailable",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ShoppingOrderAuthorizationError"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Missing, another owner, or evaluation order; no body"
+          }
+        },
+        "description": "Requires shopping-agent and exact shopping:orders:read. Owner is taken from verified OBO, never query input; the host owns the buyer session. Production reads exclude evaluation records and reject evaluation tokens/headers. Order price/name/currency come from historical snapshots, not current product data. Payment and refund records are read within one read-only repeatable-read transaction. No delivery status is inferred. Contradictory order/payment facts fail instead of being reported as successful."
+      }
+    },
+    "/internal/shopping/actions/prepare": {
+      "post": {
+        "operationId": "shoppingActionPrepare",
+        "security": [
+          {
+            "agentOboBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "X-Shopping-Session-Id",
+            "in": "header",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 64
+            },
+            "description": "ShopMate buyer session, bound to the OBO token."
+          },
+          {
+            "name": "X-Agent-Trace-Id",
+            "in": "header",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 64,
+              "pattern": "^[A-Za-z0-9._:-]+$"
+            }
+          },
+          {
+            "name": "X-Agent-Turn-Id",
+            "in": "header",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "X-Eval-Sandbox-Id",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 64,
+              "pattern": "^[A-Za-z0-9._:-]+$"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/PrepareActionRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Exact canonical PendingAction replay",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PendingAction"
+                }
+              }
+            }
+          },
+          "201": {
+            "description": "One bounded PendingAction prepared",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PendingAction"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Malformed, unbounded, or unsupported action",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ActionError"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Invalid Agent OBO identity, scope, session, or evaluation sandbox",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ActionForbidden"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Missing or non-owned refund target",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ActionError"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Changed intent, ineligible target, or durable-integrity conflict",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ActionError"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Bounded PendingAction truth observation remains indeterminate",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ActionError"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Authoritative identity, sandbox, payment, refund, or Action truth unavailable",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ActionUnavailable"
+                }
+              }
+            }
+          }
+        },
+        "description": "Uses shopping-agent OBO with the configured exact action scope (refund:create by default). The ShopMate host owns and validates its buyer session. X-Shopping-Session-Id must match the token. The original PendingAction transaction, owner checks, and receipt replay are reused. The host must obtain explicit buyer confirmation before calling confirm and reuse the trace and turn from prepare. supportSessionId in the persisted response denotes this shopping session; it does not require a legacy support database row. REQUESTED acknowledges a refund request, not a completed refund. Evaluation access remains governed by the existing sandbox boundary."
+      }
+    },
+    "/internal/shopping/actions/{pendingActionId}/confirm": {
+      "post": {
+        "operationId": "shoppingActionConfirm",
+        "security": [
+          {
+            "agentOboBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "pendingActionId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "X-Shopping-Session-Id",
+            "in": "header",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 64
+            },
+            "description": "ShopMate buyer session, bound to the OBO token."
+          },
+          {
+            "name": "X-Agent-Trace-Id",
+            "in": "header",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 64,
+              "pattern": "^[A-Za-z0-9._:-]+$"
+            }
+          },
+          {
+            "name": "X-Agent-Turn-Id",
+            "in": "header",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "X-Eval-Sandbox-Id",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 64,
+              "pattern": "^[A-Za-z0-9._:-]+$"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": false,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "additionalProperties": false,
+                "maxProperties": 0
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "One atomic ActionReceipt result or exact durable replay",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ActionReceipt"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Malformed confirmation identifier or non-empty body",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ActionError"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Invalid Agent OBO identity, scope, session, or evaluation sandbox",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ActionForbidden"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Missing or non-owned PendingAction",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ActionError"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Expired, stale, conflicting, consumed-without-receipt, or otherwise inconsistent truth",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ActionError"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Bounded ActionReceipt truth observation remains indeterminate",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ActionError"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Authoritative identity, sandbox, payment, refund, or Action truth unavailable",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ActionUnavailable"
+                }
+              }
+            }
+          }
+        },
+        "description": "Uses shopping-agent OBO with the configured exact action scope (refund:create by default). The ShopMate host owns and validates its buyer session. X-Shopping-Session-Id must match the token. The original PendingAction transaction, owner checks, and receipt replay are reused. The host must obtain explicit buyer confirmation before calling confirm and reuse the trace and turn from prepare. supportSessionId in the persisted response denotes this shopping session; it does not require a legacy support database row. REQUESTED acknowledges a refund request, not a completed refund. Evaluation access remains governed by the existing sandbox boundary."
+      }
+    },
     "/api/retail/products": {
       "get": {
         "operationId": "listRetailProducts",
@@ -960,6 +1416,262 @@
       "mockPaymentSignature": {"type": "apiKey", "in": "header", "name": "X-Mock-Payment-Signature", "description": "HMAC-SHA256 over the timestamp, idempotency key, complete callback intent, and exact evaluation context when present."}
     },
     "schemas": {
+      "ShoppingOrderProduct": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "productId",
+          "name",
+          "unitPriceMinor",
+          "currency",
+          "quantity",
+          "totalPriceMinor",
+          "productVersion"
+        ],
+        "properties": {
+          "productId": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          },
+          "unitPriceMinor": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "currency": {
+            "type": "string",
+            "pattern": "^[A-Z]{3}$"
+          },
+          "quantity": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "totalPriceMinor": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "productVersion": {
+            "anyOf": [
+              {
+                "type": "integer",
+                "format": "int64",
+                "minimum": 0
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Historical standard-order version; null for seckill orders, which do not store this column."
+          }
+        }
+      },
+      "ShoppingOrderPayment": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "attemptId",
+          "state",
+          "stateVersion",
+          "amountMinor",
+          "refundedAmountMinor",
+          "currency",
+          "succeededAt"
+        ],
+        "properties": {
+          "attemptId": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "state": {
+            "type": "string",
+            "enum": [
+              "PENDING",
+              "SUCCEEDED",
+              "FAILED"
+            ]
+          },
+          "stateVersion": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "amountMinor": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "refundedAmountMinor": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "currency": {
+            "type": "string",
+            "pattern": "^[A-Z]{3}$"
+          },
+          "succeededAt": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "date-time"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        }
+      },
+      "ShoppingOrderRefundState": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "state",
+          "count",
+          "requestedAmountMinor",
+          "refundedAmountMinor"
+        ],
+        "properties": {
+          "state": {
+            "type": "string",
+            "enum": [
+              "REQUESTED",
+              "PROCESSING",
+              "SUCCEEDED",
+              "FAILED"
+            ]
+          },
+          "count": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "requestedAmountMinor": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "refundedAmountMinor": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          }
+        }
+      },
+      "ShoppingOrderRefunds": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "reservedAmountMinor",
+          "byState"
+        ],
+        "properties": {
+          "reservedAmountMinor": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0,
+            "description": "Sum of requested amounts in REQUESTED, PROCESSING and SUCCEEDED; excludes FAILED. This is reserved refund capacity, not necessarily money refunded."
+          },
+          "byState": {
+            "type": "array",
+            "maxItems": 4,
+            "items": {
+              "$ref": "#/components/schemas/ShoppingOrderRefundState"
+            }
+          }
+        }
+      },
+      "ShoppingOrder": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "orderKind",
+          "orderId",
+          "status",
+          "stateVersion",
+          "createdAt",
+          "unpaidDeadline",
+          "product",
+          "payment",
+          "refunds"
+        ],
+        "properties": {
+          "orderKind": {
+            "type": "string",
+            "enum": [
+              "STANDARD",
+              "SECKILL"
+            ]
+          },
+          "orderId": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "status": {
+            "type": "string",
+            "enum": [
+              "UNPAID",
+              "PAID",
+              "CANCELLED"
+            ]
+          },
+          "stateVersion": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "createdAt": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "unpaidDeadline": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "date-time"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "product": {
+            "$ref": "#/components/schemas/ShoppingOrderProduct"
+          },
+          "payment": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ShoppingOrderPayment"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "refunds": {
+            "$ref": "#/components/schemas/ShoppingOrderRefunds"
+          }
+        }
+      },
+      "ShoppingOrderAuthorizationError": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "category",
+          "message"
+        ],
+        "properties": {
+          "category": {
+            "type": "string"
+          },
+          "message": {
+            "type": "string"
+          }
+        }
+      },
       "RetailContent": {
         "type": "object",
         "additionalProperties": false,

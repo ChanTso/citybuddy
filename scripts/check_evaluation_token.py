@@ -19,6 +19,8 @@ def main() -> None:
     parser.add_argument("--sandbox", required=True)
     parser.add_argument("--evaluation-handle")
     parser.add_argument("--session")
+    parser.add_argument("--scope", default="catalog:read")
+    parser.add_argument("--actor", default="agent-service")
     parser.add_argument("--maximum-expiry", required=True, type=int)
     parser.add_argument("--output", required=True, type=Path)
     args = parser.parse_args()
@@ -78,7 +80,11 @@ def main() -> None:
             raise ValueError("Unexpected evaluation handle")
         if claims.get("principal_state") != "ACTIVE":
             raise ValueError("Evaluation direct token is not active")
-        if claims.get("permissions") != ["support:session:create", "support:chat"]:
+        if claims.get("permissions") != [
+            "support:session:create",
+            "support:chat",
+            "shopping:session:create",
+        ]:
             raise ValueError("Evaluation direct token permissions changed")
         if "act" in claims or "session" in claims or "scope" in claims:
             raise ValueError("Evaluation direct token carries delegated authority")
@@ -91,9 +97,9 @@ def main() -> None:
             raise ValueError("Expected OBO session is required")
         if claims.get("user_id") != claims["sub"]:
             raise ValueError("OBO user binding changed")
-        if claims.get("scope") != "catalog:read" or claims.get("session") != args.session:
+        if claims.get("scope") != args.scope or claims.get("session") != args.session:
             raise ValueError("OBO scope or session binding changed")
-        if claims.get("act") != {"azp": "agent-service"}:
+        if claims.get("act") != {"azp": args.actor}:
             raise ValueError("OBO actor binding changed")
     args.output.write_text(
         json.dumps(

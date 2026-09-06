@@ -500,6 +500,7 @@ required_surefire_classes=(
   io.citybuddy.commerce.refund.RefundIntegrationTest
   io.citybuddy.commerce.action.ActionIntegrationTest
   io.citybuddy.commerce.merchant.MerchantIntegrationTest
+  io.citybuddy.commerce.shopping.ShoppingOrderIntegrationTest
 )
 clear_surefire_reports \
   "$repo_root/commerce-service/target/surefire-reports" \
@@ -535,7 +536,7 @@ docker run --rm \
   maven:3.9.11-eclipse-temurin-21@sha256:6fdc855a6ed81d288ca7ca37ac6ff5e9308b612485c0801d70b25a858c83d237 \
   mvn --batch-mode --no-transfer-progress -Dmaven.repo.local=/m2 \
   -pl commerce-service \
-  -Dtest=CatalogIntegrationTest,FaqPublicationIntegrationTest,SeckillIntegrationTest,SeckillReservationIntegrationTest,SeckillTransactionIntegrationTest,MockPaymentIntegrationTest,RefundIntegrationTest,ActionIntegrationTest,MerchantIntegrationTest test
+  -Dtest=CatalogIntegrationTest,FaqPublicationIntegrationTest,SeckillIntegrationTest,SeckillReservationIntegrationTest,SeckillTransactionIntegrationTest,MockPaymentIntegrationTest,RefundIntegrationTest,ActionIntegrationTest,MerchantIntegrationTest,ShoppingOrderIntegrationTest test
 
 assert_surefire_classes_executed \
   "$repo_root/commerce-service/target/surefire-reports" \

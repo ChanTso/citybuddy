@@ -9,6 +9,7 @@ import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
+import com.nimbusds.jose.crypto.RSASSAVerifier;
 import com.nimbusds.jwt.SignedJWT;
 import io.citybuddy.auth.identity.AuthRepository.EvaluationPrincipal;
 import java.nio.charset.StandardCharsets;
@@ -16,6 +17,7 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.security.KeyPair;
 import java.security.KeyPairGenerator;
+import java.security.interfaces.RSAPublicKey;
 import java.time.Clock;
 import java.time.Duration;
 import java.time.Instant;
@@ -28,6 +30,8 @@ import java.util.concurrent.atomic.AtomicReference;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
+import org.springframework.mock.env.MockEnvironment;
+import org.springframework.security.crypto.bcrypt.BCryptPasswordEncoder;
 
 class EvaluationIdentityTest {
   private static final Instant NOW = Instant.parse("2026-07-18T06:00:00Z");
@@ -41,15 +45,17 @@ class EvaluationIdentityTest {
   private AuthRepository repository;
   private AuthKeySet keys;
   private EvaluationIdentityService service;
+  private IdentityProperties properties;
+  private KeyPair keyPair;
 
   @BeforeEach
   void setUp() throws Exception {
-    KeyPair keyPair = keyPair();
+    keyPair = keyPair();
     Path privatePath =
         writePem("current-private.pem", "PRIVATE KEY", keyPair.getPrivate().getEncoded());
     Path publicPath =
         writePem("current-public.pem", "PUBLIC KEY", keyPair.getPublic().getEncoded());
-    IdentityProperties properties =
+    properties =
         new IdentityProperties(
             "https://identity.citybuddy.test",
             "citybuddy-web",
@@ -61,7 +67,7 @@ class EvaluationIdentityTest {
             Duration.ofMinutes(15),
             Duration.ofMinutes(2),
             Duration.ofSeconds(30),
-            List.of("catalog:read"));
+            List.of("catalog:read", "shopping:orders:read", "refund:create"));
     repository = mock(AuthRepository.class);
     when(repository.publicKeyMetadata())
         .thenReturn(
@@ -74,7 +80,7 @@ class EvaluationIdentityTest {
   }
 
   @Test
-  void provisioningPersistsOpaqueServerIdentityAndReturnsSameIntent() {
+  void provisioningPersistsOpaqueServerIdentityAndReturnsSameIntent() throws Exception {
     AtomicReference<EvaluationPrincipal> stored = new AtomicReference<>();
     when(repository.findEvaluationByProvisionKey("provision-1"))
         .thenAnswer(invocation -> Optional.ofNullable(stored.get()));
@@ -98,8 +104,59 @@ class EvaluationIdentityTest {
     assertThat(stored.get().subject()).startsWith("eval-").doesNotContain("test-user-1");
     assertThat(stored.get().expiresAt()).isEqualTo(NOW.plusSeconds(300));
     assertThat(stored.get().permissionList())
-        .containsExactly("support:session:create", "support:chat");
+        .containsExactly("support:session:create", "support:chat", "shopping:session:create");
     verify(repository).insertEvaluationPrincipal(any());
+
+    when(repository.findEvaluationByHandle(first.handle())).thenReturn(Optional.of(stored.get()));
+    when(repository.isActiveEvaluationSubject(stored.get().subject(), "sandbox-1", NOW))
+        .thenReturn(true);
+    String secret = "cbsvc_v1_" + "b".repeat(64);
+    when(repository.findService("shopping-agent"))
+        .thenReturn(
+            Optional.of(
+                new AuthRepository.ServiceCredential(
+                    "shopping-agent",
+                    "ACTIVE",
+                    List.of("shopping:orders:read", "refund:create"),
+                    ServiceCredentialVerifier.encodedDigest("shopping-agent", secret))));
+    String basic =
+        "Basic "
+            + Base64.getEncoder()
+                .encodeToString(("shopping-agent:" + secret).getBytes(StandardCharsets.UTF_8));
+    String direct = service.issueToken(first.handle(), "sandbox-1").accessToken();
+    assertThat(SignedJWT.parse(direct).getJWTClaimsSet().getStringListClaim("permissions"))
+        .containsExactly("support:session:create", "support:chat", "shopping:session:create");
+    var environment = new MockEnvironment();
+    environment.setActiveProfiles("evaluation");
+    var passwordEncoder = new BCryptPasswordEncoder(4);
+    var controller =
+        new AuthController(
+            repository,
+            keys,
+            passwordEncoder,
+            new ServiceCredentialVerifier(passwordEncoder),
+            properties,
+            environment,
+            Clock.fixed(NOW, ZoneOffset.UTC));
+    for (String scope : List.of("shopping:orders:read", "refund:create")) {
+      var response =
+          controller.exchange(
+              basic,
+              "Bearer " + direct,
+              "sandbox-1",
+              new AuthController.ExchangeRequest("shop-session", stored.get().subject(), scope));
+      SignedJWT obo = SignedJWT.parse(response.accessToken());
+      assertThat(obo.verify(new RSASSAVerifier((RSAPublicKey) keyPair.getPublic()))).isTrue();
+      assertThat(obo.getJWTClaimsSet().getSubject()).isEqualTo(stored.get().subject());
+      assertThat(obo.getJWTClaimsSet().getClaim("sandbox")).isEqualTo("sandbox-1");
+      assertThat(obo.getJWTClaimsSet().getClaim("session")).isEqualTo("shop-session");
+      assertThat(obo.getJWTClaimsSet().getClaim("scope")).isEqualTo(scope);
+      assertThat(obo.getJWTClaimsSet().getJSONObjectClaim("act"))
+          .containsEntry("azp", "shopping-agent");
+      assertThat(obo.getJWTClaimsSet().getClaim("evaluation_handle")).isNull();
+      assertThat(obo.getJWTClaimsSet().getExpirationTime().toInstant())
+          .isEqualTo(NOW.plusSeconds(120));
+    }
   }
 
   @Test

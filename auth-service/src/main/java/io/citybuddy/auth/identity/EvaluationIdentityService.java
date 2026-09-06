@@ -14,7 +14,7 @@ public class EvaluationIdentityService {
   private static final Pattern BOUNDED_ID = Pattern.compile("^[A-Za-z0-9][A-Za-z0-9._:-]*$");
   private static final Pattern OPAQUE_HANDLE = Pattern.compile("^[A-Za-z0-9_-]{43}$");
   private static final List<String> TEST_PERMISSIONS =
-      List.of("support:session:create", "support:chat");
+      List.of("support:session:create", "support:chat", "shopping:session:create");
 
   private final AuthRepository repository;
   private final AuthKeySet keys;

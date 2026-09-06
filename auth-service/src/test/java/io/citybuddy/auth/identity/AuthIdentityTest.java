@@ -8,6 +8,7 @@ import static org.mockito.Mockito.when;
 import com.nimbusds.jose.JWSAlgorithm;
 import com.nimbusds.jose.JWSHeader;
 import com.nimbusds.jose.crypto.RSASSASigner;
+import com.nimbusds.jose.crypto.RSASSAVerifier;
 import com.nimbusds.jwt.JWTClaimsSet;
 import com.nimbusds.jwt.SignedJWT;
 import java.nio.charset.StandardCharsets;
@@ -16,6 +17,7 @@ import java.nio.file.Path;
 import java.security.KeyPair;
 import java.security.KeyPairGenerator;
 import java.security.interfaces.RSAPrivateKey;
+import java.security.interfaces.RSAPublicKey;
 import java.time.Clock;
 import java.time.Duration;
 import java.time.Instant;
@@ -74,7 +76,10 @@ class AuthIdentityTest {
                 "merchant:price:read",
                 "merchant:price:cancel",
                 "merchant:price:apply",
-                "merchant:admin"));
+                "merchant:admin",
+                "shopping:orders:read",
+                "shopping:cart:write",
+                "refund:create"));
     repository = mock(AuthRepository.class);
     when(repository.publicKeyMetadata())
         .thenReturn(
@@ -746,6 +751,148 @@ class AuthIdentityTest {
   }
 
   @Test
+  void shoppingExchangeUsesDigestCredentialAndSignsItsTwoExactScopes() throws Exception {
+    List<String> scopes = List.of("shopping:orders:read", "refund:create");
+    String basic = allowDigestService("shopping-agent", scopes);
+    String direct = keys.directToken("user-123", List.of("shopping:session:create"));
+
+    for (String scope : scopes) {
+      var response =
+          controller.exchange(
+              basic,
+              "Bearer " + direct,
+              null,
+              new AuthController.ExchangeRequest("shop-session", "user-123", scope));
+      SignedJWT signed = SignedJWT.parse(response.accessToken());
+      JWTClaimsSet claims = signed.getJWTClaimsSet();
+
+      assertThat(signed.verify(new RSASSAVerifier((RSAPublicKey) currentKeyPair.getPublic())))
+          .isTrue();
+      assertThat(claims.getIssuer()).isEqualTo(properties.issuer());
+      assertThat(claims.getAudience()).containsExactly("commerce-service");
+      assertThat(claims.getSubject()).isEqualTo("user-123");
+      assertThat(claims.getClaim("user_id")).isEqualTo("user-123");
+      assertThat(claims.getClaim("token_type")).isEqualTo("agent_obo");
+      assertThat(claims.getClaim("session")).isEqualTo("shop-session");
+      assertThat(claims.getClaim("scope")).isEqualTo(scope);
+      assertThat(claims.getJSONObjectClaim("act")).containsEntry("azp", "shopping-agent");
+      assertThat(claims.getExpirationTime())
+          .isBeforeOrEqualTo(SignedJWT.parse(direct).getJWTClaimsSet().getExpirationTime());
+      assertThat(response.expiresIn()).isPositive().isLessThanOrEqualTo(120);
+    }
+  }
+
+  @Test
+  void shoppingScopePolicyCannotLeakAcrossActorsEvenWithBroadGrants() {
+    String direct =
+        keys.directToken(
+            "user-123",
+            List.of(
+                "support:session:create", "merchant:session:create", "shopping:session:create"));
+    for (String actor : List.of("agent-service", "merchant-agent", "shopping-agent")) {
+      String basic = allowDigestService(actor, properties.exchangeScopes());
+      List<String> deniedScopes =
+          switch (actor) {
+            case "agent-service" ->
+                List.of("shopping:orders:read", "shopping:cart:write", "merchant:read");
+            case "merchant-agent" ->
+                List.of("shopping:orders:read", "shopping:cart:write", "refund:create");
+            default ->
+                List.of("catalog:read", "shopping:cart:write", "merchant:read", "*", "catalog:*");
+          };
+      for (String scope : deniedScopes) {
+        assertThatThrownBy(
+                () ->
+                    controller.exchange(
+                        basic,
+                        "Bearer " + direct,
+                        null,
+                        new AuthController.ExchangeRequest("shop-session", "user-123", scope)))
+            .isInstanceOf(IdentityException.class)
+            .hasMessage("Exchange is not allowed");
+      }
+    }
+  }
+
+  @Test
+  void shoppingExchangeRequiresSignedShoppingPermissionAndMatchingSubject() {
+    String basic = allowDigestService("shopping-agent", List.of("shopping:orders:read"));
+    String unrelatedPermissions =
+        keys.directToken("user-123", List.of("support:session:create", "merchant:session:create"));
+    assertThatThrownBy(
+            () ->
+                controller.exchange(
+                    basic,
+                    "Bearer " + unrelatedPermissions,
+                    null,
+                    new AuthController.ExchangeRequest(
+                        "shop-session", "user-123", "shopping:orders:read")))
+        .isInstanceOf(IdentityException.class)
+        .hasMessage("Missing permission");
+
+    String direct = keys.directToken("user-123", List.of("shopping:session:create"));
+    assertThatThrownBy(
+            () ->
+                controller.exchange(
+                    basic,
+                    "Bearer " + direct,
+                    null,
+                    new AuthController.ExchangeRequest(
+                        "shop-session", "other-user", "shopping:orders:read")))
+        .isInstanceOf(IdentityException.class)
+        .hasMessage("Session binding does not match direct user");
+  }
+
+  @Test
+  void shoppingExchangeRequiresBothServiceAndDeploymentGrants() {
+    String basic = allowDigestService("shopping-agent", List.of("shopping:orders:read"));
+    String direct = keys.directToken("user-123", List.of("shopping:session:create"));
+    assertThatThrownBy(
+            () ->
+                controller.exchange(
+                    basic,
+                    "Bearer " + direct,
+                    null,
+                    new AuthController.ExchangeRequest(
+                        "shop-session", "user-123", "refund:create")))
+        .isInstanceOf(IdentityException.class)
+        .hasMessage("Exchange is not allowed");
+
+    IdentityProperties deploymentWithoutShoppingOrders =
+        new IdentityProperties(
+            properties.issuer(),
+            properties.userAudience(),
+            properties.currentKid(),
+            properties.currentPrivateKeyPath(),
+            properties.currentPublicKeyPath(),
+            properties.overlapKid(),
+            properties.overlapPublicKeyPath(),
+            properties.directTtl(),
+            properties.oboTtl(),
+            properties.clockSkew(),
+            List.of("refund:create"));
+    AuthController restricted =
+        new AuthController(
+            repository,
+            keys,
+            passwordEncoder,
+            new ServiceCredentialVerifier(passwordEncoder),
+            deploymentWithoutShoppingOrders,
+            new MockEnvironment(),
+            Clock.systemUTC());
+    assertThatThrownBy(
+            () ->
+                restricted.exchange(
+                    basic,
+                    "Bearer " + direct,
+                    null,
+                    new AuthController.ExchangeRequest(
+                        "shop-session", "user-123", "shopping:orders:read")))
+        .isInstanceOf(IdentityException.class)
+        .hasMessage("Exchange is not allowed");
+  }
+
+  @Test
   void exchangeAcceptsActiveOverlapAndRejectsItAfterRetirement() throws Exception {
     when(repository.findService("agent-service"))
         .thenReturn(
@@ -886,6 +1033,21 @@ class AuthIdentityTest {
     return "Basic "
         + Base64.getEncoder()
             .encodeToString((clientId + ":service-password").getBytes(StandardCharsets.UTF_8));
+  }
+
+  private String allowDigestService(String clientId, List<String> scopes) {
+    String secret = "cbsvc_v1_" + "a".repeat(64);
+    when(repository.findService(clientId))
+        .thenReturn(
+            Optional.of(
+                new AuthRepository.ServiceCredential(
+                    clientId,
+                    "ACTIVE",
+                    scopes,
+                    ServiceCredentialVerifier.encodedDigest(clientId, secret))));
+    return "Basic "
+        + Base64.getEncoder()
+            .encodeToString((clientId + ":" + secret).getBytes(StandardCharsets.UTF_8));
   }
 
   private Path writePem(String name, String type, byte[] encoded) throws Exception {

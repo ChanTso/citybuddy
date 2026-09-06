@@ -24,13 +24,17 @@ public final class AuthController {
   private static final String SESSION_PERMISSION = "support:session:create";
   private static final String EXCHANGE_SERVICE = "agent-service";
   private static final String MERCHANT_SERVICE = "merchant-agent";
+  private static final String SHOPPING_SERVICE = "shopping-agent";
   private static final String MERCHANT_SESSION_PERMISSION = "merchant:session:create";
+  private static final String SHOPPING_SESSION_PERMISSION = "shopping:session:create";
   private static final Set<String> MERCHANT_SCOPES =
       Set.of(
           "merchant:read",
           "merchant:price:prepare",
           "merchant:price:read",
           "merchant:price:cancel");
+  private static final Set<String> SHOPPING_SCOPES =
+      Set.of("shopping:orders:read", "refund:create");
 
   private final AuthRepository repository;
   private final AuthKeySet keys;
@@ -100,7 +104,8 @@ public final class AuthController {
             .filter(
                 candidate ->
                     EXCHANGE_SERVICE.equals(candidate.clientId())
-                        || MERCHANT_SERVICE.equals(candidate.clientId()))
+                        || MERCHANT_SERVICE.equals(candidate.clientId())
+                        || SHOPPING_SERVICE.equals(candidate.clientId()))
             .filter(candidate -> "ACTIVE".equals(candidate.state()))
             .filter(
                 candidate ->
@@ -123,9 +128,7 @@ public final class AuthController {
     DirectPrincipal principal =
         keys.validateDirect(
             parseBearer(userAuthorization),
-            MERCHANT_SERVICE.equals(service.clientId())
-                ? MERCHANT_SESSION_PERMISSION
-                : SESSION_PERMISSION,
+            sessionPermission(service.clientId()),
             activeSigningKids(signingMetadata),
             evalSandbox,
             evaluationProfile);
@@ -153,9 +156,21 @@ public final class AuthController {
   }
 
   private static boolean allowsServiceScope(String clientId, String scope) {
-    return MERCHANT_SERVICE.equals(clientId)
-        ? MERCHANT_SCOPES.contains(scope)
-        : !scope.startsWith("merchant:");
+    return switch (clientId) {
+      case MERCHANT_SERVICE -> MERCHANT_SCOPES.contains(scope);
+      case SHOPPING_SERVICE -> SHOPPING_SCOPES.contains(scope);
+      case EXCHANGE_SERVICE -> !scope.startsWith("merchant:") && !scope.startsWith("shopping:");
+      default -> false;
+    };
+  }
+
+  private static String sessionPermission(String clientId) {
+    return switch (clientId) {
+      case MERCHANT_SERVICE -> MERCHANT_SESSION_PERMISSION;
+      case SHOPPING_SERVICE -> SHOPPING_SESSION_PERMISSION;
+      case EXCHANGE_SERVICE -> SESSION_PERMISSION;
+      default -> throw new IllegalStateException("Unknown exchange service");
+    };
   }
 
   private static BasicCredential parseBasic(String authorization) {
