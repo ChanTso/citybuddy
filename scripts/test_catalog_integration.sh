@@ -407,7 +407,7 @@ openssl genpkey -algorithm RSA -pkeyopt rsa_keygen_bits:2048 \
 openssl pkey -in "$tmp_dir/current-private.pem" -pubout \
   -out "$tmp_dir/current-public.pem" 2>/dev/null
 
-./mvnw -q -pl auth-service -am -DskipTests package
+./mvnw -q -pl auth-service,commerce-service -am -DskipTests package
 auth_container="$(docker run --detach --rm \
   --name "$project-auth" \
   --network "${project}_default" \
@@ -493,6 +493,7 @@ groups_created=1
 required_surefire_classes=(
   io.citybuddy.commerce.catalog.CatalogIntegrationTest
   io.citybuddy.commerce.faq.FaqPublicationIntegrationTest
+  io.citybuddy.commerce.faq.FaqFixturePublisherIntegrationTest
   io.citybuddy.commerce.seckill.SeckillIntegrationTest
   io.citybuddy.commerce.seckill.SeckillReservationIntegrationTest
   io.citybuddy.commerce.seckill.SeckillTransactionIntegrationTest
@@ -546,11 +547,37 @@ docker run --rm \
   maven:3.9.11-eclipse-temurin-21@sha256:6fdc855a6ed81d288ca7ca37ac6ff5e9308b612485c0801d70b25a858c83d237 \
   mvn --batch-mode --no-transfer-progress -Dmaven.repo.local=/m2 \
   -pl commerce-service \
-  -Dtest=CatalogIntegrationTest,FaqPublicationIntegrationTest,SeckillIntegrationTest,SeckillReservationIntegrationTest,SeckillTransactionIntegrationTest,MockPaymentIntegrationTest,RefundIntegrationTest,ActionIntegrationTest,MerchantIntegrationTest,MerchantChangeIntegrationTest,MerchantProductOperationsIntegrationTest,MerchantListingIntegrationTest,MerchantMarketingIntegrationTest,RetailCatalogPaginationIntegrationTest,ShoppingOrderIntegrationTest,CartIntegrationTest,CheckoutIntegrationTest,MerchantOrderIssueIntegrationTest,ShoppingPreferencesIntegrationTest,RetailFactsIntegrationTest test
+  -Dtest=CatalogIntegrationTest,FaqPublicationIntegrationTest,FaqFixturePublisherIntegrationTest,SeckillIntegrationTest,SeckillReservationIntegrationTest,SeckillTransactionIntegrationTest,MockPaymentIntegrationTest,RefundIntegrationTest,ActionIntegrationTest,MerchantIntegrationTest,MerchantChangeIntegrationTest,MerchantProductOperationsIntegrationTest,MerchantListingIntegrationTest,MerchantMarketingIntegrationTest,RetailCatalogPaginationIntegrationTest,ShoppingOrderIntegrationTest,CartIntegrationTest,CheckoutIntegrationTest,MerchantOrderIssueIntegrationTest,ShoppingPreferencesIntegrationTest,RetailFactsIntegrationTest test
 
 assert_surefire_classes_executed \
   "$repo_root/commerce-service/target/surefire-reports" \
   "${required_surefire_classes[@]}"
+
+cat >"$tmp_dir/retail-faq.json" <<'JSON'
+[{"faqId":"retail-policy-fixture-cli","question":"Delivery policy?","answer":"Delivery follows the selected method."}]
+JSON
+for attempt in first repeat; do
+  docker run --rm -i \
+    --network "${project}_default" \
+    --volume "$repo_root/commerce-service/target/commerce-service-0.0.1-SNAPSHOT.jar:/opt/citybuddy/commerce.jar:ro" \
+    --env SPRING_DATASOURCE_URL='jdbc:mysql://mysql:3306/commerce_db?useSSL=false&allowPublicKeyRetrieval=true' \
+    --env SPRING_DATASOURCE_USERNAME=commerce_app \
+    --env SPRING_DATASOURCE_PASSWORD="$commerce_app_password" \
+    eclipse-temurin:21.0.8_9-jre-noble@sha256:20e7f7288e1c18eebe8f06a442c9f7183342d9b022d3b9a9677cae2b558ddddd \
+    java -Dloader.main=io.citybuddy.commerce.faq.FaqFixturePublisherCli \
+    -cp /opt/citybuddy/commerce.jar org.springframework.boot.loader.launch.PropertiesLauncher \
+    <"$tmp_dir/retail-faq.json" >"$tmp_dir/faq-$attempt.json"
+done
+grep -q '"changed":true' "$tmp_dir/faq-first.json"
+grep -q '"changed":false' "$tmp_dir/faq-repeat.json"
+faq_cli_truth="$(mysql_query commerce_app "$commerce_app_password" commerce_db \
+  "SELECT CONCAT(published_version, ':',
+    (SELECT COUNT(*) FROM faq_draft_command WHERE faq_id = s.faq_id), ':',
+    (SELECT COUNT(*) FROM faq_publication_command WHERE faq_id = s.faq_id), ':',
+    (SELECT COUNT(*) FROM commerce_outbox WHERE aggregate_type = 'FAQ' AND aggregate_id = s.faq_id))
+   FROM faq_source s WHERE faq_id = 'retail-policy-fixture-cli'")"
+[[ "$faq_cli_truth" = '1:1:1:1' ]]
+echo "Verified packaged FAQ CLI publishes once and replays without new commands or Outbox."
 
 terminal_key='00000000-0000-0000-0000-000000000060'
 terminal_output=''
