@@ -135,6 +135,112 @@ class ActionIntegrationTest {
   }
 
   @Test
+  void shoppingActionsKeepActorOwnershipAndOriginBindingsThroughRefundReplay() throws Exception {
+    PaidFixture paid = seedPaidStandard(900, "shopping-refund");
+    String session = "shop-refund-session";
+    String turn = UUID.randomUUID().toString();
+    String token = obo(USER, session, SCOPE, "shopping-agent");
+    HttpHeaders headers = shoppingHeaders(token, session, "shopping-trace", turn);
+    Map<String, Object> body =
+        Map.of(
+            "actionType",
+            "REFUND_REQUEST",
+            "arguments",
+            Map.of("orderId", paid.orderId(), "amountMinor", 400, "currency", "AUD"));
+
+    for (String actor : List.of("agent-service", "merchant-agent")) {
+      assertThat(
+              http.exchange(
+                      "/internal/shopping/actions/prepare",
+                      HttpMethod.POST,
+                      new HttpEntity<>(
+                          body,
+                          shoppingHeaders(
+                              obo(USER, session, SCOPE, actor), session, "shopping-trace", turn)),
+                      JsonNode.class)
+                  .getStatusCode())
+          .isEqualTo(HttpStatus.FORBIDDEN);
+    }
+    assertThat(prepare(token, session, "shopping-trace", turn, paid.orderId(), 400).getStatusCode())
+        .isEqualTo(HttpStatus.FORBIDDEN);
+    assertThat(
+            http.exchange(
+                    "/internal/shopping/actions/prepare",
+                    HttpMethod.POST,
+                    new HttpEntity<>(
+                        body,
+                        shoppingHeaders(
+                            obo("other-buyer", session, SCOPE, "shopping-agent"),
+                            session,
+                            "shopping-trace",
+                            turn)),
+                    JsonNode.class)
+                .getStatusCode())
+        .isEqualTo(HttpStatus.NOT_FOUND);
+
+    ResponseEntity<JsonNode> prepared =
+        http.exchange(
+            "/internal/shopping/actions/prepare",
+            HttpMethod.POST,
+            new HttpEntity<>(body, headers),
+            JsonNode.class);
+    assertThat(prepared.getStatusCode()).isEqualTo(HttpStatus.CREATED);
+    String pendingId = prepared.getBody().get("pendingActionId").asText();
+    assertThat(prepared.getBody().get("supportSessionId").asText()).isEqualTo(session);
+    assertThat(prepared.getBody().get("requiredScope").asText()).isEqualTo(SCOPE);
+    assertPreparedWithoutEffects(pendingId, paid.orderId());
+
+    String confirmationPath = "/internal/shopping/actions/" + pendingId + "/confirm";
+    assertThat(
+            http.exchange(
+                    confirmationPath,
+                    HttpMethod.POST,
+                    new HttpEntity<>(
+                        null,
+                        shoppingHeaders(
+                            token, session, "shopping-trace", UUID.randomUUID().toString())),
+                    JsonNode.class)
+                .getStatusCode())
+        .isEqualTo(HttpStatus.CONFLICT);
+    assertThat(
+            http.exchange(
+                    confirmationPath,
+                    HttpMethod.POST,
+                    new HttpEntity<>(
+                        null,
+                        shoppingHeaders(
+                            obo(USER, "shop-other-session", SCOPE, "shopping-agent"),
+                            "shop-other-session",
+                            "shopping-trace",
+                            turn)),
+                    JsonNode.class)
+                .getStatusCode())
+        .isEqualTo(HttpStatus.NOT_FOUND);
+    assertPreparedWithoutEffects(pendingId, paid.orderId());
+
+    ResponseEntity<JsonNode> confirmed =
+        http.exchange(
+            confirmationPath, HttpMethod.POST, new HttpEntity<>(null, headers), JsonNode.class);
+    ResponseEntity<JsonNode> replay =
+        http.exchange(
+            confirmationPath, HttpMethod.POST, new HttpEntity<>(null, headers), JsonNode.class);
+    assertThat(confirmed.getStatusCode()).isEqualTo(HttpStatus.OK);
+    assertThat(replay.getStatusCode()).isEqualTo(HttpStatus.OK);
+    assertThat(confirmed.getBody().get("status").asText()).isEqualTo("REQUESTED");
+    assertThat(replay.getBody().get("receiptId")).isEqualTo(confirmed.getBody().get("receiptId"));
+    assertThat(replay.getBody().get("replayed").asBoolean()).isTrue();
+    assertThat(rowCount("mock_refund", "order_id", paid.orderId())).isOne();
+    assertThat(rowCount("action_receipt", "pending_action_id", pendingId)).isOne();
+    assertThat(
+            jdbc.queryForObject(
+                "SELECT COUNT(*) FROM commerce_outbox WHERE aggregate_type = 'REFUND' "
+                    + "AND aggregate_id = ? AND event_type = 'REFUND_REQUESTED'",
+                Long.class,
+                confirmed.getBody().get("refundId").asText()))
+        .isOne();
+  }
+
+  @Test
   void oboPrepareConfirmConcurrentReplayAndClosureAreAtomic() throws Exception {
     PaidFixture paid = seedPaidStandard(900, "action-main");
     String turn = UUID.randomUUID().toString();
@@ -918,6 +1024,14 @@ class ActionIntegrationTest {
     return headers;
   }
 
+  private static HttpHeaders shoppingHeaders(
+      String token, String session, String trace, String turn) {
+    HttpHeaders headers = actionHeaders(token, session, trace, turn);
+    headers.remove("X-Support-Session-Id");
+    headers.set("X-Shopping-Session-Id", session);
+    return headers;
+  }
+
   private PaidFixture seedPaidStandard(long amount, String suffix) {
     String orderId = UUID.randomUUID().toString();
     String productId = "action-product-" + suffix;
@@ -1087,6 +1201,11 @@ class ActionIntegrationTest {
   }
 
   private static String obo(String subject, String session, String scope) throws Exception {
+    return obo(subject, session, scope, "agent-service");
+  }
+
+  private static String obo(String subject, String session, String scope, String actor)
+      throws Exception {
     Instant now = Instant.now();
     JWTClaimsSet claims =
         new JWTClaimsSet.Builder()
@@ -1097,7 +1216,7 @@ class ActionIntegrationTest {
             .claim("session", session)
             .claim("scope", scope)
             .claim("token_type", "agent_obo")
-            .claim("act", Map.of("azp", "agent-service"))
+            .claim("act", Map.of("azp", actor))
             .issueTime(Date.from(now))
             .notBeforeTime(Date.from(now))
             .expirationTime(Date.from(now.plusSeconds(300)))

@@ -1088,3 +1088,33 @@ contract change updates the affected executable schema, migration, inventory, or
 pull request and records the real validation performed. The archived slice levels, route statuses,
 and recovery process are historical context only and must not be reintroduced as the governing
 ruleset.
+## Shopping identity and owned transactions
+
+ShopMate owns buyer sessions and validates their authenticated owner before each token
+exchange. Auth accepts the `shopping-agent` service using the existing machine credential
+verifier, requires `shopping:session:create` on the direct user token, and issues only
+`shopping:orders:read` or `refund:create` when both the service and deployment grant them.
+The actor comes from the authenticated service, never from model arguments. Merchant and
+legacy support services cannot exchange shopping scopes. This does not add a dependency on
+the legacy `cs_db.support_session` table.
+
+`GET /internal/shopping/orders` and `GET /internal/shopping/orders/{orderId}` require
+`shopping-agent`, exact `shopping:orders:read`, and a matching `X-Shopping-Session-Id`.
+The list defaults to 20 and accepts a limit from 1 through 50. Reads use the authenticated
+subject and exclude evaluation orders. Missing and other users' orders both return 404.
+Order prices, names, quantities, and currency are historical order snapshots; payment and
+refund states are read from their durable records. A pending refund reserves capacity but
+is not reported as refunded. These endpoints do not infer delivery status from payment.
+Evaluation tokens and headers cannot use this production order-read surface.
+
+`POST /internal/shopping/actions/prepare` and
+`POST /internal/shopping/actions/{pendingActionId}/confirm` use the existing action schema,
+configured action scope (`refund:create` by default), and original `ActionService`.
+The routes fix the expected actor to `shopping-agent` and use `X-Shopping-Session-Id`.
+The returned `supportSessionId` is the durable session binding, including for a ShopMate
+session. No legacy support-session database row is needed. Prepare makes no refund;
+the host obtains explicit buyer confirmation and reuses the original trace and UUID turn
+when confirming. A successful confirmation records `REQUESTED`, not a finished refund.
+Repeated confirmation returns the original receipt and creates no second refund or Outbox
+event. Existing production ownership checks and evaluation-only ablation behavior remain
+inside the same transaction service.

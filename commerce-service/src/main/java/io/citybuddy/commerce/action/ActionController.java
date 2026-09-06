@@ -57,8 +57,33 @@ public final class ActionController {
       @RequestHeader(value = "X-Agent-Turn-Id", required = false) String turnId,
       @RequestHeader(value = "X-Eval-Sandbox-Id", required = false) String evalSandbox,
       HttpServletRequest request) {
+    return prepareForActor(
+        "agent-service", authorization, supportSession, traceId, turnId, evalSandbox, request);
+  }
+
+  @PostMapping("/internal/shopping/actions/prepare")
+  public ResponseEntity<PendingActionView> prepareShopping(
+      @RequestHeader(value = "Authorization", required = false) String authorization,
+      @RequestHeader(value = "X-Shopping-Session-Id", required = false) String shoppingSession,
+      @RequestHeader(value = "X-Agent-Trace-Id", required = false) String traceId,
+      @RequestHeader(value = "X-Agent-Turn-Id", required = false) String turnId,
+      @RequestHeader(value = "X-Eval-Sandbox-Id", required = false) String evalSandbox,
+      HttpServletRequest request) {
+    return prepareForActor(
+        "shopping-agent", authorization, shoppingSession, traceId, turnId, evalSandbox, request);
+  }
+
+  private ResponseEntity<PendingActionView> prepareForActor(
+      String actor,
+      String authorization,
+      String supportSession,
+      String traceId,
+      String turnId,
+      String evalSandbox,
+      HttpServletRequest request) {
     requireSupportSession(supportSession);
-    OboAuthorizer.OboPrincipal principal = authorize(authorization, supportSession, evalSandbox);
+    OboAuthorizer.OboPrincipal principal =
+        authorize(authorization, supportSession, evalSandbox, actor);
     requireCorrelation(traceId, turnId);
     PendingActionView result =
         service.prepare(
@@ -76,8 +101,49 @@ public final class ActionController {
       @RequestHeader(value = "X-Eval-Sandbox-Id", required = false) String evalSandbox,
       @PathVariable String pendingActionId,
       HttpServletRequest request) {
+    return confirmForActor(
+        "agent-service",
+        authorization,
+        supportSession,
+        traceId,
+        turnId,
+        evalSandbox,
+        pendingActionId,
+        request);
+  }
+
+  @PostMapping("/internal/shopping/actions/{pendingActionId}/confirm")
+  public ActionReceiptView confirmShopping(
+      @RequestHeader(value = "Authorization", required = false) String authorization,
+      @RequestHeader(value = "X-Shopping-Session-Id", required = false) String shoppingSession,
+      @RequestHeader(value = "X-Agent-Trace-Id", required = false) String traceId,
+      @RequestHeader(value = "X-Agent-Turn-Id", required = false) String turnId,
+      @RequestHeader(value = "X-Eval-Sandbox-Id", required = false) String evalSandbox,
+      @PathVariable String pendingActionId,
+      HttpServletRequest request) {
+    return confirmForActor(
+        "shopping-agent",
+        authorization,
+        shoppingSession,
+        traceId,
+        turnId,
+        evalSandbox,
+        pendingActionId,
+        request);
+  }
+
+  private ActionReceiptView confirmForActor(
+      String actor,
+      String authorization,
+      String supportSession,
+      String traceId,
+      String turnId,
+      String evalSandbox,
+      String pendingActionId,
+      HttpServletRequest request) {
     requireSupportSession(supportSession);
-    OboAuthorizer.OboPrincipal principal = authorize(authorization, supportSession, evalSandbox);
+    OboAuthorizer.OboPrincipal principal =
+        authorize(authorization, supportSession, evalSandbox, actor);
     requireCorrelation(traceId, turnId);
     JsonNode body = parseJson(request);
     if (body != null && (!body.isObject() || !body.isEmpty())) {
@@ -87,11 +153,11 @@ public final class ActionController {
   }
 
   private OboAuthorizer.OboPrincipal authorize(
-      String authorization, String supportSession, String evalSandbox) {
+      String authorization, String supportSession, String evalSandbox, String actor) {
     return authorizer.authorize(
         bearer(authorization),
         new OboAuthorizer.AuthorizationRequest(
-            properties.requiredScope(), null, supportSession, null, null, evalSandbox));
+            properties.requiredScope(), null, supportSession, null, null, evalSandbox, actor));
   }
 
   private static void requireSupportSession(String supportSession) {
