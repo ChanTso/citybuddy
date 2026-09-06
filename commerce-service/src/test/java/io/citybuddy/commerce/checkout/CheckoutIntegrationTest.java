@@ -34,6 +34,7 @@ import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
+import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.condition.EnabledIfEnvironmentVariable;
@@ -86,6 +87,7 @@ class CheckoutIntegrationTest {
   private String owner;
   private String prefix;
   private MockPaymentService payments;
+  private final List<String> fixtureProductIds = new ArrayList<>();
 
   @BeforeEach
   void fixture() {
@@ -100,6 +102,16 @@ class CheckoutIntegrationTest {
             new MockPaymentRepository(jdbc),
             new TransactionTemplate(transactionManager),
             Clock.systemUTC());
+  }
+
+  @AfterEach
+  void retireFixtureProducts() {
+    // Keep the shared published catalog independent of this test's 100-SKU checkout fixture.
+    // Orders and payment facts retain valid product references for subsequent truth checks.
+    for (String id : fixtureProductIds) {
+      jdbc.update(
+          "UPDATE product SET publication_state = 'UNPUBLISHED' WHERE product_id = BINARY ?", id);
+    }
   }
 
   @Test
@@ -331,6 +343,7 @@ class CheckoutIntegrationTest {
         id,
         price,
         stock);
+    fixtureProductIds.add(id);
     return id;
   }
 

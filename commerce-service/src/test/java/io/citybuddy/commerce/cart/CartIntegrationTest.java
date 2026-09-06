@@ -32,6 +32,7 @@ import java.util.concurrent.Callable;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
+import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.condition.EnabledIfEnvironmentVariable;
@@ -89,6 +90,7 @@ class CartIntegrationTest {
   private String sku;
   private String session;
   private RSAPrivateKey signingKey;
+  private final List<String> fixtureProductIds = new ArrayList<>();
 
   @BeforeEach
   void setup() throws Exception {
@@ -105,6 +107,16 @@ class CartIntegrationTest {
         (RSAPrivateKey)
             KeyFactory.getInstance("RSA")
                 .generatePrivate(new PKCS8EncodedKeySpec(Base64.getDecoder().decode(encoded)));
+  }
+
+  @AfterEach
+  void retireFixtureProducts() {
+    // Shared catalog tests enumerate every published SKU; keep our completed fixture out of it.
+    // Retain referenced products and transaction facts rather than deleting through their FKs.
+    for (String id : fixtureProductIds) {
+      jdbc.update(
+          "UPDATE product SET publication_state = 'UNPUBLISHED' WHERE product_id = BINARY ?", id);
+    }
   }
 
   @Test
@@ -256,6 +268,9 @@ class CartIntegrationTest {
         VALUES (?,?,'Cart line fixture',500,'USD',200,TRUE,'PUBLISHED',1)
         """,
         products);
+    for (Object[] product : products) {
+      fixtureProductIds.add((String) product[0]);
+    }
     jdbc.update("INSERT INTO shopping_cart (user_subject,cart_version) VALUES (?,99)", owner);
     jdbc.batchUpdate(
         "INSERT INTO shopping_cart_item (user_subject,product_id,quantity) VALUES (?,?,1)", items);
@@ -403,6 +418,7 @@ class CartIntegrationTest {
         id,
         id,
         currency);
+    fixtureProductIds.add(id);
   }
 
   private String addCategory(String key, String productId) {
