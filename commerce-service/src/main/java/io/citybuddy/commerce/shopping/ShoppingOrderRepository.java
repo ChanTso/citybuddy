@@ -18,22 +18,25 @@ import java.util.stream.Collectors;
 import org.springframework.jdbc.core.JdbcTemplate;
 
 public final class ShoppingOrderRepository {
-  private static final String STANDARD =
+  private static final String STANDARD_SOURCE =
       """
       SELECT 'STANDARD' AS order_kind, order_id, user_subject, product_id, product_name,
              unit_price_minor, currency, quantity, total_price_minor, product_version,
              status, state_version, created_at, NULL AS unpaid_deadline
       FROM standard_order
-      WHERE user_subject = ? AND BINARY user_subject = BINARY ? AND sandbox_id IS NULL
       """;
-  private static final String SECKILL =
+  private static final String STANDARD =
+      STANDARD_SOURCE
+          + " WHERE user_subject = ? AND BINARY user_subject = BINARY ? AND sandbox_id IS NULL";
+  private static final String SECKILL_SOURCE =
       """
       SELECT 'SECKILL' AS order_kind, order_id, user_subject, product_id, product_name,
              unit_price_minor, currency, quantity, total_price_minor, NULL AS product_version,
              status, state_version, created_at, unpaid_deadline
       FROM seckill_order
-      WHERE user_subject = ? AND BINARY user_subject = BINARY ?
       """;
+  private static final String SECKILL =
+      SECKILL_SOURCE + " WHERE user_subject = ? AND BINARY user_subject = BINARY ?";
   private static final String PAYMENT_JOIN =
       """
       SELECT o.*, p.attempt_id, p.state AS payment_state, p.state_version AS payment_version,
@@ -70,6 +73,25 @@ public final class ShoppingOrderRepository {
             limit,
             owner,
             owner,
+            limit,
+            limit);
+    return withFulfillment(withRefunds(orders));
+  }
+
+  public List<OrderView> listForMerchant(int limit) {
+    List<OrderView> orders =
+        jdbc.query(
+            "WITH candidates AS (("
+                + STANDARD_SOURCE
+                + " WHERE sandbox_id IS NULL ORDER BY created_at DESC, order_id DESC LIMIT ?)"
+                + " UNION ALL ("
+                + SECKILL_SOURCE
+                + " ORDER BY created_at DESC, order_id DESC LIMIT ?)),"
+                + " page AS (SELECT * FROM candidates"
+                + " ORDER BY created_at DESC, order_id DESC, order_kind LIMIT ?) "
+                + PAYMENT_JOIN,
+            ShoppingOrderRepository::order,
+            limit,
             limit,
             limit);
     return withFulfillment(withRefunds(orders));

@@ -1360,6 +1360,23 @@ all three reject evaluation tokens and headers.
 
 ### Persisted fulfillment and merchant order issues
 
+`GET /internal/merchant/orders?limit=6` reads the most recently created production orders
+across all buyers. It requires `merchant-agent`, `merchant:read` and the matching
+`X-Merchant-Session-Id`; direct user identities and evaluation context are rejected.
+The sole query parameter is a single integer `limit` in 1–50. Results use
+`Cache-Control: no-store` and sort by creation time descending, order ID descending,
+then order kind. Both STANDARD and SECKILL orders are included regardless of payment
+state. This is a bounded operational feed, independent of reporting cutoffs or payment
+completion time, and does not grant analysis SQL access to the underlying order tables.
+
+Each row is one real SKU order, including a checkout's child orders; it is not an
+aggregate checkout or a reconstructed fixture order. The shared `ShoppingOrder` read
+model retains historical price/quantity, nullable payment facts, separate refund states
+and nullable fulfillment. It exposes no buyer subject or account. Each order table's
+candidate page is bounded before joining payment and loading refund/fulfillment facts
+in the same read-only repeatable-read transaction. Existing payment consistency checks
+also apply to merchant reads; unsupported success is an error, not a fabricated status.
+
 Owned `ShoppingOrder` responses, including checkout child orders, append nullable
 `fulfillment`. STANDARD orders with a matching persisted fact expose method/stage,
 separate promised and estimated times, actual packed/shipped/delivered times, delay reason,
