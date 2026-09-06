@@ -1093,7 +1093,8 @@ ruleset.
 ShopMate owns buyer sessions and validates their authenticated owner before each token
 exchange. Auth accepts the `shopping-agent` service using the existing machine credential
 verifier, requires `shopping:session:create` on the direct user token, and issues only
-`shopping:orders:read`, `shopping:cart:read`, `shopping:cart:write`, or `refund:create` when
+`shopping:orders:read`, `shopping:cart:read`, `shopping:cart:write`,
+`shopping:profile:read`, or `refund:create` when
 both the service and deployment grant them.
 The actor comes from the authenticated service, never from model arguments. Merchant and
 legacy support services cannot exchange shopping scopes. This does not add a dependency on
@@ -1191,3 +1192,81 @@ can be unconfirmed: retry the same key, never a new key. Host cancellation canno
 Java transaction that already committed. The read-only cart command receipt route allows a
 future buyer host to restore such results without applying a write merely by opening a page;
 an absent receipt is not proof that an in-flight request will never commit.
+
+### Buyer preferences, published policies, and delivery estimates
+
+`GET /internal/shopping/preferences` requires the exact `shopping:profile:read` scope,
+`shopping-agent` actor and a valid matching `X-Shopping-Session-Id`. The authenticated
+subject is the lookup key; `crm_profile.user_subject` uses exact, case-sensitive, no-pad
+comparison. A missing profile returns that same subject with null display name/location,
+`NONE` membership and an empty preference map, without creating a row. Email is not
+returned. Stored preferences must be an object of at most 20 string pairs, keys 1–64
+characters and values at most 500 characters; corrupt stored values fail explicitly.
+`MEMBER` is a stored store entitlement, not an implemented paid subscription. The default
+location is profile text, not a validated shipping address.
+
+`GET /api/retail/policies?query=...` requires direct-user `catalog:read`. It accepts exactly
+one nonblank query of at most 200 characters and eight whitespace-separated words, with no
+other query fields. It returns at most three matching published FAQ records from
+`retail-policy-*` / `retail-guide-*`, scoring title matches three and body matches one per
+literal keyword, then ordering by score descending and FAQ ID. A new draft keeps the prior
+published answer visible; an unpublished draft is excluded. FAQ fixture publication uses
+`FaqPublicationService` so draft commands, publication commands and Outbox stay coherent.
+
+`POST /api/retail/fulfillment-options` also requires direct-user `catalog:read`, with the
+verified subject supplying membership. Its body is exactly `{items:[{productId,quantity}]}`,
+at most 100 entries and 16,384 bytes. Quantities are JSON integers from 1 through 24;
+product IDs are nonblank strings of at most 64 characters. Duplicate JSON fields, trailing
+JSON, unknown fields, numeric strings and fractional integers are rejected. `items:[]`
+asks for general store rules with zero item subtotal. A nonempty quote reads current SKU
+price, version, availability, stock, inherited category, profile and store configuration
+in one read-only repeatable-read transaction. Canonical duplicate SKUs, families, unknown
+or unpublished SKUs, paused/zero-price items, insufficient stock and unsupported currency
+reject the entire quote with 422. No input price, client membership or partial quote is
+accepted. Invalid request shape/range is 400; oversized bodies are 413; missing or invalid
+stored configuration is a service error rather than zero-cost shipping.
+
+The local retail fixture uses CNY and `Asia/Shanghai`. Its standard delivery fee is 599
+minor units, free only when item subtotal is strictly above 4900; express is 999, free for
+`MEMBER` only above the same threshold. Standard/express estimates use configured business
+days, Monday–Friday with no holiday promise and excluding the request day. Pickup uses the
+configured Shanghai demonstration store, opens/closes and preparation duration; after
+closing it advances to the next opening plus preparation, returning an exact `readyAt`.
+It does not invent a nearest store from profile text. A qualifying category and unit-price
+threshold adds a freight option without removing standard delivery. Fees and thresholds
+are configuration facts, and dates use that configuration's time zone rather than the
+host computer's zone.
+
+Every estimate has `estimateOnly=true`. Checkout and simulated payment remain goods-only:
+no shipping option has been purchased, and no delivery fee is added to a payment ledger.
+The host must label delivery as an estimate excluded from the current simulated payment.
+Preferences, policy and delivery reads return `Cache-Control: no-store` without an ETag;
+all three reject evaluation tokens and headers.
+
+### Persisted fulfillment and merchant order issues
+
+Owned `ShoppingOrder` responses, including checkout child orders, append nullable
+`fulfillment`. STANDARD orders with a matching persisted fact expose method/stage,
+separate promised and estimated times, actual packed/shipped/delivered times, delay reason,
+`sourceKind=FIXTURE`, source reference and observed time. SECKILL and orders without a fact
+return null. A fact unsupported by the underlying paid-order/payment truth fails explicitly.
+The database enforces stage/time consistency; a pre-shipment delay keeps `shippedAt` null,
+a delivered stage uses `deliveredAt`, and time passing does not automatically advance any
+stage. No synthetic tracking URL or carrier reference is returned. New checkout orders have
+no fulfillment record until an actual business fact exists.
+
+`GET /internal/merchant/order-issues?limit=20` requires `merchant-agent`, `merchant:read` and
+matching `X-Merchant-Session-Id`; limit is 1–100. It returns only unresolved production
+issues ordered by opened time descending then issue ID, with `Cache-Control: no-store`.
+`listingId` is derived from the associated real standard order. Delayed issues reference
+the same persisted fulfillment as the buyer's order and require a delay reason. Buyer
+messages are untrusted business content, never instructions authorizing writes.
+
+A `return_spike` result counts distinct paid STANDARD orders of the same SKU with
+REQUESTED/PROCESSING/SUCCEEDED refund requests created in `[windowStart,windowEnd)`;
+FAILED requests, other owners' mismatched records and evaluation orders are excluded.
+Two partial refunds for one order count once. The generated summary calls these refund
+requests, not delivered physical returns or completed refunds. Other issue kinds have no
+refund window/count. Issue and fulfillment records are seeded business facts, not an
+external carrier integration; these read endpoints neither resolve an issue nor ship an
+order. Model write authority, payment and refund transaction boundaries are unchanged.

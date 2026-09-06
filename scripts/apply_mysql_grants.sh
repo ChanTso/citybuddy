@@ -106,6 +106,9 @@ expected=(
   "GRANT SELECT, INSERT ON commerce_db.shopping_cart_command TO 'commerce_app'@'%';"
   "GRANT SELECT, INSERT ON commerce_db.shopping_checkout TO 'commerce_app'@'%';"
   "GRANT SELECT, INSERT ON commerce_db.shopping_checkout_order TO 'commerce_app'@'%';"
+  "GRANT SELECT ON commerce_db.retail_fulfillment_config TO 'commerce_app'@'%';"
+  "GRANT SELECT ON commerce_db.retail_order_fulfillment TO 'commerce_app'@'%';"
+  "GRANT SELECT ON commerce_db.retail_order_issue TO 'commerce_app'@'%';"
 )
 mapfile -t actual < <(sed -e '/^[[:space:]]*$/d' -e '/^[[:space:]]*--/d' "$manifest")
 
@@ -200,6 +203,7 @@ action_runtime_grants="$(printf '%s\n' "${actual[@]:45:2}")"
 merchant_runtime_grants="$(printf '%s\n' "${actual[@]:55:4}")"
 retail_runtime_grants="$(printf '%s\n' "${actual[@]:59:2}")"
 shopping_runtime_grants="$(printf '%s\n' "${actual[@]:61:5}")"
+retail_facts_runtime_grants="$(printf '%s\n' "${actual[@]:66:3}")"
 
 if [[ "$v013_force_revoke" == true ]]; then
   mysql "${mysql_args[@]}" --execute="
@@ -283,7 +287,10 @@ runtime_table_state="$(mysql "${mysql_args[@]}" --execute="
       'shopping_cart_item',
       'shopping_cart_command',
       'shopping_checkout',
-      'shopping_checkout_order'
+      'shopping_checkout_order',
+      'retail_fulfillment_config',
+      'retail_order_fulfillment',
+      'retail_order_issue'
     );
   SET ROLE NONE;")"
 
@@ -315,6 +322,26 @@ receipt_projection_present=false
 merchant_draft_present=false
 retail_tables_present=false
 shopping_tables_present=false
+retail_facts_tables_present=false
+retail_facts_count=0
+retail_facts_tables=(retail_fulfillment_config retail_order_fulfillment retail_order_issue)
+for retail_facts_table in "${retail_facts_tables[@]}"; do
+  if [[ ",$normalized_runtime_table_state," == *",commerce_db.$retail_facts_table,"* ]]; then
+    retail_facts_count=$((retail_facts_count + 1))
+  fi
+done
+if (( retail_facts_count != 0 && retail_facts_count != 3 )); then
+  echo "Grant job found a partial retail customer facts schema." >&2
+  exit 1
+elif (( retail_facts_count == 3 )); then
+  runtime_table_count="${normalized_runtime_table_state%%:*}"
+  runtime_table_list="${normalized_runtime_table_state#*:}"
+  for retail_facts_table in "${retail_facts_tables[@]}"; do
+    runtime_table_list="$(remove_runtime_table "$runtime_table_list" "commerce_db.$retail_facts_table")"
+  done
+  normalized_runtime_table_state="$((runtime_table_count - 3)):$runtime_table_list"
+  retail_facts_tables_present=true
+fi
 shopping_table_count=0
 shopping_tables=(shopping_cart shopping_cart_item shopping_cart_command shopping_checkout shopping_checkout_order)
 for shopping_table in "${shopping_tables[@]}"; do
@@ -595,6 +622,9 @@ if [[ "$retail_tables_present" == true ]]; then
 fi
 if [[ "$shopping_tables_present" == true ]]; then
   optional_evaluation_grants="$(printf '%s\n' "$optional_evaluation_grants" "$shopping_runtime_grants")"
+fi
+if [[ "$retail_facts_tables_present" == true ]]; then
+  optional_evaluation_grants="$(printf '%s\n' "$optional_evaluation_grants" "$retail_facts_runtime_grants")"
 fi
 if [[ "$evaluation_table_present" == true ]]; then
   optional_evaluation_grants="$(printf '%s\n' "$optional_evaluation_grants" "$evaluation_grant")"

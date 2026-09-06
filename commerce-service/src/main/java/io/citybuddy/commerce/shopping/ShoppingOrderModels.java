@@ -29,6 +29,19 @@ public final class ShoppingOrderModels {
 
   public record RefundFacts(long reservedAmountMinor, List<RefundStateTotals> byState) {}
 
+  public record FulfillmentFacts(
+      String method,
+      String stage,
+      Instant promisedDeliveryAt,
+      Instant estimatedDeliveryAt,
+      Instant packedAt,
+      Instant shippedAt,
+      Instant deliveredAt,
+      String delayReason,
+      String sourceKind,
+      String sourceRef,
+      Instant observedAt) {}
+
   public record OrderView(
       String orderKind,
       String orderId,
@@ -38,5 +51,6 @@ public final class ShoppingOrderModels {
       Instant unpaidDeadline,
       ProductSnapshot product,
       PaymentFacts payment,
-      RefundFacts refunds) {}
+      RefundFacts refunds,
+      FulfillmentFacts fulfillment) {}
 }

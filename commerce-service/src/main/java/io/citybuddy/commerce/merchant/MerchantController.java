@@ -191,7 +191,8 @@ public final class MerchantController {
   }
 }
 
-@RestControllerAdvice(assignableTypes = MerchantController.class)
+@RestControllerAdvice(
+    assignableTypes = {MerchantController.class, MerchantOrderIssueController.class})
 final class MerchantExceptionHandler {
   @ExceptionHandler(MerchantException.class)
   ResponseEntity<Map<String, String>> merchant(MerchantException exception) {

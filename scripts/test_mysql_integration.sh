@@ -233,6 +233,23 @@ for retail_table in retail_product_family retail_product_metadata; do
     mysql_query commerce_app "$commerce_app_password" commerce_db \
     "DELETE FROM $retail_table WHERE FALSE"
 done
+for facts_table in retail_fulfillment_config retail_order_fulfillment retail_order_issue; do
+  mysql_query commerce_app "$commerce_app_password" commerce_db \
+    "SELECT COUNT(*) FROM $facts_table" >/dev/null
+  assert_fails "commerce runtime cannot insert retail customer facts" 'INSERT command denied' \
+    mysql_query commerce_app "$commerce_app_password" commerce_db \
+    "INSERT INTO $facts_table SELECT * FROM $facts_table WHERE FALSE"
+  facts_column=source_ref
+  if [[ "$facts_table" == retail_fulfillment_config ]]; then
+    facts_column=config_version
+  fi
+  assert_fails "commerce runtime cannot update retail customer facts" 'UPDATE command denied' \
+    mysql_query commerce_app "$commerce_app_password" commerce_db \
+    "UPDATE $facts_table SET $facts_column = $facts_column WHERE FALSE"
+  assert_fails "commerce runtime cannot delete retail customer facts" 'DELETE command denied' \
+    mysql_query commerce_app "$commerce_app_password" commerce_db \
+    "DELETE FROM $facts_table WHERE FALSE"
+done
 assert_fails "commerce runtime cannot delete merchant approvals" 'DELETE command denied' \
   mysql_query commerce_app "$commerce_app_password" commerce_db \
   "DELETE FROM merchant_price_draft WHERE draft_id = 'forbidden'"

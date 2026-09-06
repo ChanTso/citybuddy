@@ -8,6 +8,7 @@ import static org.mockito.Mockito.verifyNoMoreInteractions;
 import static org.mockito.Mockito.when;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post;
+import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.header;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
 
@@ -215,7 +216,8 @@ class CheckoutControllerTest {
     mvc.perform(
             read("checkout", obo("shopping-agent", "shopping:orders:read", "shop-session", null)))
         .andExpect(status().isOk())
-        .andExpect(jsonPath("$.checkoutId").value("checkout"));
+        .andExpect(jsonPath("$.checkoutId").value("checkout"))
+        .andExpect(header().string("Cache-Control", "no-store"));
     mvc.perform(
             read("missing", obo("shopping-agent", "shopping:orders:read", "shop-session", null)))
         .andExpect(status().isNotFound())
