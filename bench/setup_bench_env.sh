@@ -222,13 +222,14 @@ docker run --detach --name citybuddy-bench-commerce \
   --citybuddy.seckill.order.rocketmq-topic="$tx_topic" \
   --citybuddy.seckill.order.rocketmq-consumer-group="$tx_group" \
   --citybuddy.seckill.order.worker-initial-delay-ms=1000 \
-  --citybuddy.seckill.order.worker-delay-ms=500 \
+  --citybuddy.seckill.order.worker-delay-ms=50 \
   --citybuddy.seckill.order.resolution-worker-initial-delay=2000 \
   --citybuddy.seckill.order.resolution-worker-delay=1000 \
   --citybuddy.seckill.order.receive-await=1s \
   --citybuddy.seckill.order.receive-invisible-duration=10s \
   --citybuddy.seckill.order.unpaid-timeout=15m \
   --citybuddy.seckill.timeout.enabled=true \
+  --citybuddy.seckill.timeout.dispatch-worker-delay-ms=50 \
   --citybuddy.seckill.timeout.rocketmq-endpoints=rocketmq-broker-proxy:8081 \
   --citybuddy.seckill.timeout.rocketmq-topic="$to_topic" \
   --citybuddy.seckill.timeout.rocketmq-consumer-group="$to_group" >/dev/null
@@ -283,6 +284,8 @@ SETUP_COMPLETED_AT_UTC=$setup_completed_at
 DOCKER_CPUS=$docker_cpus
 DOCKER_MEMORY_BYTES=$docker_memory_bytes
 COMMERCE_CPU_LIMIT=4
+ORDER_WORKER_DELAY_MS=50
+TIMEOUT_DISPATCH_WORKER_DELAY_MS=50
 EOF
 echo "== bench environment ready =="
 echo "setup record: $bench_env"

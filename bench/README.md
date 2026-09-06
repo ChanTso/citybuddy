@@ -25,7 +25,7 @@ source revision, raw point stream and the earlier failed experiment.
 The tradeoff is to reject in Redis before business MySQL/MQ, while retaining complete admission
 decision inputs in the projection and a pending handoff/recovery path for admitted work.
 
-## Current Redis-first capacity boundaries
+## Historical Redis-first entry boundaries
 
 The [2026-09-05 sold-out session](results/seckill_rejection_capacity_20260905.md) used a fresh
 32-activity fixture at every point, legally consumed all 3,200 quota units before timing, then
@@ -37,6 +37,13 @@ order or ledger row. This is sold-out rejection-entry capacity, not successful a
 completion. Commerce and k6 both consumed substantial CPU at 4,000/s, so the run does not isolate
 which side imposed the first limit.
 
+The [2026-09-06 fixed-warmup diagnosis](results/seckill_rejection_diagnosis_20260906.md)
+uses a new series: 320 preparation orders, a fixed 1,000/s warmup, and separately
+counted 3,000/s and 4,000/s formal windows. Both completed without drops. That does
+not identify the old run's limiting side or turn a change in measurement conditions
+into a service speedup. The new 4,000/s raw latency also retains a negative timing
+sample; completion counts and latency qualification are reported separately.
+
 The [positive-admission session](results/seckill_admission_capacity_20260905.md) used fresh
 high-quota fixtures and a 30-second excluded warmup immediately before each 30-second formal
 window. The current Redis-first path was clean at **1,000 offered requests/s** with p99 94.00 ms;
@@ -44,6 +51,27 @@ window. The current Redis-first path was clean at **1,000 offered requests/s** w
 two-times line. These are admission-entry results with an intentional asynchronous backlog, not
 order-completion throughput. One fresh 800/s old/new pair moved p50 6.27→2.35 ms but p99
 34.79→62.73 ms; the mixed single pair does not establish a performance improvement.
+
+## Sustained completed orders
+
+The [five-minute results](results/seckill_sustained_orders_20260906.md) and
+[registration](results/seckill_sustained_registration_20260906.md) separate admission from order production and timeout-message dispatch. The initial
+20/s point remained bounded; 40/s accumulated work despite complete HTTP admission.
+The [cadence comparison](results/seckill_cadence_comparison_registration_20260906.md)
+records the resulting batch-delay adjustment before execution. At the same 40/s
+for 300 seconds, both versions completed all 12,000 orders, while SQL order-wait
+p99 fell from 134.368s to 72.234ms and sampled order/dispatch queues stayed bounded.
+Later 160/s and 200/s points retain the effects of observation cost, clock anomalies
+and the original queue tolerances: 160/s with lighter sampling followed input in
+the final minutes but did not meet every registered numerical tolerance; 200/s
+accumulated work continuously. The report does not claim an exact capacity ceiling.
+Neither a short admission rate nor a finite batch average is stable order capacity.
+
+`run_ladder.sh` uses the result label as the request-key prefix. Standalone k6 callers
+can supply `REQUEST_KEY_PREFIX` (default `k6`); use a new prefix when repeating a rate
+with synthetic users whose previous Redis intent has not expired. The decision counter
+also records the response's replay boolean. Completed terminal keys may remain until
+normal expiry, but pending handoffs and unfinished business must clear before reset.
 
 ## Environment
 
@@ -75,8 +103,9 @@ CPUs, so results at that boundary do not establish a production resource require
 3. **Steps, not a continuous ramp.** Each rate is its own `constant-arrival-rate` scenario with a
    fixed steady-state window, so percentiles come from a constant arrival rate. The open-model
    executor keeps request generation independent of server response time.
-4. **The generator is measured too.** Generator CPU is sampled throughout. A percentile taken
-   while the generator is saturated describes the generator, not the server, and is discarded.
+4. **The generator is measured too.** Generator CPU is sampled throughout. If scheduling falls
+   behind, retain its dropped/completed counts and latency output, but do not attribute the
+   resulting boundary to the service without separate resource or topology evidence.
 5. **Two vantage points for Redis.** Docker Desktop is a virtual machine, so a host-to-container
    measurement includes a transport cost that can exceed the work being measured. Redis is
    measured from both the host and inside the compose network, and the difference is reported

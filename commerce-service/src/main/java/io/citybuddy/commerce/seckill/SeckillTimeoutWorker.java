@@ -27,7 +27,7 @@ public final class SeckillTimeoutWorker {
 
   @Scheduled(
       initialDelayString = "${citybuddy.seckill.timeout.dispatch-worker-initial-delay-ms:1000}",
-      fixedDelayString = "${citybuddy.seckill.timeout.dispatch-worker-delay-ms:1000}")
+      fixedDelayString = "${citybuddy.seckill.timeout.dispatch-worker-delay-ms:50}")
   public SeckillTimeoutDispatchService.DispatchBatch dispatchOnce() {
     if (!activationComplete) {
       SeckillTimeoutDispatchService.DispatchBatch batch =

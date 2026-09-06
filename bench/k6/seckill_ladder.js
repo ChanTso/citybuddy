@@ -10,6 +10,7 @@ const STEP_SECONDS = Number(__ENV.STEP_SECONDS || 15);
 const GAP_SECONDS = Number(__ENV.GAP_SECONDS || 5);
 const ACTIVITIES = Number(__ENV.ACTIVITIES || 1);
 const BASE = __ENV.BASE_URL || 'http://citybuddy-bench-commerce:8080';
+const REQUEST_KEY_PREFIX = __ENV.REQUEST_KEY_PREFIX || 'k6';
 
 const tokens = new SharedArray('tokens', () => JSON.parse(open(__ENV.TOKENS_FILE)));
 
@@ -59,14 +60,19 @@ export function reserve() {
       headers: {
         'Content-Type': 'application/json',
         Authorization: `Bearer ${token}`,
-        'Idempotency-Key': `k6-${exec.scenario.name}-${exec.scenario.iterationInTest}`,
+        'Idempotency-Key': `${REQUEST_KEY_PREFIX}-${exec.scenario.name}-${exec.scenario.iterationInTest}`,
       },
       tags: { rate: exec.scenario.name.replace('rate_', '') },
     },
   );
 
   let code = 'NONE';
-  try { code = (res.json() || {}).decisionCode || `HTTP_${res.status}`; }
+  let replay = 'unknown';
+  try {
+    const body = res.json() || {};
+    code = body.decisionCode || `HTTP_${res.status}`;
+    replay = typeof body.replay === 'boolean' ? String(body.replay) : 'unknown';
+  }
   catch (e) { code = `HTTP_${res.status}`; }
-  decisions.add(1, { decision: String(code), rate: exec.scenario.name.replace('rate_', '') });
+  decisions.add(1, { decision: String(code), replay, rate: exec.scenario.name.replace('rate_', '') });
 }
