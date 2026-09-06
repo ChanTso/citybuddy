@@ -99,6 +99,8 @@ expected=(
   "GRANT SELECT ON commerce_db.merchant_products TO 'commerce_app'@'%';"
   "GRANT SELECT ON commerce_db.merchant_paid_orders TO 'commerce_app'@'%';"
   "GRANT SELECT ON commerce_db.merchant_daily_sales TO 'commerce_app'@'%';"
+  "GRANT SELECT ON commerce_db.retail_product_family TO 'commerce_app'@'%';"
+  "GRANT SELECT ON commerce_db.retail_product_metadata TO 'commerce_app'@'%';"
 )
 mapfile -t actual < <(sed -e '/^[[:space:]]*$/d' -e '/^[[:space:]]*--/d' "$manifest")
 
@@ -191,6 +193,7 @@ v013_migration_revokes="$(printf '%s\n' "${actual[40]}" "${actual[41]}")"
 faq_runtime_grants="$(printf '%s\n' "${actual[@]:42:3}")"
 action_runtime_grants="$(printf '%s\n' "${actual[@]:45:2}")"
 merchant_runtime_grants="$(printf '%s\n' "${actual[@]:55:4}")"
+retail_runtime_grants="$(printf '%s\n' "${actual[@]:59:2}")"
 
 if [[ "$v013_force_revoke" == true ]]; then
   mysql "${mysql_args[@]}" --execute="
@@ -267,7 +270,9 @@ runtime_table_state="$(mysql "${mysql_args[@]}" --execute="
       'retrieval_evidence',
       'pending_action_reference',
       'action_receipt_projection',
-      'merchant_price_draft'
+      'merchant_price_draft',
+      'retail_product_family',
+      'retail_product_metadata'
     );
   SET ROLE NONE;")"
 
@@ -297,6 +302,24 @@ retrieval_evidence_present=false
 agent_action_reference_present=false
 receipt_projection_present=false
 merchant_draft_present=false
+retail_tables_present=false
+retail_table_count=0
+for retail_table in commerce_db.retail_product_family commerce_db.retail_product_metadata; do
+  if [[ ",$normalized_runtime_table_state," == *",$retail_table,"* ]]; then
+    retail_table_count=$((retail_table_count + 1))
+  fi
+done
+if (( retail_table_count != 0 && retail_table_count != 2 )); then
+  echo "Grant job found a partial retail catalog schema." >&2
+  exit 1
+elif (( retail_table_count == 2 )); then
+  runtime_table_count="${normalized_runtime_table_state%%:*}"
+  runtime_table_list="${normalized_runtime_table_state#*:}"
+  runtime_table_list="$(remove_runtime_table "$runtime_table_list" commerce_db.retail_product_family)"
+  runtime_table_list="$(remove_runtime_table "$runtime_table_list" commerce_db.retail_product_metadata)"
+  normalized_runtime_table_state="$((runtime_table_count - 2)):$runtime_table_list"
+  retail_tables_present=true
+fi
 if [[ ",$normalized_runtime_table_state," == *",commerce_db.merchant_price_draft,"* ]]; then
   runtime_table_count="${normalized_runtime_table_state%%:*}"
   runtime_table_list="${normalized_runtime_table_state#*:}"
@@ -535,6 +558,9 @@ cb080_runtime_table_state="21:commerce_db.auth_login_credential,commerce_db.auth
 optional_evaluation_grants=""
 if [[ "$merchant_draft_present" == true ]]; then
   optional_evaluation_grants="$merchant_runtime_grants"
+fi
+if [[ "$retail_tables_present" == true ]]; then
+  optional_evaluation_grants="$(printf '%s\n' "$optional_evaluation_grants" "$retail_runtime_grants")"
 fi
 if [[ "$evaluation_table_present" == true ]]; then
   optional_evaluation_grants="$(printf '%s\n' "$optional_evaluation_grants" "$evaluation_grant")"

@@ -220,6 +220,19 @@ for merchant_view in merchant_products merchant_paid_orders merchant_daily_sales
   mysql_query commerce_app "$commerce_app_password" commerce_db \
     "SELECT COUNT(*) FROM $merchant_view" >/dev/null
 done
+for retail_table in retail_product_family retail_product_metadata; do
+  mysql_query commerce_app "$commerce_app_password" commerce_db \
+    "SELECT COUNT(*) FROM $retail_table" >/dev/null
+  assert_fails "commerce runtime cannot insert retail display data" 'INSERT command denied' \
+    mysql_query commerce_app "$commerce_app_password" commerce_db \
+    "INSERT INTO $retail_table SELECT * FROM $retail_table WHERE FALSE"
+  assert_fails "commerce runtime cannot update retail display data" 'UPDATE command denied' \
+    mysql_query commerce_app "$commerce_app_password" commerce_db \
+    "UPDATE $retail_table SET metadata_version = metadata_version + 1 WHERE FALSE"
+  assert_fails "commerce runtime cannot delete retail display data" 'DELETE command denied' \
+    mysql_query commerce_app "$commerce_app_password" commerce_db \
+    "DELETE FROM $retail_table WHERE FALSE"
+done
 assert_fails "commerce runtime cannot delete merchant approvals" 'DELETE command denied' \
   mysql_query commerce_app "$commerce_app_password" commerce_db \
   "DELETE FROM merchant_price_draft WHERE draft_id = 'forbidden'"
