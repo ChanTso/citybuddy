@@ -109,6 +109,9 @@ expected=(
   "GRANT SELECT ON commerce_db.retail_fulfillment_config TO 'commerce_app'@'%';"
   "GRANT SELECT ON commerce_db.retail_order_fulfillment TO 'commerce_app'@'%';"
   "GRANT SELECT ON commerce_db.retail_order_issue TO 'commerce_app'@'%';"
+  "GRANT SELECT, UPDATE (missing_attributes, content_quality, facts_version, observed_at) ON commerce_db.retail_product_operations TO 'commerce_app'@'%';"
+  "GRANT UPDATE (name, description, content, metadata_version) ON commerce_db.retail_product_family TO 'commerce_app'@'%';"
+  "GRANT INSERT, UPDATE (content, metadata_version) ON commerce_db.retail_product_metadata TO 'commerce_app'@'%';"
 )
 mapfile -t actual < <(sed -e '/^[[:space:]]*$/d' -e '/^[[:space:]]*--/d' "$manifest")
 
@@ -204,6 +207,7 @@ merchant_runtime_grants="$(printf '%s\n' "${actual[@]:55:4}")"
 retail_runtime_grants="$(printf '%s\n' "${actual[@]:59:2}")"
 shopping_runtime_grants="$(printf '%s\n' "${actual[@]:61:5}")"
 retail_facts_runtime_grants="$(printf '%s\n' "${actual[@]:66:3}")"
+merchant_operations_runtime_grants="$(printf '%s\n' "${actual[@]:69:3}")"
 
 if [[ "$v013_force_revoke" == true ]]; then
   mysql "${mysql_args[@]}" --execute="
@@ -290,7 +294,8 @@ runtime_table_state="$(mysql "${mysql_args[@]}" --execute="
       'shopping_checkout_order',
       'retail_fulfillment_config',
       'retail_order_fulfillment',
-      'retail_order_issue'
+      'retail_order_issue',
+      'retail_product_operations'
     );
   SET ROLE NONE;")"
 
@@ -323,6 +328,14 @@ merchant_draft_present=false
 retail_tables_present=false
 shopping_tables_present=false
 retail_facts_tables_present=false
+merchant_operations_present=false
+if [[ ",$normalized_runtime_table_state," == *",commerce_db.retail_product_operations,"* ]]; then
+  runtime_table_count="${normalized_runtime_table_state%%:*}"
+  runtime_table_list="${normalized_runtime_table_state#*:}"
+  runtime_table_list="$(remove_runtime_table "$runtime_table_list" commerce_db.retail_product_operations)"
+  normalized_runtime_table_state="$((runtime_table_count - 1)):$runtime_table_list"
+  merchant_operations_present=true
+fi
 retail_facts_count=0
 retail_facts_tables=(retail_fulfillment_config retail_order_fulfillment retail_order_issue)
 for retail_facts_table in "${retail_facts_tables[@]}"; do
@@ -625,6 +638,13 @@ if [[ "$shopping_tables_present" == true ]]; then
 fi
 if [[ "$retail_facts_tables_present" == true ]]; then
   optional_evaluation_grants="$(printf '%s\n' "$optional_evaluation_grants" "$retail_facts_runtime_grants")"
+fi
+if [[ "$merchant_operations_present" == true ]]; then
+  if [[ "$merchant_draft_present" != true || "$retail_tables_present" != true ]]; then
+    echo "Grant job found merchant operations without catalog or approval tables." >&2
+    exit 1
+  fi
+  optional_evaluation_grants="$(printf '%s\n' "$optional_evaluation_grants" "$merchant_operations_runtime_grants")"
 fi
 if [[ "$evaluation_table_present" == true ]]; then
   optional_evaluation_grants="$(printf '%s\n' "$optional_evaluation_grants" "$evaluation_grant")"

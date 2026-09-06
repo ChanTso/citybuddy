@@ -201,8 +201,8 @@ public class MerchantService {
         || !command.currency().matches("[A-Z]{3}")
         || command.items() == null
         || command.items().isEmpty()
-        || command.items().size() > 3) {
-      throw invalid("A proposal requires a currency and one to three products");
+        || command.items().size() > 25) {
+      throw invalid("A proposal requires a currency and one to twenty-five products");
     }
     var ids = new HashSet<String>();
     for (PriceInput item : command.items()) {

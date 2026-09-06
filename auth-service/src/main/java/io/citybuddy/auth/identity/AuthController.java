@@ -32,7 +32,10 @@ public final class AuthController {
           "merchant:read",
           "merchant:price:prepare",
           "merchant:price:read",
-          "merchant:price:cancel");
+          "merchant:price:cancel",
+          "merchant:change:prepare",
+          "merchant:change:read",
+          "merchant:change:cancel");
   private static final Set<String> SHOPPING_SCOPES =
       Set.of(
           "shopping:orders:read",

@@ -76,6 +76,10 @@ class AuthIdentityTest {
                 "merchant:price:read",
                 "merchant:price:cancel",
                 "merchant:price:apply",
+                "merchant:change:prepare",
+                "merchant:change:read",
+                "merchant:change:cancel",
+                "merchant:change:apply",
                 "merchant:admin",
                 "shopping:orders:read",
                 "shopping:cart:read",
@@ -637,7 +641,9 @@ class AuthIdentityTest {
     String direct =
         keys.directToken("user-123", List.of("support:session:create", "merchant:session:create"));
 
-    for (String scope : List.of("catalog:read", "merchant:price:apply", "merchant:admin")) {
+    for (String scope :
+        List.of(
+            "catalog:read", "merchant:price:apply", "merchant:change:apply", "merchant:admin")) {
       assertThatThrownBy(
               () ->
                   controller.exchange(
@@ -661,6 +667,99 @@ class AuthIdentityTest {
             .hasMessage("Exchange is not allowed");
       }
     }
+  }
+
+  @Test
+  void merchantChangeScopesUseDigestCredentialsAndSignOnlyTheExactDelegation() throws Exception {
+    List<String> scopes =
+        List.of("merchant:change:prepare", "merchant:change:read", "merchant:change:cancel");
+    String basic = allowDigestService("merchant-agent", scopes);
+    String direct = keys.directToken("user-123", List.of("merchant:session:create"));
+    for (String scope : scopes) {
+      var response =
+          controller.exchange(
+              basic,
+              "Bearer " + direct,
+              null,
+              new AuthController.ExchangeRequest("merchant-session", "user-123", scope));
+      var signed = SignedJWT.parse(response.accessToken());
+      assertThat(signed.verify(new RSASSAVerifier((RSAPublicKey) currentKeyPair.getPublic())))
+          .isTrue();
+      var claims = signed.getJWTClaimsSet();
+      assertThat(claims.getSubject()).isEqualTo("user-123");
+      assertThat(claims.getAudience()).containsExactly("commerce-service");
+      assertThat(claims.getClaim("token_type")).isEqualTo("agent_obo");
+      assertThat(claims.getClaim("session")).isEqualTo("merchant-session");
+      assertThat(claims.getClaim("scope")).isEqualTo(scope);
+      assertThat(claims.getJSONObjectClaim("act")).containsEntry("azp", "merchant-agent");
+      assertThat(claims.getClaim("sandbox")).isNull();
+    }
+  }
+
+  @Test
+  void changeScopesStillRequireBothGrantSetsAndDoNotCrossShoppingActors() {
+    String direct =
+        keys.directToken("user-123", List.of("merchant:session:create", "shopping:session:create"));
+    String restricted = allowDigestService("merchant-agent", List.of("merchant:change:read"));
+    assertThatThrownBy(
+            () ->
+                controller.exchange(
+                    restricted,
+                    "Bearer " + direct,
+                    null,
+                    new AuthController.ExchangeRequest(
+                        "merchant-session", "user-123", "merchant:change:prepare")))
+        .isInstanceOf(IdentityException.class)
+        .hasMessage("Exchange is not allowed");
+    String shopping = allowDigestService("shopping-agent", properties.exchangeScopes());
+    for (String scope :
+        List.of(
+            "merchant:change:prepare",
+            "merchant:change:read",
+            "merchant:change:cancel",
+            "merchant:change:apply")) {
+      assertThatThrownBy(
+              () ->
+                  controller.exchange(
+                      shopping,
+                      "Bearer " + direct,
+                      null,
+                      new AuthController.ExchangeRequest("shop-session", "user-123", scope)))
+          .isInstanceOf(IdentityException.class)
+          .hasMessage("Exchange is not allowed");
+    }
+    var noChangeScopes =
+        new IdentityProperties(
+            properties.issuer(),
+            properties.userAudience(),
+            properties.currentKid(),
+            properties.currentPrivateKeyPath(),
+            properties.currentPublicKeyPath(),
+            properties.overlapKid(),
+            properties.overlapPublicKeyPath(),
+            properties.directTtl(),
+            properties.oboTtl(),
+            properties.clockSkew(),
+            List.of("merchant:read"));
+    var restrictedController =
+        new AuthController(
+            repository,
+            keys,
+            passwordEncoder,
+            new ServiceCredentialVerifier(passwordEncoder),
+            noChangeScopes,
+            new MockEnvironment(),
+            Clock.systemUTC());
+    assertThatThrownBy(
+            () ->
+                restrictedController.exchange(
+                    restricted,
+                    "Bearer " + direct,
+                    null,
+                    new AuthController.ExchangeRequest(
+                        "merchant-session", "user-123", "merchant:change:read")))
+        .isInstanceOf(IdentityException.class)
+        .hasMessage("Exchange is not allowed");
   }
 
   @Test

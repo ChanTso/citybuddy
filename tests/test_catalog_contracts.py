@@ -58,6 +58,10 @@ def test_catalog_contract_exposes_only_authenticated_published_reads() -> None:
         "/internal/merchant/products/{productId}",
         "/internal/merchant/summary",
         "/internal/merchant/order-issues",
+        "/internal/merchant/changes",
+        "/internal/merchant/changes/{changeId}",
+        "/internal/merchant/changes/{changeId}/cancel",
+        "/api/merchant/changes/{changeId}/apply",
         "/internal/merchant/price-drafts",
         "/internal/merchant/price-drafts/{draftId}",
         "/internal/merchant/price-drafts/{draftId}/cancel",
@@ -78,6 +82,34 @@ def test_catalog_contract_exposes_only_authenticated_published_reads() -> None:
         "productId",
         "X-Eval-Sandbox-Id",
     }
+
+
+def test_retail_pagination_and_merchant_change_authority_are_explicit() -> None:
+    contract = load_contract()
+    operations = contract["paths"]
+    get_page = operations["/api/retail/products"]["get"]
+    pagination = {
+        item["name"]: item["schema"] for item in get_page["parameters"] if item["in"] == "query"
+    }
+    assert pagination["limit"] == {"type": "integer", "minimum": 1, "maximum": 50, "default": 20}
+    assert pagination["offset"] == {"type": "integer", "minimum": 0, "maximum": 10000, "default": 0}
+    schemas = contract["components"]["schemas"]
+    assert schemas["RetailSearch"]["properties"]["offset"] == pagination["offset"]
+    changes = "/internal/merchant/changes"
+    for path, method, scope in (
+        (changes, "post", "prepare"),
+        (changes, "get", "read"),
+        (changes + "/{changeId}", "get", "read"),
+        (changes + "/{changeId}/cancel", "post", "cancel"),
+    ):
+        operation = operations[path][method]
+        assert operation["security"] == [{"agentOboBearer": []}]
+        assert operation["x-required-actor"] == "merchant-agent"
+        assert operation["x-required-scope"] == f"merchant:change:{scope}"
+    apply = operations["/api/merchant/changes/{changeId}/apply"]["post"]
+    assert apply["security"] == [{"directUserBearer": []}]
+    assert apply["x-required-permission"] == "merchant:change:apply"
+    assert apply["requestBody"]["content"]["application/json"]["schema"]["maxProperties"] == 0
 
 
 def test_knowledge_snapshot_contract_is_dedicated_closed_and_bounded() -> None:

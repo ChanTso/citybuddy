@@ -115,8 +115,9 @@ public final class RetailCatalogRepository {
                   "MAX(CAST(JSON_UNQUOTE(JSON_EXTRACT(summary_content, '$.rating')) AS DECIMAL(4,2))) DESC, ";
               default -> "MAX(score) DESC, ";
             });
-    sql.append("MIN(root_order), roots.root_id LIMIT ?");
+    sql.append("MIN(root_order), roots.root_id LIMIT ? OFFSET ?");
     arguments.add(request.limit());
+    arguments.add(request.offset());
     List<String> ids =
         jdbc.query(sql.toString(), (row, index) -> row.getString("root_id"), arguments.toArray());
     if (ids.isEmpty()) {

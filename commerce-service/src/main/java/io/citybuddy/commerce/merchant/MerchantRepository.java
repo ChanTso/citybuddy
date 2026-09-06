@@ -95,7 +95,8 @@ public final class MerchantRepository {
   public Optional<StoredDraft> find(String id, boolean lock) {
     return jdbc
         .query(
-            "SELECT * FROM merchant_price_draft WHERE draft_id = ?" + (lock ? " FOR UPDATE" : ""),
+            "SELECT * FROM merchant_price_draft WHERE draft_id = ? AND kind = 'PRICE_UPDATE'"
+                + (lock ? " FOR UPDATE" : ""),
             this::draft,
             id)
         .stream()
@@ -132,6 +133,10 @@ public final class MerchantRepository {
   }
 
   private StoredDraft draft(ResultSet row, int index) throws SQLException {
+    if (!"PRICE_UPDATE".equals(row.getString("kind"))) {
+      throw new MerchantException(
+          409, "IDEMPOTENCY_CONFLICT", "Idempotency key belongs to a different change kind");
+    }
     try {
       String result = row.getString("result");
       Timestamp resolved = row.getTimestamp("resolved_at");

@@ -16,10 +16,23 @@ class RetailCatalogModelsTest {
     Search request = mapper.readValue("{}", Search.class);
 
     assertEquals(20, request.limit());
+    assertEquals(0, request.offset());
     assertEquals("relevance", request.sort());
     assertEquals(Map.of(), request.attributes());
     assertThrows(
         IllegalArgumentException.class, () -> search(null, null, null, null, null, null, 0));
+  }
+
+  @Test
+  void offsetsAreBoundedAndLegacyConstructorStillStartsAtZero() throws Exception {
+    ObjectMapper mapper = new ObjectMapper();
+    assertEquals(10000, mapper.readValue("{\"offset\":10000}", Search.class).offset());
+    assertEquals(0, search(null, null, null, null, null, null, 50).offset());
+    for (int offset : new int[] {-1, 10001}) {
+      assertThrows(
+          IllegalArgumentException.class,
+          () -> new Search(null, null, null, null, null, null, null, null, 50, offset));
+    }
   }
 
   @Test
