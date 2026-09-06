@@ -34,7 +34,7 @@ public final class AuthController {
           "merchant:price:read",
           "merchant:price:cancel");
   private static final Set<String> SHOPPING_SCOPES =
-      Set.of("shopping:orders:read", "refund:create");
+      Set.of("shopping:orders:read", "shopping:cart:read", "shopping:cart:write", "refund:create");
 
   private final AuthRepository repository;
   private final AuthKeySet keys;

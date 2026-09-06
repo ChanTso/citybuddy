@@ -101,6 +101,11 @@ expected=(
   "GRANT SELECT ON commerce_db.merchant_daily_sales TO 'commerce_app'@'%';"
   "GRANT SELECT ON commerce_db.retail_product_family TO 'commerce_app'@'%';"
   "GRANT SELECT ON commerce_db.retail_product_metadata TO 'commerce_app'@'%';"
+  "GRANT SELECT, INSERT, UPDATE ON commerce_db.shopping_cart TO 'commerce_app'@'%';"
+  "GRANT SELECT, INSERT, UPDATE, DELETE ON commerce_db.shopping_cart_item TO 'commerce_app'@'%';"
+  "GRANT SELECT, INSERT ON commerce_db.shopping_cart_command TO 'commerce_app'@'%';"
+  "GRANT SELECT, INSERT ON commerce_db.shopping_checkout TO 'commerce_app'@'%';"
+  "GRANT SELECT, INSERT ON commerce_db.shopping_checkout_order TO 'commerce_app'@'%';"
 )
 mapfile -t actual < <(sed -e '/^[[:space:]]*$/d' -e '/^[[:space:]]*--/d' "$manifest")
 
@@ -194,6 +199,7 @@ faq_runtime_grants="$(printf '%s\n' "${actual[@]:42:3}")"
 action_runtime_grants="$(printf '%s\n' "${actual[@]:45:2}")"
 merchant_runtime_grants="$(printf '%s\n' "${actual[@]:55:4}")"
 retail_runtime_grants="$(printf '%s\n' "${actual[@]:59:2}")"
+shopping_runtime_grants="$(printf '%s\n' "${actual[@]:61:5}")"
 
 if [[ "$v013_force_revoke" == true ]]; then
   mysql "${mysql_args[@]}" --execute="
@@ -272,7 +278,12 @@ runtime_table_state="$(mysql "${mysql_args[@]}" --execute="
       'action_receipt_projection',
       'merchant_price_draft',
       'retail_product_family',
-      'retail_product_metadata'
+      'retail_product_metadata',
+      'shopping_cart',
+      'shopping_cart_item',
+      'shopping_cart_command',
+      'shopping_checkout',
+      'shopping_checkout_order'
     );
   SET ROLE NONE;")"
 
@@ -303,6 +314,26 @@ agent_action_reference_present=false
 receipt_projection_present=false
 merchant_draft_present=false
 retail_tables_present=false
+shopping_tables_present=false
+shopping_table_count=0
+shopping_tables=(shopping_cart shopping_cart_item shopping_cart_command shopping_checkout shopping_checkout_order)
+for shopping_table in "${shopping_tables[@]}"; do
+  if [[ ",$normalized_runtime_table_state," == *",commerce_db.$shopping_table,"* ]]; then
+    shopping_table_count=$((shopping_table_count + 1))
+  fi
+done
+if (( shopping_table_count != 0 && shopping_table_count != 5 )); then
+  echo "Grant job found a partial shopping cart schema." >&2
+  exit 1
+elif (( shopping_table_count == 5 )); then
+  runtime_table_count="${normalized_runtime_table_state%%:*}"
+  runtime_table_list="${normalized_runtime_table_state#*:}"
+  for shopping_table in "${shopping_tables[@]}"; do
+    runtime_table_list="$(remove_runtime_table "$runtime_table_list" "commerce_db.$shopping_table")"
+  done
+  normalized_runtime_table_state="$((runtime_table_count - 5)):$runtime_table_list"
+  shopping_tables_present=true
+fi
 retail_table_count=0
 for retail_table in commerce_db.retail_product_family commerce_db.retail_product_metadata; do
   if [[ ",$normalized_runtime_table_state," == *",$retail_table,"* ]]; then
@@ -561,6 +592,9 @@ if [[ "$merchant_draft_present" == true ]]; then
 fi
 if [[ "$retail_tables_present" == true ]]; then
   optional_evaluation_grants="$(printf '%s\n' "$optional_evaluation_grants" "$retail_runtime_grants")"
+fi
+if [[ "$shopping_tables_present" == true ]]; then
+  optional_evaluation_grants="$(printf '%s\n' "$optional_evaluation_grants" "$shopping_runtime_grants")"
 fi
 if [[ "$evaluation_table_present" == true ]]; then
   optional_evaluation_grants="$(printf '%s\n' "$optional_evaluation_grants" "$evaluation_grant")"

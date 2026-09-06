@@ -71,24 +71,14 @@ public final class OrderService {
                         OrderCategory.VALIDATION,
                         "Product is missing or not orderable",
                         correlationId));
-    if (!"PUBLISHED".equals(product.publicationState()) || !product.available()) {
-      throw failure(
-          422, OrderCategory.VALIDATION, "Product is missing or not orderable", correlationId);
-    }
-    if (product.publicationVersion() != request.expectedProductVersion()) {
-      throw failure(409, OrderCategory.STALE_VERSION, "Product version is stale", correlationId);
-    }
-    if (product.stockQuantity() < request.quantity()) {
-      throw failure(
-          409, OrderCategory.INSUFFICIENT_STOCK, "Insufficient authoritative stock", correlationId);
-    }
-    Math.multiplyExact(product.priceMinor(), request.quantity());
-    if (!repository.decrementStock(product, request.quantity())) {
-      throw new StockRaceException();
-    }
-    repository.insertOrder(user, orderId, product, request.quantity());
-    repository.insertOutbox(orderId, product, request.quantity());
-    return repository.findOwnedOrder(user, orderId, correlationId);
+    return StandardOrderWriter.write(
+        repository,
+        user,
+        orderId,
+        product,
+        request.quantity(),
+        request.expectedProductVersion(),
+        correlationId);
   }
 
   private OrderResult resolveCommittedForMutation(

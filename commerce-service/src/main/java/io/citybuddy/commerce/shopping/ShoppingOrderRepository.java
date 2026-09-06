@@ -95,6 +95,27 @@ public final class ShoppingOrderRepository {
     return withRefunds(orders).stream().findFirst();
   }
 
+  public List<OrderView> findStandardOrders(String owner, List<String> ids) {
+    if (ids.isEmpty()) {
+      return List.of();
+    }
+    String placeholders = ids.stream().map(id -> "?").collect(Collectors.joining(","));
+    List<Object> parameters = new ArrayList<>();
+    parameters.add(owner);
+    parameters.add(owner);
+    parameters.addAll(ids);
+    return withRefunds(
+        jdbc.query(
+            "WITH page AS ("
+                + STANDARD
+                + " AND order_id IN ("
+                + placeholders
+                + ")) "
+                + PAYMENT_JOIN,
+            ShoppingOrderRepository::order,
+            parameters.toArray()));
+  }
+
   private List<OrderView> withRefunds(List<OrderView> orders) {
     List<String> attempts =
         orders.stream()

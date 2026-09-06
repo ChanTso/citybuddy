@@ -370,7 +370,7 @@ INSERT INTO auth_login_credential (principal_id, password_hash) VALUES
   ('00000000-0000-0000-0000-000000000022', '$disabled_hash');
 INSERT INTO auth_service_identity (service_id, client_id, credential_hash, state, allowed_scopes) VALUES
   ('00000000-0000-0000-0000-000000000023', 'agent-service', '$service_hash', 'ACTIVE', 'catalog:read'),
-  ('00000000-0000-0000-0000-000000000024', 'shopping-agent', '$shopping_service_hash', 'ACTIVE', 'shopping:orders:read refund:create');
+  ('00000000-0000-0000-0000-000000000024', 'shopping-agent', '$shopping_service_hash', 'ACTIVE', 'shopping:orders:read shopping:cart:read shopping:cart:write refund:create');
 INSERT INTO auth_signing_key_metadata (kid, state, activated_at, retire_after) VALUES
   ('current-key', 'CURRENT', CURRENT_TIMESTAMP(6), NULL),
   ('overlap-key', 'OVERLAP', CURRENT_TIMESTAMP(6), TIMESTAMPADD(HOUR, 1, CURRENT_TIMESTAMP(6)));
@@ -434,6 +434,8 @@ SPRING_DATASOURCE_PASSWORD="$auth_app_password" java -jar auth-service/target/au
   '--citybuddy.identity.exchange-scopes[0]=catalog:read' \
   '--citybuddy.identity.exchange-scopes[1]=shopping:orders:read' \
   '--citybuddy.identity.exchange-scopes[2]=refund:create' \
+  '--citybuddy.identity.exchange-scopes[3]=shopping:cart:read' \
+  '--citybuddy.identity.exchange-scopes[4]=shopping:cart:write' \
   >"$tmp_dir/auth.log" 2>&1 &
 auth_pid=$!
 process_bound_port auth_port spring "$auth_pid" "$tmp_dir/auth.log" 0
@@ -496,7 +498,7 @@ assert_status 200 "second active principal login" \
   --data "{\"loginIdentifier\":\"other-user\",\"password\":\"$other_password\"}"
 other_token="$(uv run python scripts/read_json_field.py "$tmp_dir/http-response.json" accessToken)"
 
-for shopping_scope in shopping:orders:read refund:create; do
+for shopping_scope in shopping:orders:read shopping:cart:read shopping:cart:write refund:create; do
   assert_status 200 "shopping digest credential exchanges exact $shopping_scope" \
     --request POST "http://127.0.0.1:$auth_port/auth/token/exchange" \
     --user "shopping-agent:$shopping_service_password" \
@@ -554,7 +556,7 @@ assert_status 403 "shopping exchange rejects another user assertion" \
 mysql_query auth_app "$auth_app_password" commerce_db "
 UPDATE auth_service_identity SET allowed_scopes = 'catalog:read shopping:orders:read'
  WHERE client_id = 'agent-service';
-UPDATE auth_service_identity SET allowed_scopes = 'shopping:orders:read refund:create catalog:read'
+UPDATE auth_service_identity SET allowed_scopes = 'shopping:orders:read shopping:cart:read shopping:cart:write refund:create catalog:read'
  WHERE client_id = 'shopping-agent';"
 assert_status 403 "support actor cannot acquire a shopping scope with broad grants" \
   --request POST "http://127.0.0.1:$auth_port/auth/token/exchange" \
@@ -570,7 +572,7 @@ assert_status 403 "shopping actor cannot acquire a catalog scope with broad gran
   --data '{"sessionId":"shop-integration","userSubject":"user-integration","scope":"catalog:read"}'
 mysql_query auth_app "$auth_app_password" commerce_db "
 UPDATE auth_service_identity SET allowed_scopes = 'catalog:read' WHERE client_id = 'agent-service';
-UPDATE auth_service_identity SET allowed_scopes = 'shopping:orders:read refund:create'
+UPDATE auth_service_identity SET allowed_scopes = 'shopping:orders:read shopping:cart:read shopping:cart:write refund:create'
  WHERE client_id = 'shopping-agent';"
 
 AGENT_PORT=0 \

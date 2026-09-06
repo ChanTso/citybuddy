@@ -78,7 +78,9 @@ class AuthIdentityTest {
                 "merchant:price:apply",
                 "merchant:admin",
                 "shopping:orders:read",
+                "shopping:cart:read",
                 "shopping:cart:write",
+                "shopping:cart:admin",
                 "refund:create"));
     repository = mock(AuthRepository.class);
     when(repository.publicKeyMetadata())
@@ -751,8 +753,10 @@ class AuthIdentityTest {
   }
 
   @Test
-  void shoppingExchangeUsesDigestCredentialAndSignsItsTwoExactScopes() throws Exception {
-    List<String> scopes = List.of("shopping:orders:read", "refund:create");
+  void shoppingExchangeUsesDigestCredentialAndSignsItsExactScopes() throws Exception {
+    List<String> scopes =
+        List.of(
+            "shopping:orders:read", "shopping:cart:read", "shopping:cart:write", "refund:create");
     String basic = allowDigestService("shopping-agent", scopes);
     String direct = keys.directToken("user-123", List.of("shopping:session:create"));
 
@@ -794,11 +798,19 @@ class AuthIdentityTest {
       List<String> deniedScopes =
           switch (actor) {
             case "agent-service" ->
-                List.of("shopping:orders:read", "shopping:cart:write", "merchant:read");
+                List.of(
+                    "shopping:orders:read",
+                    "shopping:cart:read",
+                    "shopping:cart:write",
+                    "merchant:read");
             case "merchant-agent" ->
-                List.of("shopping:orders:read", "shopping:cart:write", "refund:create");
+                List.of(
+                    "shopping:orders:read",
+                    "shopping:cart:read",
+                    "shopping:cart:write",
+                    "refund:create");
             default ->
-                List.of("catalog:read", "shopping:cart:write", "merchant:read", "*", "catalog:*");
+                List.of("catalog:read", "shopping:cart:admin", "merchant:read", "*", "catalog:*");
           };
       for (String scope : deniedScopes) {
         assertThatThrownBy(

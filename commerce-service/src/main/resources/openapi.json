@@ -1404,6 +1404,798 @@
           "404": {"description": "Unknown or cross-user reservation", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/SeckillError"}}}}
         }
       }
+    },
+    "/internal/shopping/cart": {
+      "get": {
+        "operationId": "getShoppingCart",
+        "security": [
+          {
+            "agentOboBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "X-Shopping-Session-Id",
+            "in": "header",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 64
+            },
+            "description": "Must match the verified shopping-agent OBO session."
+          },
+          {
+            "name": "X-Eval-Sandbox-Id",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string"
+            },
+            "description": "Any presence is rejected on production cart and checkout routes."
+          }
+        ],
+        "description": "Requires shopping-agent and the exact shopping:cart:read scope; the authenticated subject owns the cart across sessions. Evaluation tokens/headers are rejected. Read-only current SKU facts; retains unavailable lines. Empty cart does not create a root. Null currency/subtotal means an incompatible or overflowing cart; stock is not reserved. Zero-price lines remain visible but are not checkout-ready.",
+        "responses": {
+          "200": {
+            "description": "Current cart",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ShoppingCart"
+                }
+              }
+            },
+            "headers": {
+              "Cache-Control": {
+                "description": "Live product price and stock are not versioned by cart.version. This response does not emit ETag or use If-None-Match to return 304.",
+                "schema": {
+                  "type": "string",
+                  "const": "no-store"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ShoppingCartError"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Invalid actor, exact scope, session or evaluation context",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ShoppingCartError"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Unavailable or unconfirmed result; retry writes using the same key",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ShoppingCartError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/internal/shopping/cart/items": {
+      "post": {
+        "operationId": "addShoppingCartItem",
+        "security": [
+          {
+            "agentOboBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "X-Shopping-Session-Id",
+            "in": "header",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 64
+            },
+            "description": "Must match the verified shopping-agent OBO session."
+          },
+          {
+            "name": "X-Eval-Sandbox-Id",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string"
+            },
+            "description": "Any presence is rejected on production cart and checkout routes."
+          },
+          {
+            "name": "Idempotency-Key",
+            "in": "header",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 128
+            },
+            "description": "Nonblank, exact owner-bound command key. Reuse this value after a timeout; never trim or replace it on retry."
+          }
+        ],
+        "description": "Requires shopping-agent and the exact shopping:cart:write scope; the authenticated subject owns the cart across sessions. Evaluation tokens/headers are rejected. Increment quantity. Checks current SKU, stock, currency, 24-unit and 100-line bounds without reserving stock. The mutation, version advance and receipt commit atomically.",
+        "responses": {
+          "200": {
+            "description": "Cart result",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ShoppingCartResult"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ShoppingCartError"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Invalid actor, exact scope, session or evaluation context",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ShoppingCartError"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Unavailable or unconfirmed result; retry writes using the same key",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ShoppingCartError"
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "Body exceeds 8192 bytes",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ShoppingCartError"
+                }
+              }
+            }
+          },
+          "415": {
+            "description": "Content-Type must be application/json"
+          },
+          "409": {
+            "description": "Intent, version, orderability, quantity, currency or amount conflict",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ShoppingCartError"
+                }
+              }
+            }
+          }
+        },
+        "requestBody": {
+          "required": true,
+          "description": "Strict JSON object, at most 8192 bytes. Unknown or duplicate fields, numeric coercion and trailing JSON are rejected.",
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ShoppingCartAdd"
+              }
+            }
+          }
+        }
+      }
+    },
+    "/internal/shopping/cart/items/{productId}": {
+      "put": {
+        "operationId": "setShoppingCartItem",
+        "security": [
+          {
+            "agentOboBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "X-Shopping-Session-Id",
+            "in": "header",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 64
+            },
+            "description": "Must match the verified shopping-agent OBO session."
+          },
+          {
+            "name": "X-Eval-Sandbox-Id",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string"
+            },
+            "description": "Any presence is rejected on production cart and checkout routes."
+          },
+          {
+            "name": "productId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 64
+            },
+            "description": "Actual product/SKU ID; family display IDs cannot be ordered."
+          },
+          {
+            "name": "Idempotency-Key",
+            "in": "header",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 128
+            },
+            "description": "Nonblank, exact owner-bound command key. Reuse this value after a timeout; never trim or replace it on retry."
+          }
+        ],
+        "description": "Requires shopping-agent and the exact shopping:cart:write scope; the authenticated subject owns the cart across sessions. Evaluation tokens/headers are rejected. Replace an existing line quantity only at expectedCartVersion; a missing line is an acknowledged no-op. Matching key replay returns the original command receipt plus the current cart before checking the stale original version.",
+        "responses": {
+          "200": {
+            "description": "Cart result",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ShoppingCartResult"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ShoppingCartError"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Invalid actor, exact scope, session or evaluation context",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ShoppingCartError"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Unavailable or unconfirmed result; retry writes using the same key",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ShoppingCartError"
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "Body exceeds 8192 bytes",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ShoppingCartError"
+                }
+              }
+            }
+          },
+          "415": {
+            "description": "Content-Type must be application/json"
+          },
+          "409": {
+            "description": "Intent, version, orderability, quantity, currency or amount conflict",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ShoppingCartError"
+                }
+              }
+            }
+          }
+        },
+        "requestBody": {
+          "required": true,
+          "description": "Strict JSON object, at most 8192 bytes. Unknown or duplicate fields, numeric coercion and trailing JSON are rejected.",
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ShoppingCartSet"
+              }
+            }
+          }
+        }
+      },
+      "delete": {
+        "operationId": "removeShoppingCartItem",
+        "security": [
+          {
+            "agentOboBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "X-Shopping-Session-Id",
+            "in": "header",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 64
+            },
+            "description": "Must match the verified shopping-agent OBO session."
+          },
+          {
+            "name": "X-Eval-Sandbox-Id",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string"
+            },
+            "description": "Any presence is rejected on production cart and checkout routes."
+          },
+          {
+            "name": "productId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 64
+            },
+            "description": "Actual product/SKU ID; family display IDs cannot be ordered."
+          },
+          {
+            "name": "Idempotency-Key",
+            "in": "header",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 128
+            },
+            "description": "Nonblank, exact owner-bound command key. Reuse this value after a timeout; never trim or replace it on retry."
+          },
+          {
+            "name": "expectedCartVersion",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "format": "int64",
+              "minimum": 0,
+              "maximum": 9223372036854775807
+            },
+            "description": "Exactly one decimal nonnegative signed-long cart version. Missing or repeated parameters, signs, fractions and overflow are rejected. HTTP If-Match is not the cart concurrency precondition."
+          }
+        ],
+        "description": "Requires shopping-agent and the exact shopping:cart:write scope; the authenticated subject owns the cart across sessions. Evaluation tokens/headers are rejected. Remove the line only at the explicit expectedCartVersion query version. Matching key replay does not remove a later re-added line.",
+        "responses": {
+          "200": {
+            "description": "Cart result",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ShoppingCartResult"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ShoppingCartError"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Invalid actor, exact scope, session or evaluation context",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ShoppingCartError"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Unavailable or unconfirmed result; retry writes using the same key",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ShoppingCartError"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Intent, version, orderability, quantity, currency or amount conflict",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ShoppingCartError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/internal/shopping/cart/commands": {
+      "get": {
+        "operationId": "getShoppingCartCommand",
+        "security": [
+          {
+            "agentOboBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "X-Shopping-Session-Id",
+            "in": "header",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 64
+            },
+            "description": "Must match the verified shopping-agent OBO session."
+          },
+          {
+            "name": "X-Eval-Sandbox-Id",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string"
+            },
+            "description": "Any presence is rejected on production cart and checkout routes."
+          },
+          {
+            "name": "key",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 128
+            },
+            "description": "Exactly one original nonblank command key, retaining its exact value. Use HTTP query-parameter encoding; slash, question mark and hash are valid key data. Missing or repeated key parameters are rejected."
+          }
+        ],
+        "description": "Requires shopping-agent and the exact shopping:cart:read scope; the authenticated subject owns the cart across sessions. Evaluation tokens/headers are rejected. Read-only lookup of the original successful command receipt and the current cart. Unknown and other users' keys both return 404. This request never applies or retries a mutation; an absent receipt does not prove an in-flight request cannot commit.",
+        "responses": {
+          "200": {
+            "description": "Cart result",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ShoppingCartResult"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ShoppingCartError"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Invalid actor, exact scope, session or evaluation context",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ShoppingCartError"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Unavailable or unconfirmed result; retry writes using the same key",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ShoppingCartError"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Owned command receipt not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ShoppingCartError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/shopping/checkouts": {
+      "post": {
+        "operationId": "createShoppingCheckout",
+        "security": [
+          {
+            "directUserBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "Idempotency-Key",
+            "in": "header",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 128
+            },
+            "description": "Nonblank, exact owner-bound command key. Reuse this value after a timeout; never trim or replace it on retry."
+          },
+          {
+            "name": "X-Eval-Sandbox-Id",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string"
+            },
+            "description": "Any presence is rejected on production cart and checkout routes."
+          },
+          {
+            "name": "X-Correlation-Id",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "maxLength": 64
+            },
+            "description": "Optional safe correlation label."
+          }
+        ],
+        "description": "Requires a direct user token with citybuddy.orders.required-permission (order:create by default), matching the ordinary order endpoint; OBO cannot create orders. The buyer confirms the complete cart version and SKU quantities/versions/prices. Sorted product locks, ordinary unpaid child orders, inventory/Outbox effects, checkout receipt and cart clearing commit in one transaction. Matching key replay returns that checkout before rechecking the cleared cart. Checkout does not pay the orders; use the existing per-order mock-payment flow. Evaluation context is rejected. Only positive-price SKUs can be checked out because mock payment requires a positive amount.",
+        "requestBody": {
+          "required": true,
+          "description": "Complete quote, 1-100 unique actual SKUs, at most 32768 bytes. Unknown or duplicate JSON fields, numeric coercion, missing values and trailing tokens are rejected.",
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ShoppingCheckoutCommand"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Matching idempotent replay",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ShoppingCheckout"
+                }
+              }
+            }
+          },
+          "201": {
+            "description": "Checkout and unpaid child orders committed",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ShoppingCheckout"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid complete quote",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ShoppingCheckoutError"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Invalid direct user, OBO or evaluation token",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ShoppingCheckoutError"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Missing configured order permission (order:create by default)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ShoppingCheckoutError"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Stale cart/quote, insufficient stock or idempotency conflict",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ShoppingCheckoutError"
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "Body exceeds 32768 bytes",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ShoppingCheckoutError"
+                }
+              }
+            }
+          },
+          "415": {
+            "description": "Content-Type must be application/json"
+          },
+          "422": {
+            "description": "Product is not orderable",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ShoppingCheckoutError"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Concurrency outcome unconfirmed; retry the same key",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ShoppingCheckoutError"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Identity/database unavailable; retry writes with the same key",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ShoppingCheckoutError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/internal/shopping/checkouts/{checkoutId}": {
+      "get": {
+        "operationId": "getShoppingCheckout",
+        "security": [
+          {
+            "agentOboBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "X-Shopping-Session-Id",
+            "in": "header",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 64
+            },
+            "description": "Must match the verified shopping-agent OBO session."
+          },
+          {
+            "name": "X-Eval-Sandbox-Id",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string"
+            },
+            "description": "Any presence is rejected on production cart and checkout routes."
+          },
+          {
+            "name": "checkoutId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            },
+            "description": "Owned checkout ID."
+          }
+        ],
+        "description": "Requires shopping-agent with exact shopping:orders:read and a matching session. Read-only owned checkout and authoritative child-order snapshots/payment/refund facts; paymentStatus is UNPAID, PARTIALLY_PAID or PAID. No delivery or completed refund is inferred. Unknown and other users' IDs both return 404; evaluation context is rejected.",
+        "responses": {
+          "200": {
+            "description": "Owned checkout and current child-order facts",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ShoppingCheckout"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Invalid shopping OBO actor, scope, session or evaluation context",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ShoppingCheckoutError"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Owned checkout not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ShoppingCheckoutError"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Identity verification unavailable",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ShoppingCheckoutError"
+                }
+              }
+            }
+          }
+        }
+      }
     }
   },
   "components": {
@@ -2415,6 +3207,134 @@
             }
           }
         ]
+      },
+      "ShoppingCartItem": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["productId", "quantity", "name", "unitPriceMinor", "currency", "productVersion", "stockQuantity", "available", "publicationState", "lineTotalMinor", "orderable", "imageUrl", "optionValues", "familyId"],
+        "properties": {
+          "productId": {"type": "string", "minLength": 1, "maxLength": 64},
+          "quantity": {"type": "integer", "format": "int64", "minimum": 1, "maximum": 24},
+          "name": {"type": "string"},
+          "unitPriceMinor": {"type": "integer", "format": "int64", "minimum": 0, "maximum": 9223372036854775807},
+          "currency": {"type": "string", "pattern": "^[A-Z]{3}$"},
+          "productVersion": {"type": "integer", "format": "int64", "minimum": 0, "maximum": 9223372036854775807},
+          "stockQuantity": {"type": "integer", "format": "int64", "minimum": 0, "maximum": 9223372036854775807},
+          "available": {"type": "boolean"},
+          "publicationState": {"type": "string"},
+          "lineTotalMinor": {"anyOf": [{"type": "integer", "format": "int64", "minimum": 0, "maximum": 9223372036854775807}, {"type": "null"}]},
+          "orderable": {"type": "boolean"},
+          "imageUrl": {"anyOf": [{"type": "string"}, {"type": "null"}]},
+          "optionValues": {"type": "object", "additionalProperties": {"type": "string"}},
+          "familyId": {"anyOf": [{"type": "string", "maxLength": 64}, {"type": "null"}]}
+        }
+      },
+      "ShoppingCart": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["version", "currency", "subtotalMinor", "checkoutReady", "items"],
+        "properties": {
+          "version": {"type": "integer", "format": "int64", "minimum": 0, "maximum": 9223372036854775807},
+          "currency": {"anyOf": [{"type": "string", "pattern": "^[A-Z]{3}$"}, {"type": "null"}]},
+          "subtotalMinor": {"anyOf": [{"type": "integer", "format": "int64", "minimum": 0, "maximum": 9223372036854775807}, {"type": "null"}]},
+          "checkoutReady": {"type": "boolean"},
+          "items": {"type": "array", "minItems": 0, "maxItems": 100, "items": {"$ref": "#/components/schemas/ShoppingCartItem"}}
+        }
+      },
+      "ShoppingCartReceipt": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["key", "operation", "productId", "beforeQuantity", "afterQuantity", "appliedVersion"],
+        "properties": {
+          "key": {"type": "string", "minLength": 1, "maxLength": 128},
+          "operation": {"type": "string", "enum": ["ADD", "SET", "REMOVE"]},
+          "productId": {"type": "string", "minLength": 1, "maxLength": 64},
+          "beforeQuantity": {"type": "integer", "format": "int64", "minimum": 0, "maximum": 24},
+          "afterQuantity": {"type": "integer", "format": "int64", "minimum": 0, "maximum": 24},
+          "appliedVersion": {"type": "integer", "format": "int64", "minimum": 0, "maximum": 9223372036854775807}
+        }
+      },
+      "ShoppingCartResult": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["receipt", "cart", "replayed"],
+        "properties": {
+          "receipt": {"$ref": "#/components/schemas/ShoppingCartReceipt"},
+          "cart": {"$ref": "#/components/schemas/ShoppingCart"},
+          "replayed": {"type": "boolean"}
+        }
+      },
+      "ShoppingCartAdd": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["productId", "quantity"],
+        "properties": {
+          "productId": {"type": "string", "minLength": 1, "maxLength": 64},
+          "quantity": {"type": "integer", "format": "int64", "minimum": 1, "maximum": 24}
+        }
+      },
+      "ShoppingCartSet": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["quantity", "expectedCartVersion"],
+        "properties": {
+          "quantity": {"type": "integer", "format": "int64", "minimum": 1, "maximum": 24},
+          "expectedCartVersion": {"type": "integer", "format": "int64", "minimum": 0, "maximum": 9223372036854775807}
+        }
+      },
+      "ShoppingCartError": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["category", "message"],
+        "properties": {
+          "category": {"type": "string", "enum": ["VALIDATION", "NOT_FOUND", "AUTHORIZATION", "IDENTITY_UNAVAILABLE", "IDEMPOTENCY_CONFLICT", "VERSION_CONFLICT", "QUANTITY_LIMIT", "CART_LIMIT", "NOT_ORDERABLE", "CURRENCY_CONFLICT", "AMOUNT_LIMIT", "RETRYABLE_CONCURRENCY", "UNAVAILABLE"]},
+          "message": {"type": "string"}
+        }
+      },
+      "ShoppingCheckoutItem": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["productId", "quantity", "expectedProductVersion", "expectedUnitPriceMinor"],
+        "properties": {
+          "productId": {"type": "string", "minLength": 1, "maxLength": 64},
+          "quantity": {"type": "integer", "format": "int64", "minimum": 1, "maximum": 24},
+          "expectedProductVersion": {"type": "integer", "format": "int64", "minimum": 1, "maximum": 9223372036854775807},
+          "expectedUnitPriceMinor": {"type": "integer", "format": "int64", "minimum": 1, "maximum": 9223372036854775807}
+        }
+      },
+      "ShoppingCheckoutCommand": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["expectedCartVersion", "currency", "items"],
+        "properties": {
+          "expectedCartVersion": {"type": "integer", "format": "int64", "minimum": 0, "maximum": 9223372036854775807},
+          "currency": {"type": "string", "pattern": "^[A-Z]{3}$"},
+          "items": {"type": "array", "minItems": 1, "maxItems": 100, "items": {"$ref": "#/components/schemas/ShoppingCheckoutItem"}}
+        }
+      },
+      "ShoppingCheckout": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["checkoutId", "sourceCartVersion", "currency", "totalMinor", "createdAt", "paymentStatus", "orders", "replayed"],
+        "properties": {
+          "checkoutId": {"type": "string", "format": "uuid"},
+          "sourceCartVersion": {"type": "integer", "format": "int64", "minimum": 0, "maximum": 9223372036854775807},
+          "currency": {"type": "string", "pattern": "^[A-Z]{3}$"},
+          "totalMinor": {"type": "integer", "format": "int64", "minimum": 0, "maximum": 9223372036854775807},
+          "createdAt": {"type": "string", "format": "date-time"},
+          "paymentStatus": {"type": "string", "enum": ["UNPAID", "PARTIALLY_PAID", "PAID"]},
+          "orders": {"type": "array", "minItems": 1, "maxItems": 100, "items": {"$ref": "#/components/schemas/ShoppingOrder"}},
+          "replayed": {"type": "boolean"}
+        }
+      },
+      "ShoppingCheckoutError": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["category", "message"],
+        "properties": {
+          "category": {"type": "string", "enum": ["validation", "ownership", "stale_cart", "stale_quote", "insufficient_stock", "idempotency_conflict", "retryable_concurrency", "unavailable", "not_found", "authentication", "authorization", "identity_unavailable"]},
+          "message": {"type": "string"}
+        }
       },
       "Product": {
         "type": "object",

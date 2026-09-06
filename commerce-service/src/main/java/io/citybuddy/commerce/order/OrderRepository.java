@@ -89,6 +89,14 @@ public class OrderRepository {
   }
 
   public Optional<ProductSnapshot> findProduct(String productId) {
+    return findProduct(productId, false);
+  }
+
+  public Optional<ProductSnapshot> lockProduct(String productId) {
+    return findProduct(productId, true);
+  }
+
+  private Optional<ProductSnapshot> findProduct(String productId, boolean lock) {
     return jdbc
         .query(
             """
@@ -96,7 +104,8 @@ public class OrderRepository {
                    publication_state, publication_version
             FROM product
             WHERE product_id = ?
-            """,
+            """
+                + (lock ? " FOR UPDATE" : ""),
             (result, row) ->
                 new ProductSnapshot(
                     result.getString("product_id"),
