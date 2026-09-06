@@ -25,7 +25,7 @@ source revision, raw point stream and the earlier failed experiment.
 The tradeoff is to reject in Redis before business MySQL/MQ, while retaining complete admission
 decision inputs in the projection and a pending handoff/recovery path for admitted work.
 
-## Current Redis-first capacity boundaries
+## Historical Redis-first entry boundaries
 
 The [2026-09-05 sold-out session](results/seckill_rejection_capacity_20260905.md) used a fresh
 32-activity fixture at every point, legally consumed all 3,200 quota units before timing, then
@@ -36,6 +36,13 @@ Post-window SQL retained only the 3,200 preparation rows: formal rejections adde
 order or ledger row. This is sold-out rejection-entry capacity, not successful admission or order
 completion. Commerce and k6 both consumed substantial CPU at 4,000/s, so the run does not isolate
 which side imposed the first limit.
+
+The [2026-09-06 fixed-warmup diagnosis](results/seckill_rejection_diagnosis_20260906.md)
+uses a new series: 320 preparation orders, a fixed 1,000/s warmup, and separately
+counted 3,000/s and 4,000/s formal windows. Both completed without drops. That does
+not identify the old run's limiting side or turn a change in measurement conditions
+into a service speedup. The new 4,000/s raw latency also retains a negative timing
+sample; completion counts and latency qualification are reported separately.
 
 The [positive-admission session](results/seckill_admission_capacity_20260905.md) used fresh
 high-quota fixtures and a 30-second excluded warmup immediately before each 30-second formal
@@ -51,7 +58,13 @@ The [five-minute results](results/seckill_sustained_orders_20260906.md) and
 [registration](results/seckill_sustained_registration_20260906.md) separate admission from order production and timeout-message dispatch. The initial
 20/s point remained bounded; 40/s accumulated work despite complete HTTP admission.
 The [cadence comparison](results/seckill_cadence_comparison_registration_20260906.md)
-records the resulting batch-delay adjustment and the next loads before execution.
+records the resulting batch-delay adjustment before execution. At the same 40/s
+for 300 seconds, both versions completed all 12,000 orders, while SQL order-wait
+p99 fell from 134.368s to 72.234ms and sampled order/dispatch queues stayed bounded.
+Later 160/s and 200/s points retain the effects of observation cost, clock anomalies
+and the original queue tolerances: 160/s with lighter sampling followed input in
+the final minutes but did not meet every registered numerical tolerance; 200/s
+accumulated work continuously. The report does not claim an exact capacity ceiling.
 Neither a short admission rate nor a finite batch average is stable order capacity.
 
 `run_ladder.sh` uses the result label as the request-key prefix. Standalone k6 callers

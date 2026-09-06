@@ -1,5 +1,11 @@
 # Local seckill diagnosis and consumer scheduling
 
+This report retains the earlier scheduling diagnosis. Subsequent work measured
+[five-minute completed orders](seckill_sustained_orders_20260906.md) and
+[fixed-warmup 3,000/4,000 sold-out windows](seckill_rejection_diagnosis_20260906.md)
+on `16cb21154d1ae94c65fff56b8a96ea7f4514f924`. Its earlier stopping decision is historical;
+those later results do not replace or combine this report's before/after pair.
+
 Baseline CityBuddy commit: `69be167a3df030bf45795c49f444d6e7c24d0423`.
 
 Fixed CityBuddy commit: `cd213a846769b40cfbc95e791847f338fd7917c3`.
