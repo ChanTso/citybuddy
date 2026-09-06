@@ -72,7 +72,7 @@ flowchart LR
   scope, session binding and resource ownership. OBO tokens are not server-enforced one-use tokens.
   Generated high-entropy machine credentials use a client-bound digest; human passwords retain
   BCrypt. Existing BCrypt service rows require explicit rotation to use the new verifier.
-- **Merchant approval.** Commerce snapshots one to three same-currency products into an immutable
+- **Merchant approval.** Commerce snapshots one to 25 same-currency products into an immutable
   operator/session/request-key draft. Approval requires the owning operator's direct identity.
   One transaction locks products in sorted order, verifies all versions and eligibility, then
   commits prices, the receipt, catalog generation and publication events. Business conflicts
@@ -97,7 +97,7 @@ separate projection/cache workloads; Elasticsearch is a derived knowledge index.
 Outbox records have configured publishers. Other retained transaction records must not be counted
 as an undelivered queue merely because their state is `PENDING`.
 
-Merchant analysis reads three restricted `merchant_*` views without user identities. Amounts are
+Merchant analysis reads restricted `merchant_*` views without user identities. Payment amounts are
 historical successful-payment gross **before refunds**, grouped by currency and payment-success
 time in UTC half-open intervals. Changing a product price does not rewrite historical paid amounts.
 See the [merchant contract](docs/CONTRACTS.md#merchant-analysis-and-approved-price-changes).

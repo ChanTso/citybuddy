@@ -1318,6 +1318,15 @@ other query fields. It returns at most three matching published FAQ records from
 literal keyword, then ordering by score descending and FAQ ID. A new draft keeps the prior
 published answer visible; an unpublished draft is excluded. FAQ fixture publication uses
 `FaqPublicationService` so draft commands, publication commands and Outbox stay coherent.
+The offline `FaqFixturePublisherCli` accepts 1–100 distinct `{faqId,question,answer}` entries
+from standard input, bounded to 1 MiB with strict JSON fields and types. One read-committed
+transaction processes IDs in sorted order. Identical published content makes no writes and
+preserves any newer draft; a matching unpublished draft is published, while a different
+unpublished draft rejects and rolls back the whole batch. Changed published content advances
+the current draft and publication versions through the original service. Connection secrets
+come only from the existing Spring datasource environment variables; errors emit categories
+without JDBC messages. The [offline publication command](FAQ_FIXTURES.md) runs from the regular
+Commerce JAR without starting HTTP listeners or background workers.
 
 `POST /api/retail/fulfillment-options` also requires direct-user `catalog:read`, with the
 verified subject supplying membership. Its body is exactly `{items:[{productId,quantity}]}`,
