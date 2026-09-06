@@ -195,6 +195,7 @@ public final class MerchantController {
     assignableTypes = {
       MerchantController.class,
       MerchantOrderIssueController.class,
+      MerchantOrderController.class,
       MerchantListingController.class,
       MerchantMarketingController.class
     })
