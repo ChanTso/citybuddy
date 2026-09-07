@@ -137,7 +137,7 @@ def test_every_integration_suite_uses_runtime_owned_ports() -> None:
 @pytest.mark.parametrize(
     ("name", "minimum_waits"),
     [
-        ("test_identity_integration.sh", 5),
+        ("test_identity_integration.sh", 3),
         ("test_evaluation_identity_integration.sh", 1),
         ("test_evaluation_sandbox_integration.sh", 1),
     ],
@@ -165,8 +165,16 @@ def test_host_applications_request_kernel_assigned_ports() -> None:
     assert 'AGENT_PORT="$' not in combined
     assert 'fake_litellm_server.py --port "$' not in combined
     assert combined.count("--server.port=0") >= 4
-    assert combined.count("AGENT_PORT=0") >= 3
-    assert combined.count("fake_litellm_server.py --port 0") >= 3
+    assert identity.count("AGENT_PORT=0") == 1
+    assert evaluation.count("AGENT_PORT=0") == 1
+    for script in (identity, evaluation):
+        assert 'process_bound_port agent_port uvicorn "$agent_pid"' in script
+    assert "fake_litellm_server.py" not in combined
+    proxy_launch = evaluation.split("uv run python scripts/drop_response_proxy.py", 1)[1].split(
+        "drop_proxy_pid=$!", 1
+    )[0]
+    assert "  --port 0 --upstream" in proxy_launch
+    assert 'process_bound_port drop_proxy_port proxy "$drop_proxy_pid"' in evaluation
     assert "process_bound_port" in combined
 
 
@@ -207,7 +215,7 @@ def test_port_zero_restarts_refresh_every_live_dependent() -> None:
     assert "start_agent true" in jwks_recovery
 
     evidence_restart = (
-        'assert_status 200 "agent evidence survives restart without model or commerce availability"'
+        'assert_status 200 "agent evidence survives restart without commerce availability"'
     )
     commerce_recovery = content.split(evidence_restart, 1)[1].split(
         'assert_status 200 "state persists across commerce restart"', 1

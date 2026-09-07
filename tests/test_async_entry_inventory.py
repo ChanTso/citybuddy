@@ -247,7 +247,6 @@ def test_faq_cache_writers_remain_on_their_exact_runtime_boundaries() -> None:
     }
     agent_cache_references = relative_sources_with("agent-service/src", ".py", "RedisFaqCache")
     assert agent_cache_references == {
-        "agent-service/src/citybuddy_agent/application.py",
         "agent-service/src/citybuddy_agent/faq_cache.py",
     }
     commerce_sources = "\n".join(

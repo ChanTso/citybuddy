@@ -31,7 +31,7 @@ from .actions import (
     validate_pending_action_resolution,
     validate_resolved_action_events,
 )
-from .agent_control import (
+from .history_types import (
     SESSION_CONTEXT_MAX_CANDIDATE_TOKENS,
     SESSION_CONTEXT_MAX_TURNS,
     SESSION_CONTEXT_POLICY_VERSION,

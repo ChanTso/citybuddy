@@ -28,7 +28,7 @@ from .actions import (
     validate_pending_action_resolution,
     validate_resolved_action_events,
 )
-from .agent_control import (
+from .history_types import (
     EMPTY_CONVERSATION_HISTORY,
     MAX_ASSISTANT_MESSAGE_CHARACTERS,
     MAX_USER_MESSAGE_CHARACTERS,

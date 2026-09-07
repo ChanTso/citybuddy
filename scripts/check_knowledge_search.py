@@ -1,4 +1,4 @@
-"""Real CB-090 Elasticsearch, ToolSpec, privacy, and failure-boundary probe."""
+"""Real Elasticsearch client privacy, bounded recall, and failure-boundary probe."""
 
 from __future__ import annotations
 
@@ -11,13 +11,6 @@ from urllib.parse import quote
 
 import httpx
 from citybuddy_agent import http_client
-from citybuddy_agent.agent_control import (
-    AgentEvent,
-    AttemptBudget,
-    ModelPlan,
-    ProviderRoute,
-    ToolAdapter,
-)
 from citybuddy_agent.knowledge import (
     EMBEDDING_DIMS,
     FINAL_RESULT_LIMIT,
@@ -25,48 +18,10 @@ from citybuddy_agent.knowledge import (
     KnowledgeSearchFailure,
     KnowledgeSearchInput,
 )
-from citybuddy_agent.retrieval import RerankOutput, RerankScore, load_calibration
+from pydantic import ValidationError
 
 INDEX = "knowledge_docs_v1"
 ALIAS = "knowledge_docs_read"
-
-
-class ForbiddenObo:
-    def __init__(self) -> None:
-        self.calls = 0
-
-    def exchange(
-        self,
-        direct_token: str,
-        subject: str,
-        session_id: str,
-        scope: str,
-        sandbox_id: str | None = None,
-    ) -> str:
-        del direct_token, subject, session_id, scope, sandbox_id
-        self.calls += 1
-        raise AssertionError("knowledge.search must not acquire OBO authority")
-
-
-class DeterministicReranker:
-    def rerank(
-        self,
-        plan: ModelPlan,
-        request: Any,
-        budget: AttemptBudget,
-        events: list[AgentEvent],
-    ) -> RerankOutput:
-        del events
-        budget.charge("reranker_http", plan.reranker_route.provider_key)
-        return RerankOutput(
-            scores=tuple(
-                RerankScore(
-                    candidate_id=candidate.candidate_id,
-                    score=round(0.95 - candidate.fused_rank * 0.2, 2),
-                )
-                for candidate in request.candidates
-            )
-        )
 
 
 def api(
@@ -141,7 +96,7 @@ def main() -> None:
     base_url = str(args.elasticsearch_url).rstrip("/")
     clients = http_client.HttpClients(
         "shared",
-        (base_url, "http://127.0.0.1:9", "http://commerce-must-not-be-used"),
+        (base_url, "http://127.0.0.1:9"),
     )
     http_client.install(clients)
     try:
@@ -254,47 +209,12 @@ def run(base_url: str) -> None:
         if forbidden.intersection(result) or forbidden.intersection(metadata):
             raise AssertionError("Private or live-commerce fields escaped retrieval")
 
-    obo = ForbiddenObo()
-    tool_events: list[AgentEvent] = []
-    tool_budget = AttemptBudget(8, tool_events)
-    tool_adapter = ToolAdapter(
-        "http://commerce-must-not-be-used",
-        obo,
-        client,
-        DeterministicReranker(),
-        load_calibration(),
-    )
-    model_plan = ModelPlan(
-        tier="standard",
-        routes=(ProviderRoute("support-standard-primary", "primary"),),
-        reranker_route=ProviderRoute("support-reranker-standard", "reranker"),
-        attempt_limit=8,
-        tool_profile="read",
-    )
-    tool_result = tool_adapter.execute(
-        name="knowledge.search",
-        serialized_arguments='{"query":"退款 policy"}',
-        direct_token="direct-token",
-        subject="user-subject",
-        session_id="support-session",
-        budget=tool_budget,
-        events=tool_events,
-        plan=model_plan,
-    )
-    if tool_result.outcome != "ok" or obo.calls != 0 or tool_budget.used != 5:
-        raise AssertionError("knowledge.search crossed the OBO or bounded-I/O boundary")
-    denied_budget = AttemptBudget(2, [])
-    denied = tool_adapter.execute(
-        name="knowledge.search",
-        serialized_arguments='{"query":"refund","index":"private_orders"}',
-        direct_token="direct-token",
-        subject="user-subject",
-        session_id="support-session",
-        budget=denied_budget,
-        events=[],
-    )
-    if denied.model_view.get("reason") != "invalid_arguments" or denied_budget.used != 0:
-        raise AssertionError("Caller-selected index authority reached Elasticsearch")
+    try:
+        KnowledgeSearchInput.model_validate({"query": "refund", "index": "private_orders"})
+    except ValidationError:
+        pass
+    else:
+        raise AssertionError("Caller-selected index authority entered the search client")
 
     existing = object_payload(
         api(base_url, "GET", f"/{INDEX}/_doc/{quote('faq-refund-policy:overview', safe='')}")
@@ -510,7 +430,7 @@ def run(base_url: str) -> None:
                 "denseRecall": "passed",
                 "indexVersion": INDEX,
                 "mixedLanguageBm25": "passed",
-                "oboCalls": obo.calls,
+                "callerIndexRejected": True,
                 "realBoundedResultCount": FINAL_RESULT_LIMIT,
                 "realRrfTieOrder": "passed",
                 "rrfRepeatable": True,

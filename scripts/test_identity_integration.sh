@@ -12,15 +12,11 @@ project="citybuddy-cb020-test-$$"
 auth_port=""
 agent_port=""
 commerce_port=""
-proxy_port=""
-timeout_agent_port=""
 MYSQL_PORT=""
 compose=(docker compose --project-name "$project" --env-file "$env_file" --file compose.yaml)
 auth_pid=""
 agent_pid=""
 commerce_pid=""
-proxy_pid=""
-timeout_agent_pid=""
 
 cleanup() {
   local status=$?
@@ -36,14 +32,6 @@ cleanup() {
   if [[ -n "$commerce_pid" ]]; then
     kill "$commerce_pid" >/dev/null 2>&1 || true
     wait "$commerce_pid" >/dev/null 2>&1 || true
-  fi
-  if [[ -n "$proxy_pid" ]]; then
-    kill "$proxy_pid" >/dev/null 2>&1 || true
-    wait "$proxy_pid" >/dev/null 2>&1 || true
-  fi
-  if [[ -n "$timeout_agent_pid" ]]; then
-    kill "$timeout_agent_pid" >/dev/null 2>&1 || true
-    wait "$timeout_agent_pid" >/dev/null 2>&1 || true
   fi
   "${compose[@]}" down --volumes --remove-orphans >/dev/null 2>&1 || resource_stop_status=$?
   rm -rf "$tmp_dir"
@@ -233,114 +221,83 @@ INSERT INTO support_conversation (
    'bench-user-9003', 'ACTIVE', 0);
 "
 
-warm_history_commit="$(git rev-parse --verify HEAD)"
-warm_history_nonce=0123456789abcdef0123456789abcdef
-for warm_history_case in empty one-short max-count high-pressure; do
-  warm_history_pool="$tmp_dir/warm-history-$warm_history_case-pool.json"
-  warm_history_output="$tmp_dir/warm-history-$warm_history_case-fixture.json"
-  printf '[{"sessionId":"warm-history-%s-session"}]\n' "$warm_history_case" \
-    > "$warm_history_pool"
-  uv run python bench/agent/build_warm_history_fixture.py \
-    --case "$warm_history_case" \
-    --sessions 1 \
-    --pool "$warm_history_pool" \
-    --mysql-host 127.0.0.1 \
-    --mysql-port "$MYSQL_PORT" \
-    --mysql-password "$agent_app_password" \
-    --citybuddy-commit "$warm_history_commit" \
-    --setup-nonce "$warm_history_nonce" \
-    --out "$warm_history_output"
-done
-
+# Exercise the retained history reader with real completed turns, including its SQL
+# count bound and maximum text sizes. Context selection and model routing are retired.
 WARM_HISTORY_MYSQL_PORT="$MYSQL_PORT" \
 WARM_HISTORY_MYSQL_PASSWORD="$agent_app_password" \
-WARM_HISTORY_FIXTURE_DIR="$tmp_dir" \
 uv run python - <<'PY'
-import json
 import os
-from pathlib import Path
+from types import SimpleNamespace
 
 import pymysql
 
-from citybuddy_agent.agent_control import (
-    ModelRouter,
-    ProviderRoute,
-    RuleRouter,
-    SessionContextPolicy,
-)
 from citybuddy_agent.conversation import MysqlConversationStore
+from citybuddy_agent.history_types import (
+    AgentEvent,
+    MAX_ASSISTANT_MESSAGE_CHARACTERS,
+    MAX_USER_MESSAGE_CHARACTERS,
+)
 
-delivery_message = "hello, can you tell me about delivery times"
+settings = SimpleNamespace(
+    mysql_host="127.0.0.1",
+    mysql_port=int(os.environ["WARM_HISTORY_MYSQL_PORT"]),
+    mysql_password=os.environ["WARM_HISTORY_MYSQL_PASSWORD"],
+    attempt_budget=8,
+)
+store = MysqlConversationStore(settings)
 boundaries = {
-    "empty": ("warm-history-empty-session", 0, [], False, "low", 0),
-    "one-short": ("warm-history-one-short-session", 1, [1], False, "low", 1),
+    "empty": ("warm-history-empty-session", "bench-user-9000", 0, [], False),
+    "one-short": ("warm-history-one-short-session", "bench-user-9001", 1, [1], False),
     "max-count": (
-        "warm-history-max-count-session",
-        17,
-        list(range(2, 18)),
-        True,
-        "low",
-        16,
+        "warm-history-max-count-session", "bench-user-9002", 17, list(range(2, 18)), True,
     ),
     "high-pressure": (
-        "warm-history-high-pressure-session",
-        17,
-        list(range(2, 18)),
-        True,
-        "high",
-        1,
+        "warm-history-high-pressure-session", "bench-user-9003", 17, list(range(2, 18)), True,
     ),
 }
+expected_text = {}
+for case_name, (session_id, subject, count, sequences, older) in boundaries.items():
+    for sequence in range(1, count + 1):
+        user_text = f"Earlier parcel note {sequence:02d}."
+        assistant_text = f"Neutral reply {sequence:02d}."
+        if case_name == "high-pressure":
+            user_text = user_text.ljust(MAX_USER_MESSAGE_CHARACTERS, "x")
+            assistant_text = assistant_text.ljust(MAX_ASSISTANT_MESSAGE_CHARACTERS, "y")
+        expected_text[(case_name, sequence)] = (user_text, assistant_text)
+        start = store.begin_turn(
+            session_id=session_id, subject=subject, sandbox_id=None,
+            correlation_key=f"historical-reader-{sequence}", message=user_text,
+        )
+        store.complete_turn(
+            start=start, response_text=assistant_text, outcome="completed",
+            events=(AgentEvent("AGENT_OUTCOME", {"outcome": "completed"}),),
+        )
 connection = pymysql.connect(
-    host="127.0.0.1",
-    port=int(os.environ["WARM_HISTORY_MYSQL_PORT"]),
-    user="agent_app",
-    password=os.environ["WARM_HISTORY_MYSQL_PASSWORD"],
-    database="cs_db",
-    autocommit=False,
+    host=settings.mysql_host, port=settings.mysql_port, user="agent_app",
+    password=settings.mysql_password, database="cs_db", autocommit=False,
 )
 try:
     with connection.cursor() as cursor:
         for case_name, boundary in boundaries.items():
-            session_id, persisted, sequences, older, pressure, included = boundary
+            session_id, subject, persisted, sequences, older = boundary
             cursor.execute(
                 "SELECT conversation_id, user_subject, next_turn_sequence "
                 "FROM support_conversation WHERE session_id = %s",
                 (session_id,),
             )
-            conversation_id, subject, next_sequence = cursor.fetchone()
+            conversation_id, stored_subject, next_sequence = cursor.fetchone()
+            assert stored_subject == subject
             assert next_sequence == persisted
-            history = MysqlConversationStore._load_recent_history(  # noqa: SLF001
-                cursor,
-                conversation_id=conversation_id,
-                session_id=session_id,
-                subject=subject,
-                before_turn_sequence=persisted + 1,
+            history = MysqlConversationStore._load_recent_history(
+                cursor, conversation_id=conversation_id, session_id=session_id,
+                subject=subject, before_turn_sequence=persisted + 1,
             )
             assert [turn.turn_sequence for turn in history.turns] == sequences
             assert history.older_turns_available is older
-            window = SessionContextPolicy().select(history)
-            assert window.pressure == pressure
-            assert len(window.turns) == included
-            assert [turn.turn_sequence for turn in window.turns] == sequences[-included:]
-            prior = ()
-            if window.turns:
-                prior = (window.turns[-1].user_text, window.turns[-1].assistant_text)
-            plan = ModelRouter((ProviderRoute("primary", "fixture"),), 16).plan(
-                RuleRouter().signals(delivery_message, prior)
-            )
-            assert plan.tool_profile == "read"
-
-            fixture = json.loads(
-                (
-                    Path(os.environ["WARM_HISTORY_FIXTURE_DIR"])
-                    / f"warm-history-{case_name}-fixture.json"
-                ).read_text(encoding="utf-8")
-            )
-            assert fixture["case"] == case_name
-            assert fixture["history"]["persistedTurnCount"] == persisted
-            assert fixture["history"]["loadedTurnCount"] == len(sequences)
-            assert fixture["history"]["includedTurnCount"] == included
+            for turn in history.turns:
+                assert (turn.user_text, turn.assistant_text) == expected_text[
+                    (case_name, turn.turn_sequence)
+                ]
 finally:
     connection.close()
 PY
@@ -356,11 +313,12 @@ test "$(mysql_query agent_app "$agent_app_password" cs_db \
      ) fixture_counts")" = \
   'bench-user-9001:1,bench-user-9002:17,bench-user-9003:17'
 mysql_query root "$bootstrap_password" cs_db "
+DELETE FROM support_event WHERE user_subject LIKE 'bench-user-900%';
 DELETE FROM support_turn WHERE user_subject LIKE 'bench-user-900%';
 DELETE FROM support_conversation WHERE user_subject LIKE 'bench-user-900%';
 DELETE FROM support_session WHERE user_subject LIKE 'bench-user-900%';
 "
-echo "Verified warm-history fixture against the real MySQL loader and context policy."
+echo "Verified retained MySQL history ordering, count bound, and complete stored text."
 
 mysql_query auth_app "$auth_app_password" commerce_db "
 INSERT INTO auth_user_principal (principal_id, subject, login_identifier, state, permissions) VALUES
@@ -466,12 +424,6 @@ wait_port \
   "http://127.0.0.1:$commerce_port/internal/tools/catalog.product.get" \
   "$commerce_pid" \
   "$tmp_dir/commerce.log"
-
-uv run python scripts/fake_litellm_server.py --port 0 \
-  >"$tmp_dir/proxy.log" 2>&1 &
-proxy_pid=$!
-process_bound_port proxy_port uvicorn "$proxy_pid" "$tmp_dir/proxy.log" 0
-wait_http "http://127.0.0.1:$proxy_port/fixture/counts" "$proxy_pid" "$tmp_dir/proxy.log"
 
 curl --silent --show-error "http://127.0.0.1:$auth_port/auth/jwks" >"$tmp_dir/jwks.json"
 uv run python scripts/check_identity_jwks.py "$tmp_dir/jwks.json" current-key overlap-key
@@ -670,10 +622,7 @@ MYSQL_AGENT_APP_PASSWORD="$agent_app_password" \
 AGENT_SERVICE_CLIENT_ID=agent-service \
 AGENT_SERVICE_CLIENT_SECRET="$service_password" \
 AGENT_EXCHANGE_SCOPES=catalog:read \
-AGENT_MODEL_PROXY_URL="http://127.0.0.1:$proxy_port" \
-AGENT_COMMERCE_TOOLS_URL="http://127.0.0.1:$commerce_port" \
 AGENT_ATTEMPT_BUDGET=8 \
-AGENT_CIRCUIT_OPEN_SECONDS=3 \
 uv run citybuddy-agent >"$tmp_dir/agent.log" 2>&1 &
 agent_pid=$!
 process_bound_port agent_port uvicorn "$agent_pid" "$tmp_dir/agent.log" 0
@@ -705,186 +654,47 @@ assert_status 401 "production evaluation header" \
   --header 'Content-Type: application/json' \
   --data '{}'
 
-chat_headers=(
-  --header "Authorization: Bearer $direct_token"
-  --header "X-Session-Id: $session_id"
-  --header 'Content-Type: application/json'
-)
-assert_status 200 "durable bounded support turn" \
-  --request POST "http://127.0.0.1:$agent_port/api/chat" \
-  "${chat_headers[@]}" \
-  --header 'Idempotency-Key: cb080-first-turn' \
-  --data '{"message":"Where is my order?"}'
-cp "$tmp_dir/http-response.json" "$tmp_dir/first-chat.json"
-conversation_id="$(uv run python scripts/read_json_field.py "$tmp_dir/first-chat.json" conversationId)"
-trace_id="$(uv run python scripts/read_json_field.py "$tmp_dir/first-chat.json" traceId)"
-turn_id="$(uv run python scripts/read_json_field.py "$tmp_dir/first-chat.json" turnId)"
-test "$(uv run python scripts/read_json_field.py "$tmp_dir/first-chat.json" outcome)" = completed
+# The model loop is retired. Persist one explicit historical turn through the production
+# store so feedback, replay and SQL constraints still run at their live boundaries.
+store_fixture() {
+  MYSQL_HOST=127.0.0.1 MYSQL_PORT="$MYSQL_PORT" \
+    MYSQL_AGENT_APP_PASSWORD="$agent_app_password" \
+    uv run python scripts/support_history_fixture.py "$@"
+}
+store_fixture complete --session="$session_id" --subject=user-integration \
+  --key=cb080-first-turn --message='Where is my order?' >"$tmp_dir/first-history.json"
+conversation_id="$(uv run python scripts/read_json_field.py "$tmp_dir/first-history.json" conversationId)"
+trace_id="$(uv run python scripts/read_json_field.py "$tmp_dir/first-history.json" traceId)"
+turn_id="$(uv run python scripts/read_json_field.py "$tmp_dir/first-history.json" turnId)"
+historical_trace="$trace_id"
 test "$(mysql_query agent_app "$agent_app_password" cs_db "SELECT COUNT(*) FROM support_conversation WHERE conversation_id = '$conversation_id' AND session_id = '$session_id' AND user_subject = 'user-integration'")" = 1
 test "$(mysql_query agent_app "$agent_app_password" cs_db "SELECT CONCAT(state, ':', turn_sequence) FROM support_turn WHERE turn_id = '$turn_id' AND trace_id = '$trace_id'")" = COMPLETED:1
-test "$(mysql_query agent_app "$agent_app_password" cs_db "SELECT GROUP_CONCAT(CONCAT(sequence, ':', event_type) ORDER BY sequence SEPARATOR ',') FROM support_event WHERE trace_id = '$trace_id'")" = '1:USER_INPUT,2:CONTEXT_WINDOW,3:ROUTING_DECISION,4:BUDGET_CHARGED,5:CIRCUIT_OUTCOME,6:MODEL_OUTCOME,7:AGENT_OUTCOME,8:ASSISTANT_RESPONSE,9:TURN_COMPLETED'
-
-assert_status 200 "same-intent durable replay" \
-  --request POST "http://127.0.0.1:$agent_port/api/chat" \
-  "${chat_headers[@]}" \
-  --header 'Idempotency-Key: cb080-first-turn' \
-  --data '{"message":"Where is my order?"}'
-cmp "$tmp_dir/first-chat.json" "$tmp_dir/http-response.json"
-test "$(mysql_query agent_app "$agent_app_password" cs_db "SELECT COUNT(*) FROM support_turn WHERE session_id = '$session_id'")" = 1
-test "$(mysql_query agent_app "$agent_app_password" cs_db "SELECT COUNT(*) FROM support_event WHERE trace_id = '$trace_id'")" = 9
-
-assert_status 201 "bounded-context support-session creation" \
-  --request POST "http://127.0.0.1:$agent_port/api/sessions" \
-  --header "Authorization: Bearer $direct_token" \
-  --header 'Content-Type: application/json' \
-  --data '{}'
-context_session_id="$(uv run python scripts/read_json_field.py "$tmp_dir/http-response.json" sessionId)"
-context_headers=(
-  --header "Authorization: Bearer $direct_token"
-  --header "X-Session-Id: $context_session_id"
-  --header 'Content-Type: application/json'
-)
-assert_status 200 "bounded-context seed turn" \
-  --request POST "http://127.0.0.1:$agent_port/api/chat" \
-  "${context_headers[@]}" \
-  --header 'Idempotency-Key: context-seed' \
-  --data '{"message":"context-seed remember amber for this support session"}'
-context_seed_turn="$(uv run python scripts/read_json_field.py "$tmp_dir/http-response.json" turnId)"
-test "$(uv run python scripts/read_json_field.py "$tmp_dir/http-response.json" reply)" = 'The session codeword is amber.'
-assert_status 200 "bounded-context follow-up receives prior role pair" \
-  --request POST "http://127.0.0.1:$agent_port/api/chat" \
-  "${context_headers[@]}" \
-  --header 'Idempotency-Key: context-followup' \
-  --data '{"message":"context-followup what was the session codeword?"}'
-context_followup_turn="$(uv run python scripts/read_json_field.py "$tmp_dir/http-response.json" turnId)"
-test "$(uv run python scripts/read_json_field.py "$tmp_dir/http-response.json" reply)" = 'The session codeword is amber.'
-test "$(mysql_query agent_app "$agent_app_password" cs_db "SELECT CONCAT(JSON_UNQUOTE(JSON_EXTRACT(payload_json, '$.policyVersion')), ':', JSON_EXTRACT(payload_json, '$.loadedTurnCount'), ':', JSON_UNQUOTE(JSON_EXTRACT(payload_json, '$.includedTurnIds[0]')), ':', JSON_EXTRACT(payload_json, '$.olderTurnsAvailable')) FROM support_event WHERE turn_id = '$context_followup_turn' AND event_type = 'CONTEXT_WINDOW'")" = "session-context-v1:1:$context_seed_turn:false"
-test "$(mysql_query agent_app "$agent_app_password" cs_db "SELECT LOCATE('amber', CAST(payload_json AS CHAR)) FROM support_event WHERE turn_id = '$context_followup_turn' AND event_type = 'CONTEXT_WINDOW'")" = 0
-echo "Verified bounded completed-turn context reaches the model with content-free selection evidence."
-
-assert_status 200 "filtered SSE safe text" \
-  --request POST "http://127.0.0.1:$agent_port/api/chat/stream" \
-  "${chat_headers[@]}" \
-  --header 'Idempotency-Key: cb082-safe-stream' \
-  --data '{"message":"safe stream"}'
-cp "$tmp_dir/http-response.json" "$tmp_dir/safe-stream.sse"
-uv run python scripts/check_sse_stream.py "$tmp_dir/safe-stream.sse" \
-  --terminal done --expected-text 'The bounded support route completed safely.'
-stream_trace="$(mysql_query agent_app "$agent_app_password" cs_db "SELECT trace_id FROM support_turn WHERE session_id = '$session_id' AND correlation_key = 'cb082-safe-stream'")"
-test -n "$stream_trace"
-assert_status 200 "filtered SSE durable replay" \
-  --request POST "http://127.0.0.1:$agent_port/api/chat/stream" \
-  "${chat_headers[@]}" \
-  --header 'Idempotency-Key: cb082-safe-stream' \
-  --data '{"message":"safe stream"}'
-cmp "$tmp_dir/safe-stream.sse" "$tmp_dir/http-response.json"
-test "$(mysql_query agent_app "$agent_app_password" cs_db "SELECT COUNT(*) FROM support_turn WHERE session_id = '$session_id' AND correlation_key = 'cb082-safe-stream'")" = 1
-assert_status 409 "filtered SSE conflicting idempotency reuse" \
-  --request POST "http://127.0.0.1:$agent_port/api/chat/stream" \
-  "${chat_headers[@]}" \
-  --header 'Idempotency-Key: cb082-safe-stream' \
-  --data '{"message":"different stream intent"}'
-assert_status 403 "filtered SSE forged support session" \
-  --request POST "http://127.0.0.1:$agent_port/api/chat/stream" \
-  --header "Authorization: Bearer $direct_token" \
-  --header 'X-Session-Id: forged-session' \
-  --header 'Idempotency-Key: cb082-forged-stream' \
-  --header 'Content-Type: application/json' \
-  --data '{"message":"hello"}'
-assert_status 403 "filtered SSE cross-user support session" \
-  --request POST "http://127.0.0.1:$agent_port/api/chat/stream" \
-  --header "Authorization: Bearer $other_token" \
-  --header "X-Session-Id: $session_id" \
-  --header 'Idempotency-Key: cb082-cross-user-stream' \
-  --header 'Content-Type: application/json' \
-  --data '{"message":"hello"}'
-assert_status 401 "filtered SSE rejects production evaluation header" \
-  --request POST "http://127.0.0.1:$agent_port/api/chat/stream" \
-  "${chat_headers[@]}" \
-  --header 'Idempotency-Key: cb082-eval-stream' \
-  --header 'X-Eval-Sandbox-Id: forbidden-production-context' \
-  --data '{"message":"hello"}'
-assert_status 401 "filtered SSE requires direct-user bearer" \
-  --request POST "http://127.0.0.1:$agent_port/api/chat/stream" \
-  --header "X-Session-Id: $session_id" \
-  --header 'Idempotency-Key: cb082-missing-auth-stream' \
-  --header 'Content-Type: application/json' \
-  --data '{"message":"hello"}'
-
-assert_status 200 "filtered SSE ToolSpec success" \
-  --request POST "http://127.0.0.1:$agent_port/api/chat/stream" \
-  "${chat_headers[@]}" \
-  --header 'Idempotency-Key: cb082-tool-stream' \
-  --data '{"message":"tool-success product-1"}'
-cp "$tmp_dir/http-response.json" "$tmp_dir/tool-stream.sse"
-uv run python scripts/check_sse_stream.py "$tmp_dir/tool-stream.sse" \
-  --terminal done --expected-text 'The requested information is available.'
-tool_stream_trace="$(mysql_query agent_app "$agent_app_password" cs_db "SELECT trace_id FROM support_turn WHERE session_id = '$session_id' AND correlation_key = 'cb082-tool-stream'")"
-test "$(mysql_query agent_app "$agent_app_password" cs_db "SELECT COUNT(*) FROM support_event WHERE trace_id = '$tool_stream_trace' AND event_type = 'TOOL_LIFECYCLE'")" = 2
-assert_status 200 "filtered SSE tool replay does not re-execute" \
-  --request POST "http://127.0.0.1:$agent_port/api/chat/stream" \
-  "${chat_headers[@]}" \
-  --header 'Idempotency-Key: cb082-tool-stream' \
-  --data '{"message":"tool-success product-1"}'
-cmp "$tmp_dir/tool-stream.sse" "$tmp_dir/http-response.json"
-test "$(mysql_query agent_app "$agent_app_password" cs_db "SELECT COUNT(*) FROM support_event WHERE trace_id = '$tool_stream_trace' AND event_type = 'TOOL_LIFECYCLE'")" = 2
-
-assert_status 200 "filtered SSE structured tool denial" \
-  --request POST "http://127.0.0.1:$agent_port/api/chat/stream" \
-  "${chat_headers[@]}" \
-  --header 'Idempotency-Key: cb082-denied-stream' \
-  --data '{"message":"tool-malformed"}'
-uv run python scripts/check_sse_stream.py "$tmp_dir/http-response.json" \
-  --terminal done --expected-text 'The requested information is available.'
-denied_stream_trace="$(mysql_query agent_app "$agent_app_password" cs_db "SELECT trace_id FROM support_turn WHERE session_id = '$session_id' AND correlation_key = 'cb082-denied-stream'")"
-test "$(mysql_query agent_app "$agent_app_password" cs_db "SELECT JSON_UNQUOTE(JSON_EXTRACT(payload_json, '$.reason')) FROM support_event WHERE trace_id = '$denied_stream_trace' AND event_type = 'TOOL_DENIED'")" = invalid_arguments
-
-assert_status 200 "provider failure is one bounded public SSE error" \
-  --request POST "http://127.0.0.1:$agent_port/api/chat/stream" \
-  "${chat_headers[@]}" \
-  --header 'Idempotency-Key: cb082-provider-failure' \
-  --data '{"message":"provider-failure"}'
-uv run python scripts/check_sse_stream.py "$tmp_dir/http-response.json" \
-  --terminal error --error-code provider_unavailable
-assert_status 200 "budget exhaustion is one bounded public SSE error" \
-  --request POST "http://127.0.0.1:$agent_port/api/chat/stream" \
-  "${chat_headers[@]}" \
-  --header 'Idempotency-Key: cb082-budget-failure' \
-  --data '{"message":"budget-exhaustion"}'
-uv run python scripts/check_sse_stream.py "$tmp_dir/http-response.json" \
-  --terminal error --error-code attempt_budget_exhausted
-assert_status 200 "action claim without receipt remains non-authoritative explanation" \
-  --request POST "http://127.0.0.1:$agent_port/api/chat/stream" \
-  "${chat_headers[@]}" \
-  --header 'Idempotency-Key: cb082-unsafe-action' \
-  --data '{"message":"unsafe-action-claim"}'
-uv run python scripts/check_sse_stream.py "$tmp_dir/http-response.json" \
-  --terminal done --expected-text 'Your refund has been issued.'
-if grep -q 'event: action_receipt' "$tmp_dir/http-response.json"; then
-  echo "Unreceipted explanation acquired an action receipt." >&2
-  exit 1
-fi
-
-set +e
-curl --silent --show-error --max-time 0.05 \
-  --request POST "http://127.0.0.1:$agent_port/api/chat/stream" \
-  "${chat_headers[@]}" \
-  --header 'Idempotency-Key: cb082-disconnect' \
-  --data '{"message":"disconnect-slow"}' \
-  >"$tmp_dir/disconnected-stream.sse"
-disconnect_curl_status=$?
-set -e
-test "$disconnect_curl_status" -ne 0
-sleep 1
-assert_status 200 "authorized replay after disconnect uses durable turn" \
-  --request POST "http://127.0.0.1:$agent_port/api/chat/stream" \
-  "${chat_headers[@]}" \
-  --header 'Idempotency-Key: cb082-disconnect' \
-  --data '{"message":"disconnect-slow"}'
-uv run python scripts/check_sse_stream.py "$tmp_dir/http-response.json" \
-  --terminal done --expected-text 'The bounded response completed safely.'
-test "$(mysql_query agent_app "$agent_app_password" cs_db "SELECT COUNT(*) FROM support_turn WHERE session_id = '$session_id' AND correlation_key = 'cb082-disconnect'")" = 1
-echo "Verified bounded filtered SSE, terminal ordering, replay, failure, and disconnect recovery."
+test "$(mysql_query agent_app "$agent_app_password" cs_db "SELECT GROUP_CONCAT(CONCAT(sequence, ':', event_type) ORDER BY sequence SEPARATOR ',') FROM support_event WHERE trace_id = '$trace_id'")" = '1:USER_INPUT,2:AGENT_OUTCOME,3:ASSISTANT_RESPONSE,4:TURN_COMPLETED'
+store_fixture replay --session="$session_id" --subject=user-integration \
+  --key=cb080-first-turn --message='Where is my order?' >"$tmp_dir/history-replay.json"
+cmp "$tmp_dir/first-history.json" "$tmp_dir/history-replay.json"
+store_fixture replay --session="$session_id" --subject=user-integration \
+  --key=cb080-first-turn --message='Different intent' --expect=conflict
+store_fixture begin --session="$session_id" --subject=other-user \
+  --key=cb080-cross-user --expect=ownership
+store_fixture begin --session=unknown-session --subject=user-integration \
+  --key=cb080-unknown --expect=ownership
+concurrent_pids=()
+for index in 1 2 3 4; do
+  store_fixture complete --session="$session_id" --subject=user-integration \
+    --key=cb080-concurrent --message='one concurrent intent' \
+    >"$tmp_dir/concurrent-$index.json" &
+  concurrent_pids+=("$!")
+done
+for pid in "${concurrent_pids[@]}"; do wait "$pid"; done
+for index in 2 3 4; do cmp "$tmp_dir/concurrent-1.json" "$tmp_dir/concurrent-$index.json"; done
+test "$(mysql_query agent_app "$agent_app_password" cs_db "SELECT COUNT(*) FROM support_turn WHERE session_id = '$session_id' AND correlation_key = 'cb080-concurrent'")" = 1
+for retired_path in /api/chat /api/chat/stream; do
+  assert_status 404 "retired buyer model endpoint $retired_path" \
+    --request POST "http://127.0.0.1:$agent_port$retired_path" \
+    --header "Authorization: Bearer $direct_token" \
+    --header 'Content-Type: application/json' --data '{"message":"hello"}'
+done
 
 feedback_headers=(
   --header "Authorization: Bearer $direct_token"
@@ -895,15 +705,15 @@ assert_status 201 "owner-scoped append-only feedback" \
   --request POST "http://127.0.0.1:$agent_port/api/feedback" \
   "${feedback_headers[@]}" \
   --header 'Idempotency-Key: cb082-feedback' \
-  --data "{\"traceId\":\"$stream_trace\",\"rating\":\"POSITIVE\",\"comment\":\"Helpful\"}"
+  --data "{\"traceId\":\"$historical_trace\",\"rating\":\"POSITIVE\",\"comment\":\"Helpful\"}"
 cp "$tmp_dir/http-response.json" "$tmp_dir/first-feedback.json"
 feedback_id="$(uv run python scripts/read_json_field.py "$tmp_dir/first-feedback.json" feedbackId)"
-test "$(mysql_query agent_app "$agent_app_password" cs_db "SELECT CONCAT(session_id, ':', user_subject, ':', trace_id, ':', rating) FROM support_feedback WHERE feedback_id = '$feedback_id'")" = "$session_id:user-integration:$stream_trace:POSITIVE"
+test "$(mysql_query agent_app "$agent_app_password" cs_db "SELECT CONCAT(session_id, ':', user_subject, ':', trace_id, ':', rating) FROM support_feedback WHERE feedback_id = '$feedback_id'")" = "$session_id:user-integration:$historical_trace:POSITIVE"
 assert_status 201 "same-intent feedback retry" \
   --request POST "http://127.0.0.1:$agent_port/api/feedback" \
   "${feedback_headers[@]}" \
   --header 'Idempotency-Key: cb082-feedback' \
-  --data "{\"traceId\":\"$stream_trace\",\"rating\":\"POSITIVE\",\"comment\":\"Helpful\"}"
+  --data "{\"traceId\":\"$historical_trace\",\"rating\":\"POSITIVE\",\"comment\":\"Helpful\"}"
 cmp "$tmp_dir/first-feedback.json" "$tmp_dir/http-response.json"
 test "$(mysql_query agent_app "$agent_app_password" cs_db "SELECT COUNT(*) FROM support_feedback WHERE session_id = '$session_id' AND idempotency_key = 'cb082-feedback'")" = 1
 feedback_pids=()
@@ -914,7 +724,7 @@ for index in 1 2 3 4; do
       --request POST "http://127.0.0.1:$agent_port/api/feedback" \
       "${feedback_headers[@]}" \
       --header 'Idempotency-Key: cb082-feedback-concurrent' \
-      --data "{\"traceId\":\"$stream_trace\",\"rating\":\"NEGATIVE\"}")"
+      --data "{\"traceId\":\"$historical_trace\",\"rating\":\"NEGATIVE\"}")"
     test "$status" = 201
   ) &
   feedback_pids+=("$!")
@@ -931,7 +741,7 @@ assert_status 409 "conflicting feedback key reuse" \
   --request POST "http://127.0.0.1:$agent_port/api/feedback" \
   "${feedback_headers[@]}" \
   --header 'Idempotency-Key: cb082-feedback' \
-  --data "{\"traceId\":\"$stream_trace\",\"rating\":\"NEGATIVE\"}"
+  --data "{\"traceId\":\"$historical_trace\",\"rating\":\"NEGATIVE\"}"
 assert_status 403 "unknown feedback trace" \
   --request POST "http://127.0.0.1:$agent_port/api/feedback" \
   "${feedback_headers[@]}" \
@@ -943,18 +753,18 @@ assert_status 403 "cross-user feedback ownership" \
   --header "X-Session-Id: $session_id" \
   --header 'Idempotency-Key: cb082-cross-user-feedback' \
   --header 'Content-Type: application/json' \
-  --data "{\"traceId\":\"$stream_trace\",\"rating\":\"POSITIVE\"}"
+  --data "{\"traceId\":\"$historical_trace\",\"rating\":\"POSITIVE\"}"
 assert_status 422 "feedback body identity substitution" \
   --request POST "http://127.0.0.1:$agent_port/api/feedback" \
   "${feedback_headers[@]}" \
   --header 'Idempotency-Key: cb082-body-owner-feedback' \
-  --data "{\"traceId\":\"$stream_trace\",\"rating\":\"POSITIVE\",\"userSubject\":\"other-user\"}"
+  --data "{\"traceId\":\"$historical_trace\",\"rating\":\"POSITIVE\",\"userSubject\":\"other-user\"}"
 assert_status 401 "feedback rejects production evaluation header" \
   --request POST "http://127.0.0.1:$agent_port/api/feedback" \
   "${feedback_headers[@]}" \
   --header 'X-Eval-Sandbox-Id: forbidden-production-context' \
   --header 'Idempotency-Key: cb082-eval-feedback' \
-  --data "{\"traceId\":\"$stream_trace\",\"rating\":\"POSITIVE\"}"
+  --data "{\"traceId\":\"$historical_trace\",\"rating\":\"POSITIVE\"}"
 
 mysql_query agent_migration "$agent_migration_password" cs_db \
   "ALTER TABLE support_feedback ADD CONSTRAINT chk_cb082_feedback_rollback CHECK (comment_text <> 'rollback-trigger')"
@@ -963,7 +773,7 @@ assert_status 503 "feedback transaction rollback is bounded" \
   --request POST "http://127.0.0.1:$agent_port/api/feedback" \
   "${feedback_headers[@]}" \
   --header 'Idempotency-Key: cb082-feedback-rollback' \
-  --data "{\"traceId\":\"$stream_trace\",\"rating\":\"NEGATIVE\",\"comment\":\"rollback-trigger\"}"
+  --data "{\"traceId\":\"$historical_trace\",\"rating\":\"NEGATIVE\",\"comment\":\"rollback-trigger\"}"
 mysql_query agent_migration "$agent_migration_password" cs_db \
   'ALTER TABLE support_feedback DROP CHECK chk_cb082_feedback_rollback'
 test "$(mysql_query agent_app "$agent_app_password" cs_db 'SELECT COUNT(*) FROM support_feedback')" = "$before_feedback_rollback"
@@ -974,197 +784,11 @@ crash_trace_id='00000000-0000-0000-0000-000000000811'
 crash_turn_sequence="$(mysql_query agent_app "$agent_app_password" cs_db "SELECT next_turn_sequence + 1 FROM support_conversation WHERE conversation_id = '$conversation_id'")"
 mysql_query agent_app "$agent_app_password" cs_db \
   "START TRANSACTION; UPDATE support_conversation SET next_turn_sequence = $crash_turn_sequence WHERE conversation_id = '$conversation_id'; INSERT INTO support_turn (turn_id, conversation_id, session_id, user_subject, trace_id, turn_sequence, correlation_key, request_fingerprint, input_text, state, processing_deadline_at) VALUES ('$crash_turn_id', '$conversation_id', '$session_id', 'user-integration', '$crash_trace_id', $crash_turn_sequence, 'cb081-crash-window', 'ae2067cc156a9372a6a96c0741e0b1884a23067d63c264e73766e4a25c6a7459', 'crash-window', 'PROCESSING', DATE_SUB(CURRENT_TIMESTAMP(6), INTERVAL 1 SECOND)); INSERT INTO support_event (event_id, turn_id, trace_id, session_id, user_subject, sequence, event_type, payload_json) VALUES ('00000000-0000-0000-0000-000000000812', '$crash_turn_id', '$crash_trace_id', '$session_id', 'user-integration', 1, 'USER_INPUT', JSON_OBJECT('accepted', TRUE)); COMMIT"
-assert_status 503 "expired crash-window turn converges without re-execution" \
-  --request POST "http://127.0.0.1:$agent_port/api/chat" \
-  "${chat_headers[@]}" \
-  --header 'Idempotency-Key: cb081-crash-window' \
-  --data '{"message":"crash-window"}'
+store_fixture begin --session="$session_id" --subject=user-integration \
+  --key=cb081-crash-window --message=crash-window --expect=failed
 test "$(mysql_query agent_app "$agent_app_password" cs_db "SELECT CONCAT(state, ':', failure_code, ':', processing_deadline_at IS NULL) FROM support_turn WHERE turn_id = '$crash_turn_id'")" = 'FAILED:processing_deadline_expired:1'
 test "$(mysql_query agent_app "$agent_app_password" cs_db "SELECT GROUP_CONCAT(CONCAT(sequence, ':', event_type) ORDER BY sequence SEPARATOR ',') FROM support_event WHERE trace_id = '$crash_trace_id'")" = '1:USER_INPUT,2:TURN_FAILED'
 echo "Verified a committed PROCESSING crash window converges once to durable failure without agent or tool re-execution."
-
-assert_status 409 "conflicting idempotency reuse" \
-  --request POST "http://127.0.0.1:$agent_port/api/chat" \
-  "${chat_headers[@]}" \
-  --header 'Idempotency-Key: cb080-first-turn' \
-  --data '{"message":"Different intent"}'
-assert_status 422 "client-selected authoritative trace" \
-  --request POST "http://127.0.0.1:$agent_port/api/chat" \
-  "${chat_headers[@]}" \
-  --header 'Idempotency-Key: cb080-client-id' \
-  --data '{"message":"hello","traceId":"client-selected"}'
-assert_status 422 "missing support session header" \
-  --request POST "http://127.0.0.1:$agent_port/api/chat" \
-  --header "Authorization: Bearer $direct_token" \
-  --header 'Idempotency-Key: cb080-missing-session' \
-  --header 'Content-Type: application/json' \
-  --data '{"message":"hello"}'
-assert_status 401 "chat rejects production evaluation header" \
-  --request POST "http://127.0.0.1:$agent_port/api/chat" \
-  "${chat_headers[@]}" \
-  --header 'Idempotency-Key: cb080-eval' \
-  --header 'X-Eval-Sandbox-Id: forbidden-production-context' \
-  --data '{"message":"hello"}'
-
-assert_status 403 "unknown support session does not disclose existence" \
-  --request POST "http://127.0.0.1:$agent_port/api/chat" \
-  --header "Authorization: Bearer $direct_token" \
-  --header 'X-Session-Id: unknown-session' \
-  --header 'Idempotency-Key: cb080-unknown' \
-  --header 'Content-Type: application/json' \
-  --data '{"message":"hello"}'
-cp "$tmp_dir/http-response.json" "$tmp_dir/forbidden-chat.json"
-assert_status 403 "cross-user support session does not disclose existence" \
-  --request POST "http://127.0.0.1:$agent_port/api/chat" \
-  --header "Authorization: Bearer $other_token" \
-  --header "X-Session-Id: $session_id" \
-  --header 'Idempotency-Key: cb080-cross-user' \
-  --header 'Content-Type: application/json' \
-  --data '{"message":"hello"}'
-cmp "$tmp_dir/forbidden-chat.json" "$tmp_dir/http-response.json"
-
-concurrent_pids=()
-for index in 1 2 3 4; do
-  (
-    status="$(curl --silent --show-error \
-      --output "$tmp_dir/concurrent-$index.json" --write-out '%{http_code}' \
-      --request POST "http://127.0.0.1:$agent_port/api/chat" \
-      "${chat_headers[@]}" \
-      --header 'Idempotency-Key: cb080-concurrent' \
-      --data '{"message":"one concurrent intent"}')"
-    test "$status" = 200
-  ) &
-  concurrent_pids+=("$!")
-done
-for concurrent_pid in "${concurrent_pids[@]}"; do
-  wait "$concurrent_pid"
-done
-for index in 2 3 4; do
-  cmp "$tmp_dir/concurrent-1.json" "$tmp_dir/concurrent-$index.json"
-done
-test "$(mysql_query agent_app "$agent_app_password" cs_db "SELECT COUNT(*) FROM support_turn WHERE session_id = '$session_id' AND correlation_key = 'cb080-concurrent'")" = 1
-concurrent_trace="$(uv run python scripts/read_json_field.py "$tmp_dir/concurrent-1.json" traceId)"
-test "$(mysql_query agent_app "$agent_app_password" cs_db "SELECT COUNT(*) FROM support_event WHERE trace_id = '$concurrent_trace'")" = 9
-echo "Verified concurrent same-intent requests converge to one durable turn and sequence."
-
-assert_status 200 "real JIT OBO and commerce ToolSpec success" \
-  --request POST "http://127.0.0.1:$agent_port/api/chat" \
-  "${chat_headers[@]}" \
-  --header 'Idempotency-Key: cb081-tool-success' \
-  --data '{"message":"tool-success product-1"}'
-cp "$tmp_dir/http-response.json" "$tmp_dir/tool-success.json"
-tool_trace="$(uv run python scripts/read_json_field.py "$tmp_dir/tool-success.json" traceId)"
-test "$(mysql_query agent_app "$agent_app_password" cs_db "SELECT COUNT(*) FROM support_event WHERE trace_id = '$tool_trace' AND event_type = 'TOOL_LIFECYCLE'")" = 2
-test "$(mysql_query agent_app "$agent_app_password" cs_db "SELECT GROUP_CONCAT(JSON_UNQUOTE(JSON_EXTRACT(payload_json, '$.kind')) ORDER BY sequence SEPARATOR ',') FROM support_event WHERE trace_id = '$tool_trace' AND event_type = 'BUDGET_CHARGED'")" = 'model_http,identity_http,tool_http,model_http'
-assert_status 200 "tool turn replay does not re-execute agent or tool" \
-  --request POST "http://127.0.0.1:$agent_port/api/chat" \
-  "${chat_headers[@]}" \
-  --header 'Idempotency-Key: cb081-tool-success' \
-  --data '{"message":"tool-success product-1"}'
-cmp "$tmp_dir/tool-success.json" "$tmp_dir/http-response.json"
-test "$(mysql_query agent_app "$agent_app_password" cs_db "SELECT COUNT(*) FROM support_event WHERE trace_id = '$tool_trace' AND event_type = 'TOOL_LIFECYCLE'")" = 2
-
-assert_status 200 "malformed model arguments deny with feedback" \
-  --request POST "http://127.0.0.1:$agent_port/api/chat" \
-  "${chat_headers[@]}" \
-  --header 'Idempotency-Key: cb081-malformed' \
-  --data '{"message":"tool-malformed"}'
-malformed_trace="$(uv run python scripts/read_json_field.py "$tmp_dir/http-response.json" traceId)"
-test "$(mysql_query agent_app "$agent_app_password" cs_db "SELECT JSON_UNQUOTE(JSON_EXTRACT(payload_json, '$.reason')) FROM support_event WHERE trace_id = '$malformed_trace' AND event_type = 'TOOL_DENIED'")" = invalid_arguments
-test "$(mysql_query agent_app "$agent_app_password" cs_db "SELECT COUNT(*) FROM support_event WHERE trace_id = '$malformed_trace' AND event_type = 'BUDGET_CHARGED' AND JSON_UNQUOTE(JSON_EXTRACT(payload_json, '$.kind')) IN ('identity_http', 'tool_http')")" = 0
-
-assert_status 200 "unknown model-selected tool denies before authority or I/O" \
-  --request POST "http://127.0.0.1:$agent_port/api/chat" \
-  "${chat_headers[@]}" \
-  --header 'Idempotency-Key: cb081-unknown-tool' \
-  --data '{"message":"tool-unknown"}'
-unknown_tool_trace="$(uv run python scripts/read_json_field.py "$tmp_dir/http-response.json" traceId)"
-test "$(mysql_query agent_app "$agent_app_password" cs_db "SELECT JSON_UNQUOTE(JSON_EXTRACT(payload_json, '$.reason')) FROM support_event WHERE trace_id = '$unknown_tool_trace' AND event_type = 'TOOL_DENIED'")" = unknown_tool
-
-mysql_query auth_app "$auth_app_password" commerce_db \
-  "UPDATE auth_service_identity SET state = 'REVOKED' WHERE client_id = 'agent-service'"
-assert_status 200 "OBO exchange denial is structured model feedback" \
-  --request POST "http://127.0.0.1:$agent_port/api/chat" \
-  "${chat_headers[@]}" \
-  --header 'Idempotency-Key: test-denial' \
-  --data '{"message":"tool-success with denied exchange"}'
-obo_denial_trace="$(uv run python scripts/read_json_field.py "$tmp_dir/http-response.json" traceId)"
-test "$(mysql_query agent_app "$agent_app_password" cs_db "SELECT JSON_UNQUOTE(JSON_EXTRACT(payload_json, '$.reason')) FROM support_event WHERE trace_id = '$obo_denial_trace' AND event_type = 'TOOL_DENIED'")" = identity_denied
-test "$(mysql_query agent_app "$agent_app_password" cs_db "SELECT COUNT(*) FROM support_event WHERE trace_id = '$obo_denial_trace' AND event_type = 'BUDGET_CHARGED' AND JSON_UNQUOTE(JSON_EXTRACT(payload_json, '$.kind')) = 'tool_http'")" = 0
-mysql_query auth_app "$auth_app_password" commerce_db \
-  "UPDATE auth_service_identity SET state = 'ACTIVE' WHERE client_id = 'agent-service'"
-
-assert_status 200 "one transient provider retry" \
-  --request POST "http://127.0.0.1:$agent_port/api/chat" \
-  "${chat_headers[@]}" \
-  --header 'Idempotency-Key: test-retry' \
-  --data '{"message":"transient-retry"}'
-transient_trace="$(uv run python scripts/read_json_field.py "$tmp_dir/http-response.json" traceId)"
-test "$(mysql_query agent_app "$agent_app_password" cs_db "SELECT GROUP_CONCAT(JSON_UNQUOTE(JSON_EXTRACT(payload_json, '$.result')) ORDER BY sequence SEPARATOR ',') FROM support_event WHERE trace_id = '$transient_trace' AND event_type = 'MODEL_OUTCOME'")" = 'transient,ok'
-
-assert_status 200 "same-tier fallback after the one retry" \
-  --request POST "http://127.0.0.1:$agent_port/api/chat" \
-  "${chat_headers[@]}" \
-  --header 'Idempotency-Key: cb081-fallback' \
-  --data '{"message":"same-tier-fallback"}'
-fallback_trace="$(uv run python scripts/read_json_field.py "$tmp_dir/http-response.json" traceId)"
-test "$(mysql_query agent_app "$agent_app_password" cs_db "SELECT GROUP_CONCAT(JSON_UNQUOTE(JSON_EXTRACT(payload_json, '$.provider')) ORDER BY sequence SEPARATOR ',') FROM support_event WHERE trace_id = '$fallback_trace' AND event_type = 'MODEL_OUTCOME'")" = 'primary,primary,fallback'
-test "$(mysql_query agent_app "$agent_app_password" cs_db "SELECT COUNT(*) FROM support_event WHERE trace_id = '$fallback_trace' AND event_type = 'CIRCUIT_OUTCOME' AND JSON_UNQUOTE(JSON_EXTRACT(payload_json, '$.state')) = 'opened'")" = 1
-
-assert_status 200 "open primary circuit is charged, recorded, and stays in tier" \
-  --request POST "http://127.0.0.1:$agent_port/api/chat" \
-  "${chat_headers[@]}" \
-  --header 'Idempotency-Key: cb081-circuit-open' \
-  --data '{"message":"circuit-open"}'
-circuit_open_trace="$(uv run python scripts/read_json_field.py "$tmp_dir/http-response.json" traceId)"
-test "$(mysql_query agent_app "$agent_app_password" cs_db "SELECT COUNT(*) FROM support_event WHERE trace_id = '$circuit_open_trace' AND event_type = 'CIRCUIT_OUTCOME' AND JSON_UNQUOTE(JSON_EXTRACT(payload_json, '$.state')) = 'open'")" = 1
-sleep 4
-assert_status 200 "bounded half-open probe recovers the primary provider" \
-  --request POST "http://127.0.0.1:$agent_port/api/chat" \
-  "${chat_headers[@]}" \
-  --header 'Idempotency-Key: cb081-circuit-recover' \
-  --data '{"message":"circuit-recover"}'
-circuit_recover_trace="$(uv run python scripts/read_json_field.py "$tmp_dir/http-response.json" traceId)"
-test "$(mysql_query agent_app "$agent_app_password" cs_db "SELECT GROUP_CONCAT(JSON_UNQUOTE(JSON_EXTRACT(payload_json, '$.state')) ORDER BY sequence SEPARATOR ',') FROM support_event WHERE trace_id = '$circuit_recover_trace' AND event_type = 'CIRCUIT_OUTCOME'")" = 'half-open,closed'
-
-assert_status 200 "shared attempt budget exhausts deterministically" \
-  --request POST "http://127.0.0.1:$agent_port/api/chat" \
-  "${chat_headers[@]}" \
-  --header 'Idempotency-Key: cb081-budget' \
-  --data '{"message":"budget-exhaustion"}'
-test "$(uv run python scripts/read_json_field.py "$tmp_dir/http-response.json" outcome)" = budget_exhausted
-budget_trace="$(uv run python scripts/read_json_field.py "$tmp_dir/http-response.json" traceId)"
-test "$(mysql_query agent_app "$agent_app_password" cs_db "SELECT COUNT(*) FROM support_event WHERE trace_id = '$budget_trace' AND event_type = 'BUDGET_CHARGED'")" = 8
-
-AGENT_PORT=0 \
-AGENT_WORKERS=1 \
-AGENT_IDENTITY_ENABLED=true \
-CITYBUDDY_ENVIRONMENT=integration \
-IDENTITY_ISSUER=https://identity.citybuddy.test \
-IDENTITY_USER_AUDIENCE=citybuddy-web \
-IDENTITY_JWKS_URL="http://127.0.0.1:$auth_port/auth/jwks" \
-IDENTITY_EXCHANGE_URL="http://127.0.0.1:$auth_port/auth/token/exchange" \
-MYSQL_HOST=127.0.0.1 \
-MYSQL_PORT="$MYSQL_PORT" \
-MYSQL_AGENT_APP_PASSWORD="$agent_app_password" \
-AGENT_SERVICE_CLIENT_ID=agent-service \
-AGENT_SERVICE_CLIENT_SECRET="$service_password" \
-AGENT_EXCHANGE_SCOPES=catalog:read \
-AGENT_MODEL_PROXY_URL="http://127.0.0.1:$proxy_port" \
-AGENT_COMMERCE_TOOLS_URL="http://127.0.0.1:$proxy_port" \
-uv run citybuddy-agent >"$tmp_dir/timeout-agent.log" 2>&1 &
-timeout_agent_pid=$!
-process_bound_port timeout_agent_port uvicorn "$timeout_agent_pid" "$tmp_dir/timeout-agent.log" 0
-wait_port "http://127.0.0.1:$timeout_agent_port/api/sessions" \
-  "$timeout_agent_pid" "$tmp_dir/timeout-agent.log"
-assert_status 200 "bounded commerce tool timeout becomes feedback" \
-  --request POST "http://127.0.0.1:$timeout_agent_port/api/chat" \
-  "${chat_headers[@]}" \
-  --header 'Idempotency-Key: cb081-tool-timeout' \
-  --data '{"message":"tool-timeout"}'
-timeout_trace="$(uv run python scripts/read_json_field.py "$tmp_dir/http-response.json" traceId)"
-test "$(mysql_query agent_app "$agent_app_password" cs_db "SELECT JSON_UNQUOTE(JSON_EXTRACT(payload_json, '$.reason')) FROM support_event WHERE trace_id = '$timeout_trace' AND event_type = 'TOOL_DENIED'")" = timeout
-echo "CB-081 fake-provider, shared-budget, circuit, JIT OBO, and ToolSpec evidence passed."
 
 assert_status 201 "isolated rollback-drill session creation" \
   --request POST "http://127.0.0.1:$agent_port/api/sessions" \
@@ -1172,24 +796,12 @@ assert_status 201 "isolated rollback-drill session creation" \
   --header 'Content-Type: application/json' \
   --data '{}'
 rollback_session_id="$(uv run python scripts/read_json_field.py "$tmp_dir/http-response.json" sessionId)"
-rollback_chat_headers=(
-  --header "Authorization: Bearer $direct_token"
-  --header "X-Session-Id: $rollback_session_id"
-  --header 'Content-Type: application/json'
-)
 before_failure="$(mysql_query agent_app "$agent_app_password" cs_db "SELECT CONCAT((SELECT next_turn_sequence FROM support_conversation WHERE session_id = '$rollback_session_id'), ':', (SELECT COUNT(*) FROM support_turn WHERE session_id = '$rollback_session_id'), ':', (SELECT COUNT(*) FROM support_event WHERE session_id = '$rollback_session_id'))")"
 test "$before_failure" = '0:0:0'
 mysql_query agent_migration "$agent_migration_password" cs_db \
-  "ALTER TABLE support_event ADD CONSTRAINT chk_cb081_controlled_failure CHECK (session_id <> '$rollback_session_id' OR event_type <> 'MODEL_OUTCOME')"
-assert_status 503 "accepted-turn database failure is bounded" \
-  --request POST "http://127.0.0.1:$agent_port/api/chat" \
-  "${rollback_chat_headers[@]}" \
-  --header 'Idempotency-Key: cb080-rollback' \
-  --data '{"message":"must roll back"}'
-if grep -q 'chk_cb081_controlled_failure' "$tmp_dir/http-response.json"; then
-  echo "Database failure detail leaked through the public response." >&2
-  exit 1
-fi
+  "ALTER TABLE support_event ADD CONSTRAINT chk_cb081_controlled_failure CHECK (session_id <> '$rollback_session_id' OR event_type <> 'ASSISTANT_RESPONSE')"
+store_fixture complete --session="$rollback_session_id" --subject=user-integration \
+  --key=cb080-rollback --message='must roll back' --expect=database
 mysql_query agent_migration "$agent_migration_password" cs_db \
   'ALTER TABLE support_event DROP CHECK chk_cb081_controlled_failure'
 after_failure="$(mysql_query agent_app "$agent_app_password" cs_db "SELECT CONCAT((SELECT next_turn_sequence FROM support_conversation WHERE session_id = '$rollback_session_id'), ':', (SELECT COUNT(*) FROM support_turn WHERE session_id = '$rollback_session_id'), ':', (SELECT COUNT(*) FROM support_event WHERE session_id = '$rollback_session_id'))")"
@@ -1345,4 +957,4 @@ if rg -l 'BEGIN (RSA )?PRIVATE KEY' auth-service/target commerce-service/target 
   exit 1
 fi
 
-echo "CB-020 identity, CB-080/CB-081 control, and CB-082 SSE/feedback integration passed."
+echo "Identity, OBO, retained history storage and feedback integration passed."

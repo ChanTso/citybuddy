@@ -208,7 +208,7 @@ publishes every PENDING row. Backlog measurements must select the relevant deliv
 
 ## 1. System context and current capabilities
 
-CityBuddy combines local-commerce transactions with a text-only AI customer-support path. Its
+CityBuddy supplies the transaction and identity backend for ShopMate retail Agents. Its
 defining boundary is not the number of services; it is that identity, transactional side effects,
 retrieval evidence, and evaluation-only access remain independently enforceable.
 
@@ -216,10 +216,10 @@ retrieval evidence, and evaluation-only access remain independently enforceable.
 |---|---|---|
 | `auth-service` | Java 21 / Spring Boot 3.5 | Login, RS256 user tokens, service-authenticated token exchange, OBO tokens, JWKS publication and key rotation, and evaluation-only test identities. |
 | `commerce-service` | Java 21 / Spring Boot 3.5 | Products, inventory, orders, seckill admission and ordering, mock payment, refund, CRM and FAQ truth, internal tool APIs, PendingAction and ActionReceipt truth, and evaluation-only state APIs. |
-| `agent-service` | Python 3.11 / FastAPI / Pydantic | Customer-support APIs, bounded same-session context, one ReAct agent, deterministic control signals, model policy, tool mediation, PendingAction reference and decision handling, retrieval, bounded public projection, authoritative support evidence, confirmation of a prepared action, and projection of the receipt returned by commerce. |
+| `agent-service` | Python 3.11 / FastAPI / Pydantic | Retained support-session identity, historical feedback and evaluation evidence API, historical conversation/receipt readers. No model loop, chat or SSE endpoint. |
 | `knowledge-indexer` | Python 3.11 | Production RocketMQ FAQ synchronization, FAQ/product snapshot rebuilds, source-version ordering, tombstones, validation, and versioned Elasticsearch alias changes. |
-| `web` | React / TypeScript / Vite | The current demonstration surface for login, products, seckill reservation status, support chat, and the full PendingAction lifecycle including confirmation and the receipt identifier returned by the server. |
-| `litellm-proxy` boundary | OpenAI-compatible HTTP | Provider key isolation, rate limiting, same-tier provider failover, one bounded network retry, and usage/cost records when a proxy is deployed. It never makes business-tier routing decisions. Tests and the local demonstration use a deterministic compatible fake rather than a real provider. |
+| `web` | React / TypeScript / Vite | Login, product reads, dedicated seckill engineering forms and the ShopMate buyer link. The default retail deployment does not enable seckill. |
+| ShopMate (separate repository) | Python / FastAPI and React | One buyer and merchant retail runtime, analysis delegation, user-confirmed execution and role/owner-isolated session state. Its repository defines actual model/proxy/tool capabilities. |
 
 The retained MemoryPacker, support-ticket/handoff, and failure-candidate export designs are
 separated under [Retained vNext designs and current non-goals](#contract-mainline-non-goals). A
@@ -255,15 +255,14 @@ freeze: changes follow the current working agreement in [AGENTS.md](../AGENTS.md
   owns a token-signing key.
 - `commerce-service` owns transactional business state and every business-side authorization
   decision, including audience, scope, sandbox, and resource ownership.
-- `agent-service` owns support orchestration and support evidence. It can request a delegated token
+- `agent-service` retains support identity and historical evidence. Its identity client can request a delegated token
   but cannot issue identity, choose arbitrary scopes, or substitute a user identifier from a
   request body.
 - `knowledge-indexer` is an asynchronous projection worker and snapshot consumer. It does not
   become a source of product or FAQ truth.
 - `web` is a client, not an authority for confirmation, identity, price, stock, action status, or
   sandbox state.
-- An OpenAI-compatible model proxy is provider infrastructure, not a business router. Business-tier
-  selection stays in `agent-service`.
+- ShopMate owns current model orchestration. A model proxy never owns business authorization.
 - Java owns authentication and commerce transactions. Python owns the agent path and indexing
   worker. Cross-language synchronous calls use internal HTTP/REST JSON; RocketMQ is used only for
   asynchronous messaging.
@@ -321,7 +320,7 @@ freeze: changes follow the current working agreement in [AGENTS.md](../AGENTS.md
 | Agent migration identity | Agent-owned migration stream in `cs_db` | Agent migration history and agent-owned schema metadata | `commerce_db`, application runtime |
 | `auth_app` / `auth-service` | Auth-owned principal, credential-verifier, service-identity, signing-key metadata, and eval test-principal records | The same auth-owned family | Commerce business table families, `cs_db`, Elasticsearch; DDL/global/admin grants |
 | `commerce_app` / `commerce-service` | Commerce-owned business tables, transaction Outbox, sandbox registry, Commerce Redis, and any future authoritative ticket tables | Commerce-owned business tables; JWKS over HTTP | Auth credential/service-identity/private metadata, `cs_db`, Support Redis, direct model providers; DDL/global/admin grants |
-| `agent_app` / `agent-service` | Agent-owned `cs_db` tables and Support Redis | Agent-owned `cs_db`; Elasticsearch; commerce data only through scoped tool APIs; JWKS over HTTP; model proxy | All `commerce_db` tables, signing keys, direct provider credentials; DDL/global/admin grants |
+| `agent_app` / `agent-service` | Agent-owned `cs_db` tables | Agent-owned `cs_db`; JWKS and sandbox liveness over HTTP | All `commerce_db` tables, signing keys, direct provider credentials; DDL/global/admin grants |
 | `knowledge-indexer` | Versioned Elasticsearch indexes; allowed FAQ-version cache entries in Support Redis | Knowledge events and published source snapshots | Runtime writes to `commerce_db` or `cs_db`; private order/refund data |
 | `web` | No authoritative data store | Public/user-scoped HTTP APIs | Databases, Redis, Elasticsearch, RocketMQ, signing material |
 | Model proxy | Provider-routing, usage, and cost records configured for the proxy | Runtime alias mapping and provider credentials | Business databases, ToolSpec policy, user/resource authorization decisions |
@@ -374,8 +373,8 @@ co-locates its persistent invariants, synchronous interfaces, asynchronous bound
 sequence that materially explains the contract. Full request and response fields remain in the
 [agent](../agent-service/openapi.json),
 [auth](../auth-service/src/main/resources/openapi.json), and
-[commerce](../commerce-service/src/main/resources/openapi.json) OpenAPI documents and the
-[ToolSpec definitions](../agent-service/src/citybuddy_agent/agent_control.py).
+[commerce](../commerce-service/src/main/resources/openapi.json) OpenAPI documents. Current Agent tool
+definitions live in the separate ShopMate repository.
 
 | Capability | Persistent truth and invariants | Interfaces and sequences | State |
 |---|---|---|---|
@@ -383,7 +382,7 @@ sequence that materially explains the contract. Full request and response fields
 | Catalog and standard ordering | CRM, products, stock, standard orders, Outbox | Product reads and idempotent order creation | Implemented |
 | Seckill and inventory convergence | Activity allocation, reservations, uniqueness, inventory ledger | Reservation APIs, transaction and delay messages, RocketMQ sequence | Implemented |
 | Payment, refund, and sensitive action | Payment attempts/callbacks, refunds, PendingAction, ActionReceipt | Payment, refund, prepare/confirm, receipt projection, confirmation sequence | Implemented |
-| Support agent and evidence | Conversations, ordered evidence, feedback, receipt projection | Chat, SSE, feedback, scoped commerce tool | Implemented |
+| Historical support evidence | Conversations, ordered evidence, feedback, receipt projection | Session creation, feedback and evaluation-only evidence reads; no chat/SSE execution | Retained implementation |
 | Knowledge and retrieval | FAQ/product source versions, retrieval evidence, index aliases, FAQ cache | Snapshot, FAQ events, application-side RRF | Implemented |
 | Evaluation-only access | Test principals, sandbox lifecycle, scoped audit/evidence | Reset, completion, liveness, state, audit, version, evidence | Implemented only in the evaluation profile |
 | Memory, handoff, and candidate export | Summary watermark, authoritative ticket, projections, reviewed candidate | Proposed async and cross-system contracts | Retained design |
@@ -391,6 +390,10 @@ sequence that materially explains the contract. Full request and response fields
 <a id="contract-identity-authorization"></a>
 
 ## 4. Identity, support sessions, and delegated authorization
+
+The legacy `agent-service` actor and support-session contracts remain for historical identity and
+evidence consumers. ShopMate uses `shopping-agent` and `merchant-agent` with their exact retail
+scopes; it does not create a legacy support session or run the old support model loop.
 
 Token classes are distinguished explicitly by a token-purpose/type claim or an equivalent
 independent authentication chain. Absence of an actor claim is never treated as a permissive
@@ -728,198 +731,91 @@ sequenceDiagram
 
 <a id="contract-agent-action-evidence"></a>
 
-### 7.3 PendingAction, confirmation, receipt, and evidence boundary
+### 7.3 PendingAction, confirmation and receipt boundary
 
-- ToolSpec defines each tool's schema, risk tier, fixed scope, timeout, idempotency behavior, and
-  model-visible output. The model cannot expand scope or bypass confirmation.
-- Read and ordinary write tools are checked at `commerce-service`. Sensitive actions first create a
-  PendingAction in `commerce_db`; `agent-service` stores only the validated reference and presents
-  a text confirmation request.
-- Confirmation is not a front-end security primitive. In one commerce transaction, the service
-  validates argument hash, resource version, expiry, ownership, unconsumed state, and current refund
-  capacity after locking the payment aggregate root; consumes the PendingAction once; executes the
-  business mutation; and persists an ActionReceipt.
-- Before the irreversible commerce call, the agent atomically claims its local reference from
-  `PENDING` to `CONFIRMING` in a separate committed transaction. A transport failure after the
-  commerce commit therefore leaves a claim that can safely re-enter commerce and replay the
-  receipt; it never leaves a local durable statement that the action was declined or never
-  attempted.
-- A strict Commerce `409` Action error in category `CONFLICT` or
-  `INCONSISTENT_DURABLE_STATE` resolves that claim, its `ACTION_REJECTED` evidence, and the
-  confirming turn's `action_rejected` outcome atomically. It records that Commerce rejected the
-  request and returned no receipt; it does not infer whether an inconsistent pre-existing durable
-  state includes a business effect. Malformed errors, other 4xx statuses, rate limits, server
-  failures, transport failures, and invalid success responses leave the reference `CONFIRMING` so
-  a later exact confirmation can recover.
-- A successful Commerce ActionReceipt remains immutable action truth. The agent projects it into
-  `cs_db.action_receipt_projection` in the same transaction that resolves the reference to
-  `CONFIRMED` and commits the turn as `action_completed`; none of those three may exist without the
-  others. Commerce is idempotent per PendingAction, so confirmation retried after a lost response
-  replays the committed receipt rather than refunding twice.
-- JSON `reply` and public SSE `token` prose are the same bounded, non-authoritative explanation of
-  one durable turn. They are structurally validated on first response and replay, but are not a
-  semantic truth classifier and may contradict business state. A client renders successful action
-  only when `action_completed` is paired with the stored receipt projection. On SSE the receipt
-  leads the stream, has exact status `REQUESTED`, and terminal `done` carries `action_completed`;
-  neither may appear without the other. The web surface keeps this distinction visible.
-- The server derives write idempotency from `turn_id`, tool identity, and argument hash. A repeated
-  key returns the existing action result or receipt.
-- Internal events may include text, tool, retrieval, guard, error, PendingAction
-  preparation/confirmation/decline/expiry, and completion evidence. Public `action_receipt` is
-  emitted from stored projection only, with the identifier and `REQUESTED` request-recording
-  status durably recorded.
+- Commerce validates tool input, exact delegated scope, session and ownership. The model cannot
+  expand scope or execute a refund by returning prose.
+- ShopMate's buyer tool prepares a PendingAction with saved arguments and a stable request key.
+  The resulting card references that saved command under the authenticated buyer/session.
+- The buyer's explicit confirmation calls Java with the saved action id and correlation, after
+  checking the card belongs to that buyer/session. Model tools do not expose confirmation.
+- One Java transaction locks the payment aggregate root, checks current refund capacity, owner,
+  argument hash, version, expiry and unconsumed state, then consumes the PendingAction and commits
+  the refund request, Outbox and immutable ActionReceipt together.
+- A repeated confirmation asks Java to replay the same receipt. ShopMate stores a projection only
+  after a valid response; a lost response does not declare success or create a new action.
+  `REQUESTED` means request recording, not settlement of funds.
 
 <a id="contract-sequence-action"></a>
 
-### 7.4 PendingAction, atomic confirmation, ActionReceipt, and retry sequence
-
-The whole sequence is implemented. Commerce owns prepare/confirm/ActionReceipt; the agent claims
-the reference before the commerce call, then projects the receipt and commits the
-`action_completed` turn in the transaction that resolves the reference.
+### 7.4 Buyer confirmation sequence
 
 ```mermaid
 sequenceDiagram
-    actor U as User
-    participant G as agent-service
-    participant C as commerce-service
-    participant D as MySQL commerce_db
-    participant E as MySQL cs_db
-
-    U->>G: Request a sensitive action
-    G->>C: Prepare action with OBO and server idempotency key
-    C->>D: Create PendingAction bound to owner, args hash, version, and expiry
-    D-->>C: PendingAction persisted
-    C-->>G: pending_action_id and confirmation summary
-    G-->>U: Ask for text confirmation
-
-    alt User declines or never confirms
-        Note over G,C: No business mutation is executed
-    else User sends confirmation text
-        U->>G: Confirm
-        G->>E: Claim reference, PENDING to CONFIRMING, in its own transaction
-        G->>C: Confirm pending_action_id with OBO
-        C->>D: Begin one business transaction
-        D->>D: Validate owner, scope, args hash, resource version, expiry, and unconsumed state
-        D->>D: Lock payment root; current-read refund capacity
-        alt Validation fails or business transition is illegal
-            D-->>C: Roll back
-            C-->>G: Structured rejection, no receipt
-            alt Strict Commerce 409 CONFLICT or INCONSISTENT_DURABLE_STATE
-                G->>E: Resolve claim and turn atomically as REJECTED/action_rejected
-                G-->>U: Fixed rejection, no receipt
-            else Ambiguous, invalid, or transient response
-                Note over G,E: Keep CONFIRMING for a later exact confirmation
-                G-->>U: Fixed typed failure
-            end
-        else Validation succeeds
-            D->>D: Consume PendingAction once
-            D->>D: Execute mutation and persist ActionReceipt
-            D-->>C: Commit action and receipt together
-            C-->>G: Authoritative ActionReceipt
-            G->>E: Persist receipt projection and turn evidence
-            G-->>U: SSE action_receipt, then explanation
-            opt Repeat same request after commit point
-                G->>E: Read stored turn and receipt projection
-                Note over G,C: No model call and no second commerce execution
-                G-->>U: Stored turn, or same receipt then explanation on SSE
-            end
-        end
+    actor U as Buyer
+    participant S as ShopMate
+    participant C as Commerce
+    participant D as MySQL
+    U->>S: Request refund preparation
+    S->>C: Prepare with scoped shopping OBO and saved key
+    C->>D: Persist owner/session-bound PendingAction
+    C-->>S: Immutable preparation summary
+    S-->>U: Confirmation card
+    U->>S: Confirm saved card
+    S->>C: Confirm same action with scoped OBO
+    C->>D: Validate, consume, refund, Outbox and receipt in one transaction
+    C-->>S: Receipt, or typed rejection
+    S-->>U: Recorded result
+    opt Response lost or repeated confirmation
+        S->>C: Confirm the same action
+        C-->>S: Replay existing receipt
     end
 ```
 
-## 8. Support agent and durable evidence
+The former support caller's text-confirmation grammar, `CONFIRMING` claim and `cs_db` projection
+sequence are [historical contracts](https://github.com/ChanTso/citybuddy/blob/2eb42634f082c0ddf93639f902db38009381d337/docs/CONTRACTS.md#73-pendingaction-confirmation-receipt-and-evidence-boundary).
+Their storage invariants remain tested with declared historical fixtures; this is not the current
+ShopMate confirmation protocol and no old PendingAction is automatically confirmed or migrated.
 
-### 8.1 Agent-control boundaries
+## 8. Retained support identity and durable evidence
 
-- Production support uses one ReAct agent. There is no multi-agent or decomposer mainline.
-- `RuleRouter` emits only deterministic signals for refund context and an exact chitchat greeting.
-  Refund context is coarse capability relevance, not a claim that the user wants an action and not
-  an authorization decision; policy, status, and negated refund messages intentionally remain in
-  that context. Message length, high-risk duplication, and a wording whitelist for public FAQs are
-  not treated as intent signals.
-- `ModelRouter` converts those signals into a server-owned plan. Refund context exposes all current
-  tools; exact chitchat exposes none and caps the configured attempt limit at three; every other
-  input exposes read tools. The read default keeps public retrieval available when wording or
-  published knowledge changes. The current deployment has one `standard` tier, so no signal
-  invents an unconfigured tier or provider route.
-- Tool visibility reduces what the model can request; it does not replace argument validation,
-  delegated scope, ownership checks, confirmation, or any other `ToolAdapter` boundary. A known
-  tool outside the selected profile is denied before identity or commerce I/O.
-- The model proxy may retry or fail over only inside the tier selected by the server-owned plan.
-- One shared `attempt_budget` spans model, model-proxy, HTTP, and tool attempts. Circuit breakers are
-  provider-scoped, do not open before a minimum request count, and use bounded half-open probes.
-  Provider fallback stays within the tier selected by `ModelRouter`.
-- `ToolAdapter` returns structured `deny_with_feedback` results. The single agent, constrained by
-  ToolSpec and deterministic signals, handles missing slots, RAG/tool choice, clarification, and
-  refusal. CityBuddy does not train or introduce a separate intent classifier.
-- Current-turn task state is server owned. PendingAction state, exact confirmation/decline parsing,
-  identity, authorization, arguments, tool results, retrieval decisions and receipts are never
-  reconstructed from conversation prose. A live PendingAction continues through the fixed server
-  path without a model call.
-- Short-term context contains only completed user/assistant pairs from the same conversation,
-  support session, subject and evaluation sandbox. At reservation, the store reads at most 17
-  earlier rows by descending turn sequence, retains at most the newest 16, and excludes
-  `PROCESSING`, `FAILED`, current and cross-session turns. Overlapping different-key requests are
-  not causally ordered: each sees only earlier turns already completed at its own reservation.
-- The history lane has a 6,144 estimated-token budget. `utf8-bytes-v1` counts one estimated token
-  per UTF-8 byte plus four framing units per role message as a deterministic conservative capacity
-  estimate, not provider usage. This is an injection limit for stored history, not a claim about
-  the provider's complete context window; system text, tool schemas, the current input and in-turn
-  tool messages remain outside this lane. Up to 50% utilization is `low`; above 50% through 80% is
-  `guarded`; above 80% is `high` and evicts the oldest whole pairs toward a 70% target. If the newest
-  pair alone exceeds that target, it remains eligible only when it fits the 6,144 hard limit; a
-  pair over that limit is omitted whole. The policy never splits a pair, skips a newer pair to
-  retain an older one, summarizes text, or grows without a hard turn and token bound.
-- History is inserted as ordinary `user` and `assistant` roles between the one system message and
-  the current user message. Prior user text and prior assistant replies are both untrusted context,
-  not business truth, authorization or confirmation. Historical tool calls, tool data, retrieval
-  payloads, PendingAction data and receipts are not replayed into the prompt.
-- The window is recomputed, not a second model-authored memory store. A wrong assistant reply or
-  malicious user turn cannot mutate domain truth and is bounded out by the suffix policy; creating
-  a new support session immediately supplies an empty context window. Append-only support evidence
-  is not rewritten as a rollback, and authoritative business repair remains with the owning service.
-- Only the most recent included pair may extend the coarse refund-context routing signal into the
-  current turn; an exact current greeting still selects the no-tools profile. This preserves a
-  direct task follow-up without making any older mention a sticky tool profile. The signal affects
-  relevance and cost only: every tool request still crosses the same schema, scope, owner, session,
-  confirmation and commerce checks.
-- Current model input remains separated into `SYSTEM`, `TOOLS`, `CURRENT USER`, `UNTRUSTED SESSION
-  CONTEXT`, `UNTRUSTED RETRIEVED`, and `UNTRUSTED TOOL DATA`; citations may point only to allowlisted
-  evidence sources.
-- Every modeled turn records one content-free `CONTEXT_WINDOW` event with the policy and estimator
-  versions, budget, pressure, candidate/included/omitted counts, older-history flag and included
-  turn ids. The evaluation projection validates that selected ids are completed, earlier, ordered
-  turns under the same conversation/session/owner before exposing this metadata; it never exposes
-  the conversation text or prompt.
-- `cs_db` plus the evaluation-only evidence API is the authoritative support-evidence channel.
-  Langfuse may be enabled only as an optional observability profile with no-op fallback; it may
-  mirror traces but never becomes an assertion source or prompt authority. Prompt definitions stay
-  versioned with code.
-- CI and tests never receive a real model-provider key. Model calls must be replaceable by
-  deterministic fakes or mocks.
+### 8.1 Runtime boundary
+
+`agent-service` no longer constructs a model, tool router, reranker or SSE projector. It retains
+JWT validation, support-session creation, historical feedback, sandbox liveness and evaluation-only
+evidence reads. `history_types.py` defines the immutable stored DTOs and bounds needed by the
+conversation/evidence readers; these are not a second Agent runtime.
+
+The old RuleRouter/ModelRouter, prompt packing and public chat behavior are recorded only at the
+[pre-cutover source revision](https://github.com/ChanTso/citybuddy/blob/2eb42634f082c0ddf93639f902db38009381d337/docs/CONTRACTS.md#81-agent-control-boundaries). Reproduce historical measurements
+from each result's recorded full SHA. Current-main integration tests exercise real identity,
+MySQL, Elasticsearch and Redis boundaries directly. Historical evidence fixture events and
+fixed reranker scores are explicitly test data, never real-model task outcomes.
+
+The current buyer and merchant model lifecycle, context, memory, budget, search, code execution,
+streaming and cache protocols belong to ShopMate. They do not read old `cs_db` conversations into
+new sessions or treat old receipt projections as new actions.
 
 ### 8.2 Persistent evidence invariants
 
 | Entity | Owner/store | Unique invariant | Lifecycle or boundary | Executable source |
 |---|---|---|---|---|
 | Support conversation, event, and evidence lifecycle | `agent-service`; `cs_db`; runtime identity `agent_app` | Ordered records scoped to server-created support session and owner | Conversation lifecycle and append-only evidence bind to established session; no cross-user reuse | Agent conversation migrations and tests |
-| Agent event and evidence records | `agent-service`; `cs_db` | Unique `(trace_id, sequence)` or equivalent ordered event key | Append-only evidence for accepted internal events; public SSE is filtered projection | Agent evidence migration and SSE tests |
+| Agent event and evidence records | `agent-service`; `cs_db` | Unique `(trace_id, sequence)` or equivalent ordered event key | Append-only historical evidence with validated reader projection | Agent evidence migration and history/evaluation tests |
 | ActionReceipt projection | `agent-service`; `cs_db` | Unique receipt, PendingAction, turn, and refund bindings | Insert-only projection may be committed only with `CONFIRMED` reference and `action_completed` turn; it never overrides commerce receipt truth | Agent receipt-projection migration and conversation store |
 | Retrieval evidence | `agent-service`; `cs_db` | Trace/turn association plus index version and source references | Stores evidence actually used by turn; never re-queries Elasticsearch to rewrite history | Agent retrieval migration and evidence tests |
 | Feedback | `agent-service`; `cs_db` | Unique feedback associated with trace/session/user or sandbox | Append-only signal; authorization and ownership checked at write | Agent feedback migration and OpenAPI |
 
-### 8.3 Support interfaces
+### 8.3 Retained support interfaces
 
-| Caller → owner | Method and path | Authentication | Required boundary | Success semantics | Rejection semantics |
-|---|---|---|---|---|---|
-| `web` or evaluator → `agent-service` | `POST /api/chat` | Direct-user JWT | Fixed issuer/user audience/type, permission, owned `X-Session-Id`, `Idempotency-Key`; evaluation also supplies matching sandbox header | Returns one bounded explanation; exact confirmation returns either `action_completed` with its stored `receiptId` projection or `action_rejected` without a receipt for the two strict Commerce `409` categories | Wrong identity/session/sandbox, idempotency conflict, policy block, or exhausted attempts rejects with typed status |
-| `web` or evaluator → `agent-service` | `POST /api/chat/stream` | Direct-user JWT | Same identity, session, idempotency, and sandbox rules as `/api/chat` | Emits only `token`, `done`, `error`, and `action_receipt`; `retrieval_denied` is a normal `done`; receipt is `REQUESTED`, leads, and appears only with `action_completed`, while `action_rejected` has no receipt frame | Same failures; no raw tool/retrieval output or synthetic receipt |
-| `web` → `agent-service` | `POST /api/feedback` | Direct-user JWT | User principal, owned support session, `Idempotency-Key`, trace owned by persisted support evidence | Persists authorized append-only feedback in `cs_db` | Wrong identity, unknown trace, forged/cross-user session, ownership failure, or idempotency conflict rejects |
-| Authorized evaluator → `agent-service` | `GET /api/eval/evidence/{traceId}` | Independent evaluation API credential; evaluation profile only | Sandbox and trace must be associated | Returns authoritative allowed support evidence from `cs_db` | Production not found; cross-sandbox/unknown trace/invalid credential rejects |
-| `agent-service` → `commerce-service` | `POST /internal/tools/catalog.product.get` | Agent OBO only | Exact catalog-read scope; `act.azp=agent-service`; user subject; verified support session; time bounds; ownership; eval equality/liveness when applicable | Returns ToolSpec-bounded published product view and evidence metadata | Direct-user token, wrong issuer/audience/type/scope/actor, forged session, body identity substitution, cross-user resource, sandbox mismatch/inactivity, malformed input, or unavailable truth rejects |
+| Caller → owner | Method and path | Authentication and boundary | Result |
+|---|---|---|---|
+| Historical support client → `agent-service` | `POST /api/sessions` | Direct-user JWT, `support:session:create`; evaluation also requires matching active sandbox | Server-created owner-bound support session |
+| Historical support client → `agent-service` | `POST /api/feedback` | Direct-user JWT, owned support session and trace, idempotency key | Append-only feedback or typed ownership/conflict rejection |
+| Authorized evaluator → `agent-service` | `GET /api/eval/evidence/{trace_id}` | Independent evaluation credential, matching sandbox/trace; evaluation profile only | Validated stored historical evidence; absent in production |
 
-`knowledge.search` is a process-local ToolSpec mediated by `agent-service`; it has no commerce HTTP
-route. Sensitive action HTTP routes are listed in the preceding capability.
+`POST /api/chat` and `POST /api/chat/stream` are removed. The scoped Java tool endpoints remain
+available to their configured actors; their contracts do not imply an active CityBuddy model loop.
 
 <a id="contract-retrieval-knowledge"></a>
 
@@ -927,14 +823,15 @@ route. Sensitive action HTTP routes are listed in the preceding capability.
 
 ### 9.1 Retrieval boundaries
 
-- RAG is invoked through the `knowledge.search` tool; it is not unconditionally prepended to every
-  turn.
+- The indexer, real Elasticsearch client, FAQ cache and pure retrieval decision functions remain
+  independently testable retained components. Current ShopMate catalog/policy reads use Java
+  retail APIs; its buyer runtime does not invoke the retired `knowledge.search` ToolAdapter.
 - Retrieval keeps original query and optional rewrite as separate recall inputs. Both may
   contribute BM25 and dense-vector candidates.
-- Default fusion is deterministic application-side reciprocal rank fusion, followed by a reranker
-  role alias and a sufficiency gate whose score threshold and top-result margin are calibrated on
-  a development set. Insufficient evidence produces structured denial or clarification rather
-  than an unsupported answer.
+- The retained Elasticsearch client fuses recall lists using deterministic reciprocal rank
+  fusion. Pure decision code interprets supplied reranker scores against historical calibration;
+  current `agent-service` does not call a reranker model or generate an answer. Historical score
+  and evidence fixtures verify storage and readers without claiming a new model result.
 - Knowledge is stored in `knowledge_docs_vN` and read through a stable alias. FAQ and product chunks
   share the logical index and are separated by `doc_type` and metadata.
 - FAQ is one question-and-answer document per published item. Product documents use
@@ -1036,100 +933,17 @@ hand-built sandbox messages cannot establish reachability or satisfy that obliga
 
 <a id="contract-mainline-non-goals"></a>
 
-## 11. Retained vNext designs and current non-goals
+## 11. Historical proposals outside this repository's current runtime
 
-Everything in this section is **Retained design**, not current runtime behavior.
+The former support MemoryPacker, summary watermark, handoff ticket and failure-candidate export
+proposals remain [historical retained designs](https://github.com/ChanTso/citybuddy/blob/2eb42634f082c0ddf93639f902db38009381d337/docs/CONTRACTS.md#11-retained-vnext-designs-and-current-non-goals),
+not implemented CityBuddy behavior. They do not constrain ShopMate's implemented retail scope.
+ShopMate owns its current role/owner-isolated long-term memory; Commerce remains authoritative for
+prices, inventory, permissions, orders and approvals. No old support conversation or memory is
+copied automatically into ShopMate.
 
-### 11.1 Memory and summary design
-
-The implemented recent-turn window in section 8.1 is session-scoped short-term context, not this
-retained summary or cross-session memory design. Starting a new support session reads none of the
-old session's turns. The prompt/read cap also does not claim to delete append-only support evidence;
-durable retention and erasure require a separate policy across turns, retrieval evidence, feedback,
-PendingAction references and receipts.
-
-`MemoryPacker` may combine a commerce-owned read-only CRM view, recent turns, and a summary
-protected by monotonic `summary_until_turn`. The cold summary belongs in `cs_db`, with a hot copy in
-Support Redis. One current watermark exists per session; an older asynchronous summary cannot
-overwrite a newer watermark, and the cold summary remains recoverable from MySQL. Summary work
-would carry owner/session, exact source-turn prefix commitment, target watermark, policy version,
-and sandbox where applicable. Monotonic CAS applies; inactive sandbox work drops/archives
-idempotently, while unavailable or indeterminate liveness remains retryable.
-
-Any future cross-session memory is limited to explicit, stable, low-risk preferences such as
-language or response style. A model inference cannot write it. A chat request would first create a
-bounded proposal showing the exact value, scope and expiry, and the user would explicitly confirm
-before activation; a direct settings edit can itself be the confirmation. Order ownership, order
-ids, amounts, payment/refund state, identity, authorization, confirmation and instructions to
-change agent rules are never eligible memory.
-
-Each eligible slot requires an owner-bound source turn, policy version, expiry and monotonically
-versioned active pointer. Update and delete use an expected version; a conflict returns the current
-value for an explicit user choice rather than last-write-wins. Delete or expiry writes a tombstone
-and immediately excludes the value from prompts, while any privacy erasure policy separately
-defines what minimal audit metadata may remain. Conflict precedence is authoritative live domain
-truth, then the current user's explicit input, then the latest confirmed memory. Evaluation memory
-would also be sandbox-bound and could not survive into another sandbox. These are entry conditions
-for a future feature, not behavior supplied by the current runtime.
-
-### 11.2 Human handoff design
-
-Handoff is a bounded ticket flow rather than a full agent workstation. `commerce-service` owns the
-authoritative ticket, SLA, and Outbox; `agent-service` requests handoff and stores only a projection.
-The ticket has unique id and idempotent request key, with one applicable open ticket per configured
-session/action boundary. Its state is
-`REQUESTED → QUEUED → ASSIGNED → ACCEPTED → CLOSED / EXPIRED`. `HUMAN_PENDING` is an agent session
-mode, not ticket state; that mode plus an open authoritative ticket blocks sensitive writes.
-
-The proposed `POST /internal/handoffs` requires exact OBO handoff scope, user subject, support
-session, idempotency, and evidence correlation. Commerce would create or replay the authoritative
-ticket; wrong token mode/scope/session/owner, duplicate conflict, or invalid transition rejects.
-Ticket mutation and Outbox commit together. SLA delay consumers re-read ticket truth, and
-duplicates or late delivery cannot regress state.
-
-### 11.3 Failure-candidate export design
-
-Failure candidates belong to `agent-service` in `cs_db`, uniquely keyed by candidate and source
-trace with idempotent export status. Raw support evidence stays in CityBuddy. Only a reviewed,
-masked, synthetic bundle may cross to an authenticated ServiceEval import contract; missing review
-or masking, raw production evidence, invalid authentication, replay conflict, or attempted direct
-`cs_db` access rejects. Candidate events would carry trace/session/event id, minimized PII, and
-sandbox where applicable; duplicates are idempotent and inactive sandbox work drops/archives.
-
-### 11.4 Retained persistent invariants
-
-| Entity | Owner/store | Unique invariant | Lifecycle or boundary | State |
-|---|---|---|---|---|
-| Authoritative support ticket/handoff | `commerce-service`; `commerce_db` | Unique ticket id and idempotent handoff request key; one applicable open ticket per configured session/action boundary | `REQUESTED → QUEUED → ASSIGNED → ACCEPTED → CLOSED / EXPIRED`; mutation, state change, SLA delay event, and Outbox are commerce transactions; `HUMAN_PENDING` is agent session mode, not ticket state | Retained design |
-| Handoff projection | `agent-service`; `cs_db`; runtime identity `agent_app` | Projection keyed to authoritative commerce ticket id and support session | Agent requests handoff, enters/leaves `HUMAN_PENDING`, stores controlled evidence projection, and never becomes ticket truth | Retained design |
-| Support summary | `agent-service`; `cs_db`, hot copy in Support Redis | One current summary watermark per session; monotonically increasing `summary_until_turn` | Older asynchronous summary cannot overwrite newer watermark; cold summary is recoverable from MySQL | Retained design |
-| Failure candidate | `agent-service`; `cs_db` | Unique candidate id and source trace; export status idempotent | Raw evidence stays in CityBuddy; only reviewed, masked, synthetic bundle may cross evaluation boundary | Retained design |
-
-### 11.5 Retained interfaces
-
-| Caller → owner | Method and path | Authentication | Required boundary | Success semantics | Rejection semantics |
-|---|---|---|---|---|---|
-| `agent-service` → `commerce-service` | `POST /internal/handoffs` | Agent OBO only | Exact handoff scope, user subject, support session, idempotency, evidence correlation | Creates or returns authoritative ticket; agent stores projection and enters `HUMAN_PENDING` as applicable | Wrong token mode/scope/session/owner, duplicate conflict, or invalid transition rejects |
-| `agent-service` export process → ServiceEval authenticated import | Endpoint defined by receiving system | Dedicated cross-system authentication; no direct database access | Reviewed export authorization, masked/synthetic payload, stable candidate id/version, audit correlation | Transfers only controlled reviewed/masked/synthetic bundle; raw `cs_db` evidence remains in CityBuddy | Missing review/masking, raw production evidence, invalid authentication, replay conflict, or attempted direct `cs_db` access rejects |
-
-### 11.6 Retained asynchronous contracts
-
-| Channel | Producer → consumer | Message type | Stable payload/invariant | Failure and replay rule | State |
-|---|---|---|---|---|---|
-| Support summary generation | `agent-service` bounded async publisher → summary worker | Normal | Owner/session, exact source-turn prefix commitment, target watermark, policy version, sandbox where applicable | Monotonic CAS projection; inactive sandbox work drops/archives idempotently; unavailable or indeterminate liveness retries | Retained design |
-| Support failure-candidate events | `agent-service` bounded async publisher → authorized support-side consumers | Normal | Trace/session/event id, minimized PII, sandbox where applicable | Idempotent candidate work; inactive sandbox work drops/archives | Retained design |
-| Ticket/handoff and SLA events | Commerce transaction/Outbox → authorized consumers | Normal or Delay | Authoritative ticket id/state/version, support-session correlation, event id, due time, sandbox | Ticket mutation and Outbox commit together; SLA re-reads ticket; duplicates and late delivery cannot regress state; agent is not authoritative producer | Retained design |
-
-### 11.7 Explicit current non-goals
-
-The current implementation does not include MemoryPacker summaries/watermarks, cross-session
-memory or its proposal/confirmation/update/delete/expiry lifecycle, the associated
-PII/prompt lane, handoff tickets, failure-candidate export, multimodal input, image/audio/video
-storage, a full shopping site, a multi-page commerce product, a full human-agent
-workstation, multi-agent orchestration, a decomposer model, long-term vector memory, a second
-vector database, a service gateway or registry, Kubernetes, production return of evaluation
-evidence, automatic code changes by an evaluator, or a recovery scanner that can repeat committed
-actions.
+CityBuddy does not add a service registry, Kubernetes, a second vector database, real payment
+settlement or a scanner that repeats committed business actions as part of this entry cutover.
 
 <a id="contracts-preflight"></a>
 
@@ -1152,7 +966,6 @@ in build files, image references, and lockfiles.
 | Reciprocal rank fusion | Server-side availability is not an undeclared deployment assumption | Implemented | Application merges separate BM25 and kNN lists deterministically; server-side RRF requires future distribution verification | [Elasticsearch RRF](https://www.elastic.co/guide/en/elasticsearch/reference/8.19/rrf.html) |
 | <a id="contract-preflight-ik"></a> IK analyzer compatibility | Elasticsearch and IK are pinned to matching patch; image installation and analyzer smoke tests pass | Resolved | Do not silently omit IK or change analyzer behavior; version changes must verify matching artifact/build | [IK analyzer repository](https://github.com/infinilabs/analysis-ik) |
 | Python 3.11, FastAPI, Pydantic, `pyproject.toml` | Pydantic v2 path and uv workspace are implemented | Implemented | Python 3.11, per-package metadata, committed shared `uv.lock`, exact locked patches | [FastAPI migration](https://fastapi.tiangolo.com/how-to/migrate-from-pydantic-v1-to-pydantic-v2/); [Pydantic](https://pydantic.dev/docs/validation/latest/get-started/install/); [uv layout](https://docs.astral.sh/uv/concepts/projects/layout/); [uv workspaces](https://docs.astral.sh/uv/concepts/workspaces/) |
-| Model-proxy compatibility and retry boundary | OpenAI-compatible calls, same-tier fallback, and bounded retry are enforced by application policy and deterministic tests | Implemented boundary | `ModelRouter` keeps the configured `standard` tier and selects signal-driven tool visibility and attempt limit; proxy gets at most one transient/network retry and same-tier fallback; shared attempt budget forbids stacked unbounded retry | [LiteLLM Proxy](https://docs.litellm.ai/docs/simple_proxy); [fallback and retry](https://docs.litellm.ai/docs/proxy/reliability) |
 | <a id="contract-preflight-compose"></a> Compose readiness and migration jobs | Health-gated dependencies and one-shot migration/grant jobs are implemented | Implemented | Stateful dependencies have meaningful health checks; migrations are explicit one-shot jobs, never API startup side effects | [Compose startup order](https://docs.docker.com/compose/how-tos/startup-order/); [Compose run](https://docs.docker.com/reference/cli/docker/compose/run/) |
 | Initialization checks and build tools | Maintained language tools and secret scanning back every invoked check | Implemented | Maven/Spotless/Checkstyle/JUnit; Ruff/mypy/pytest/uv; npm/Prettier/ESLint/TypeScript/Vitest/Vite; Gitleaks; CI targets invoke only checks backed by real files and tests | [Spotless](https://github.com/diffplug/spotless/tree/main/plugin-maven); [Checkstyle](https://maven.apache.org/plugins/maven-checkstyle-plugin/); [Maven compiler](https://maven.apache.org/plugins/maven-compiler-plugin/); [Surefire](https://maven.apache.org/surefire/maven-surefire-plugin/); [Ruff](https://docs.astral.sh/ruff/); [mypy](https://mypy.readthedocs.io/en/stable/); [pytest](https://docs.pytest.org/en/stable/); [ESLint](https://eslint.org/docs/latest/use/getting-started); [Prettier](https://prettier.io/docs/); [TypeScript](https://www.typescriptlang.org/docs/handbook/compiler-options.html); [Vitest](https://vitest.dev/guide/); [npm ci](https://docs.npmjs.com/cli/v11/commands/npm-ci/); [Gitleaks](https://github.com/gitleaks/gitleaks) |
 
@@ -1176,11 +989,11 @@ relevant real integration evidence rather than relying on this prose.
 | Risk | Guardrail |
 |---|---|
 | Dependency/version drift | Exact patches and image digests live in build files/lockfiles. Markdown keeps compatibility boundary only; upgrades require real build and contract tests. |
-| Retry amplification across agent, proxy, HTTP, and MQ | One bounded attempt budget is propagated. `ModelRouter` owns the server plan and caps exact chitchat at three attempts; model proxy gets at most one transient/network retry and same-tier fallback. Commerce side-effect retries return existing results. Confirmation re-enters commerce only from claimed reference and replays receipt; repeated request idempotency replays stored turn without commerce. |
+| Retry amplification across Agent, proxy, HTTP, and MQ | ShopMate owns a bounded task budget. Commerce rechecks identity and business invariants on every call; repeated request keys and confirmations replay the same committed business result. MQ delivery and checkback use durable reservation truth. |
 | Redis or Elasticsearch treated as business truth | Contract tests and reconciliation compare with MySQL. User-visible order/action success requires durable MySQL state or ActionReceipt. |
 | Cross-database or cross-service leakage | Separate bootstrap/migration/runtime identities, exact grants, no cross-database joins, API-only boundaries, token-derived ownership, and private data excluded from RAG. |
 | Evaluation sandbox leakage, orphaned test identity, or late asynchronous effects | Commerce-orchestrated auth provision/revoke, opaque TTL handles, fail-closed activation/compensation, normal completion, janitor backstop, header/claim equality, ACTIVE/DEAD registry, scoped SQL, introduction-point liveness checks, and sandbox-bound callbacks. |
-| Model text contradicts action state | Commerce ActionReceipt is authoritative. JSON reply and SSE token text are explicitly non-authoritative explanations, and clients render successful action only from `action_completed` paired with the projected receipt. |
+| Model text contradicts action state | Commerce ActionReceipt is authoritative. ShopMate renders recorded execution from the validated business response; streamed explanation and a prepared card are not execution or settlement. |
 | Committed receipt read as settled money | Receipt proves refund request is durably recorded and commerce-owned. Mock provider does not advance it: result remains `REQUESTED` and refunded amount remains zero. Client copy states request, not settlement. |
 | Private/provider credentials in repository or CI | Runtime secret injection, safe examples, redaction tests, Gitleaks, deterministic model fakes, and no real provider key in CI. |
 | Evidence or observability divergence | `commerce_db` and `cs_db` remain authoritative for their domains. Optional tracing is mirror only and may degrade to no-op. |

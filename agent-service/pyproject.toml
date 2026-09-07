@@ -5,7 +5,7 @@ build-backend = "hatchling.build"
 [project]
 name = "citybuddy-agent-service"
 version = "0.0.1"
-description = "CityBuddy agent service executable skeleton"
+description = "CityBuddy support identity and historical evidence service"
 requires-python = ">=3.11,<3.12"
 dependencies = [
   "fastapi==0.116.1",

@@ -1,116 +1,94 @@
-# The 90-second demonstration
+# CityBuddy 与 ShopMate 演示
 
-CityBuddy exists to hold one line: an LLM agent may read business data and *prepare* a sensitive
-action, but it never becomes the authority on whether the transaction happened. This demonstration
-walks that line from both sides in about ninety seconds — the agent answering with evidence, the
-model claiming a refund that never happened, and a real refund request that is durably recorded
-only because a human confirmed it and commerce committed it.
+CityBuddy 提供身份与 Java 交易服务；ShopMate 提供统一的商家和买家零售 Agent。正式演示只使用 ShopMate 零售部署中的一套 Auth、Commerce 与数据卷：Auth 为 `127.0.0.1:9081`，Commerce 为 `127.0.0.1:9082`，ShopMate API 为 `127.0.0.1:8101`，网页为 `127.0.0.1:3100`。
 
-## Bring the stack up
+City 的可选 Vite 页面保留基本商品读取与秒杀工程表单，默认代理同一套 9081/9082。购物助手链接直接打开 `http://127.0.0.1:3100/buyer`；新页面使用同一买家账号重新登录。页面间不传 JWT、不共享浏览器令牌，也不保留旧客服会话或聊天接口。
 
-Requires the local topology (`make init-local && make up`) and both service jars
-(`./mvnw -pl auth-service,commerce-service package -DskipTests`).
+## 启动导引
 
-```bash
+```sh
 make demo
 ```
 
-That seeds a demonstration identity and product, bootstraps the knowledge index with the corpus
-the indexer ships, starts auth-service and commerce-service as containers on the compose network,
-starts the model fixture and agent-service on the host, and prints the login it created. It takes a couple of minutes, and none of it is part
-of the ninety seconds.
+**此命令只打印操作说明，未启动或停止任何服务，也未修改数据库或凭证。** `make demo-story` 打印买家操作步骤；`make demo-stop` 打印停止步骤。它们保留命令名便于查找，不再自动运行旧模型 fixture、清理签名表或创建退款订单。
 
-Two services run on the host rather than in a container because agent-service binds `127.0.0.1`,
-so a published port would not reach it and the browser has to. The ports are the ones
-`web/.env.example` already proxies to, so the web surface needs no configuration beyond
-`cp web/.env.example web/.env.local`.
+需要同级 ShopMate 仓库、Java 21、Python 3.11、Node.js 24、uv 和 Docker Compose。目录不同时可设置 `SHOPMATE_DIR` 供导引生成正确路径。首次准备：
 
-## The terminal run
+```sh
+# CityBuddy 目录
+make init-local setup-java setup-python
+./mvnw --batch-mode --no-transfer-progress -pl auth-service,commerce-service -am package
 
-```bash
-make demo-story
+# ShopMate 目录
+cd ../shopmate
+uv sync --frozen
+python3 scripts/local_runtime.py up
 ```
 
-Six beats, each one asserting something and then reading the answer back out of the authoritative
-database rather than believing the HTTP response that produced it.
+`up` 前先停止 ShopMate API。它使用 `shopmate` Compose 项目及其持久卷，首次初始化当前零售夹具；已有该版本数据时保留实际业务变更。它不是手工业务 reset，也不会将旧 City 演示库迁入零售库。需要恢复夹具时，先停业务写入并按 ShopMate 的 `docs/retail-fixture.md` 操作。
 
-| | Beat | What it proves |
-|---|---|---|
-| 1 | A real order, paid through the real endpoints | Refund preparation verifies durable payment truth. A hand-written `PAID` row is rejected as `ACTION_PREPARATION_DURABLE_TRUTH_INCONSISTENT`, so the fixture has to buy and pay like anyone else. |
-| 2 | The agent answers from the knowledge base | Retrieval is a decision with a persisted record — sufficiency outcome, calibration version, candidate and evidence counts — not a hidden step inside a prompt. The citations are the indexer's own public corpus. |
-| 3 | The model claims the refund already happened | JSON completes the turn, then SSE replays that same durable turn under the same idempotency key. Both expose the same bounded explanation with `outcome=completed`; neither carries a receipt, so no client can render action success. Commerce still holds zero refunds. |
-| 4 | The agent prepares the refund | Preparation writes a `PendingAction` in commerce and stops. The turn carries `action_pending` and a null receipt. |
-| 5 | The user confirms | The agent claims the action, commerce records the refund request, and the agent projects an `ActionReceipt`. The receipt is the only thing that lets a client render a success state. |
-| 6 | Confirming again does not record a second refund request | The same idempotency key replays the stored turn; a fresh confirmation finds no live action on the conversation, because the agent-side reference is resolved and commerce's own action is `CONSUMED`. Exactly one refund request exists. |
+在 ShopMate 目录的一个终端启动 API：
 
-`--pace 0` runs the same thing with no pauses, in about a second, which is the form to use when
-checking that the flow still works rather than watching it.
-
-## The browser run
-
-```bash
-npm --prefix web run dev
+```sh
+uv run uvicorn shopmate.app:create_app --factory --host 127.0.0.1 --port 8101
 ```
 
-Log in at <http://localhost:5173> with the credentials `make demo` printed, then:
+另一个终端启动网页：
 
-1. **Support → 消息或澄清说明.** Send `retrieval-sufficient 退款政策是怎样的`. The reply renders
-   with its citations underneath — title, document type and source version for each.
-2. Send `unsafe-action-claim 我的退款到账了吗` with either response mode. The model's sentence
-   appears as explanation text, while the permanent warning says that explanation may be wrong.
-   No success state or receipt card appears because the server outcome is only `completed`.
-3. Send `action-prepare 我要退款，订单 <order id>`. A **BOUNDARY NOTICE** card appears —
-   敏感动作等待处理 — with 确认此动作 and 拒绝此动作. Nothing has executed.
-4. Press **确认此动作**. The card becomes 敏感动作已提交 and shows the receipt identifier. The
-   copy says the refund *request* was recorded, because that is what happened.
+```sh
+npm --prefix web ci
+npm --prefix web run build
+npm --prefix web run start
+```
 
-The order identifier for step 3 comes from the terminal run, or from
-`uv run python scripts/demo_story.py --pace 0` run once beforehand.
+买家入口为 <http://127.0.0.1:3100/buyer>，商家入口为 <http://127.0.0.1:3100>。演示账号与私有密码文件：
 
-## What is real here and what is a fixture
+| 角色 | 账号 | ShopMate 内的密码文件 |
+| --- | --- | --- |
+| 买家 | `shopmate-retail-buyer` | `.run/buyer_1_password` |
+| 第二买家 | `shopmate-retail-buyer-2` | `.run/buyer_2_password` |
+| 商家 | `shopmate-fixture-operator` | `.run/operator_password` |
 
-- **There is no model-provider access.** `scripts/fake_litellm_server.py` answers the completion
-  API deterministically, and the scenario is selected by a keyword in the message — which is why
-  the demonstration messages start with `retrieval-sufficient`, `unsafe-action-claim` or
-  `action-prepare`. Everything the demonstration is about happens after that response arrives.
-- **The payment and refund providers are mocked**, and deliberately: `result_state=REQUESTED` on
-  the receipt means the refund request is durably recorded and owned by commerce, not that money
-  moved. `refunded_amount_minor` stays 0 until a settlement that this repository does not have.
-- **Everything else is real.** MySQL holds the order, the payment, the `PendingAction` and the
-  `ActionReceipt`; Elasticsearch holds the FAQ documents and answers a real hybrid query;
-  auth-service mints and exchanges real RS256 tokens; the OBO token bound to that one tool call is
-  what commerce checks before it will prepare anything.
+密码和模型代理配置只从现有本机文件读取，不放进 URL、截图、文档或提交。模型代理来源仍是 CityBuddy `.env`，由 ShopMate 实际启动配置接入；以上启动命令本身不是一次模型验收。
 
-### Shared local state
+如需演示 City 的基本商品接口，另开终端在 CityBuddy 目录运行：
 
-Two rows in the auth schema are singletons the whole local topology contends for, and the
-demonstration takes both over while it runs:
+```sh
+npm --prefix web ci
+npm --prefix web run dev -- --host 127.0.0.1
+```
 
-- **The published signing metadata.** auth-service fails the entire JWKS document when any
-  published `kid` has no configured runtime key, and the demonstration cannot configure another
-  fixture's key, so it clears the table and seeds its own.
-- **The `agent-service` client credential.** auth-service and commerce-service both pin that exact
-  client id, so it cannot be namespaced per fixture. Whichever fixture starts last owns it.
+打开 <http://127.0.0.1:5173>。`web/vite.config.ts` 与 `web/.env.example` 默认 Auth/Commerce 为 9081/9082；已有 `web/.env.local` 时，把 `CITYBUDDY_AUTH_TARGET`、`CITYBUDDY_COMMERCE_TARGET` 更新为对应地址并重启 Vite，删除旧 Agent 代理配置。旧 8081/8082 或压测用 18080/18081 不是此零售入口的共享权威。
 
-`make demo-stop` gives both back. The benchmark rig seeds its own on every setup run, so it does
-not depend on the demonstration having stopped cleanly.
+## 买家操作顺序
 
-The consequence is that **the demonstration and the benchmark rig cannot be up at the same time**.
-Whichever setup ran last owns the two rows; the other one's login starts answering 500, because its
-signing key is no longer published. Re-running that fixture's setup switches back — `make demo`
-here, `bench/setup_bench_env.sh` and `bench/agent/setup_agent_bench.sh` there. Nothing is lost
-either way.
+1. 登录买家页面，读取真实目录与规格，选择有货 SKU 加入购物车。City 的基础商品列表最多展示 100 条；完整目录、商品系列与规格以 ShopMate 为入口。
+2. 可向助手询问推荐、比较、购物规划、本人订单或政策。资料页按关键词搜索已发布政策，每次最多返回三条匹配；不是全部政策列表。
+3. 打开结账页，核对整车 SKU、规格、数量、当前价格与商品合计，勾选后确认创建订单。旧报价冲突时重新读回再决定，不自动接受新价。
+4. 对结账记录明确确认模拟付款。创建订单不等于付款成功，付款成功也不等于已发货；配送估算不加入商品付款。
+5. 在本人订单页或通过助手准备退款申请，核对保存的订单、金额和有效期，再由登录买家明确确认。`REQUESTED` 表示退款申请已记录，不代表真实资金到账。
+6. 刷新、重新登录并恢复原会话，核对持久订单、购物车和退款回执。未知写入先只读恢复，再按页面提示决定是否重试原请求。
 
-The agent's configured attempt ceiling is 16; an exact chitchat greeting is routed with a ceiling
-of three. A retrieval turn keeps the configured ceiling and charges the budget once for the model
-call that requests the tool, twice to resolve the alias and validate the mapping, twice per query
-text for BM25 and dense recall, and once for the rerank — eight in all when the tool call carries a
-query rewrite, as this one does. The closing model call is the ninth charged attempt.
+这些步骤是操作说明，不代表自动执行成功或新的模型成绩。写入正确性由 ShopMate 的 `integration_tests` 通过真实接口及权威 SQL 验证；混合确认、重复提交、归属隔离等业务断言不依赖旧页面或旧聊天协议。
 
-## Stop
+## 秒杀工程演示的边界
 
-```bash
+默认零售 `local_runtime.py up` **未启用秒杀，也没有预置可用秒杀活动或买家秒杀权限**。City 秒杀表单仍保留原请求幂等、版本提交、有界轮询、终态展示和退出取消行为，供已有秒杀专用部署与活动夹具使用；不能把默认零售页上的表单视为已开放活动。
+
+秒杀专用启动、压测脚本与历史结果继续保留在 [bench](../bench/README.md)。若切到专用测量环境，应明确该环境的身份与数据库，不能把另一套默认 City 库中的订单当成 ShopMate 账户的订单。此入口切换不新增活动、改容量参数或重跑压测。
+
+## 停止与历史数据
+
+```sh
 make demo-stop
 ```
 
-The data topology and the seeded fixture are left alone, so the next `make demo` is quick.
+此命令**未停止任何服务**。先在自己启动 API、ShopMate 网页、City Vite 的终端按 Ctrl-C，确认没有运行中的任务或未知写入，再在 ShopMate 目录执行：
+
+```sh
+python3 scripts/local_runtime.py stop
+```
+
+ShopMate 的停止命令停止自身 Java 容器和 `shopmate` Compose 数据服务，保留持久卷。导引不读取旧 `.citybuddy-demo` PID 文件、不杀未知进程，也不操作旧 `citybuddy` 数据卷或签名元数据。旧客服的历史 PendingAction、回执与证据不自动迁移或确认；旧运行进程需先核实所属启动会话后处理。
+
+旧 `demo.sh` / `demo_story.py` 的自动六幕演示绑定 `/api/sessions`、`/api/chat` 和旧模型 fixture，随该正式循环退出。历史代码仍可在切换前版本 `2eb42634f082c0ddf93639f902db38009381d337` 查阅。StateEval 历史消融原件按其记录的源版本保存，不能将旧协议的成绩直接称为新版购物助手成绩，也不能把历史 reseed 脚本改端口后指向当前零售库。

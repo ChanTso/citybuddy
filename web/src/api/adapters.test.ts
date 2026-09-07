@@ -1,6 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
-import { createSupportSession, sendChat, streamChat } from './agent';
 import { login } from './auth';
 import { listProducts, pollReservation, submitReservation } from './commerce';
 
@@ -134,103 +133,5 @@ describe('public API adapters', () => {
         signal: controller.signal,
       },
     );
-  });
-
-  it('freezes support session and JSON chat routes, ownership headers, and exact bodies', async () => {
-    const chat = {
-      conversationId: UUID,
-      traceId: UUID,
-      turnId: UUID,
-      reply: 'Safe reply.',
-      outcome: 'completed',
-      receiptId: null,
-      citations: [],
-    };
-    const fetchMock = vi
-      .fn()
-      .mockResolvedValueOnce(jsonResponse({ sessionId: 'owned-session' }, 201))
-      .mockResolvedValueOnce(jsonResponse(chat));
-    vi.stubGlobal('fetch', fetchMock);
-    const controller = new AbortController();
-
-    await expect(
-      createSupportSession(TOKEN, controller.signal),
-    ).resolves.toEqual({ sessionId: 'owned-session' });
-    await expect(
-      sendChat(
-        TOKEN,
-        'owned-session',
-        'chat-intent-key',
-        'hello',
-        controller.signal,
-      ),
-    ).resolves.toEqual(chat);
-    expect(fetchMock).toHaveBeenNthCalledWith(1, '/api/sessions', {
-      method: 'POST',
-      headers: {
-        Authorization: `Bearer ${TOKEN}`,
-        'Content-Type': 'application/json',
-      },
-      body: '{}',
-      signal: controller.signal,
-    });
-    expect(fetchMock).toHaveBeenNthCalledWith(2, '/api/chat', {
-      method: 'POST',
-      headers: {
-        Authorization: `Bearer ${TOKEN}`,
-        'Content-Type': 'application/json',
-        'X-Session-Id': 'owned-session',
-        'Idempotency-Key': 'chat-intent-key',
-      },
-      body: JSON.stringify({ message: 'hello' }),
-      signal: controller.signal,
-    });
-  });
-
-  it('returns the committed receipt from a POST-SSE stream', async () => {
-    const bytes = new TextEncoder().encode(
-      `event: action_receipt\ndata: {"sequence":1,"receiptId":"${UUID}","status":"REQUESTED"}\n\n` +
-        `event: token\ndata: {"sequence":2,"text":"issued"}\n\n` +
-        `event: done\ndata: {"sequence":3,"conversationId":"${UUID}","traceId":"${UUID}","turnId":"${UUID}","outcome":"action_completed"}\n\n`,
-    );
-    const body = new ReadableStream<Uint8Array>({
-      start(controller) {
-        controller.enqueue(bytes);
-        controller.close();
-      },
-    });
-    const fetchMock = vi.fn().mockResolvedValue(
-      new Response(body, {
-        status: 200,
-        headers: { 'Content-Type': 'text/event-stream; charset=utf-8' },
-      }),
-    );
-    vi.stubGlobal('fetch', fetchMock);
-    const controller = new AbortController();
-
-    await expect(
-      streamChat(
-        TOKEN,
-        'owned-session',
-        'stream-intent-key',
-        'confirm',
-        controller.signal,
-      ),
-    ).resolves.toEqual({
-      reply: 'issued',
-      outcome: 'action_completed',
-      receiptId: UUID,
-    });
-    expect(fetchMock).toHaveBeenCalledWith('/api/chat/stream', {
-      method: 'POST',
-      headers: {
-        Authorization: `Bearer ${TOKEN}`,
-        'Content-Type': 'application/json',
-        'X-Session-Id': 'owned-session',
-        'Idempotency-Key': 'stream-intent-key',
-      },
-      body: JSON.stringify({ message: 'confirm' }),
-      signal: controller.signal,
-    });
   });
 });

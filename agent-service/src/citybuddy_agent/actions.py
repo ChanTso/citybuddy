@@ -5,12 +5,10 @@ from __future__ import annotations
 import hashlib
 import json
 import math
-import unicodedata
 import uuid
 from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime
-from enum import Enum
 from typing import Literal, cast
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
@@ -702,26 +700,3 @@ def validate_resolved_action_events(
     ):
         raise ActionEvidenceError("Resolved action event closure is inconsistent")
     return tuple(events)
-
-
-class ConfirmationDecision(Enum):
-    CONFIRM = "CONFIRM"
-    DECLINE = "DECLINE"
-    CLARIFY = "CLARIFY"
-
-
-_CONFIRMATIONS = frozenset(
-    {"confirm", "confirm refund", "yes", "yes confirm", "确认", "确认退款", "是的", "是的确认"}
-)
-_DECLINES = frozenset(
-    {"cancel", "decline", "do not confirm", "no", "no cancel", "不", "不确认", "取消", "取消退款"}
-)
-
-
-def confirmation_decision(message: str) -> ConfirmationDecision:
-    normalized = " ".join(unicodedata.normalize("NFKC", message).strip().casefold().split())
-    if normalized in _CONFIRMATIONS:
-        return ConfirmationDecision.CONFIRM
-    if normalized in _DECLINES:
-        return ConfirmationDecision.DECLINE
-    return ConfirmationDecision.CLARIFY

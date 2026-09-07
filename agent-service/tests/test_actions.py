@@ -9,13 +9,11 @@ from citybuddy_agent import http_client
 from citybuddy_agent.actions import (
     ActionEvidenceError,
     ActionJsonError,
-    ConfirmationDecision,
     PendingActionPayload,
     PendingActionReference,
     action_argument_commitment,
     bounded_http_post,
     canonical_action_timestamp,
-    confirmation_decision,
     strict_json_object,
     validate_pending_action_events,
     validate_pending_action_reference,
@@ -165,24 +163,6 @@ def test_evaluation_rejects_action_reference_on_non_owning_turn(
             conversation_id="00000000-0000-0000-0000-000000000125",
             terminal_outcome=outcome,  # type: ignore[arg-type]
         )
-
-
-@pytest.mark.parametrize(
-    ("message", "expected"),
-    [
-        ("confirm", ConfirmationDecision.CONFIRM),
-        (" YES CONFIRM ", ConfirmationDecision.CONFIRM),
-        ("确认退款", ConfirmationDecision.CONFIRM),
-        ("do not confirm", ConfirmationDecision.DECLINE),
-        ("取消退款", ConfirmationDecision.DECLINE),
-        ("yes, but use a different amount", ConfirmationDecision.CLARIFY),
-        ("the model says confirmed", ConfirmationDecision.CLARIFY),
-        ("true", ConfirmationDecision.CLARIFY),
-        ("maybe", ConfirmationDecision.CLARIFY),
-    ],
-)
-def test_confirmation_grammar_is_closed(message: str, expected: ConfirmationDecision) -> None:
-    assert confirmation_decision(message) is expected
 
 
 @pytest.mark.parametrize(

@@ -1,4 +1,4 @@
-"""Real CB-091 Elasticsearch, reranker, MySQL atomicity, replay, and grant probe."""
+"""Real search/cache clients and historical evidence persistence; no model execution."""
 
 from __future__ import annotations
 
@@ -12,21 +12,24 @@ from typing import Any
 import httpx
 import pymysql
 from citybuddy_agent import http_client
-from citybuddy_agent.agent_control import (
-    BoundedAgent,
-    LiteLlmClient,
-    ModelRouter,
-    ProviderCircuits,
-    ProviderRoute,
-    RuleRouter,
-    ToolAdapter,
-)
-from citybuddy_agent.application import AgentSettings, MysqlSessionStore, OboClient
+from citybuddy_agent.application import AgentSettings, MysqlSessionStore
 from citybuddy_agent.conversation import CorrelationConflictError, MysqlConversationStore
 from citybuddy_agent.faq_cache import RedisFaqCache
-from citybuddy_agent.knowledge import ElasticsearchKnowledgeSearch
+from citybuddy_agent.history_types import AgentEvent
+from citybuddy_agent.knowledge import (
+    ElasticsearchKnowledgeSearch,
+    KnowledgeSearchInput,
+    KnowledgeSearchOutput,
+)
 from citybuddy_agent.metrics import PrometheusCityBuddyMetrics
-from citybuddy_agent.retrieval import RetrievalDecision, load_calibration
+from citybuddy_agent.retrieval import (
+    RerankOutput,
+    RerankScore,
+    RetrievalDecision,
+    decide_retrieval,
+    insufficient_decision,
+    load_calibration,
+)
 from citybuddy_indexer import (
     ElasticsearchKnowledgeProjection,
     FaqKnowledgeEvent,
@@ -106,52 +109,45 @@ def metric_value(payload: str, name: str, labels: dict[str, str]) -> float:
     return 0.0
 
 
-def make_agent(
-    settings: AgentSettings,
-    sessions: MysqlSessionStore,
-    *,
-    model_url: str,
-    attempt_limit: int,
-    metrics: PrometheusCityBuddyMetrics | None = None,
-) -> BoundedAgent:
-    circuits = ProviderCircuits(
-        minimum_requests=2,
-        open_seconds=0.2,
-        half_open_probes=1,
-    )
-    model = LiteLlmClient(model_url, circuits, metrics)
-    return BoundedAgent(
-        RuleRouter(),
-        ModelRouter(
-            (
-                ProviderRoute("support-standard-primary", "primary"),
-                ProviderRoute("support-standard-fallback", "fallback"),
-            ),
-            attempt_limit,
-            ProviderRoute("support-reranker-standard", "reranker"),
+def fixture_decision(search: KnowledgeSearchOutput, scores: tuple[float, ...]) -> RetrievalDecision:
+    """Supply declared historical score fixtures to the retained deterministic decision code."""
+    if len(search.results) != len(scores):
+        raise AssertionError("Historical score fixture does not cover real search candidates")
+    return decide_retrieval(
+        search,
+        RerankOutput(
+            scores=tuple(
+                RerankScore(candidate_id=f"{item.source_id}:{item.chunk_id}", score=score)
+                for item, score in zip(search.results, scores, strict=True)
+            )
         ),
-        model,
-        ToolAdapter(
-            "http://commerce-must-not-be-used",
-            OboClient(settings, sessions),
-            ElasticsearchKnowledgeSearch(settings.elasticsearch_url),
-            model,
-            load_calibration(),
-            RedisFaqCache(settings.support_redis_url, metrics=metrics)
-            if settings.support_redis_url
-            else None,
-            metrics,
+        load_calibration(),
+    )
+
+
+def fixture_events(decision: RetrievalDecision) -> tuple[AgentEvent, ...]:
+    return (
+        AgentEvent(
+            "RETRIEVAL_DECISION",
+            {
+                "indexVersion": decision.index_version,
+                "calibrationVersion": decision.calibration_version,
+                "outcome": decision.outcome,
+                "reason": decision.reason,
+                "candidateCount": decision.candidate_count,
+                "evidenceCount": len(decision.evidence),
+            },
         ),
     )
 
 
-def execute(
+def persist_decision(
     *,
     store: MysqlConversationStore,
-    agent: BoundedAgent,
     session_id: str,
     message: str,
     correlation_key: str,
+    decision: RetrievalDecision,
 ) -> tuple[RetrievalDecision, str, str]:
     start = store.begin_turn(
         session_id=session_id,
@@ -161,27 +157,18 @@ def execute(
         message=message,
     )
     if start.replay is not None:
-        raise AssertionError("Fresh retrieval fixture unexpectedly replayed")
-    result = agent.run(
-        message=message,
-        direct_token="direct-token-must-not-be-forwarded",
-        subject="cb091-user",
-        session_id=session_id,
-        trace_id=start.trace_id,
-        turn_id=start.turn_id,
-    )
-    if result.retrieval_decision is None:
-        raise AssertionError("Retrieval turn omitted its decision")
+        raise AssertionError("Fresh historical fixture unexpectedly replayed")
+    outcome = "completed" if decision.outcome == "SUFFICIENT" else "retrieval_denied"
     completed = store.complete_turn(
         start=start,
-        response_text=result.response_text,
-        outcome=result.outcome,
-        events=result.events,
-        retrieval_decision=result.retrieval_decision,
+        response_text="Controlled historical persistence fixture.",
+        outcome=outcome,
+        events=fixture_events(decision),
+        retrieval_decision=decision,
     )
-    if completed.outcome != result.outcome:
+    if completed.outcome != outcome:
         raise AssertionError("Terminal outcome diverged during atomic commit")
-    return result.retrieval_decision, start.trace_id, start.turn_id
+    return decision, start.trace_id, start.turn_id
 
 
 def main() -> None:
@@ -193,16 +180,13 @@ def main() -> None:
     parser.add_argument("--auth-password", required=True)
     parser.add_argument("--commerce-password", required=True)
     parser.add_argument("--elasticsearch-url", required=True)
-    parser.add_argument("--model-url", required=True)
     parser.add_argument("--agent-cache-url", required=True)
     parser.add_argument("--indexer-cache-url", required=True)
     args = parser.parse_args()
     clients = http_client.HttpClients(
         "shared",
         (
-            args.model_url,
             args.elasticsearch_url,
-            "http://commerce-must-not-be-used",
             "http://127.0.0.1:9",
         ),
     )
@@ -222,51 +206,61 @@ def run(args: argparse.Namespace) -> None:
         mysql_host=args.mysql_host,
         mysql_port=args.mysql_port,
         mysql_password=args.agent_password,
-        elasticsearch_url=args.elasticsearch_url,
-        model_proxy_url=args.model_url,
-        commerce_tools_url="http://commerce-must-not-be-used",
-        support_redis_url=args.agent_cache_url,
         attempt_budget=12,
     )
     sessions = MysqlSessionStore(settings)
     store = MysqlConversationStore(settings)
     session_id = sessions.create("cb091-user")
-    agent = make_agent(settings, sessions, model_url=args.model_url, attempt_limit=12)
-
+    search_client = ElasticsearchKnowledgeSearch(args.elasticsearch_url)
+    search_output = search_client.search(
+        KnowledgeSearchInput(query="refund policy"), lambda *_: None
+    )
+    if len(search_output.results) < 2:
+        raise AssertionError("Real hybrid fixture needs at least two historical evidence rows")
+    count = len(search_output.results)
+    sufficient_scores = tuple(round(0.95 - index * 0.2, 2) for index in range(count))
+    sufficient_fixture = fixture_decision(search_output, sufficient_scores)
+    below = fixture_decision(search_output, tuple(0.1 for _ in range(count)))
+    ambiguous = fixture_decision(search_output, tuple(0.95 for _ in range(count)))
+    denied = insufficient_decision(
+        index_version=search_output.index_version,
+        calibration=load_calibration(),
+        reason="reranker_denied",
+        candidate_count=count,
+    )
+    empty = insufficient_decision(
+        index_version=search_output.index_version,
+        calibration=load_calibration(),
+        reason="empty_candidates",
+        candidate_count=0,
+    )
     decisions: dict[str, RetrievalDecision] = {}
     traces: dict[str, str] = {}
     turns: dict[str, str] = {}
     expected = {
-        "retrieval-sufficient refund policy": ("SUFFICIENT", "sufficient", "completed"),
-        "retrieval-insufficient refund policy": (
+        "historical sufficient": (sufficient_fixture, "SUFFICIENT", "sufficient", "completed"),
+        "historical below threshold": (
+            below,
             "INSUFFICIENT",
             "below_threshold",
             "retrieval_denied",
         ),
-        "retrieval-ambiguous refund policy": (
-            "INSUFFICIENT",
-            "ambiguous_margin",
-            "retrieval_denied",
-        ),
-        "retrieval-malformed refund policy": (
+        "historical ambiguous": (ambiguous, "INSUFFICIENT", "ambiguous_margin", "retrieval_denied"),
+        "historical reranker denial": (
+            denied,
             "INSUFFICIENT",
             "reranker_denied",
             "retrieval_denied",
         ),
-        "retrieval-transient refund policy": ("SUFFICIENT", "sufficient", "completed"),
-        "retrieval-timeout refund policy": (
-            "INSUFFICIENT",
-            "reranker_denied",
-            "retrieval_denied",
-        ),
+        "historical empty": (empty, "INSUFFICIENT", "empty_candidates", "retrieval_denied"),
     }
-    for sequence, (message, expectation) in enumerate(expected.items(), start=1):
-        decision, trace_id, turn_id = execute(
+    for sequence, (message, (fixture, *expectation)) in enumerate(expected.items(), start=1):
+        decision, trace_id, turn_id = persist_decision(
             store=store,
-            agent=agent,
             session_id=session_id,
             message=message,
             correlation_key=f"cb091-{sequence}",
+            decision=fixture,
         )
         durable = query_one(
             args,
@@ -276,9 +270,9 @@ def run(args: argparse.Namespace) -> None:
         )
         turn = query_one(args, "SELECT outcome FROM support_turn WHERE turn_id = %s", (turn_id,))
         actual = (decision.outcome, decision.reason, turn[0])
-        if actual != expectation:
+        if actual != tuple(expectation):
             raise AssertionError(
-                f"Deterministic retrieval outcome diverged for {message}: "
+                f"Historical decision persistence diverged for {message}: "
                 f"expected {expectation}, got {actual}"
             )
         if durable[:4] != (
@@ -294,7 +288,7 @@ def run(args: argparse.Namespace) -> None:
         traces[message] = trace_id
         turns[message] = turn_id
 
-    sufficient_message = "retrieval-sufficient refund policy"
+    sufficient_message = "historical sufficient"
     sufficient = decisions[sufficient_message]
     if len(sufficient.evidence) < 2:
         raise AssertionError("Real hybrid retrieval did not provide bounded rerank evidence")
@@ -312,7 +306,6 @@ def run(args: argparse.Namespace) -> None:
     if stored_sources != expected_sources:
         raise AssertionError("Stored evidence did not match the exact real-index selection")
 
-    counts_before = httpx.get(f"{args.model_url}/fixture/counts", timeout=2).json()
     replay = store.begin_turn(
         session_id=session_id,
         subject="cb091-user",
@@ -320,9 +313,8 @@ def run(args: argparse.Namespace) -> None:
         correlation_key="cb091-1",
         message=sufficient_message,
     )
-    counts_after = httpx.get(f"{args.model_url}/fixture/counts", timeout=2).json()
-    if replay.replay is None or counts_after != counts_before:
-        raise AssertionError("Same-intent replay reran Elasticsearch or the reranker")
+    if replay.replay is None:
+        raise AssertionError("Same-intent history did not replay")
     if replay.replay.retrieval_evidence != sufficient.evidence:
         raise AssertionError("Replay did not return the stored sufficient evidence")
     try:
@@ -337,24 +329,6 @@ def run(args: argparse.Namespace) -> None:
         pass
     else:
         raise AssertionError("Conflicting replay did not fail closed")
-
-    # Admit the initial model request, alias and mapping checks, and all four
-    # original/rewrite recall legs; exhaust exactly at the reranker boundary.
-    budget_agent = make_agent(settings, sessions, model_url=args.model_url, attempt_limit=7)
-    budget_decision, budget_trace, _ = execute(
-        store=store,
-        agent=budget_agent,
-        session_id=session_id,
-        message="retrieval-sufficient budget-bound refund policy",
-        correlation_key="cb091-budget",
-    )
-    budget_reason = query_one(
-        args,
-        "SELECT reason_code FROM retrieval_decision WHERE trace_id = %s",
-        (budget_trace,),
-    )[0]
-    if budget_decision.reason != "reranker_denied" or budget_reason != "reranker_denied":
-        raise AssertionError("Shared attempt-budget exhaustion did not fail closed")
 
     event_payloads = query_one(
         args,
@@ -438,18 +412,7 @@ def run(args: argparse.Namespace) -> None:
         correlation_key="cb091-fault",
         message=fault_message,
     )
-    # Isolate the atomic-write fault from the intentionally opened circuit in
-    # the earlier timeout scenario; this fixture must reach evidence row two.
-    fault_agent = make_agent(settings, sessions, model_url=args.model_url, attempt_limit=12)
-    fault_result = fault_agent.run(
-        message=fault_message,
-        direct_token="direct-token-must-not-be-forwarded",
-        subject="cb091-user",
-        session_id=session_id,
-        trace_id=fault_start.trace_id,
-        turn_id=fault_start.turn_id,
-    )
-    if fault_result.retrieval_decision is None or len(fault_result.retrieval_decision.evidence) < 2:
+    if len(sufficient_fixture.evidence) < 2:
         raise AssertionError("Controlled rollback fixture lacks two evidence rows")
     trigger_sql = (
         "CREATE TRIGGER cb091_fail_second_evidence BEFORE INSERT ON retrieval_evidence "
@@ -463,10 +426,10 @@ def run(args: argparse.Namespace) -> None:
     try:
         store.complete_turn(
             start=fault_start,
-            response_text=fault_result.response_text,
-            outcome=fault_result.outcome,
-            events=fault_result.events,
-            retrieval_decision=fault_result.retrieval_decision,
+            response_text="Controlled rollback fixture.",
+            outcome="completed",
+            events=fixture_events(sufficient_fixture),
+            retrieval_decision=sufficient_fixture,
         )
     except pymysql.MySQLError as error:
         if error.args[0] != 1644:
@@ -567,127 +530,71 @@ def run(args: argparse.Namespace) -> None:
     refresh_response.raise_for_status()
 
     cache_metrics = PrometheusCityBuddyMetrics()
-    cache_agent = make_agent(
-        settings,
-        sessions,
-        model_url=args.model_url,
-        attempt_limit=12,
-        metrics=cache_metrics,
-    )
-    first_cache_decision, _, _ = execute(
+    agent_cache = RedisFaqCache(args.agent_cache_url, metrics=cache_metrics)
+    if agent_cache.lookup(cache_message) is not None:
+        raise AssertionError("Unpopulated query mapping unexpectedly hit")
+    search_cache = search_client.search(KnowledgeSearchInput(query=cache_message), lambda *_: None)
+    first_cache_fixture = fixture_decision(search_cache, (0.95,))
+    first_cache_decision, _, _ = persist_decision(
         store=store,
-        agent=cache_agent,
         session_id=session_id,
         message=cache_message,
         correlation_key="cb112-cache-population",
+        decision=first_cache_fixture,
     )
     if (
-        first_cache_decision.outcome != "SUFFICIENT"
-        or len(first_cache_decision.evidence) != 1
+        len(first_cache_decision.evidence) != 1
         or first_cache_decision.evidence[0].source_id != "faq-cb112-exact"
         or first_cache_decision.evidence[0].source_version != 1
     ):
-        raise AssertionError(
-            "Real Elasticsearch miss did not produce one guarded FAQ mapping: "
-            f"{first_cache_decision.model_dump(by_alias=True, mode='json')}"
-        )
-    after_miss = cache_metrics.render().decode("utf-8")
-    if (
-        metric_value(
-            after_miss,
-            "citybuddy_knowledge_backend_decisions_total",
-            {"decision": "elasticsearch_issued"},
-        )
-        != 1
-        or metric_value(
-            after_miss,
-            "citybuddy_knowledge_backend_decisions_total",
-            {"decision": "cache_served"},
-        )
-        != 0
-    ):
-        raise AssertionError("Real FAQ miss did not record exactly one Elasticsearch decision")
-    cache_hit_settings = settings.model_copy(update={"elasticsearch_url": "http://127.0.0.1:9"})
-    cache_hit_agent = make_agent(
-        cache_hit_settings,
-        sessions,
-        model_url=args.model_url,
-        attempt_limit=12,
-        metrics=cache_metrics,
-    )
-    cache_hit_decision, _, _ = execute(
+        raise AssertionError("Real Elasticsearch fixture did not retain its exact published FAQ")
+    if not agent_cache.populate_mapping(cache_message, "faq-cb112-exact", 1):
+        raise AssertionError("Published FAQ mapping was not populated")
+    cached = agent_cache.lookup(cache_message)
+    if cached is None:
+        raise AssertionError("Real populated FAQ mapping did not hit")
+    cache_hit_fixture = fixture_decision(cached, (0.95,))
+    cache_hit_decision, _, _ = persist_decision(
         store=store,
-        agent=cache_hit_agent,
         session_id=session_id,
         message=cache_message,
         correlation_key="cb112-cache-hit",
+        decision=cache_hit_fixture,
     )
     if cache_hit_decision.evidence != first_cache_decision.evidence:
-        raise AssertionError("Cache hit changed citation or retrieval evidence semantics")
-    after_hit = cache_metrics.render().decode("utf-8")
+        raise AssertionError("Cache hit changed historical evidence facts")
     if (
         metric_value(
-            after_hit,
-            "citybuddy_knowledge_backend_decisions_total",
-            {"decision": "cache_served"},
+            cache_metrics.render().decode(),
+            "citybuddy_agent_faq_cache_lookups_total",
+            {"level": "mapping", "result": "miss"},
         )
         != 1
         or metric_value(
-            after_hit,
-            "citybuddy_knowledge_backend_decisions_total",
-            {"decision": "elasticsearch_issued"},
+            cache_metrics.render().decode(),
+            "citybuddy_agent_faq_cache_lookups_total",
+            {"level": "answer", "result": "hit"},
         )
         != 1
     ):
-        raise AssertionError("Real FAQ hit was not isolated from Elasticsearch issuance")
-    outage_settings = settings.model_copy(update={"support_redis_url": "redis://127.0.0.1:9/0"})
-    outage_agent = make_agent(
-        outage_settings,
-        sessions,
-        model_url=args.model_url,
-        attempt_limit=12,
-        metrics=cache_metrics,
-    )
-    outage_decision, _, _ = execute(
-        store=store,
-        agent=outage_agent,
-        session_id=session_id,
-        message=cache_message,
-        correlation_key="cb112-cache-outage",
-    )
-    if outage_decision.evidence != first_cache_decision.evidence:
-        raise AssertionError("Support Redis outage changed Elasticsearch fallback evidence")
-    after_outage = cache_metrics.render().decode("utf-8")
+        raise AssertionError("Cache client did not record real lookup outcomes")
+    outage_cache = RedisFaqCache("redis://127.0.0.1:9/0", metrics=cache_metrics)
+    if outage_cache.lookup(cache_message) is not None:
+        raise AssertionError("Unavailable Redis unexpectedly returned a hit")
     if (
         metric_value(
-            after_outage,
-            "citybuddy_knowledge_backend_decisions_total",
-            {"decision": "elasticsearch_issued"},
-        )
-        != 2
-        or metric_value(
-            after_outage,
+            cache_metrics.render().decode(),
             "citybuddy_agent_faq_cache_lookups_total",
             {"level": "mapping", "result": "unavailable"},
         )
         != 1
     ):
-        raise AssertionError("Real FAQ outage did not record one fallback Elasticsearch decision")
-    if (
-        metric_value(
-            after_outage,
-            "citybuddy_agent_model_request_attempts_total",
-            {"role": "primary", "outcome": "success"},
-        )
-        <= 0
-        or metric_value(
-            after_outage,
-            "citybuddy_agent_model_request_attempts_total",
-            {"role": "reranker", "outcome": "success"},
-        )
-        <= 0
-    ):
-        raise AssertionError("Real retrieval omitted actual provider attempt diagnostics")
+        raise AssertionError("Redis outage was not recorded as unavailable")
+    independent_search = search_client.search(
+        KnowledgeSearchInput(query=cache_message), lambda *_: None
+    )
+    if fixture_decision(independent_search, (0.95,)).evidence != first_cache_decision.evidence:
+        raise AssertionError("Independent live-index reading changed published evidence")
 
     interrupted_publication = cache_event(2)
     interrupted_projection = VersionedKnowledgeProjection(
@@ -701,7 +608,6 @@ def run(args: argparse.Namespace) -> None:
             raise
     else:
         raise AssertionError("Injected Redis finalization failure unexpectedly acknowledged")
-    agent_cache = RedisFaqCache(args.agent_cache_url)
     if agent_cache.lookup(cache_message) is not None:
         raise AssertionError("Old query mapping survived the Redis finalization failure window")
     if (
@@ -713,14 +619,7 @@ def run(args: argparse.Namespace) -> None:
     tombstone = cache_event(3, tombstone=True)
     assert es_projection.apply(tombstone) is ProjectionOutcome.APPLIED
     assert cache_projection.apply(tombstone, "knowledge_docs_v1") is ProjectionOutcome.APPLIED
-    decisions_before_replay = {
-        decision: metric_value(
-            cache_metrics.render().decode("utf-8"),
-            "citybuddy_knowledge_backend_decisions_total",
-            {"decision": decision},
-        )
-        for decision in ("cache_served", "elasticsearch_issued")
-    }
+    lookup_metrics_before = cache_metrics.render()
     replay = store.begin_turn(
         session_id=session_id,
         subject="cb091-user",
@@ -730,16 +629,8 @@ def run(args: argparse.Namespace) -> None:
     )
     if replay.replay is None or replay.replay.retrieval_evidence != cache_hit_decision.evidence:
         raise AssertionError("Historical cache-hit evidence was not replayed from MySQL")
-    decisions_after_replay = {
-        decision: metric_value(
-            cache_metrics.render().decode("utf-8"),
-            "citybuddy_knowledge_backend_decisions_total",
-            {"decision": decision},
-        )
-        for decision in ("cache_served", "elasticsearch_issued")
-    }
-    if decisions_after_replay != decisions_before_replay:
-        raise AssertionError("Durable replay fabricated a backend decision")
+    if cache_metrics.render() != lookup_metrics_before:
+        raise AssertionError("Durable history replay performed another cache lookup")
 
     print(
         json.dumps(
@@ -748,13 +639,13 @@ def run(args: argparse.Namespace) -> None:
                 "cacheDurableReplay": True,
                 "cacheFinalizeWindow": True,
                 "cacheHitEvidence": True,
-                "cacheOutageFallback": True,
-                "metricsBackendMatrix": True,
+                "cacheOutageReadBoundary": True,
+                "cacheLookupMetrics": True,
                 "metricsReplayExcluded": True,
                 "calibrationVersion": "cb091-calibration-v1",
                 "indexVersion": "knowledge_docs_v1",
-                "outcomes": len(expected) + 4,
-                "replayWithoutExecution": True,
+                "historicalOutcomes": len(expected),
+                "historicalReplay": True,
                 "runtimeIsolation": "passed",
                 "storedEvidenceCount": len(sufficient.evidence),
             },

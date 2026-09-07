@@ -6,9 +6,10 @@ A Java commerce backend for catalog, standard orders, seckill, simulated payment
 Commerce owns transaction state; Auth issues user identities and scoped service delegations.
 The implementation focuses on contention, idempotency, asynchronous recovery and authorized writes.
 
-The buyer web and support demo remain the default entry in this repository.
-[ShopMate](https://github.com/ChanTso/shopmate) is a separate merchant workbench that uses the same
-Commerce contracts for paid-order analysis and operator-approved price changes.
+The retail entry is [ShopMate](https://github.com/ChanTso/shopmate): one buyer shopping assistant
+and merchant workbench, both using CityBuddy identities and transaction APIs. This repository
+retains a small catalog/seckill engineering page; its shopping-assistant link opens ShopMate.
+The former buyer support model loop and chat endpoints are retired.
 
 ## Results
 
@@ -18,7 +19,7 @@ Commerce contracts for paid-order analysis and operator-approved price changes.
 | Order and timeout-dispatch cadence | Order-wait p99 134.368 s → 72.234 ms; 12,000/12,000 orders completed on both sides | Same single-activity 40 requests/s × 300 seconds. Batch sizes and serial processing unchanged; order/dispatch queues stayed bounded after adjustment. [Comparison and higher-rate observations](bench/results/seckill_sustained_orders_20260906.md). |
 | Activity lock: `FOR UPDATE` → `FOR SHARE` | p50 1,535.1 → 6.1 ms; dropped iterations 949 → 0 | Historical one-activity comparison at 800 requests/s. [Paired results](bench/README.md#shared-activity-lock-result). |
 | Generated machine credential: BCrypt → digest | Refund-preparation p50 4,139.8 → 13.4 ms; Auth median CPU 694.42% → 4.30% | Historical 30 requests/s step, one Agent worker and deterministic model. [Paired results](bench/agent/README.md#repeated-obo-service-credential-verification). |
-| In-transaction resource ownership binding | Unauthorized refund requests 55/300 → 0/300 | StateEval's fixed 600 real-model trials, graded against independent SQL. [Campaign artifacts](https://github.com/ChanTso/state-eval/tree/main/results/ownership-campaign-v1/formal). |
+| Historical in-transaction resource ownership binding | Unauthorized refund requests 55/300 → 0/300 | StateEval's fixed 600 real-model trials, graded against independent SQL. [Campaign artifacts](https://github.com/ChanTso/state-eval/tree/main/results/ownership-campaign-v1/formal). |
 
 Performance measurements ran on a MacBook Pro M4, Docker 8 CPUs / 14 GB, with Commerce limited to
 4 CPUs. Each linked report records its measured revision, workload and raw output.
@@ -33,20 +34,21 @@ limiting side between Commerce and the co-located generator was not isolated. A 
 that load or retroactively establish the historical cause. The historical headline remains
 separate from that newer workload. Sustained order input at 200/s accumulated work; its eventual
 completion is not stable capacity. The earlier [blocking-scheduler diagnosis](bench/results/local_seckill_diagnosis_20260906.md)
-retains its separate 10/s comparison. StateEval evaluates resource ownership; ShopMate's normal business
-quality is covered by its separate [real-model evaluations](https://github.com/ChanTso/shopmate/blob/b327368d557150e5459cd6814d60721e6fa5c489/evals/records/README.md).
+retains its separate 10/s comparison. The StateEval campaign measured the former support caller,
+not the new ShopMate buyer chain. A new-chain ownership campaign and the expanded retail task
+acceptance remain separate work; neither inherits the old campaign or prior merchant-only scores.
+[Historical ShopMate evaluations](https://github.com/ChanTso/shopmate/blob/b327368d557150e5459cd6814d60721e6fa5c489/evals/records/README.md) retain their original scope.
 
 ## Transaction and identity design
 
 ```mermaid
 flowchart LR
-    Buyer[Buyer web / default] --> Commerce[Commerce / Java]
-    Buyer --> Support[Buyer support]
-    Support -->|scoped delegation| Commerce
-    Operator[Merchant operator] --> ShopMate[ShopMate / separate repository]
-    ShopMate -->|read / prepare| Commerce
-    ShopMate -->|direct operator approval| Commerce
-    Support --> Auth[Auth / Java]
+    Buyer[Buyer] --> ShopMate[ShopMate / buyer and merchant Agents]
+    Operator[Merchant operator] --> ShopMate
+    CityWeb[CityBuddy catalog / seckill page] --> Commerce[Commerce / Java]
+    CityWeb -->|shopping-assistant link| ShopMate
+    ShopMate -->|scoped reads / proposals| Commerce
+    ShopMate -->|user-confirmed transactions| Commerce
     ShopMate --> Auth
     ShopMate -->|read-only analysis| Views[Restricted reporting views]
     Views --> DB[(MySQL transaction state)]
@@ -72,7 +74,9 @@ flowchart LR
   scope, session binding and resource ownership. OBO tokens are not server-enforced one-use tokens.
   Generated high-entropy machine credentials use a client-bound digest; human passwords retain
   BCrypt. Existing BCrypt service rows require explicit rotation to use the new verifier.
-- **Merchant approval.** Commerce snapshots one to 25 same-currency products into an immutable
+- **Merchant approval.** Listing, inventory, price, promotion and campaign writes use persisted
+  proposals and direct operator approval. For price changes, Commerce snapshots one to 25
+  same-currency products into an immutable
   operator/session/request-key draft. Approval requires the owning operator's direct identity.
   One transaction locks products in sorted order, verifies all versions and eligibility, then
   commits prices, the receipt, catalog generation and publication events. Business conflicts
@@ -88,9 +92,9 @@ that shaped these choices.
 |---|---|
 | `commerce-service` / Java 21, Spring Boot | Catalog, orders, seckill, payments, refunds, reconciliation and merchant drafts |
 | `auth-service` / Java 21, Spring Boot | User login, signing keys, JWKS and authenticated exact-scope token exchange |
-| `agent-service` / Python, FastAPI | Existing buyer support sessions, tools, confirmation and SSE |
+| `agent-service` / Python, FastAPI | Retained support identity, historical feedback/evidence and storage readers; no model loop or chat API |
 | `knowledge-indexer` / Python | Buyer knowledge indexing, version ordering, rebuild and alias switching |
-| `web` / React, TypeScript | Default buyer demonstration surface |
+| `web` / React, TypeScript | Catalog/seckill engineering page and link to ShopMate buyer |
 
 MySQL is authoritative for business and identity state. Commerce Redis and support Redis serve
 separate projection/cache workloads; Elasticsearch is a derived knowledge index. Product and FAQ
@@ -102,68 +106,31 @@ historical successful-payment gross **before refunds**, grouped by currency and 
 time in UTC half-open intervals. Changing a product price does not rewrite historical paid amounts.
 See the [merchant contract](docs/CONTRACTS.md#merchant-analysis-and-approved-price-changes).
 
-## Two local entries
+## Local retail entry
 
-| Entry | Purpose | Default address |
-|---|---|---|
-| Buyer demo in this repository | Catalog, order/payment and support confirmation walkthrough | `http://localhost:5173` |
-| [ShopMate](https://github.com/ChanTso/shopmate/blob/b327368d557150e5459cd6814d60721e6fa5c489/README.md) | Merchant analysis, price drafts and operator approval | `http://127.0.0.1:3100` |
-
-### Buyer demo
+ShopMate runs the buyer and merchant pages on `http://127.0.0.1:3100/buyer` and
+`http://127.0.0.1:3100`, backed by its API on 8101 and one CityBuddy Auth/Commerce pair on
+9081/9082. The optional CityBuddy Vite page on 5173 proxies that same pair. It does not copy a
+browser token into the ShopMate link: log in there with the same buyer account.
 
 Requires Java 21, Python 3.11, uv 0.11.24, Node.js 24, GNU Make, Docker Compose v2,
-OpenSSL, `sha256sum`, `curl` and `tar`.
+OpenSSL, `sha256sum`, `curl` and `tar`. Start with:
 
 ```bash
-make setup
-make init-local
-make up
-./mvnw --batch-mode --no-transfer-progress -pl auth-service,commerce-service -am package
 make demo
 ```
 
-In another terminal:
+This prints preparation and startup instructions. It does **not** launch services, reset data or
+change credentials. `make demo-story` prints the buyer walkthrough; `make demo-stop` prints the
+actual stop commands. Follow [docs/DEMO.md](docs/DEMO.md) for the sibling ShopMate startup,
+private local login files, CityBuddy page and fixture boundaries. The default retail deployment
+has no active seckill fixture; dedicated seckill workloads remain in `bench/`.
 
-```bash
-cp web/.env.example web/.env.local
-npm --prefix web run dev
-```
-
-The buyer web proxies Auth/Commerce/Agent at 8081/8082/8000. Use the generated login printed by
-`make demo`. Run `make demo-story` for the terminal walkthrough and `make demo-stop` to stop the
-applications; `make down` stops the data topology and preserves named volumes. The buyer walkthrough
-uses a deterministic model fixture; details and the payment/refund boundary are in
-[docs/DEMO.md](docs/DEMO.md).
-
-The buyer demo and benchmark setup share local signing/client fixture state; stop one before
-starting the other. Their [shared-state contract](docs/DEMO.md#shared-local-state) records why.
-
-### Merchant workbench
-
-With the sibling ShopMate checkout and the Java artifacts above:
-
-```bash
-cd ../shopmate
-uv sync --frozen
-python3 scripts/local_runtime.py up
-uv run uvicorn shopmate.app:create_app --factory --host 127.0.0.1 --port 8101
-```
-
-In another terminal in ShopMate:
-
-```bash
-npm --prefix web ci
-npm --prefix web run build
-npm --prefix web run start
-```
-
-ShopMate uses its own Compose project and data volumes, with Auth/Commerce on 9081/9082 and its
-API on 8101. The two local entries use separate data, while sharing CityBuddy's implementation.
-Its [README](https://github.com/ChanTso/shopmate/blob/b327368d557150e5459cd6814d60721e6fa5c489/README.md) covers model configuration,
-generated local login and fixture reset. `python3 scripts/local_runtime.py stop` stops its Java
-and data services while preserving volumes; stop the API and web in their terminals.
-See the [browser walkthrough](https://github.com/ChanTso/shopmate/blob/b327368d557150e5459cd6814d60721e6fa5c489/docs/demo-20260906/README.md)
-for analysis, actual approval, readback and refresh recovery.
+The old standalone support demo is no longer a second buyer entry. Its historical database
+volumes, support evidence, PendingAction and receipts are preserved without automatic migration
+or confirmation. Historical Agent benchmarks require their recorded source revisions, not the
+current retired chat endpoint. ShopMate's [README](https://github.com/ChanTso/shopmate/blob/main/README.md)
+documents model configuration and controlled fixture reset.
 
 ## Verification
 
