@@ -40,6 +40,11 @@ def test_catalog_contract_exposes_only_authenticated_published_reads() -> None:
         "/internal/tools/catalog.product.get",
         "/internal/knowledge/snapshot",
         "/internal/eval/sandboxes/{sandboxId}/liveness",
+        "/internal/eval/shopping/orders",
+        "/internal/eval/shopping/orders/{orderId}",
+        "/internal/eval/shopping/preferences",
+        "/internal/eval/shopping/cart",
+        "/internal/eval/shopping/policies",
         "/internal/mock-payments/callback",
         "/internal/shopping/orders",
         "/internal/shopping/preferences",
@@ -57,6 +62,7 @@ def test_catalog_contract_exposes_only_authenticated_published_reads() -> None:
         "/internal/merchant/products",
         "/internal/merchant/products/{productId}",
         "/internal/merchant/summary",
+        "/internal/merchant/orders",
         "/internal/merchant/order-issues",
         "/internal/merchant/listings",
         "/internal/merchant/listings/{id}",
@@ -117,6 +123,66 @@ def test_retail_pagination_and_merchant_change_authority_are_explicit() -> None:
     assert apply["security"] == [{"directUserBearer": []}]
     assert apply["x-required-permission"] == "merchant:change:apply"
     assert apply["requestBody"]["content"]["application/json"]["schema"]["maxProperties"] == 0
+
+    orders = operations["/internal/merchant/orders"]["get"]
+    assert orders["security"] == [{"agentOboBearer": []}]
+    assert orders["x-required-actor"] == "merchant-agent"
+    assert orders["x-required-scope"] == "merchant:read"
+    query = {item["name"]: item["schema"] for item in orders["parameters"] if item["in"] == "query"}
+    assert query == {"limit": {"type": "integer", "minimum": 1, "maximum": 50, "default": 6}}
+    assert orders["responses"]["200"]["content"]["application/json"]["schema"] == {
+        "type": "array",
+        "maxItems": 50,
+        "items": {"$ref": "#/components/schemas/ShoppingOrder"},
+    }
+
+
+def test_evaluation_shopping_reads_reuse_business_schemas_with_exact_authority() -> None:
+    paths = load_contract()["paths"]
+    for suffix, scope, schema in (
+        ("orders", "shopping:orders:read", "ShoppingOrder"),
+        ("orders/{orderId}", "shopping:orders:read", "ShoppingOrder"),
+        ("preferences", "shopping:profile:read", "ShoppingPreferences"),
+        ("cart", "shopping:cart:read", "ShoppingCart"),
+        ("policies", None, "RetailPolicy"),
+    ):
+        path = paths[f"/internal/eval/shopping/{suffix}"]
+        assert set(path) == {"get"}
+        operation = path["get"]
+        assert operation["x-citybuddy-profile"] == "evaluation"
+        parameters = {parameter["name"]: parameter for parameter in operation["parameters"]}
+        assert parameters["X-Eval-Sandbox-Id"]["required"] is True
+        if scope is not None:
+            assert operation["security"] == [{"agentOboBearer": []}]
+            assert operation["x-required-actor"] == "shopping-agent"
+            assert operation["x-required-scope"] == scope
+            assert parameters["X-Shopping-Session-Id"]["required"] is True
+        else:
+            assert operation["security"] == [{"directUserBearer": []}]
+            assert operation["x-required-permission"] == "shopping:session:create"
+            assert "X-Shopping-Session-Id" not in parameters
+        result = operation["responses"]["200"]["content"]["application/json"]["schema"]
+        if suffix in {"orders", "policies"}:
+            assert result["type"] == "array"
+            assert result["maxItems"] == (50 if suffix == "orders" else 3)
+            result = result["items"]
+        assert result == {"$ref": f"#/components/schemas/{schema}"}
+        for response in operation["responses"].values():
+            assert response["headers"]["Cache-Control"]["schema"]["const"] == "no-store"
+    order_parameters = paths["/internal/eval/shopping/orders"]["get"]["parameters"]
+    assert next(item["schema"] for item in order_parameters if item["name"] == "limit") == {
+        "type": "integer",
+        "minimum": 1,
+        "maximum": 50,
+        "default": 20,
+    }
+    query = next(
+        item
+        for item in paths["/internal/eval/shopping/policies"]["get"]["parameters"]
+        if item["name"] == "query"
+    )
+    assert query["required"] is True
+    assert query["schema"] == {"type": "string", "minLength": 1, "maxLength": 200}
 
 
 def test_knowledge_snapshot_contract_is_dedicated_closed_and_bounded() -> None:
