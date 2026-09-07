@@ -23,7 +23,7 @@ public record SeckillOrderProperties(
     receiveAwait = receiveAwait == null ? Duration.ofSeconds(2) : receiveAwait;
     receiveInvisibleDuration =
         receiveInvisibleDuration == null ? Duration.ofSeconds(30) : receiveInvisibleDuration;
-    receiveBatchSize = receiveBatchSize == null ? 16 : receiveBatchSize;
+    receiveBatchSize = receiveBatchSize == null ? 32 : receiveBatchSize;
     requireText(rocketmqEndpoints, "RocketMQ endpoints");
     requireText(rocketmqTopic, "RocketMQ topic");
     requireText(rocketmqConsumerGroup, "RocketMQ consumer group");

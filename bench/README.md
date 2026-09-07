@@ -1,8 +1,17 @@
 # Transaction measurement
 
+Latest completed results: [transaction results, 2026-09-08](results/transaction_results_20260908.md).
+
 Current scripts cover three distinct workloads on the existing Docker network: sustained
 seckill admission and order creation, ordinary order-to-payment flows, and already-sold-out
 seckill rejection. Commerce remains limited to 4 CPUs in the 8-CPU Docker VM.
+
+The order consumer now receives up to 32 messages and waits 10 ms between batches.
+It still processes one transaction and then acknowledges each message serially; the
+timeout dispatch and cancellation cadence is unchanged. Empty receives retain long polling.
+The smaller fixed delay also permits more frequent retries after immediate failures.
+Compare this combined batch/cadence change at the same input rate; do not attribute
+its result to either factor alone or reuse earlier 16-message/50-ms results as new measurements.
 
 Every setup uses a new `TOPIC_SUFFIX` of at most 40 safe characters. It creates label-scoped
 users, products and activities; it does not delete prior transactions or alter checkout foreign
