@@ -1,4 +1,123 @@
-# Seckill measurement
+# Transaction measurement
+
+Current scripts cover three distinct workloads on the existing Docker network: sustained
+seckill admission and order creation, ordinary order-to-payment flows, and already-sold-out
+seckill rejection. Commerce remains limited to 4 CPUs in the 8-CPU Docker VM.
+
+Every setup uses a new `TOPIC_SUFFIX` of at most 40 safe characters. It creates label-scoped
+users, products and activities; it does not delete prior transactions or alter checkout foreign
+keys. Before setup, preserve the preceding SQL/MQ/Redis results, finish its admitted work and
+stop the old benchmark applications and generator. Setup refuses running benchmark containers
+or pending handoff/order work. It saves the original public signing metadata once in ignored
+state; it refuses to mistake an already installed synthetic key for that original.
+
+Build and commit the exact source before measuring. Setup records full source/JAR revisions,
+the runners check them, and existing result paths are never overwritten. Login is fixture work.
+The scripts preserve incomplete business rows after a failed request; there are no automatic
+payment retries or fixture deletes.
+
+## Current workload commands
+
+Use a fresh setup for every measured point. The commands below run one point, not an automatic
+capacity search. Stop the benchmark applications only after preserving and inspecting the
+previous point. `LABEL` examples fit the fixture identifier limit.
+
+```sh
+LABEL="a160_$(git rev-parse --short=7 HEAD)_$(date -u +%Y%m%dT%H%M%SZ)"
+BENCH_WORKLOAD=seckill TOPIC_SUFFIX="$LABEL" BENCH_USERS=48050 \
+  BENCH_ACTIVITIES=1 BENCH_QUOTA=48050 BENCH_STOCK=48050 bash bench/setup_bench_env.sh
+python3 bench/observe_orders.py "$LABEL" --snapshot before
+python3 bench/observe_orders.py "$LABEL" &
+OBSERVER_PID=$!
+# A single shell owns the observer throughout input and drain; retain its exact PID.
+sleep 5
+EXTERNAL_RESOURCE_OBSERVER=1 RATES=160 STEP_SECONDS=300 GAP_SECONDS=0 \
+  bash bench/run_ladder.sh "$LABEL" 1
+```
+
+Leave that observer running while inspecting its raw SQL. Once admitted/order counts agree and
+no timeout dispatch remains pending or failed, stop the recorded PID and capture the final SQL.
+If the workload command failed, preserve its partial output and resolve the actual state first.
+
+```sh
+kill -TERM "$OBSERVER_PID"
+wait "$OBSERVER_PID"
+python3 bench/observe_orders.py "$LABEL" --snapshot after
+```
+
+The observer performs two grouped SQL reads every five seconds and reads the oldest waiting
+reservation at most once per minute. It records actual query times and does not issue catch-up
+bursts when a sample overruns. Full joins, inventory/payment ledgers and SQL wait percentiles
+are confined to snapshots. A 650-second observation is bounded; reaching that bound is not a
+claim that the queue drained. Use the actual sample interval for output rate and drain bounds.
+Do not start the older private observer alongside this one.
+
+```sh
+LABEL="normal_$(git rev-parse --short=7 HEAD)_$(date -u +%Y%m%dT%H%M%SZ)"
+BENCH_WORKLOAD=order-payment TOPIC_SUFFIX="$LABEL" BENCH_USERS=2450 \
+  bash bench/setup_bench_env.sh
+RATE=20 DURATION_SECONDS=120 bash bench/run_order_payment.sh "$LABEL"
+```
+
+Ordinary mode creates 32 fresh SKUs with 1,000 units each. One flow creates an order for one
+unit, starts its payment attempt, and sends a correctly signed success callback. Thus 20 flows/s
+is approximately 60 HTTP requests/s when all three stages complete. The full-flow trend includes
+client work and signing; per-stage HTTP trends remain in native k6 output. SQL independently
+counts paid orders, attempts, callbacks, `STANDARD_PAYMENT` movements and order-created Outbox
+rows, checks money and owner bindings, and reconciles product stock. Payment ledger inventory
+and quota deltas are zero for ordinary orders. Outbox persistence is included; downstream
+publication is outside this workload. Use `BENCH_USERS=54`, `RATE=1`, `DURATION_SECONDS=4` for a
+separate smoke fixture before formal points.
+
+Setup creates a private callback env file for this fixture. An existing dedicated file may be
+supplied as `BENCH_PAYMENT_ENV_FILE`; setup validates and copies it into the fixture so Commerce
+and k6 read the same source. It contains only `CITYBUDDY_MOCKPAYMENT_CALLBACKKEYID` and
+`CITYBUDDY_MOCKPAYMENT_CALLBACKSECRET`, with mode 0600. Its values are not written to result
+metadata. Do not edit it between startup and the flow.
+
+```sh
+LABEL="reject4k_$(git rev-parse --short=7 HEAD)_$(date -u +%Y%m%dT%H%M%SZ)"
+BENCH_WORKLOAD=seckill-rejection TOPIC_SUFFIX="$LABEL" BENCH_USERS=16704 \
+  BENCH_ACTIVITIES=32 BENCH_QUOTA=10 BENCH_STOCK=2000000 bash bench/setup_bench_env.sh
+python3 bench/prepare_rejection.py --label "$LABEL" --rate 4000 --seconds 30 \
+  --citybuddy-sha "$(git rev-parse HEAD)"
+RATES=4000 STEP_SECONDS=30 bash bench/run_ladder.sh "$LABEL" 32
+```
+
+Exactly 320 separate users consume the quota through the real API. The runner requires all
+320 reservations/orders to be durable and timeout messages dispatched, with sufficient unpaid
+lifetime remaining. Load rotates over the other 16,384 users. Every warm-up and formal request
+has a fresh label/scenario/iteration key; prepared users never enter the rejection pool. The
+fixed warm-up is 1,000/s for 30 seconds, followed by a five-second gap and a 30- or 120-second
+formal scenario, each with 500 fixed VUs. The calculator excludes warm-up from formal counts,
+prints every decision/replay bucket and retains negative timing observations from both phases.
+A zero k6 exit code alone is not a business or capacity verdict.
+
+The account pool bounds Auth fixture size. It does **not** bound Redis intent state: each fresh
+rejection creates three keys with a 15-minute TTL. Preserve before/after Redis INFO and actual
+AOF/maxmemory settings. Wait for previous transient state to expire when a comparable fresh
+memory baseline is required; do not flush unrelated Redis data. A 120-second point is an active
+sale window, not cross-TTL steady state. Login tokens and the 320 unpaid order deadlines must
+cover the whole point; do not extend them to rescue a run.
+
+Resource logs retain host wall/monotonic timestamps, VM wall/uptime, Commerce cgroup counters
+and native Docker CPU/memory samples. Align them to formal HTTP timestamps, excluding JSON
+writer shutdown. Their coarse clock samples cannot prove the cause of sub-millisecond negative
+HTTP timings. Preserve those values and separate count correctness from latency qualification.
+If the fixed VU pool or generator is first limited, report that boundary rather than attributing
+it to Commerce. New output/host-network configurations begin a separate controlled series.
+
+After the series, stop only its benchmark applications and restore the saved signing metadata:
+
+```sh
+bash bench/restore_bench_signing.sh
+```
+
+This restores public key metadata only, preserving fixtures, private keys and raw results.
+Verify normal application startup/login afterward. Keep the saved baseline with this series;
+archive it deliberately before beginning a later series with a different normal key inventory.
+
+## Retained results
 
 The agent's four workloads are measured separately in [agent/README.md](agent/README.md).
 
@@ -422,7 +541,10 @@ The retained evidence is:
   [CPU samples](results/k6_seckill_s2_f4ae145_20260902T133609Z_spread_r1000_cpu.txt), and
   [setup and postcheck](results/seckill_seckill_s2_f4ae145_20260902T133609Z_spread_r1000_setup.txt)
 
-## Reproducing
+## Historical reproduction protocol
+
+The following commands document the earlier fixture/layout. Use the current workload commands
+above for new measurements; preserve these source and topology boundaries with old results.
 
 Build the exact clean commit that will be measured; setup mounts these host JARs.
 

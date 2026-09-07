@@ -38,6 +38,12 @@ if [ ! -s "$bench_env" ]; then
 fi
 # shellcheck disable=SC1090
 source "$bench_env"
+if [ "${BENCH_WORKLOAD:-seckill}" = order-payment ]; then
+  echo "Use run_order_payment.sh for the normal transaction fixture." >&2; exit 2
+fi
+if [ "${BENCH_WORKLOAD:-seckill}" = seckill-rejection ] && { [ "$LABEL" != "$TOPIC_SUFFIX" ] || [ "$ACTIVITIES" != 32 ] || [[ "$RATES" == *,* ]] || { [ "$STEP_SECONDS" != 30 ] && [ "$STEP_SECONDS" != 120 ]; }; }; then
+  echo "Rejection requires this setup label, 32 activities, one formal rate and 30/120 seconds." >&2; exit 2
+fi
 
 source_changes="$(git status --porcelain --untracked-files=all -- . \
   ':(exclude)bench/results/**' \
@@ -64,16 +70,24 @@ done
 required_tokens=$((nominal_iterations + 50 * rate_count))
 token_count="$(python3 -c 'import json,sys; print(len(json.load(open(sys.argv[1]))))' \
   "$run_dir/tokens.json")"
+if [ "${BENCH_WORKLOAD:-seckill}" = seckill-rejection ]; then required_tokens=16704; fi
 if [ "$token_count" -lt "$required_tokens" ]; then
   echo "Token pool has $token_count entries; this ladder requires at least $required_tokens." >&2
   exit 1
 fi
-if [ "$BENCH_STOCK" -lt "$nominal_iterations" ] \
-  || { [ "$ACTIVITIES" -eq 1 ] && [ "$BENCH_QUOTA" -lt "$nominal_iterations" ]; }; then
+if [ "${BENCH_WORKLOAD:-seckill}" = seckill ] && { [ "$BENCH_STOCK" -lt "$nominal_iterations" ] \
+  || { [ "$ACTIVITIES" -eq 1 ] && [ "$BENCH_QUOTA" -lt "$nominal_iterations" ]; }; }; then
   echo "Seeded stock or activity quota cannot keep this ladder on the admitted path." >&2
   exit 1
 fi
 
+if [ "$(docker info --format '{{.NCPU}}')" != 8 ] || [ "$(docker inspect -f '{{.HostConfig.NanoCpus}}' citybuddy-bench-commerce)" != 4000000000 ]; then
+  echo "This series requires Docker VM 8 CPUs and Commerce 4 CPUs." >&2; exit 1
+fi
+script_name=seckill_ladder.js
+if [ "${BENCH_WORKLOAD:-seckill}" = seckill-rejection ]; then
+  script_name=seckill_rejection.js
+fi
 summary_name="k6_${LABEL}_summary.json"
 points_name="k6_${LABEL}_points.json"
 cpu_name="k6_${LABEL}_cpu.txt"
@@ -90,6 +104,21 @@ if docker inspect citybuddy-bench-k6 >/dev/null 2>&1; then
   echo "Refusing to replace existing container citybuddy-bench-k6." >&2
   exit 1
 fi
+if [ "${BENCH_WORKLOAD:-seckill}" = seckill-rejection ]; then
+  python3 bench/rejection_snapshot.py "$LABEL" --phase before --require-ready
+fi
+python3 - "$run_dir/tokens.json" "$((STEP_SECONDS * rate_count + GAP_SECONDS * rate_count + 180))" <<'PY'
+import base64,json,sys,time
+pool=json.load(open(sys.argv[1]))
+try:
+    earliest=min(json.loads(base64.urlsafe_b64decode(t.split('.')[1]+'==='))["exp"] for t in pool)
+except (ValueError,KeyError,IndexError,TypeError):
+    raise SystemExit('Invalid token metadata; values withheld.')
+if earliest-time.time()<max(300,int(sys.argv[2])):
+    raise SystemExit('Tokens do not cover the planned input and completion window; remint outside load.')
+print(f'token_count={len(pool)} minimum_seconds_remaining={int(earliest-time.time())}')
+PY
+
 cp "$bench_env" "$out/$setup_name"
 
 run_started_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
@@ -106,30 +135,52 @@ metadata() {
   printf 'docker_cpus=%s docker_memory_bytes=%s commerce_cpu_limit=%s\n' \
     "$DOCKER_CPUS" "$DOCKER_MEMORY_BYTES" "$COMMERCE_CPU_LIMIT"
   printf 'k6_image=%s\n' "$K6_IMAGE_REFERENCE"
-  printf 'request_key_prefix=%s\n' "$LABEL"
+  printf 'request_key_prefix=%s activity_prefix=%s workload=%s\n' "$LABEL" "${ACTIVITY_PREFIX:-bench-activity-}" "${BENCH_WORKLOAD:-seckill}"
+  if [ "${BENCH_WORKLOAD:-seckill}" = seckill-rejection ]; then
+    printf 'warmup=1000/s*30s gap=5s formal_scenario=rate_%s load_users=16384 preparation_users=320 fixed_vus_per_phase=500\n' "$RATES"
+  fi
 }
 { metadata; echo; } > "$out/$cpu_name"
 
 echo "== ladder '$LABEL' (commit=$CITYBUDDY_COMMIT activities=$ACTIVITIES rates=$RATES) =="
+# Only this invocation's container ID is stopped on interruption; SQL and outputs remain.
+k6_container_id=""
+cleanup() {
+  status=$?
+  trap - EXIT INT TERM
+  if [ -n "$k6_container_id" ]; then
+    docker stop --time 15 "$k6_container_id" >/dev/null 2>&1 || true
+    { metadata; echo; docker logs "$k6_container_id" 2>&1; } > "$out/$console_name"
+    docker rm "$k6_container_id" >/dev/null 2>&1 || true
+  fi
+  exit "$status"
+}
+trap cleanup EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
 k6_container_id="$(docker run --detach --name citybuddy-bench-k6 \
   --network citybuddy_default \
   --volume "$repo_root/bench/k6:/scripts:ro" \
-  --volume "$run_dir:/run-data:ro" \
+  --volume "$run_dir/tokens.json:/run-data/tokens.json:ro" \
   --volume "$out:/out" \
   --env TOKENS_FILE=/run-data/tokens.json \
   --env RATES="$RATES" --env STEP_SECONDS="$STEP_SECONDS" --env GAP_SECONDS="$GAP_SECONDS" \
   --env ACTIVITIES="$ACTIVITIES" \
-  --env REQUEST_KEY_PREFIX="$LABEL" \
+  --env REQUEST_KEY_PREFIX="$LABEL" --env ACTIVITY_PREFIX="${ACTIVITY_PREFIX:-bench-activity-}" \
   --entrypoint k6 "$K6_IMAGE_REFERENCE" run \
   --tag "citybuddy_commit=$CITYBUDDY_COMMIT" --tag "bench_label=$LABEL" \
   --tag "run_started_at_utc=$run_started_at" --tag "activities=$ACTIVITIES" \
   --tag "step_seconds=$STEP_SECONDS" \
   --summary-export="/out/$summary_name" --out "json=/out/$points_name" \
-  /scripts/seckill_ladder.js)"
+  "/scripts/$script_name")"
 while [ "$(docker inspect -f '{{.State.Running}}' "$k6_container_id" 2>/dev/null)" = true ]; do
+  if [ "${EXTERNAL_RESOURCE_OBSERVER:-0}" = 0 ]; then
+  python3 -c 'import time; print("host_wall_ns="+str(time.time_ns())+" host_monotonic_ns="+str(time.monotonic_ns()))' >> "$out/$cpu_name"
+  docker exec citybuddy-bench-commerce sh -c 'date -u +vm_wall_epoch=%s; cat /proc/uptime; cat /sys/fs/cgroup/cpu.stat; cat /sys/fs/cgroup/cpu.max; cat /sys/fs/cgroup/memory.current' >> "$out/$cpu_name" 2>&1 || true
   docker stats --no-stream --format '{{.Name}} cpu={{.CPUPerc}} mem={{.MemUsage}}' \
-    "$k6_container_id" citybuddy-bench-commerce citybuddy-mysql-1 citybuddy-redis-commerce-1 \
-    2>/dev/null | sed "s/^/$(date -u +%H:%M:%S) /" >> "$out/$cpu_name" || true
+    "$k6_container_id" citybuddy-bench-commerce citybuddy-bench-auth citybuddy-mysql-1 citybuddy-redis-commerce-1 citybuddy-rocketmq-broker-proxy-1 \
+    2>&1 | sed "s/^/$(date -u +%H:%M:%S) /" >> "$out/$cpu_name" || true
+  fi
   sleep 3
 done
 k6_exit_code="$(docker wait "$k6_container_id")"
@@ -137,10 +188,14 @@ run_completed_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 printf '\nrun_completed_at_utc=%s\n' "$run_completed_at" >> "$out/$cpu_name"
 { metadata; echo; docker logs "$k6_container_id" 2>&1; } > "$out/$console_name"
 docker rm "$k6_container_id" >/dev/null
+k6_container_id=""
+if [ "${BENCH_WORKLOAD:-seckill}" = seckill-rejection ]; then
+  python3 bench/rejection_snapshot.py "$LABEL" --phase after
+fi
 
 if [ -s "$out/$summary_name" ]; then
   python3 - "$out/$summary_name" "$CITYBUDDY_COMMIT" "$run_started_at" "$run_completed_at" \
-    "$LABEL" "$ACTIVITIES" "$RATES" "$STEP_SECONDS" "$GAP_SECONDS" "$K6_IMAGE_REFERENCE" <<'PY'
+    "$LABEL" "$ACTIVITIES" "$RATES" "$STEP_SECONDS" "$GAP_SECONDS" "$K6_IMAGE_REFERENCE" "${BENCH_WORKLOAD:-seckill}" <<'PY'
 import json, sys
 path = sys.argv[1]
 document = json.load(open(path))
@@ -150,16 +205,18 @@ document["benchmark"] = {
     "label": sys.argv[5], "activities": int(sys.argv[6]),
     "requestKeyPrefix": sys.argv[5],
     "rates": [int(value) for value in sys.argv[7].split(",")],
-    "stepSeconds": int(sys.argv[8]), "gapSeconds": int(sys.argv[9]), "k6Image": sys.argv[10],
+    "workload": sys.argv[11], "stepSeconds": int(sys.argv[8]), "gapSeconds": int(sys.argv[9]), "k6Image": sys.argv[10],
 }
 json.dump(document, open(path, "w"), indent=2, sort_keys=True)
 open(path, "a").write("\n")
 PY
 fi
-if [ "$(git rev-parse --verify HEAD)" != "$CITYBUDDY_COMMIT" ]; then
+if [ "$(git rev-parse --verify HEAD)" != "$CITYBUDDY_COMMIT" ] || [ -n "$(git status --porcelain --untracked-files=all -- . ':(exclude)bench/results/**' ':(exclude)bench/.run/**')" ]; then
   echo "CityBuddy HEAD changed during the ladder." >&2
   exit 1
 fi
+{ metadata; echo; python3 bench/analyze_ladder.py "$out/$points_name" "$LABEL" \
+  --rates "$RATES" --step-seconds "$STEP_SECONDS"; } > "$out/$steps_name"
 if [[ ! "$k6_exit_code" =~ ^[0-9]+$ ]] || [ "$k6_exit_code" -ne 0 ]; then
   echo "k6 exited with status ${k6_exit_code:-unknown}." >&2
   exit 1
@@ -168,9 +225,6 @@ if [ ! -s "$out/$summary_name" ] || [ ! -s "$out/$points_name" ]; then
   echo "k6 did not produce both required raw outputs." >&2
   exit 1
 fi
-{ metadata; echo; python3 bench/analyze_ladder.py "$out/$points_name" "$LABEL" \
-  --rates "$RATES" --step-seconds "$STEP_SECONDS"; } > "$out/$steps_name"
-
 echo "-- peak generator CPU --"
 awk '/citybuddy-bench-k6/ {value=$3; sub(/^cpu=/,"",value); sub(/%$/,"",value); print value}' \
   "$out/$cpu_name" | sort -n | tail -1
