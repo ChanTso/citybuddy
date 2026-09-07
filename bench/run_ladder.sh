@@ -41,8 +41,8 @@ source "$bench_env"
 if [ "${BENCH_WORKLOAD:-seckill}" = order-payment ]; then
   echo "Use run_order_payment.sh for the normal transaction fixture." >&2; exit 2
 fi
-if [ "${BENCH_WORKLOAD:-seckill}" = seckill-rejection ] && { [ "$LABEL" != "$TOPIC_SUFFIX" ] || [ "$ACTIVITIES" != 32 ] || [[ "$RATES" == *,* ]] || { [ "$STEP_SECONDS" != 30 ] && [ "$STEP_SECONDS" != 120 ]; }; }; then
-  echo "Rejection requires this setup label, 32 activities, one formal rate and 30/120 seconds." >&2; exit 2
+if [ "${BENCH_WORKLOAD:-seckill}" = seckill-rejection ] && { [ "$LABEL" != "$TOPIC_SUFFIX" ] || [ "$ACTIVITIES" != 32 ] || [ "$GAP_SECONDS" -lt 5 ] || { [ "$STEP_SECONDS" != 30 ] && [ "$STEP_SECONDS" != 120 ]; } || { [[ "$RATES" == *,* ]] && [ "$STEP_SECONDS" != 30 ]; }; }; then
+  echo "Rejection requires this setup label, 32 activities, gap >= 5s and 30/120s; multi-rate probes use 30s." >&2; exit 2
 fi
 
 source_changes="$(git status --porcelain --untracked-files=all -- . \
@@ -137,7 +137,12 @@ metadata() {
   printf 'k6_image=%s\n' "$K6_IMAGE_REFERENCE"
   printf 'request_key_prefix=%s activity_prefix=%s workload=%s\n' "$LABEL" "${ACTIVITY_PREFIX:-bench-activity-}" "${BENCH_WORKLOAD:-seckill}"
   if [ "${BENCH_WORKLOAD:-seckill}" = seckill-rejection ]; then
-    printf 'warmup=1000/s*30s gap=5s formal_scenario=rate_%s load_users=16384 preparation_users=320 fixed_vus_per_phase=500\n' "$RATES"
+    printf 'warmup=1000/s*30s warmup_gap=5s rates=%s load_users=16384 preparation_users=320 fixed_vus_per_phase=500\n' "$RATES"
+    if [[ "$RATES" == *,* ]]; then
+      printf 'measurement_kind=coarse_probe stop=per_phase_drops_1pct_nominal_or_unexpected_1pct_or_p99_1000ms delay=5s\n'
+    else
+      printf 'measurement_kind=fixed_load\n'
+    fi
   fi
 }
 { metadata; echo; } > "$out/$cpu_name"

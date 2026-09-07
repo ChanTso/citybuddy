@@ -81,7 +81,12 @@ def main():
         )
         output.flush()
         result = subprocess.run(
-            mysql, input=statement, text=True, capture_output=True, env=child, timeout=15
+            mysql,
+            input=statement,
+            text=True,
+            capture_output=True,
+            env=child,
+            timeout=60 if args.snapshot else 15,
         )
         output.write(
             result.stdout + result.stderr + f"\nquery_end_monotonic_ns={time.monotonic_ns()}\n"

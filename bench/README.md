@@ -95,6 +95,16 @@ formal scenario, each with 500 fixed VUs. The calculator excludes warm-up from f
 prints every decision/replay bucket and retains negative timing observations from both phases.
 A zero k6 exit code alone is not a business or capacity verdict.
 
+For a coarse search, pass the same comma-separated rates to preparation and the runner, e.g.
+`--rate 9000,18000,36000` and `RATES=9000,18000,36000 STEP_SECONDS=30`. These phases share
+one exhausted fixture and accumulated Redis state; they locate an interval, not independent
+capacity results. Each phase has 500 VUs and a five-second default gap. Native k6 thresholds
+abort the probe when a phase drops 1% of its full nominal arrivals, has 1% unexpected responses,
+or reaches p99 1,000 ms, with evaluation delayed until five seconds into that phase. An abort
+keeps its nonzero exit status and raw results; classify its cause before selecting the next point.
+Check memory and raw-output space against the whole ladder first. Confirm useful endpoints
+with separate fixed-load fixtures, and report generator limits separately from service limits.
+
 The account pool bounds Auth fixture size. It does **not** bound Redis intent state: each fresh
 rejection creates three keys with a 15-minute TTL. Preserve before/after Redis INFO and actual
 AOF/maxmemory settings. Wait for previous transient state to expire when a comparable fresh
@@ -232,8 +242,9 @@ CPUs, so results at that boundary do not establish a production resource require
    measured from both the host and inside the compose network, and the difference is reported
    as a result in its own right.
 6. **Formal runs are commit-bound.** Setup requires a clean source tree, records the full HEAD and
-   auth/commerce JAR digests in `bench/.run/bench.env`, and clears only synthetic activity, user and
-   rebuild Redis keys. Runners check that record before load and confirm HEAD afterward.
+   auth/commerce JAR digests in `bench/.run/bench.env`. New activity prefixes isolate fixtures;
+   transient Redis state expires naturally. Runners check that record before load and confirm
+   HEAD afterward.
 7. **Results never overwrite.** Every run needs a unique safe `LABEL`. k6 is digest-pinned and its
    exit code is checked; every result records the measured commit, UTC window and configuration.
 
