@@ -143,6 +143,7 @@ start_auth() {
     '--citybuddy.identity.exchange-scopes[2]=refund:create' \
     '--citybuddy.identity.exchange-scopes[3]=shopping:cart:read' \
     '--citybuddy.identity.exchange-scopes[4]=shopping:cart:write' \
+    '--citybuddy.identity.exchange-scopes[5]=shopping:profile:read' \
     ${profile_argument[@]+"${profile_argument[@]}"} \
     >>"$tmp_dir/auth.log" 2>&1 &
   auth_pid=$!
@@ -184,7 +185,7 @@ INSERT INTO auth_service_identity (service_id, client_id, credential_hash, state
   ('00000000-0000-0000-0000-000000000101', 'commerce-service', '$commerce_service_hash', 'ACTIVE', 'eval:principal:manage'),
   ('00000000-0000-0000-0000-000000000102', 'evaluation-client', '$evaluator_hash', 'ACTIVE', 'eval:test-token:issue'),
   ('00000000-0000-0000-0000-000000000103', 'agent-service', '$agent_service_hash', 'ACTIVE', 'catalog:read'),
-  ('00000000-0000-0000-0000-000000000104', 'shopping-agent', '$shopping_service_hash', 'ACTIVE', 'shopping:orders:read shopping:cart:read shopping:cart:write refund:create');
+  ('00000000-0000-0000-0000-000000000104', 'shopping-agent', '$shopping_service_hash', 'ACTIVE', 'shopping:orders:read shopping:cart:read shopping:cart:write shopping:profile:read refund:create');
 INSERT INTO auth_signing_key_metadata (kid, state, activated_at, retire_after) VALUES
   ('current-key', 'CURRENT', CURRENT_TIMESTAMP(6), NULL),
   ('overlap-key', 'OVERLAP', CURRENT_TIMESTAMP(6), TIMESTAMPADD(HOUR, 1, CURRENT_TIMESTAMP(6)));
@@ -578,7 +579,7 @@ uv run python scripts/check_evaluation_token.py \
   --output "$tmp_dir/evaluation-obo.json"
 test "$(uv run python scripts/read_json_field.py "$tmp_dir/evaluation-obo.json" subject)" = "$evaluation_subject"
 
-for shopping_scope in shopping:orders:read shopping:cart:read shopping:cart:write refund:create; do
+for shopping_scope in shopping:orders:read shopping:cart:read shopping:cart:write shopping:profile:read refund:create; do
   assert_status 200 "shopping evaluation exchange preserves sandbox for $shopping_scope" \
     --request POST "http://127.0.0.1:$auth_port/auth/token/exchange" \
     --user "shopping-agent:$shopping_service_password" \
@@ -669,6 +670,13 @@ assert_status 403 "revocation invalidates shopping evaluation token exchange" \
   --header 'X-Eval-Sandbox-Id: sandbox-1' \
   --header 'Content-Type: application/json' \
   --data "{\"sessionId\":\"shop-eval-session\",\"userSubject\":\"$evaluation_subject\",\"scope\":\"refund:create\"}"
+assert_status 403 "revocation invalidates shopping profile token exchange" \
+  --request POST "http://127.0.0.1:$auth_port/auth/token/exchange" \
+  --user "shopping-agent:$shopping_service_password" \
+  --header "X-User-Authorization: Bearer $evaluation_direct_token" \
+  --header 'X-Eval-Sandbox-Id: sandbox-1' \
+  --header 'Content-Type: application/json' \
+  --data "{\"sessionId\":\"shop-eval-session\",\"userSubject\":\"$evaluation_subject\",\"scope\":\"shopping:profile:read\"}"
 
 assert_status 200 "provision lifecycle record for restart evidence" \
   --request POST "http://127.0.0.1:$auth_port/internal/eval/test-principals/provision" \

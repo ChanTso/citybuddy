@@ -28,6 +28,10 @@ public final class ShoppingOrderRepository {
   private static final String STANDARD =
       STANDARD_SOURCE
           + " WHERE user_subject = ? AND BINARY user_subject = BINARY ? AND sandbox_id IS NULL";
+  private static final String EVALUATION_STANDARD =
+      STANDARD_SOURCE
+          + " WHERE user_subject = ? AND BINARY user_subject = BINARY ?"
+          + " AND sandbox_id = ? AND BINARY sandbox_id = BINARY ?";
   private static final String SECKILL_SOURCE =
       """
       SELECT 'SECKILL' AS order_kind, order_id, user_subject, product_id, product_name,
@@ -46,6 +50,18 @@ public final class ShoppingOrderRepository {
       LEFT JOIN mock_payment_attempt p
         ON p.order_id = o.order_id AND p.order_kind = o.order_kind
        AND BINARY p.user_subject = BINARY o.user_subject AND p.sandbox_id IS NULL
+      ORDER BY o.created_at DESC, o.order_id DESC, o.order_kind
+      """;
+  private static final String EVALUATION_PAYMENT_JOIN =
+      """
+      SELECT o.*, p.attempt_id, p.state AS payment_state, p.state_version AS payment_version,
+             p.amount_minor, p.refunded_amount_minor, p.currency AS payment_currency,
+             p.succeeded_at
+      FROM page o
+      LEFT JOIN mock_payment_attempt p
+        ON p.order_id = o.order_id AND p.order_kind = o.order_kind
+       AND BINARY p.user_subject = BINARY o.user_subject
+       AND p.sandbox_id = ? AND BINARY p.sandbox_id = BINARY ?
       ORDER BY o.created_at DESC, o.order_id DESC, o.order_kind
       """;
   private final JdbcTemplate jdbc;
@@ -119,6 +135,45 @@ public final class ShoppingOrderRepository {
     return withFulfillment(withRefunds(orders)).stream().findFirst();
   }
 
+  public List<OrderView> listForEvaluation(String owner, String sandboxId, int limit) {
+    List<OrderView> orders =
+        jdbc.query(
+            "WITH page AS ("
+                + EVALUATION_STANDARD
+                + " ORDER BY created_at DESC, order_id DESC LIMIT ?) "
+                + EVALUATION_PAYMENT_JOIN,
+            ShoppingOrderRepository::order,
+            owner,
+            owner,
+            sandboxId,
+            sandboxId,
+            limit,
+            sandboxId,
+            sandboxId);
+    return withRefunds(orders, sandboxId);
+  }
+
+  public Optional<OrderView> findForEvaluation(String owner, String sandboxId, String orderId) {
+    List<OrderView> orders =
+        jdbc.query(
+            "WITH page AS ("
+                + EVALUATION_STANDARD
+                + " AND order_id = ?) "
+                + EVALUATION_PAYMENT_JOIN,
+            ShoppingOrderRepository::order,
+            owner,
+            owner,
+            sandboxId,
+            sandboxId,
+            orderId,
+            sandboxId,
+            sandboxId);
+    if (orders.size() > 1) {
+      throw new IllegalStateException("Shopping order identifier is ambiguous");
+    }
+    return withRefunds(orders, sandboxId).stream().findFirst();
+  }
+
   public List<OrderView> findStandardOrders(String owner, List<String> ids) {
     if (ids.isEmpty()) {
       return List.of();
@@ -166,6 +221,10 @@ public final class ShoppingOrderRepository {
   }
 
   private List<OrderView> withRefunds(List<OrderView> orders) {
+    return withRefunds(orders, null);
+  }
+
+  private List<OrderView> withRefunds(List<OrderView> orders, String sandboxId) {
     List<String> attempts =
         orders.stream()
             .filter(order -> order.payment() != null)
@@ -175,6 +234,15 @@ public final class ShoppingOrderRepository {
       return orders;
     }
     String placeholders = attempts.stream().map(id -> "?").collect(Collectors.joining(","));
+    String sandboxPredicate =
+        sandboxId == null
+            ? "p.sandbox_id IS NULL"
+            : "p.sandbox_id = ? AND BINARY p.sandbox_id = BINARY ?";
+    List<Object> parameters = new ArrayList<>(attempts);
+    if (sandboxId != null) {
+      parameters.add(sandboxId);
+      parameters.add(sandboxId);
+    }
     Map<String, List<RefundStateTotals>> totals = new HashMap<>();
     jdbc.query(
         """
@@ -182,13 +250,13 @@ public final class ShoppingOrderRepository {
                SUM(r.requested_amount_minor) AS requested_amount_minor,
                SUM(r.refunded_amount_minor) AS refunded_amount_minor
         FROM mock_refund r JOIN mock_payment_attempt p ON p.attempt_id = r.payment_attempt_id
-        WHERE p.attempt_id IN (%s) AND p.sandbox_id IS NULL
+        WHERE p.attempt_id IN (%s) AND %s
           AND BINARY r.user_subject = BINARY p.user_subject
           AND r.order_kind = p.order_kind AND r.order_id = p.order_id
           AND r.currency = p.currency
         GROUP BY r.payment_attempt_id, r.state ORDER BY r.payment_attempt_id, r.state
         """
-            .formatted(placeholders),
+            .formatted(placeholders, sandboxPredicate),
         row -> {
           totals
               .computeIfAbsent(row.getString("payment_attempt_id"), key -> new ArrayList<>())
@@ -199,7 +267,7 @@ public final class ShoppingOrderRepository {
                       row.getBigDecimal("requested_amount_minor").longValueExact(),
                       row.getBigDecimal("refunded_amount_minor").longValueExact()));
         },
-        attempts.toArray());
+        parameters.toArray());
     return orders.stream()
         .map(
             order -> {

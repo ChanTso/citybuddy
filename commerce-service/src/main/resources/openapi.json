@@ -931,6 +931,26 @@
         }
       }
     },
+    "/internal/merchant/orders": {
+      "get": {
+        "operationId": "listMerchantRecentOrders",
+        "security": [{"agentOboBearer": []}],
+        "x-required-actor": "merchant-agent",
+        "x-required-scope": "merchant:read",
+        "description": "Available with citybuddy.merchant.enabled=true. Reads recent production STANDARD and SECKILL SKU orders across all buyers, regardless of payment state, in one read-only repeatable-read transaction. Sorts by createdAt descending, orderId descending, then orderKind. Each checkout child is a separate order. Historical SKU, actual nullable payment, refund states and persisted nullable fulfillment use the shared ShoppingOrder model. No buyer subject is exposed. Authorization and X-Merchant-Session-Id must occur exactly once; direct-user tokens and any evaluation context are rejected. Only one limit query parameter is accepted; offset, asOf and owner are not accepted.",
+        "parameters": [
+          {"name": "X-Merchant-Session-Id", "in": "header", "required": true, "description": "The merchant-agent OBO session.", "schema": {"type": "string", "minLength": 1, "maxLength": 128}},
+          {"name": "X-Eval-Sandbox-Id", "in": "header", "required": false, "description": "Any supplied evaluation context is rejected.", "schema": {"type": "string"}},
+          {"name": "limit", "in": "query", "required": false, "schema": {"type": "integer", "minimum": 1, "maximum": 50, "default": 6}}
+        ],
+        "responses": {
+          "200": {"description": "Bounded recent SKU orders with authoritative payment and refund facts.", "headers": {"Cache-Control": {"schema": {"type": "string", "const": "no-store"}}}, "content": {"application/json": {"schema": {"type": "array", "maxItems": 50, "items": {"$ref": "#/components/schemas/ShoppingOrder"}}}}},
+          "400": {"description": "Invalid, unknown or repeated query parameter.", "headers": {"Cache-Control": {"schema": {"type": "string", "const": "no-store"}}}},
+          "403": {"description": "Invalid merchant identity, actor, exact scope, session or evaluation context.", "headers": {"Cache-Control": {"schema": {"type": "string", "const": "no-store"}}}},
+          "503": {"description": "Identity verification unavailable.", "headers": {"Cache-Control": {"schema": {"type": "string", "const": "no-store"}}}}
+        }
+      }
+    },
     "/internal/merchant/order-issues": {
       "get": {
         "operationId": "listMerchantOrderIssues",
@@ -2238,6 +2258,109 @@
           "400": {"description": "Caller-selected version or capability rejected", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/EvaluationError"}}}},
           "401": {"description": "Invalid independent management credential", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/EvaluationError"}}}},
           "503": {"description": "Startup-validated schema compatibility unavailable", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/EvaluationError"}}}}
+        }
+      }
+    },
+    "/internal/eval/shopping/orders": {
+      "get": {
+        "operationId": "listEvaluationShoppingOrders",
+        "x-citybuddy-profile": "evaluation",
+        "security": [{"agentOboBearer": []}],
+        "x-required-actor": "shopping-agent",
+        "x-required-scope": "shopping:orders:read",
+        "description": "Available only with the evaluation profile and citybuddy.obo.enabled=true. Read-only; production shopping routes are unchanged. Authorization and evaluation sandbox headers must each occur exactly once. Lists only STANDARD orders owned by the verified subject in the current sandbox, ordered by createdAt descending then orderId descending. Payment and refund facts retain the same owner, order kind and sandbox; fulfillment is null. No owner, offset or reporting cutoff is accepted.",
+        "parameters": [
+          {"name": "X-Eval-Sandbox-Id", "in": "header", "required": true, "description": "Exactly one value, equal to the signed evaluation sandbox; commerce must still report ACTIVE.", "schema": {"$ref": "#/components/schemas/PaymentSandboxId"}},
+          {"name": "X-Shopping-Session-Id", "in": "header", "required": true, "description": "Exactly one value matching the shopping-agent OBO session.", "schema": {"type": "string", "minLength": 1, "maxLength": 64, "pattern": "^(?:[A-Za-z0-9][A-Za-z0-9._:-]{0,63}|[A-Za-z0-9_-]{43})$"}},
+          {"name": "limit", "in": "query", "required": false, "schema": {"type": "integer", "minimum": 1, "maximum": 50, "default": 20}}
+        ],
+        "responses": {
+          "200": {"description": "Authoritative evaluation shopping facts.", "headers": {"Cache-Control": {"schema": {"type": "string", "const": "no-store"}}}, "content": {"application/json": {"schema": {"type": "array", "maxItems": 50, "items": {"$ref": "#/components/schemas/ShoppingOrder"}}}}},
+          "400": {"description": "Malformed sandbox or query; unknown or repeated query parameters are rejected.", "headers": {"Cache-Control": {"schema": {"type": "string", "const": "no-store"}}}, "content": {"application/json": {"schema": {"$ref": "#/components/schemas/EvaluationError"}}}},
+          "403": {"description": "Missing or repeated identity headers, wrong actor, exact scope, session or sandbox, production identity, or inactive sandbox.", "headers": {"Cache-Control": {"schema": {"type": "string", "const": "no-store"}}}, "content": {"application/json": {"schema": {"$ref": "#/components/schemas/EvaluationError"}}}},
+          "503": {"description": "Identity verification, sandbox liveness or authoritative persistence unavailable.", "headers": {"Cache-Control": {"schema": {"type": "string", "const": "no-store"}}}, "content": {"application/json": {"schema": {"$ref": "#/components/schemas/EvaluationError"}}}}
+        }
+      }
+    },
+    "/internal/eval/shopping/orders/{orderId}": {
+      "get": {
+        "operationId": "getEvaluationShoppingOrder",
+        "x-citybuddy-profile": "evaluation",
+        "security": [{"agentOboBearer": []}],
+        "x-required-actor": "shopping-agent",
+        "x-required-scope": "shopping:orders:read",
+        "description": "Available only with the evaluation profile and citybuddy.obo.enabled=true. Read-only; production shopping routes are unchanged. Authorization and evaluation sandbox headers must each occur exactly once. Reads one owned STANDARD order in the current sandbox, including historical price and actual payment/refund states. Unknown, non-owned and other-sandbox orders return the same empty 404. No query parameters are accepted; fulfillment is null.",
+        "parameters": [
+          {"name": "X-Eval-Sandbox-Id", "in": "header", "required": true, "description": "Exactly one value, equal to the signed evaluation sandbox; commerce must still report ACTIVE.", "schema": {"$ref": "#/components/schemas/PaymentSandboxId"}},
+          {"name": "X-Shopping-Session-Id", "in": "header", "required": true, "description": "Exactly one value matching the shopping-agent OBO session.", "schema": {"type": "string", "minLength": 1, "maxLength": 64, "pattern": "^(?:[A-Za-z0-9][A-Za-z0-9._:-]{0,63}|[A-Za-z0-9_-]{43})$"}},
+          {"name": "orderId", "in": "path", "required": true, "description": "Unknown, non-owned, other-sandbox or overlength identifiers return 404.", "schema": {"type": "string", "minLength": 1, "maxLength": 128}}
+        ],
+        "responses": {
+          "200": {"description": "Authoritative evaluation shopping facts.", "headers": {"Cache-Control": {"schema": {"type": "string", "const": "no-store"}}}, "content": {"application/json": {"schema": {"$ref": "#/components/schemas/ShoppingOrder"}}}},
+          "400": {"description": "Malformed sandbox or query; unknown or repeated query parameters are rejected.", "headers": {"Cache-Control": {"schema": {"type": "string", "const": "no-store"}}}, "content": {"application/json": {"schema": {"$ref": "#/components/schemas/EvaluationError"}}}},
+          "403": {"description": "Missing or repeated identity headers, wrong actor, exact scope, session or sandbox, production identity, or inactive sandbox.", "headers": {"Cache-Control": {"schema": {"type": "string", "const": "no-store"}}}, "content": {"application/json": {"schema": {"$ref": "#/components/schemas/EvaluationError"}}}},
+          "404": {"description": "Unknown, non-owned, other-sandbox or overlength order identifier; empty body.", "headers": {"Cache-Control": {"schema": {"type": "string", "const": "no-store"}}}},
+          "503": {"description": "Identity verification, sandbox liveness or authoritative persistence unavailable.", "headers": {"Cache-Control": {"schema": {"type": "string", "const": "no-store"}}}, "content": {"application/json": {"schema": {"$ref": "#/components/schemas/EvaluationError"}}}}
+        }
+      }
+    },
+    "/internal/eval/shopping/preferences": {
+      "get": {
+        "operationId": "getEvaluationShoppingPreferences",
+        "x-citybuddy-profile": "evaluation",
+        "security": [{"agentOboBearer": []}],
+        "x-required-actor": "shopping-agent",
+        "x-required-scope": "shopping:profile:read",
+        "description": "Available only with the evaluation profile and citybuddy.obo.enabled=true. Read-only; production shopping routes are unchanged. Authorization and evaluation sandbox headers must each occur exactly once. Reads the verified subject only. Profiles use the sandbox-bound evaluation subject rather than a sandbox column. Missing profile returns the existing null/NONE/empty-preferences representation without inserting a row. No query parameters are accepted.",
+        "parameters": [
+          {"name": "X-Eval-Sandbox-Id", "in": "header", "required": true, "description": "Exactly one value, equal to the signed evaluation sandbox; commerce must still report ACTIVE.", "schema": {"$ref": "#/components/schemas/PaymentSandboxId"}},
+          {"name": "X-Shopping-Session-Id", "in": "header", "required": true, "description": "Exactly one value matching the shopping-agent OBO session.", "schema": {"type": "string", "minLength": 1, "maxLength": 64, "pattern": "^(?:[A-Za-z0-9][A-Za-z0-9._:-]{0,63}|[A-Za-z0-9_-]{43})$"}}
+        ],
+        "responses": {
+          "200": {"description": "Authoritative evaluation shopping facts.", "headers": {"Cache-Control": {"schema": {"type": "string", "const": "no-store"}}}, "content": {"application/json": {"schema": {"$ref": "#/components/schemas/ShoppingPreferences"}}}},
+          "400": {"description": "Malformed sandbox or query; unknown or repeated query parameters are rejected.", "headers": {"Cache-Control": {"schema": {"type": "string", "const": "no-store"}}}, "content": {"application/json": {"schema": {"$ref": "#/components/schemas/EvaluationError"}}}},
+          "403": {"description": "Missing or repeated identity headers, wrong actor, exact scope, session or sandbox, production identity, or inactive sandbox.", "headers": {"Cache-Control": {"schema": {"type": "string", "const": "no-store"}}}, "content": {"application/json": {"schema": {"$ref": "#/components/schemas/EvaluationError"}}}},
+          "503": {"description": "Identity verification, sandbox liveness or authoritative persistence unavailable.", "headers": {"Cache-Control": {"schema": {"type": "string", "const": "no-store"}}}, "content": {"application/json": {"schema": {"$ref": "#/components/schemas/EvaluationError"}}}}
+        }
+      }
+    },
+    "/internal/eval/shopping/cart": {
+      "get": {
+        "operationId": "getEvaluationShoppingCart",
+        "x-citybuddy-profile": "evaluation",
+        "security": [{"agentOboBearer": []}],
+        "x-required-actor": "shopping-agent",
+        "x-required-scope": "shopping:cart:read",
+        "description": "Available only with the evaluation profile and citybuddy.obo.enabled=true. Read-only; production shopping routes are unchanged. Authorization and evaluation sandbox headers must each occur exactly once. Reads the verified subject only, using current authoritative SKU facts. Carts use the sandbox-bound evaluation subject rather than a sandbox column. Missing cart returns version zero and no items without creating a cart root or command. No query parameters are accepted.",
+        "parameters": [
+          {"name": "X-Eval-Sandbox-Id", "in": "header", "required": true, "description": "Exactly one value, equal to the signed evaluation sandbox; commerce must still report ACTIVE.", "schema": {"$ref": "#/components/schemas/PaymentSandboxId"}},
+          {"name": "X-Shopping-Session-Id", "in": "header", "required": true, "description": "Exactly one value matching the shopping-agent OBO session.", "schema": {"type": "string", "minLength": 1, "maxLength": 64, "pattern": "^(?:[A-Za-z0-9][A-Za-z0-9._:-]{0,63}|[A-Za-z0-9_-]{43})$"}}
+        ],
+        "responses": {
+          "200": {"description": "Authoritative evaluation shopping facts.", "headers": {"Cache-Control": {"schema": {"type": "string", "const": "no-store"}}}, "content": {"application/json": {"schema": {"$ref": "#/components/schemas/ShoppingCart"}}}},
+          "400": {"description": "Malformed sandbox or query; unknown or repeated query parameters are rejected.", "headers": {"Cache-Control": {"schema": {"type": "string", "const": "no-store"}}}, "content": {"application/json": {"schema": {"$ref": "#/components/schemas/EvaluationError"}}}},
+          "403": {"description": "Missing or repeated identity headers, wrong actor, exact scope, session or sandbox, production identity, or inactive sandbox.", "headers": {"Cache-Control": {"schema": {"type": "string", "const": "no-store"}}}, "content": {"application/json": {"schema": {"$ref": "#/components/schemas/EvaluationError"}}}},
+          "503": {"description": "Identity verification, sandbox liveness or authoritative persistence unavailable.", "headers": {"Cache-Control": {"schema": {"type": "string", "const": "no-store"}}}, "content": {"application/json": {"schema": {"$ref": "#/components/schemas/EvaluationError"}}}}
+        }
+      }
+    },
+    "/internal/eval/shopping/policies": {
+      "get": {
+        "operationId": "searchEvaluationShoppingPolicies",
+        "x-citybuddy-profile": "evaluation",
+        "security": [{"directUserBearer": []}],
+        "x-required-permission": "shopping:session:create",
+        "description": "Available only with the evaluation profile and citybuddy.obo.enabled=true. Read-only; production shopping routes are unchanged. Authorization and evaluation sandbox headers must each occur exactly once. Requires an eval_direct_user token with a valid nonempty evaluation_handle and a signed sandbox equal to the header. Production and OBO tokens are rejected. No shopping-session header is required. Searches only published retail-policy-* and retail-guide-* FAQ snapshots; a newer working draft does not replace the published answer. Literal keyword matches score title 3 and body 1, ordered by score descending then FAQ ID. Unknown or repeated query parameters are rejected.",
+        "parameters": [
+          {"name": "X-Eval-Sandbox-Id", "in": "header", "required": true, "description": "Exactly one value, equal to the signed evaluation sandbox; commerce must still report ACTIVE.", "schema": {"$ref": "#/components/schemas/PaymentSandboxId"}},
+          {"name": "query", "in": "query", "required": true, "description": "Nonblank query containing at most eight whitespace-separated words.", "schema": {"type": "string", "minLength": 1, "maxLength": 200}}
+        ],
+        "responses": {
+          "200": {"description": "At most three matching published policies; empty array when none match.", "headers": {"Cache-Control": {"schema": {"type": "string", "const": "no-store"}}}, "content": {"application/json": {"schema": {"type": "array", "maxItems": 3, "items": {"$ref": "#/components/schemas/RetailPolicy"}}}}},
+          "400": {"description": "Malformed sandbox or query; unknown or repeated query parameters are rejected.", "headers": {"Cache-Control": {"schema": {"type": "string", "const": "no-store"}}}, "content": {"application/json": {"schema": {"$ref": "#/components/schemas/EvaluationError"}}}},
+          "401": {"description": "Invalid direct-user token, signed sandbox mismatch or production token.", "headers": {"Cache-Control": {"schema": {"type": "string", "const": "no-store"}}}, "content": {"application/json": {"schema": {"$ref": "#/components/schemas/EvaluationError"}}}},
+          "403": {"description": "Missing or repeated identity headers, absent evaluation handle, invalid permission or inactive sandbox.", "headers": {"Cache-Control": {"schema": {"type": "string", "const": "no-store"}}}, "content": {"application/json": {"schema": {"$ref": "#/components/schemas/EvaluationError"}}}},
+          "503": {"description": "Identity verification, sandbox liveness or authoritative persistence unavailable.", "headers": {"Cache-Control": {"schema": {"type": "string", "const": "no-store"}}}, "content": {"application/json": {"schema": {"$ref": "#/components/schemas/EvaluationError"}}}}
         }
       }
     },

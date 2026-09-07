@@ -870,7 +870,7 @@ incremental FAQ consumption distinct from complete FAQ/product rebuilds.
 ## 10. Evaluation-only capability
 
 - Evaluation routes are loaded only by the evaluation profile. Production returns not found for
-  `/api/eval/*`, rejects `X-Eval-Sandbox-Id`, and cannot issue evaluation test tokens.
+  `/api/eval/*` and `/internal/eval/*`, rejects `X-Eval-Sandbox-Id`, and cannot issue evaluation test tokens.
 - The evaluator first calls `commerce-service POST /api/eval/reset`. Commerce creates a one-time
   sandbox and business fixtures, then calls an internal service-authenticated auth provisioning
   endpoint with sandbox id, case correlation, TTL, and minimum test-principal attributes.
@@ -917,6 +917,53 @@ incremental FAQ consumption distinct from complete FAQ/product rebuilds.
 | Authorized evaluator → `commerce-service` | `GET /api/eval/state` | Independent evaluation API credential; evaluation profile only | Sandbox context | Returns sandbox-scoped business snapshot after complete committed-payment reconciliation | Missing/mismatched/unscoped access or damaged committed truth rejects |
 | Authorized evaluator → `commerce-service` | `GET /api/eval/audit/{sessionId}` | Independent evaluation API credential; evaluation profile only | Sandbox and session association | Returns sandbox-scoped audit/receipt references after committed-payment reconciliation | Cross-sandbox/session, invalid credential, or damaged committed truth rejects |
 | Authorized evaluator → `commerce-service` | `GET /api/eval/version` | Independent evaluation API credential; evaluation profile only | Evaluation credential | Returns build/schema/capability identifiers | Invalid credential or production profile rejects |
+
+### 10.2.1 Evaluation shopping reads
+
+The five GET routes below require both the `evaluation` profile and
+`citybuddy.obo.enabled=true`. They use the evaluation authorizer and existing repositories;
+they do not enable the production catalog, order workers or merchant configuration. Existing
+production shopping reads continue to reject evaluation context. These endpoints add no cart,
+profile, checkout, payment or refund mutation.
+
+| Path | Identity and exact permission/scope | Parameters and response |
+|---|---|---|
+| `/internal/eval/shopping/orders` | `shopping-agent` OBO, `shopping:orders:read` | Optional `limit`, default 20, range 1–50; array of shared `ShoppingOrder` objects |
+| `/internal/eval/shopping/orders/{orderId}` | `shopping-agent` OBO, `shopping:orders:read` | No query parameters; one shared `ShoppingOrder`, or empty 404 for unknown, non-owned, other-sandbox or overlength ID (maximum 128 characters) |
+| `/internal/eval/shopping/preferences` | `shopping-agent` OBO, `shopping:profile:read` | No query parameters; shared `ShoppingPreferences` for the verified subject |
+| `/internal/eval/shopping/cart` | `shopping-agent` OBO, `shopping:cart:read` | No query parameters; shared `ShoppingCart` for the verified subject |
+| `/internal/eval/shopping/policies` | Evaluation direct-user JWT with `shopping:session:create` | Required nonblank `query`, 1–200 characters and at most eight whitespace-separated words; at most three shared `RetailPolicy` objects |
+
+Every request requires exactly one `Authorization` and `X-Eval-Sandbox-Id`. The signed sandbox
+must match the bounded header and remain ACTIVE in Commerce. The four OBO routes additionally
+require exactly one valid `X-Shopping-Session-Id`, matching the token session, and the fixed
+`shopping-agent` actor with the endpoint's exact scope. The policy route requires an
+`eval_direct_user` token with a nonempty valid `evaluation_handle`; production direct tokens,
+OBO tokens and legacy handleless evaluation tokens cannot use it. It does not require a
+shopping-session header. The independent evaluator management credential is not accepted by
+these read routes. Missing/repeated identity headers reject, as do unknown/repeated query
+parameters. Successful reads and handled errors use `Cache-Control: no-store`.
+
+Evaluation orders include only STANDARD orders with the exact verified owner and sandbox.
+Lists sort by creation time descending then order ID descending. Payment joins and refund
+aggregation retain the same owner, order kind and sandbox in one read-only repeatable-read
+transaction, preserving historical SKU price/quantity and the distinction between requested,
+reserved and completed refunds. Production and seckill orders are excluded; damaged payment
+truth fails rather than being presented as successful. Fulfillment is null because these
+fixtures do not contain fulfillment facts. Reading does not bind a fixture order to a user;
+that binding remains part of the existing evaluation payment flow.
+
+Profiles and carts have no sandbox column. Their read boundary is the exact verified evaluation
+subject tied to the active sandbox, with no caller-selected owner. A missing profile returns
+that subject with null display/location, `NONE` loyalty and empty preferences. A missing cart
+returns version zero and no items. Neither read inserts a profile, cart root or command; an
+existing cart still derives its quote from current authoritative SKU facts.
+
+Policy search uses the last-published FAQ snapshots whose IDs begin with `retail-policy-` or
+`retail-guide-`. An unpublished working draft does not replace the published answer. For each
+literal keyword, a title match scores 3 and an answer match scores 1; positive scores sort
+descending, then by FAQ ID, with a limit of three. These published policy facts are shared across
+sandboxes; caller identity and liveness remain evaluation-only.
 
 ### 10.3 Asynchronous liveness introduction rule
 
