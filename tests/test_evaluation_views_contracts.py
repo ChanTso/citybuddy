@@ -111,9 +111,6 @@ def test_evaluation_audit_is_append_only_scoped_and_not_agent_evidence() -> None
         / "commerce-service/src/main/java/io/citybuddy/commerce/evaluation"
         / "EvaluationAuditReferenceWriter.java"
     ).read_text(encoding="utf-8")
-    agent = (ROOT / "agent-service/src/citybuddy_agent/agent_control.py").read_text(
-        encoding="utf-8"
-    )
 
     assert "UNIQUE KEY uq_eval_audit_operation (sandbox_id, operation_id)" in migration
     assert "KEY ix_eval_audit_session_page" in migration
@@ -228,8 +225,6 @@ def test_evaluation_audit_is_append_only_scoped_and_not_agent_evidence() -> None
         / "commerce-service/src/main/java/io/citybuddy/commerce/evaluation"
         / "EvaluationCommerceAuditService.java"
     ).read_text(encoding="utf-8")
-    assert 'headers["X-Agent-Trace-Id"] = trace_id' in agent
-    assert 'headers["X-Agent-Operation-Id"]' in agent
     assert "support_event" not in repository
     assert "cs_db" not in repository
 

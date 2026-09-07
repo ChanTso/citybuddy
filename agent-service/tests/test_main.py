@@ -79,35 +79,35 @@ def test_settings_records_requested_http_client_layout(monkeypatch: pytest.Monke
 @pytest.mark.parametrize(
     ("value", "expected"),
     (
-        (None, True),
-        ("", True),
-        ("   ", True),
+        (None, False),
+        ("", False),
+        ("   ", False),
         ("true", True),
         ("TrUe", True),
         ("false", False),
         ("FALSE", False),
     ),
 )
-def test_evaluation_session_propagation_is_strict_with_enabled_default(
+def test_metrics_configuration_is_strict_with_disabled_default(
     monkeypatch: pytest.MonkeyPatch, value: str | None, expected: bool
 ) -> None:
     if value is None:
-        monkeypatch.delenv("AGENT_EVALUATION_SESSION_PROPAGATION_ENABLED", raising=False)
+        monkeypatch.delenv("CITYBUDDY_METRICS_ENABLED", raising=False)
     else:
-        monkeypatch.setenv("AGENT_EVALUATION_SESSION_PROPAGATION_ENABLED", value)
+        monkeypatch.setenv("CITYBUDDY_METRICS_ENABLED", value)
 
-    assert main_module._settings().evaluation_session_propagation_enabled is expected
-    assert AgentSettings().evaluation_session_propagation_enabled is True
+    assert main_module._settings().metrics_enabled is expected
+    assert AgentSettings().metrics_enabled is False
 
 
-def test_evaluation_session_propagation_rejects_other_nonempty_values(
+def test_metrics_configuration_rejects_other_nonempty_values(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setenv("AGENT_EVALUATION_SESSION_PROPAGATION_ENABLED", "yes")
+    monkeypatch.setenv("CITYBUDDY_METRICS_ENABLED", "yes")
 
     with pytest.raises(
         ValueError,
-        match="AGENT_EVALUATION_SESSION_PROPAGATION_ENABLED must be true or false",
+        match="CITYBUDDY_METRICS_ENABLED must be true or false",
     ):
         main_module._settings()
 
@@ -139,3 +139,15 @@ def test_main_uses_the_zero_argument_factory_and_resolved_workers(
         "workers": expected_workers,
     }
     assert tuple(inspect.signature(main_module.create_runtime_app).parameters) == ()
+
+
+def test_runtime_settings_do_not_parse_retired_model_configuration(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("AGENT_MODEL_TEMPERATURE", "not-a-number")
+    monkeypatch.setenv("AGENT_MODEL_TIMEOUT_SECONDS", "not-a-number")
+    monkeypatch.setenv("AGENT_EVALUATION_SESSION_PROPAGATION_ENABLED", "not-a-boolean")
+    resolved = main_module._settings()
+    assert "model_proxy_url" not in resolved.model_dump()
+    assert "model_temperature" not in resolved.model_dump()
+    assert "evaluation_session_propagation_enabled" not in resolved.model_dump()

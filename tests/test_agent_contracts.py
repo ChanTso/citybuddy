@@ -12,121 +12,13 @@ def contract() -> dict[str, Any]:
     return payload
 
 
-def test_chat_contract_fixes_identity_correlation_and_bounded_body() -> None:
-    operation = contract()["paths"]["/api/chat"]["post"]
-
-    assert operation["security"] == [{"directUserBearer": []}]
-    headers = {item["name"]: item for item in operation["parameters"]}
-    assert set(headers) == {"X-Session-Id", "Idempotency-Key"}
-    assert all(item["in"] == "header" and item["required"] for item in headers.values())
-    request = operation["requestBody"]["content"]["application/json"]["schema"]
-    assert request["additionalProperties"] is False
-    assert request["required"] == ["message"]
-    assert request["properties"]["message"] == {
-        "type": "string",
-        "minLength": 1,
-        "maxLength": 4000,
+def test_evidence_service_contract_has_no_retired_chat_execution_paths() -> None:
+    assert set(contract()["paths"]) == {
+        "/api/sessions",
+        "/api/feedback",
+        "/api/eval/evidence/{traceId}",
     }
-
-
-def test_chat_response_is_allowlisted_and_server_ids_are_read_only() -> None:
-    operation = contract()["paths"]["/api/chat"]["post"]
-    response = operation["responses"]["200"]["content"]["application/json"]["schema"]
-
-    assert response["additionalProperties"] is False
-    assert set(response["properties"]) == {
-        "conversationId",
-        "traceId",
-        "turnId",
-        "reply",
-        "outcome",
-        "citations",
-        "receiptId",
-    }
-    assert set(response["required"]) == set(response["properties"])
-    for name in ("conversationId", "traceId", "turnId"):
-        assert response["properties"][name]["readOnly"] is True
-    assert response["properties"]["outcome"]["enum"] == [
-        "completed",
-        "budget_exhausted",
-        "provider_denied",
-        "retrieval_denied",
-        "action_pending",
-        "action_completed",
-        "action_clarification",
-        "action_declined",
-        "action_expired",
-        "action_rejected",
-    ]
-    assert response["properties"]["reply"]["minLength"] == 1
-    assert response["properties"]["reply"]["maxLength"] == 256
-    receipt = response["properties"]["receiptId"]
-    assert receipt["type"] == ["string", "null"]
-    assert receipt["format"] == "uuid"
-    assert receipt["readOnly"] is True
-    citation = contract()["components"]["schemas"]["RetrievalCitation"]
-    assert citation["additionalProperties"] is False
-    assert set(citation["properties"]) == {
-        "sourceId",
-        "chunkId",
-        "sourceVersion",
-        "docType",
-        "title",
-    }
-    assert response["properties"]["citations"]["maxItems"] == 3
-    assert set(operation["responses"]) == {"200", "401", "403", "409", "422", "502", "503"}
-
-
-def test_stream_contract_fixes_headers_event_names_and_allowlisted_payloads() -> None:
-    payload = contract()
-    operation = payload["paths"]["/api/chat/stream"]["post"]
-
-    assert operation["security"] == [{"directUserBearer": []}]
-    assert {item["name"] for item in operation["parameters"]} == {
-        "X-Session-Id",
-        "Idempotency-Key",
-    }
-    request = operation["requestBody"]["content"]["application/json"]["schema"]
-    assert request["additionalProperties"] is False
-    assert request["required"] == ["message"]
-    stream = operation["responses"]["200"]["content"]["text/event-stream"]
-    assert set(stream["x-sse-events"]) == {"token", "action_receipt", "done", "error"}
-    expected_fields = {
-        "SseTokenData": {"sequence", "text"},
-        "SseActionReceiptData": {"sequence", "receiptId", "status"},
-        "SseDoneData": {"sequence", "conversationId", "traceId", "turnId", "outcome"},
-        "SseErrorData": {"sequence", "code"},
-    }
-    for schema_name, fields in expected_fields.items():
-        schema = payload["components"]["schemas"][schema_name]
-        assert schema["additionalProperties"] is False
-        assert set(schema["properties"]) == fields
-        assert set(schema["required"]) == fields
-    assert payload["components"]["schemas"]["SseActionReceiptData"]["properties"]["status"] == {
-        "type": "string",
-        "enum": ["REQUESTED"],
-    }
-    assert payload["components"]["schemas"]["SseDoneData"]["properties"]["outcome"]["enum"] == [
-        "completed",
-        "retrieval_denied",
-        "action_pending",
-        "action_completed",
-        "action_clarification",
-        "action_declined",
-        "action_expired",
-        "action_rejected",
-    ]
-    assert payload["components"]["schemas"]["SseErrorData"]["properties"]["code"]["enum"] == [
-        "attempt_budget_exhausted",
-        "provider_unavailable",
-        "stream_unavailable",
-    ]
-
-    source = (ROOT / "agent-service/src/citybuddy_agent/sse.py").read_text(encoding="utf-8")
-    assert "MAX_PUBLIC_EVENTS" in source
-    assert "is_disconnected" in source
-    assert "create_task" not in source
-    assert "Thread" not in source
+    assert not any(name.startswith("Sse") for name in contract()["components"]["schemas"])
 
 
 def test_feedback_contract_has_no_body_owner_and_returns_server_identity() -> None:
@@ -256,8 +148,6 @@ def test_pending_action_reference_is_agent_owned_bounded_and_least_privilege() -
         ROOT / "infra/mysql/migrations/agent/V007__pending_action_reference.sql"
     ).read_text(encoding="utf-8")
     grants = (ROOT / "infra/mysql/grants/V001__migration_access.sql").read_text(encoding="utf-8")
-    payload = contract()
-
     assert "CREATE TABLE pending_action_reference" in migration
     assert "UNIQUE KEY uq_pending_action_reference_turn (source_turn_id)" in migration
     assert (
@@ -284,9 +174,6 @@ def test_pending_action_reference_is_agent_owned_bounded_and_least_privilege() -
     assert "UPDATE (target_version)" not in grants
     assert "UPDATE ON cs_db.support_event" not in grants
     assert "DELETE ON cs_db.support_event" not in grants
-    for route in ("/api/chat", "/api/chat/stream"):
-        responses = payload["paths"][route]["post"]["responses"]
-        assert set(responses) >= {"409", "502", "503"}
 
 
 def test_session_context_event_extends_the_closed_append_only_evidence_language() -> None:
@@ -355,19 +242,6 @@ def test_commerce_tool_contract_is_exact_obo_and_bounded_view() -> None:
     }
     assert "description" not in response["properties"]
     assert "stockQuantity" not in response["properties"]
-
-
-def test_application_uses_role_aliases_without_concrete_provider_models() -> None:
-    sources = "\n".join(
-        path.read_text(encoding="utf-8")
-        for path in (ROOT / "agent-service/src/citybuddy_agent").glob("*.py")
-    )
-
-    assert "support-standard-primary" in sources
-    assert "support-standard-fallback" in sources
-    assert "gpt-" not in sources.casefold()
-    assert "claude-" not in sources.casefold()
-    assert "gemini-" not in sources.casefold()
 
 
 def test_action_receipt_projection_is_agent_owned_insert_only_and_least_privilege() -> None:

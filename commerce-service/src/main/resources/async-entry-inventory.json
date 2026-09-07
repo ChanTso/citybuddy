@@ -86,7 +86,7 @@
       "producer": "none",
       "consumer": "none",
       "evidence": [
-        "the evaluation chat and evidence routes are synchronous",
+        "the retained support identity, feedback and evaluation evidence routes are synchronous",
         "the runtime contains no RocketMQ producer, consumer, or durable asynchronous publisher"
       ]
     }

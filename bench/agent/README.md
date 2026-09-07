@@ -1,4 +1,10 @@
-# Agent workload latency
+# Historical Agent workload latency
+
+The CityBuddy support model loop and `/api/chat` endpoints have been retired in favor of the
+ShopMate buyer. These scripts and results are retained historical artifacts: run them only from
+the full measured revision recorded by the chosen report. Current main retains the data readers
+and knowledge components, not the old HTTP workload or warm-history prompt packer. No old score
+or throughput in this file is a measurement of ShopMate.
 
 ## Measured local capacity boundary at c5af89d
 
@@ -18,7 +24,7 @@ sessions varied the configuration as a bundle, so they do not isolate the effect
 HTTP-client reuse, MySQL capacity, the earlier TLS work, or generated-credential digests. They do
 not support attributing the boundary movement to any one of those changes.
 
-The current program and benchmark setup default `AGENT_WORKERS` to 4 and default the HTTP-client
+At the measured revision, the program and benchmark setup default `AGENT_WORKERS` to 4 and default the HTTP-client
 layout to `shared`. The historical worker factorial below compared only one worker with two and
 supports two relative to one at that measured boundary; it neither tested four workers as an
 isolated treatment nor establishes four as optimal. Session 3/4 therefore supplies combined-config

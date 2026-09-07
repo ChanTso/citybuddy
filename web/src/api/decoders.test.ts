@@ -1,23 +1,13 @@
 import { describe, expect, it } from 'vitest';
 
 import {
-  decodeChatResponse,
   decodeLoginResponse,
   decodeProducts,
   decodePublicError,
   decodeReservation,
-  decodeSessionResponse,
 } from './decoders';
 
 const UUID = '00000000-0000-0000-0000-000000000001';
-const chat = {
-  conversationId: UUID,
-  traceId: UUID,
-  turnId: UUID,
-  reply: 'safe',
-  outcome: 'completed',
-  citations: [],
-};
 const product = {
   productId: 'p',
   name: 'Published',
@@ -60,39 +50,7 @@ describe('closed public decoders', () => {
     ).toThrow('Malformed');
   });
 
-  it('accepts only the bounded server-owned session shape', () => {
-    expect(decodeSessionResponse({ sessionId: 'owned-session' })).toEqual({
-      sessionId: 'owned-session',
-    });
-    expect(() => decodeSessionResponse({ sessionId: '' })).toThrow('Malformed');
-    expect(() =>
-      decodeSessionResponse({ sessionId: 'owned-session', owner: 'client' }),
-    ).toThrow('Malformed');
-  });
-
-  it.each([
-    'pendingAction',
-    'pendingActionId',
-    'requiredScope',
-    'targetVersion',
-    'argumentCommitment',
-    'userSubject',
-    'sandboxId',
-    'toolCalls',
-    'evidence',
-    'serverReason',
-    'internalReason',
-    'reasonCode',
-    'retrievedDocs',
-    'stateChanges',
-    'supportSessionId',
-  ])('rejects forbidden chat field %s', (field) => {
-    expect(() => decodeChatResponse({ ...chat, [field]: 'private' })).toThrow(
-      'Malformed',
-    );
-  });
-
-  it('rejects malformed or unbounded products instead of producing empty data', () => {
+  it('rejects malformed products instead of producing empty data', () => {
     expect(() => decodeProducts([{ productId: 'p' }])).toThrow('Malformed');
     expect(() =>
       decodeProducts(Array.from({ length: 101 }, () => ({}))),
@@ -111,6 +69,17 @@ describe('closed public decoders', () => {
           internal: true,
         },
       ]),
+    ).toThrow('Malformed');
+  });
+
+  it('accepts a valid retail catalog larger than the display limit and validates its tail', () => {
+    const catalog = Array.from({ length: 104 }, (_, index) => ({
+      ...product,
+      productId: `sku-${index}`,
+    }));
+    expect(decodeProducts(catalog)).toEqual(catalog);
+    expect(() =>
+      decodeProducts([...catalog, { ...product, currency: 'bad' }]),
     ).toThrow('Malformed');
   });
 
@@ -188,57 +157,6 @@ describe('closed public decoders', () => {
         orderId: null,
       }),
     );
-  });
-
-  it.each([
-    ['conversationId', 'not-a-uuid'],
-    ['traceId', 'not-a-uuid'],
-    ['turnId', 'not-a-uuid'],
-    ['reply', 'x'.repeat(257)],
-    ['outcome', 'unknown'],
-    ['citations', {}],
-    ['citations', Array.from({ length: 4 }, () => ({}))],
-  ])('rejects chat with invalid %s', (field, value) => {
-    expect(() => decodeChatResponse({ ...chat, [field]: value })).toThrow(
-      'Malformed',
-    );
-  });
-
-  it('accepts a durable commerce rejection only without a receipt', () => {
-    expect(
-      decodeChatResponse({
-        ...chat,
-        outcome: 'action_rejected',
-        receiptId: null,
-      }).outcome,
-    ).toBe('action_rejected');
-    expect(() =>
-      decodeChatResponse({
-        ...chat,
-        outcome: 'action_rejected',
-        receiptId: UUID,
-      }),
-    ).toThrow('Malformed');
-  });
-
-  it.each([
-    ['sourceId', ''],
-    ['chunkId', ''],
-    ['sourceVersion', 0],
-    ['docType', 'private'],
-    ['title', ''],
-  ])('rejects a citation with invalid %s', (field, value) => {
-    const citation = {
-      sourceId: 'source',
-      chunkId: 'chunk',
-      sourceVersion: 1,
-      docType: 'faq',
-      title: 'Public title',
-      [field]: value,
-    };
-    expect(() =>
-      decodeChatResponse({ ...chat, citations: [citation] }),
-    ).toThrow('Malformed');
   });
 
   it('keeps public errors closed and bounded', () => {

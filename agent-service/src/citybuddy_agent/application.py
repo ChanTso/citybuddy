@@ -1,4 +1,4 @@
-"""Direct-user authentication and support-session identity boundary."""
+"""Support identity, historical feedback, and evaluation evidence service."""
 
 from __future__ import annotations
 
@@ -9,47 +9,20 @@ import uuid
 from base64 import b64decode
 from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
 from contextlib import asynccontextmanager
-from datetime import UTC, datetime
-from typing import Any, Literal, Protocol, cast
+from typing import Any, Literal, Protocol
 
 import httpx
 import jwt
 import pymysql
 from fastapi import FastAPI, Header, HTTPException, Request
 from fastapi.exceptions import RequestValidationError
-from fastapi.responses import JSONResponse, Response, StreamingResponse
+from fastapi.responses import JSONResponse, Response
 from pydantic import BaseModel, ConfigDict, Field
 
 from . import http_client
-from .actions import ConfirmationDecision, confirmation_decision
-from .agent_control import (
-    MAX_USER_MESSAGE_CHARACTERS,
-    TOOL_BOUNDARY_FAILURE_REASONS,
-    ActionConfirmationRejected,
-    ActionConfirmer,
-    AgentEvent,
-    AgentRunner,
-    AttemptBudget,
-    AttemptBudgetExhausted,
-    BoundedAgent,
-    LiteLlmClient,
-    ModelRouter,
-    ProviderCircuits,
-    ProviderRoute,
-    RuleRouter,
-    ToolAdapter,
-    ToolBoundaryFailure,
-)
 from .conversation import (
-    ActionArbitrationConflictError,
-    ConversationIntegrityError,
-    ConversationOwnershipError,
-    ConversationResult,
     ConversationStore,
-    CorrelationConflictError,
     MysqlConversationStore,
-    TurnFailedError,
-    TurnInProgressError,
 )
 from .evaluation import (
     ActionEvaluationEvidenceInvalid,
@@ -59,36 +32,42 @@ from .evaluation import (
     EvaluationEvidenceStore,
     MysqlEvaluationEvidenceStore,
 )
-from .faq_cache import RedisFaqCache
 from .feedback import (
     FeedbackConflictError,
     FeedbackOwnershipError,
     FeedbackStore,
     MysqlFeedbackStore,
 )
-from .knowledge import ElasticsearchKnowledgeSearch
+from .history_types import TOOL_BOUNDARY_FAILURE_REASONS
 from .metrics import (
     PROMETHEUS_CONTENT_TYPE,
     MetricsRuntime,
-    Operation,
-    OperationOutcome,
     SafeCityBuddyMetrics,
     create_metrics_runtime,
 )
-from .retrieval import load_calibration
-from .sse import SseEgressFilter, SseProjectionError, stream_events, validate_public_result
 from .tracing import (
-    OperationObservation,
     TraceSink,
     create_trace_sink,
 )
 
 SESSION_PERMISSION = "support:session:create"
+
+
 CHAT_PERMISSION = "support:chat"
+
+
 DIRECT_TOKEN_TYPE = "direct_user"
+
+
 EVALUATION_DIRECT_TOKEN_TYPE = "eval_direct_user"
+
+
 MAX_EVALUATION_AUTHORIZATION_LENGTH = 1024
+
+
 LOGGER = logging.getLogger(__name__)
+
+
 ACTION_REQUEST_FAILURE_REASONS = TOOL_BOUNDARY_FAILURE_REASONS | frozenset(
     {
         "AGENT_REQUEST_INVALID",
@@ -122,7 +101,6 @@ class AgentSettings(BaseModel):
     environment: str = "development"
     identity_enabled: bool = False
     evaluation_enabled: bool = False
-    evaluation_session_propagation_enabled: bool = True
     evaluation_client_id: str = ""
     evaluation_client_secret: str = ""
     issuer: str = ""
@@ -135,25 +113,9 @@ class AgentSettings(BaseModel):
     service_client_id: str = ""
     service_client_secret: str = ""
     exchange_scopes: tuple[str, ...] = ()
-    model_proxy_url: str = ""
-    model_proxy_api_key: str = ""
-    model_temperature: float | None = Field(default=None, ge=0, le=2)
-    model_timeout_seconds: float = Field(default=2.0, gt=0, allow_inf_nan=False)
-    commerce_tools_url: str = ""
     commerce_liveness_url: str = ""
-    primary_role_alias: str = "support-standard-primary"
-    fallback_role_alias: str = "support-standard-fallback"
-    primary_provider_key: str = "primary"
-    fallback_provider_key: str = "fallback"
-    reranker_role_alias: str = "support-reranker-standard"
-    reranker_provider_key: str = "reranker"
-    elasticsearch_url: str = ""
-    knowledge_alias: str = "knowledge_docs_read"
-    support_redis_url: str = ""
+    # Preserves the deadline of historical PROCESSING turns in MysqlConversationStore.
     attempt_budget: int = 16
-    circuit_minimum_requests: int = 2
-    circuit_open_seconds: float = 1.0
-    circuit_half_open_probes: int = 1
     clock_skew_seconds: int = 30
     jwks_cache_seconds: int = 60
     metrics_enabled: bool = False
@@ -339,50 +301,6 @@ class SessionResponse(BaseModel):
     session_id: str = Field(serialization_alias="sessionId")
 
 
-class ChatRequest(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-    message: str = Field(min_length=1, max_length=MAX_USER_MESSAGE_CHARACTERS)
-
-
-class CitationResponse(BaseModel):
-    model_config = ConfigDict(frozen=True)
-
-    source_id: str = Field(serialization_alias="sourceId")
-    chunk_id: str = Field(serialization_alias="chunkId")
-    source_version: int = Field(serialization_alias="sourceVersion")
-    doc_type: Literal["faq", "product"] = Field(serialization_alias="docType")
-    title: str
-
-
-ChatOutcome = Literal[
-    "completed",
-    "budget_exhausted",
-    "provider_denied",
-    "retrieval_denied",
-    "action_pending",
-    "action_completed",
-    "action_clarification",
-    "action_declined",
-    "action_expired",
-    "action_rejected",
-]
-
-
-class ChatResponse(BaseModel):
-    model_config = ConfigDict(frozen=True)
-
-    conversation_id: str = Field(serialization_alias="conversationId")
-    trace_id: str = Field(serialization_alias="traceId")
-    turn_id: str = Field(serialization_alias="turnId")
-    reply: str = Field(min_length=1, max_length=256)
-    outcome: ChatOutcome
-    citations: tuple[CitationResponse, ...] = ()
-    # Present only for a committed action, and read from the stored projection so the non-stream
-    # client sees the same receipt the stream does.
-    receipt_id: str | None = Field(default=None, serialization_alias="receiptId")
-
-
 class FeedbackRequest(BaseModel):
     model_config = ConfigDict(extra="forbid", populate_by_name=True)
 
@@ -435,7 +353,7 @@ class HttpSandboxLiveness:
 
 
 class OboClient:
-    """JIT exchange boundary used by future server-owned ToolSpecs."""
+    """JIT exchange that rechecks the persisted support-session owner."""
 
     def __init__(self, settings: AgentSettings, sessions: SessionStore) -> None:
         self._settings = settings
@@ -486,14 +404,24 @@ class OboClient:
         return token
 
 
+class ToolBoundaryFailure(Exception):
+    """An authoritative support-boundary failure with a closed historical reason."""
+
+    def __init__(self, *, status_code: int, reason: str, detail: str) -> None:
+        if reason not in TOOL_BOUNDARY_FAILURE_REASONS:
+            raise ValueError("Unregistered sensitive-tool boundary producer")
+        super().__init__(detail)
+        self.status_code = status_code
+        self.reason = reason
+        self.detail = detail
+
+
 def create_app(
     settings: AgentSettings | None = None,
     *,
     validator: DirectJwtValidator | None = None,
     sessions: SessionStore | None = None,
     conversations: ConversationStore | None = None,
-    agent: AgentRunner | None = None,
-    confirmer: ActionConfirmer | None = None,
     feedback: FeedbackStore | None = None,
     evidence: EvaluationEvidenceStore | None = None,
     liveness: SandboxLiveness | None = None,
@@ -505,12 +433,9 @@ def create_app(
     http_clients = http_client.HttpClients(
         resolved.http_client_layout,
         (
-            resolved.model_proxy_url,
             resolved.jwks_url,
             resolved.auth_exchange_url,
-            resolved.commerce_tools_url,
             resolved.commerce_liveness_url,
-            resolved.elasticsearch_url,
             resolved.trace_export_url,
         ),
     )
@@ -530,13 +455,10 @@ def create_app(
             validator=validator,
             sessions=sessions,
             conversations=conversations,
-            agent=agent,
-            confirmer=confirmer,
             feedback=feedback,
             evidence=evidence,
             liveness=liveness,
             metrics_runtime=resolved_metrics_runtime,
-            metrics=resolved_metrics,
             trace_sink=resolved_trace_sink,
             http_clients=http_clients,
         )
@@ -555,20 +477,16 @@ def _create_app(
     validator: DirectJwtValidator | None,
     sessions: SessionStore | None,
     conversations: ConversationStore | None,
-    agent: AgentRunner | None,
-    confirmer: ActionConfirmer | None,
     feedback: FeedbackStore | None,
     evidence: EvaluationEvidenceStore | None,
     liveness: SandboxLiveness | None,
     metrics_runtime: MetricsRuntime,
-    metrics: SafeCityBuddyMetrics,
     trace_sink: TraceSink,
     http_clients: http_client.HttpClients,
 ) -> FastAPI:
     """Construct the app, enabling identity routes only with complete runtime configuration."""
     resolved = settings
     resolved_metrics_runtime = metrics_runtime
-    resolved_metrics = metrics
     resolved_trace_sink = trace_sink
 
     @asynccontextmanager
@@ -613,9 +531,7 @@ def _create_app(
 
     @app.exception_handler(RequestValidationError)
     async def invalid_request(request: Request, exception: RequestValidationError) -> JSONResponse:
-        if request.url.path in {"/api/chat", "/api/chat/stream"}:
-            record_action_request_failure("AGENT_REQUEST_INVALID")
-        del exception
+        del request, exception
         return JSONResponse(status_code=422, content={"detail": "Invalid request"})
 
     @app.exception_handler(ToolBoundaryFailure)
@@ -648,69 +564,13 @@ def _create_app(
         if not resolved.commerce_liveness_url:
             raise ValueError("Evaluation liveness URL is required")
         resolved_liveness = HttpSandboxLiveness(resolved.commerce_liveness_url)
-    sse_filter = SseEgressFilter()
     app.state.validator = resolved_validator
     app.state.sessions = resolved_sessions
     app.state.conversations = resolved_conversations
     app.state.feedback = resolved_feedback
     app.state.evidence = resolved_evidence
     app.state.liveness = resolved_liveness
-    app.state.sse_filter = sse_filter
-    resolved_obo = OboClient(resolved, resolved_sessions)
-    resolved_agent: AgentRunner
-    if agent is None:
-        model_client = LiteLlmClient(
-            resolved.model_proxy_url,
-            ProviderCircuits(
-                minimum_requests=resolved.circuit_minimum_requests,
-                open_seconds=resolved.circuit_open_seconds,
-                half_open_probes=resolved.circuit_half_open_probes,
-            ),
-            resolved_metrics,
-            api_key=resolved.model_proxy_api_key,
-            temperature=resolved.model_temperature,
-            timeout_seconds=resolved.model_timeout_seconds,
-        )
-        resolved_tools = ToolAdapter(
-            resolved.commerce_tools_url,
-            resolved_obo,
-            ElasticsearchKnowledgeSearch(
-                resolved.elasticsearch_url,
-                alias=resolved.knowledge_alias,
-            )
-            if resolved.elasticsearch_url
-            else None,
-            model_client,
-            load_calibration(),
-            RedisFaqCache(resolved.support_redis_url, metrics=resolved_metrics)
-            if resolved.support_redis_url
-            else None,
-            resolved_metrics,
-            resolved_trace_sink,
-        )
-        resolved_agent = BoundedAgent(
-            RuleRouter(),
-            ModelRouter(
-                (
-                    ProviderRoute(resolved.primary_role_alias, resolved.primary_provider_key),
-                    ProviderRoute(resolved.fallback_role_alias, resolved.fallback_provider_key),
-                ),
-                resolved.attempt_budget,
-                ProviderRoute(resolved.reranker_role_alias, resolved.reranker_provider_key),
-            ),
-            model_client,
-            resolved_tools,
-            evaluation_profile_enabled=resolved.evaluation_enabled,
-            evaluation_session_propagation_enabled=(
-                resolved.evaluation_session_propagation_enabled
-            ),
-        )
-        resolved_confirmer: ActionConfirmer | None = confirmer or resolved_tools
-    else:
-        resolved_agent = agent
-        resolved_confirmer = confirmer
-    app.state.obo_client = resolved_obo
-    app.state.agent = resolved_agent
+    app.state.obo_client = OboClient(resolved, resolved_sessions)
 
     def authorize(
         authorization: str | None,
@@ -790,384 +650,6 @@ def _create_app(
         else:
             resolved_sessions.verify_owner(session_id, principal.subject, principal.sandbox_id)
 
-    def _execute_turn(
-        request: ChatRequest,
-        *,
-        token: str,
-        principal: DirectPrincipal,
-        session_id: str,
-        correlation_key: str,
-        observation: OperationObservation,
-    ) -> ConversationResult:
-        try:
-            verify_session(session_id, principal)
-        except HTTPException as exception:
-            if exception.status_code == 403:
-                raise ConversationOwnershipError from exception
-            raise
-        except pymysql.MySQLError as exception:
-            raise ToolBoundaryFailure(
-                status_code=503,
-                reason="ACTION_SESSION_PERSISTENCE_UNAVAILABLE",
-                detail="Service unavailable",
-            ) from exception
-        try:
-            replay = resolved_conversations.replay_turn(
-                session_id=session_id,
-                subject=principal.subject,
-                sandbox_id=principal.sandbox_id,
-                correlation_key=correlation_key,
-                message=request.message,
-            )
-        except pymysql.MySQLError as exception:
-            raise ToolBoundaryFailure(
-                status_code=503,
-                reason="ACTION_REPLAY_PERSISTENCE_UNAVAILABLE",
-                detail="Service unavailable",
-            ) from exception
-        if replay is not None:
-            observation.outcome = OperationOutcome.REPLAY
-            return replay
-        try:
-            live_action = resolved_conversations.current_pending_action(
-                session_id=session_id,
-                subject=principal.subject,
-                sandbox_id=principal.sandbox_id,
-            )
-        except pymysql.MySQLError as exception:
-            raise ToolBoundaryFailure(
-                status_code=503,
-                reason="ACTION_REFERENCE_PERSISTENCE_UNAVAILABLE",
-                detail="Service unavailable",
-            ) from exception
-        decision = confirmation_decision(request.message)
-        # A claimed reference has a refund in flight at commerce, so only a confirmation may
-        # resolve it. Expiry and decline are the two ways a turn could otherwise record that the
-        # action did not happen while commerce is committing it.
-        pending = None if live_action is None else live_action[0]
-        claimed = live_action is not None and live_action[1] == "CONFIRMING"
-        require_liveness(principal, token)
-        try:
-            start = resolved_conversations.begin_turn(
-                session_id=session_id,
-                subject=principal.subject,
-                sandbox_id=principal.sandbox_id,
-                correlation_key=correlation_key,
-                message=request.message,
-            )
-        except pymysql.MySQLError as exception:
-            raise ToolBoundaryFailure(
-                status_code=503,
-                reason="ACTION_TURN_RESERVATION_PERSISTENCE_UNAVAILABLE",
-                detail="Service unavailable",
-            ) from exception
-        if start.replay is not None:
-            observation.outcome = OperationOutcome.REPLAY
-            return start.replay
-        try:
-            if pending is not None:
-                if not claimed and pending.expires_at <= datetime.now(UTC):
-                    with OperationObservation(
-                        Operation.PENDING_ACTION_EXPIRY,
-                        resolved_metrics,
-                        resolved_trace_sink,
-                    ) as local_observation:
-                        try:
-                            result = resolved_conversations.complete_action_expired(
-                                start=start,
-                                pending=pending,
-                                response_text="The prepared action expired and was not executed.",
-                            )
-                        except ActionArbitrationConflictError:
-                            local_observation.outcome = OperationOutcome.CONFLICT
-                            raise
-                        except pymysql.MySQLError as exception:
-                            local_observation.outcome = OperationOutcome.UNAVAILABLE
-                            raise ToolBoundaryFailure(
-                                status_code=503,
-                                reason="ACTION_EXPIRY_PERSISTENCE_UNAVAILABLE",
-                                detail="Service unavailable",
-                            ) from exception
-                        local_observation.outcome = OperationOutcome.EXPIRED
-                        return result
-                if not claimed and decision is ConfirmationDecision.DECLINE:
-                    with OperationObservation(
-                        Operation.PENDING_ACTION_DECLINE,
-                        resolved_metrics,
-                        resolved_trace_sink,
-                    ) as local_observation:
-                        try:
-                            result = resolved_conversations.complete_action_decline(
-                                start=start,
-                                pending=pending,
-                                response_text=(
-                                    "The prepared action was declined and was not executed."
-                                ),
-                            )
-                        except ActionArbitrationConflictError:
-                            local_observation.outcome = OperationOutcome.CONFLICT
-                            raise
-                        except pymysql.MySQLError as exception:
-                            local_observation.outcome = OperationOutcome.UNAVAILABLE
-                            raise ToolBoundaryFailure(
-                                status_code=503,
-                                reason="ACTION_DECLINE_PERSISTENCE_UNAVAILABLE",
-                                detail="Service unavailable",
-                            ) from exception
-                        local_observation.outcome = OperationOutcome.DECLINED
-                        return result
-                if decision is ConfirmationDecision.CONFIRM:
-                    with OperationObservation(
-                        Operation.PENDING_ACTION_CONFIRM,
-                        resolved_metrics,
-                        resolved_trace_sink,
-                    ) as local_observation:
-                        if resolved_confirmer is None:
-                            local_observation.outcome = OperationOutcome.UNAVAILABLE
-                            raise ToolBoundaryFailure(
-                                status_code=503,
-                                reason="ACTION_CONFIRMATION_UNAVAILABLE",
-                                detail="Action confirmation unavailable",
-                            )
-                        if not claimed:
-                            # Fails closed if a decline or an expiry got there first: the refund
-                            # has not been requested yet, so losing the race costs nothing.
-                            try:
-                                resolved_conversations.claim_action_confirmation(pending=pending)
-                            except ActionArbitrationConflictError:
-                                local_observation.outcome = OperationOutcome.CONFLICT
-                                raise
-                            except pymysql.MySQLError as exception:
-                                local_observation.outcome = OperationOutcome.UNAVAILABLE
-                                raise ToolBoundaryFailure(
-                                    status_code=503,
-                                    reason="ACTION_CONFIRMATION_PERSISTENCE_UNAVAILABLE",
-                                    detail="Service unavailable",
-                                ) from exception
-                        confirm_events: list[AgentEvent] = []
-                        try:
-                            receipt = resolved_confirmer.confirm_action(
-                                pending=pending,
-                                direct_token=token,
-                                subject=principal.subject,
-                                session_id=session_id,
-                                sandbox_id=principal.sandbox_id,
-                                budget=AttemptBudget(resolved.attempt_budget, confirm_events),
-                                events=confirm_events,
-                            )
-                        except ActionConfirmationRejected as rejection:
-                            record_action_request_failure(rejection.reason)
-                            try:
-                                result = resolved_conversations.complete_action_rejected(
-                                    start=start,
-                                    pending=pending,
-                                    response_text=(
-                                        "Commerce rejected the prepared action and returned no "
-                                        "action receipt."
-                                    ),
-                                )
-                            except ActionArbitrationConflictError:
-                                local_observation.outcome = OperationOutcome.CONFLICT
-                                raise
-                            except ConversationIntegrityError:
-                                local_observation.outcome = OperationOutcome.CONFLICT
-                                raise
-                            except pymysql.MySQLError as exception:
-                                local_observation.outcome = OperationOutcome.UNAVAILABLE
-                                raise ToolBoundaryFailure(
-                                    status_code=503,
-                                    reason="ACTION_CONFIRMATION_PERSISTENCE_UNAVAILABLE",
-                                    detail="Service unavailable",
-                                ) from exception
-                            local_observation.outcome = OperationOutcome.REJECTED
-                            return result
-                        except ToolBoundaryFailure as failure:
-                            local_observation.outcome = OperationOutcome.UNAVAILABLE
-                            record_action_request_failure(failure.reason)
-                            raise
-                        except AttemptBudgetExhausted as exception:
-                            local_observation.outcome = OperationOutcome.UNAVAILABLE
-                            raise ToolBoundaryFailure(
-                                status_code=503,
-                                reason="ACTION_CONFIRMATION_UNAVAILABLE",
-                                detail="Action confirmation unavailable",
-                            ) from exception
-                        try:
-                            # The refund exists in commerce from here on. A failure below leaves
-                            # the reference CONFIRMING, which nothing but another confirmation can
-                            # resolve, and that confirmation replays the same commerce receipt
-                            # rather than issuing a second refund. Leaving it claimed is
-                            # deliberate: the agent cannot tell a lost response from a refund that
-                            # never happened, so it must not let anything record either.
-                            result = resolved_conversations.complete_action_confirmed(
-                                start=start,
-                                pending=pending,
-                                receipt=receipt,
-                                response_text=(
-                                    # Commerce records a refund request and settles it
-                                    # asynchronously, so this may not claim money moved.
-                                    "The refund request was submitted and recorded."
-                                ),
-                            )
-                        except ActionArbitrationConflictError:
-                            local_observation.outcome = OperationOutcome.CONFLICT
-                            raise
-                        except ConversationIntegrityError:
-                            # Recorded as a conflict, matching how the turn-level observation
-                            # classifies it; this operation has no separate invalid label.
-                            local_observation.outcome = OperationOutcome.CONFLICT
-                            raise
-                        except pymysql.MySQLError as exception:
-                            local_observation.outcome = OperationOutcome.UNAVAILABLE
-                            raise ToolBoundaryFailure(
-                                status_code=503,
-                                reason="ACTION_CONFIRMATION_PERSISTENCE_UNAVAILABLE",
-                                detail="Service unavailable",
-                            ) from exception
-                        local_observation.outcome = OperationOutcome.CONFIRMED
-                        return result
-                with OperationObservation(
-                    Operation.PENDING_ACTION_CLARIFICATION,
-                    resolved_metrics,
-                    resolved_trace_sink,
-                ) as local_observation:
-                    try:
-                        result = resolved_conversations.complete_turn(
-                            start=start,
-                            response_text=(
-                                "Please reply with an exact confirmation or decline for the "
-                                "prepared refund request."
-                            ),
-                            outcome="action_clarification",
-                            events=(
-                                AgentEvent(
-                                    "AGENT_OUTCOME",
-                                    {"outcome": "action_clarification"},
-                                ),
-                            ),
-                        )
-                    except pymysql.MySQLError as exception:
-                        local_observation.outcome = OperationOutcome.UNAVAILABLE
-                        raise ToolBoundaryFailure(
-                            status_code=503,
-                            reason="ACTION_CLARIFICATION_PERSISTENCE_UNAVAILABLE",
-                            detail="Service unavailable",
-                        ) from exception
-                    local_observation.outcome = OperationOutcome.CLARIFICATION
-                    return result
-            if principal.sandbox_id is None:
-                agent_result = resolved_agent.run(
-                    message=request.message,
-                    direct_token=token,
-                    subject=principal.subject,
-                    session_id=session_id,
-                    trace_id=start.trace_id,
-                    turn_id=start.turn_id,
-                    history=start.history,
-                )
-            else:
-                agent_result = resolved_agent.run(
-                    message=request.message,
-                    direct_token=token,
-                    subject=principal.subject,
-                    session_id=session_id,
-                    trace_id=start.trace_id,
-                    turn_id=start.turn_id,
-                    history=start.history,
-                    sandbox_id=principal.sandbox_id,
-                )
-            for reason in agent_result.request_reasons:
-                record_action_request_failure(reason)
-            try:
-                return resolved_conversations.complete_turn(
-                    start=start,
-                    response_text=agent_result.response_text,
-                    outcome=agent_result.outcome,
-                    events=agent_result.events,
-                    retrieval_decision=agent_result.retrieval_decision,
-                    pending_action=agent_result.pending_action,
-                )
-            except pymysql.MySQLError as exception:
-                reason = (
-                    "ACTION_REFERENCE_PERSISTENCE_UNAVAILABLE"
-                    if agent_result.pending_action is not None
-                    else "AGENT_TURN_COMPLETION_PERSISTENCE_UNAVAILABLE"
-                )
-                raise ToolBoundaryFailure(
-                    status_code=503,
-                    reason=reason,
-                    detail="Service unavailable",
-                ) from exception
-        except Exception as original:
-            try:
-                resolved_conversations.fail_turn(start=start, failure_code="agent_execution_failed")
-            except Exception:
-                LOGGER.exception(
-                    "agent_request_cleanup_failed original_type=%s",
-                    type(original).__name__,
-                )
-            raise
-
-    def execute_turn(
-        request: ChatRequest,
-        *,
-        token: str,
-        principal: DirectPrincipal,
-        session_id: str,
-        correlation_key: str,
-    ) -> ConversationResult:
-        with OperationObservation(
-            Operation.CHAT_TURN, resolved_metrics, resolved_trace_sink
-        ) as observation:
-            try:
-                result = _execute_turn(
-                    request,
-                    token=token,
-                    principal=principal,
-                    session_id=session_id,
-                    correlation_key=correlation_key,
-                    observation=observation,
-                )
-                validate_public_result(result)
-            except SseProjectionError as exception:
-                observation.outcome = OperationOutcome.CONFLICT
-                raise ConversationIntegrityError(
-                    "Durable turn cannot be projected to the public contract"
-                ) from exception
-            except ConversationOwnershipError:
-                observation.outcome = OperationOutcome.DENIED
-                raise
-            except (
-                CorrelationConflictError,
-                TurnInProgressError,
-                ConversationIntegrityError,
-                ActionArbitrationConflictError,
-            ):
-                observation.outcome = OperationOutcome.CONFLICT
-                raise
-            except ToolBoundaryFailure as exception:
-                if exception.status_code in {401, 403}:
-                    observation.outcome = OperationOutcome.DENIED
-                elif exception.status_code == 409:
-                    observation.outcome = OperationOutcome.CONFLICT
-                else:
-                    observation.outcome = OperationOutcome.UNAVAILABLE
-                raise
-            if observation.outcome is not OperationOutcome.REPLAY:
-                observation.outcome = {
-                    "completed": OperationOutcome.SUCCESS,
-                    "action_pending": OperationOutcome.PENDING,
-                    "action_clarification": OperationOutcome.CLARIFICATION,
-                    "action_completed": OperationOutcome.CONFIRMED,
-                    "action_rejected": OperationOutcome.REJECTED,
-                    "action_declined": OperationOutcome.DECLINED,
-                    "action_expired": OperationOutcome.EXPIRED,
-                    "retrieval_denied": OperationOutcome.RETRIEVAL_DENIED,
-                    "budget_exhausted": OperationOutcome.BUDGET_EXHAUSTED,
-                    "provider_denied": OperationOutcome.PROVIDER_DENIED,
-                }.get(result.outcome, OperationOutcome.ERROR)
-            return result
-
     @app.post("/api/sessions", response_model=SessionResponse, status_code=201)
     def create_session(
         request: SessionCreateRequest,
@@ -1182,130 +664,6 @@ def _create_app(
         else:
             session_id = resolved_sessions.create(principal.subject, principal.sandbox_id)
         return SessionResponse(session_id=session_id)
-
-    @app.post("/api/chat", response_model=ChatResponse)
-    def chat(
-        request: ChatRequest,
-        authorization: str | None = Header(default=None),
-        x_session_id: str = Header(min_length=1, max_length=64),
-        idempotency_key: str = Header(min_length=1, max_length=128),
-        x_eval_sandbox_id: str | None = Header(default=None),
-    ) -> ChatResponse:
-        principal, token = authorize(authorization, x_eval_sandbox_id, CHAT_PERMISSION)
-        try:
-            result = execute_turn(
-                request,
-                token=token,
-                principal=principal,
-                session_id=x_session_id,
-                correlation_key=idempotency_key,
-            )
-        except ConversationOwnershipError as exception:
-            record_action_request_failure("ACTION_SESSION_OWNERSHIP_REJECTED")
-            raise HTTPException(status_code=403, detail="Forbidden") from exception
-        except CorrelationConflictError as exception:
-            record_action_request_failure("ACTION_IDEMPOTENCY_CONFLICT")
-            raise HTTPException(status_code=409, detail="Idempotency conflict") from exception
-        except TurnInProgressError as exception:
-            record_action_request_failure("ACTION_TURN_IN_PROGRESS")
-            raise HTTPException(status_code=409, detail="Turn in progress") from exception
-        except TurnFailedError as exception:
-            record_action_request_failure("ACTION_TURN_PREVIOUSLY_FAILED")
-            raise HTTPException(status_code=503, detail="Service unavailable") from exception
-        except ConversationIntegrityError as exception:
-            record_action_request_failure("ACTION_DURABLE_TRUTH_INCONSISTENT")
-            raise HTTPException(
-                status_code=409, detail="Action durable truth is inconsistent"
-            ) from exception
-        except ActionArbitrationConflictError as exception:
-            record_action_request_failure("ACTION_LOCAL_ARBITRATION_CONFLICT")
-            raise HTTPException(status_code=409, detail="Action state conflict") from exception
-        except ToolBoundaryFailure as exception:
-            record_action_request_failure(exception.reason)
-            raise HTTPException(
-                status_code=exception.status_code, detail=exception.detail
-            ) from exception
-        return ChatResponse(
-            conversation_id=result.conversation_id,
-            trace_id=result.trace_id,
-            turn_id=result.turn_id,
-            reply=result.response_text,
-            outcome=cast(ChatOutcome, result.outcome),
-            citations=tuple(
-                CitationResponse(
-                    source_id=evidence.source_id,
-                    chunk_id=evidence.chunk_id,
-                    source_version=evidence.source_version,
-                    doc_type=evidence.doc_type,
-                    title=evidence.title,
-                )
-                for evidence in result.retrieval_evidence
-            ),
-            receipt_id=result.receipt_id,
-        )
-
-    @app.post("/api/chat/stream")
-    def chat_stream(
-        request: ChatRequest,
-        http_request: Request,
-        authorization: str | None = Header(default=None),
-        x_session_id: str = Header(min_length=1, max_length=64),
-        idempotency_key: str = Header(min_length=1, max_length=128),
-        x_eval_sandbox_id: str | None = Header(default=None),
-    ) -> StreamingResponse:
-        principal, token = authorize(authorization, x_eval_sandbox_id, CHAT_PERMISSION)
-        try:
-            result = execute_turn(
-                request,
-                token=token,
-                principal=principal,
-                session_id=x_session_id,
-                correlation_key=idempotency_key,
-            )
-        except ConversationOwnershipError as exception:
-            record_action_request_failure("ACTION_SESSION_OWNERSHIP_REJECTED")
-            raise HTTPException(status_code=403, detail="Forbidden") from exception
-        except CorrelationConflictError as exception:
-            record_action_request_failure("ACTION_IDEMPOTENCY_CONFLICT")
-            raise HTTPException(status_code=409, detail="Idempotency conflict") from exception
-        except TurnInProgressError as exception:
-            record_action_request_failure("ACTION_TURN_IN_PROGRESS")
-            raise HTTPException(status_code=409, detail="Turn in progress") from exception
-        except TurnFailedError as exception:
-            record_action_request_failure("ACTION_TURN_PREVIOUSLY_FAILED")
-            raise HTTPException(status_code=503, detail="Service unavailable") from exception
-        except ConversationIntegrityError as exception:
-            record_action_request_failure("ACTION_DURABLE_TRUTH_INCONSISTENT")
-            raise HTTPException(
-                status_code=409, detail="Action durable truth is inconsistent"
-            ) from exception
-        except ActionArbitrationConflictError as exception:
-            record_action_request_failure("ACTION_LOCAL_ARBITRATION_CONFLICT")
-            raise HTTPException(status_code=409, detail="Action state conflict") from exception
-        except ToolBoundaryFailure as exception:
-            record_action_request_failure(exception.reason)
-            raise HTTPException(
-                status_code=exception.status_code, detail=exception.detail
-            ) from exception
-        except HTTPException:
-            raise
-        except Exception:
-            record_action_request_failure("ACTION_STREAM_UNEXPECTED_FAILURE")
-            events = sse_filter.terminal_error("stream_unavailable")
-        else:
-            try:
-                events = sse_filter.project_result(result)
-            except SseProjectionError:
-                record_action_request_failure("ACTION_STREAM_PROJECTION_INVALID")
-                events = sse_filter.terminal_error("stream_unavailable")
-        return StreamingResponse(
-            stream_events(events, http_request.is_disconnected),
-            media_type="text/event-stream",
-            headers={
-                "Cache-Control": "no-cache, no-store",
-                "X-Accel-Buffering": "no",
-            },
-        )
 
     @app.post("/api/feedback", response_model=FeedbackResponse, status_code=201)
     def append_feedback(

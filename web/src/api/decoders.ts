@@ -39,36 +39,6 @@ export type Reservation = {
   orderId: string | null;
 };
 
-export type ChatOutcome =
-  | 'completed'
-  | 'action_completed'
-  | 'budget_exhausted'
-  | 'provider_denied'
-  | 'retrieval_denied'
-  | 'action_pending'
-  | 'action_clarification'
-  | 'action_declined'
-  | 'action_expired'
-  | 'action_rejected';
-
-export type Citation = {
-  sourceId: string;
-  chunkId: string;
-  sourceVersion: number;
-  docType: 'faq' | 'product';
-  title: string;
-};
-
-export type ChatResponse = {
-  conversationId: string;
-  traceId: string;
-  turnId: string;
-  reply: string;
-  outcome: ChatOutcome;
-  receiptId: string | null;
-  citations: Citation[];
-};
-
 export type PublicError =
   | { detail: string }
   | { error: string }
@@ -159,11 +129,6 @@ export function decodeLoginResponse(value: unknown) {
   };
 }
 
-export function decodeSessionResponse(value: unknown) {
-  const record = closedRecord(value, ['sessionId']);
-  return { sessionId: stringValue(record.sessionId, 1, 64) };
-}
-
 function decodeProduct(value: unknown): Product {
   const record = closedRecord(value, [
     'productId',
@@ -198,8 +163,7 @@ function decodeProduct(value: unknown): Product {
 }
 
 export function decodeProducts(value: unknown): Product[] {
-  if (!Array.isArray(value) || value.length > 100)
-    throw new Error('Malformed response');
+  if (!Array.isArray(value)) throw new Error('Malformed response');
   return value.map(decodeProduct);
 }
 
@@ -255,70 +219,6 @@ export function decodeReservation(value: unknown): Reservation {
     replay: booleanValue(record.replay),
     durableOrderCreated: booleanValue(record.durableOrderCreated),
     orderId: record.orderId === null ? null : uuidValue(record.orderId),
-  };
-}
-
-function decodeCitation(value: unknown): Citation {
-  const record = closedRecord(value, [
-    'sourceId',
-    'chunkId',
-    'sourceVersion',
-    'docType',
-    'title',
-  ]);
-  return {
-    sourceId: stringValue(record.sourceId, 1, 128),
-    chunkId: stringValue(record.chunkId, 1, 128),
-    sourceVersion: integerValue(
-      record.sourceVersion,
-      1,
-      Number.MAX_SAFE_INTEGER,
-    ),
-    docType: enumValue(record.docType, ['faq', 'product'] as const),
-    title: stringValue(record.title, 1, 200),
-  };
-}
-
-// A committed action and its receipt are one truth on this path too: the page must not be able to
-// render a success the server did not record, whichever endpoint it came from.
-function receiptFor(outcome: unknown, receiptId: unknown): string | null {
-  if (outcome === 'action_completed') return uuidValue(receiptId);
-  if (receiptId !== null) throw new Error('Malformed response');
-  return null;
-}
-
-export function decodeChatResponse(value: unknown): ChatResponse {
-  const record = closedRecord(value, [
-    'conversationId',
-    'traceId',
-    'turnId',
-    'reply',
-    'outcome',
-    'receiptId',
-    'citations',
-  ]);
-  if (!Array.isArray(record.citations) || record.citations.length > 3) {
-    throw new Error('Malformed response');
-  }
-  return {
-    conversationId: uuidValue(record.conversationId),
-    traceId: uuidValue(record.traceId),
-    turnId: uuidValue(record.turnId),
-    reply: stringValue(record.reply, 0, 256),
-    outcome: enumValue(record.outcome, [
-      'completed',
-      'action_completed',
-      'budget_exhausted',
-      'provider_denied',
-      'retrieval_denied',
-      'action_pending',
-      'action_clarification',
-      'action_declined',
-      'action_expired',
-      'action_rejected',
-    ] as const),
-    receiptId: receiptFor(record.outcome, record.receiptId),
-    citations: record.citations.map(decodeCitation),
   };
 }
 

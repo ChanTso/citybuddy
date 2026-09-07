@@ -1,6 +1,5 @@
 import { FormEvent, useCallback, useEffect, useRef, useState } from 'react';
 
-import { createSupportSession, sendChat, streamChat } from './api/agent';
 import { login } from './api/auth';
 import { ApiFailure, type ApiFailureKind } from './api/client';
 import {
@@ -8,12 +7,7 @@ import {
   pollReservation,
   submitReservation,
 } from './api/commerce';
-import type {
-  Citation,
-  ChatOutcome,
-  Product,
-  Reservation,
-} from './api/decoders';
+import type { Product, Reservation } from './api/decoders';
 import './app.css';
 
 type ProductState = {
@@ -31,25 +25,6 @@ type ReservationIntent = {
   result?: Reservation;
   error?: string;
 };
-type ChatEntry = {
-  id: string;
-  speaker: 'you' | 'citybuddy';
-  text: string;
-  citations?: Citation[];
-};
-type ChatIntent = {
-  key: string;
-  message: string;
-  mode: 'json' | 'stream';
-  phase: 'sending' | 'error';
-};
-type PendingNotice = {
-  phase: 'pending' | 'declined' | 'expired' | 'rejected' | 'confirmed';
-  reply: string;
-  // Shown only for a confirmed action, and only ever the identifier the server sent.
-  receiptId?: string;
-};
-
 const TERMINAL_RESERVATIONS = new Set([
   'REJECTED',
   'ORDERED',
@@ -57,23 +32,6 @@ const TERMINAL_RESERVATIONS = new Set([
   'UNFULFILLED',
 ]);
 const POLL_LIMIT = 8;
-const CONFIRMATION_MESSAGES = new Set([
-  'confirm',
-  'confirm refund',
-  'yes',
-  'yes confirm',
-  '确认',
-  '确认退款',
-  '是的',
-  '是的确认',
-]);
-
-function isConfirmationMessage(message: string): boolean {
-  return CONFIRMATION_MESSAGES.has(
-    message.normalize('NFKC').trim().toLocaleLowerCase().replace(/\s+/g, ' '),
-  );
-}
-
 function fixedError(kind: ApiFailureKind): string {
   return {
     unauthorized: '会话已过期，请重新登录。',
@@ -84,21 +42,6 @@ function fixedError(kind: ApiFailureKind): string {
     malformed: '服务返回了无法安全读取的数据。',
     network: '网络连接不可用，请稍后重试。',
   }[kind];
-}
-
-function outcomeLabel(outcome: ChatOutcome): string {
-  return {
-    completed: '回复已完成',
-    action_completed: '退款申请已提交，服务端已返回回执',
-    budget_exhausted: '本次回复预算已用尽',
-    provider_denied: '回复服务暂时不可用',
-    retrieval_denied: '没有足够的公开资料来回答',
-    action_pending: '动作仍在等待处理',
-    action_clarification: '已记录补充说明，动作仍未执行',
-    action_declined: '动作已由服务端标记为拒绝，未执行',
-    action_expired: '动作已由服务端标记为过期，未执行',
-    action_rejected: 'Commerce 已拒绝该动作，未返回动作回执',
-  }[outcome];
 }
 
 export function App() {
@@ -114,16 +57,9 @@ export function App() {
   const [reservation, setReservation] = useState<ReservationIntent | null>(
     null,
   );
-  const [sessionId, setSessionId] = useState<string | null>(null);
-  const [chat, setChat] = useState<ChatEntry[]>([]);
-  const [chatIntent, setChatIntent] = useState<ChatIntent | null>(null);
-  const [chatStatus, setChatStatus] = useState('');
-  const [pending, setPending] = useState<PendingNotice | null>(null);
-  const [streamMode, setStreamMode] = useState(false);
   const controllers = useRef(new Set<AbortController>());
   const reservationController = useRef<AbortController | null>(null);
   const activeReservation = useRef<string | null>(null);
-  const activeChat = useRef<string | null>(null);
   const generation = useRef(0);
 
   const ownController = useCallback(() => {
@@ -140,15 +76,9 @@ export function App() {
     controllers.current.clear();
     reservationController.current = null;
     activeReservation.current = null;
-    activeChat.current = null;
     setToken(null);
     setProducts({ phase: 'idle', items: [] });
     setReservation(null);
-    setSessionId(null);
-    setChat([]);
-    setChatIntent(null);
-    setChatStatus('');
-    setPending(null);
     setAuthError('');
     setAuthPhase(expired ? 'expired' : 'signed-out');
   }, []);
@@ -182,7 +112,7 @@ export function App() {
     try {
       const items = await listProducts(activeToken, controller.signal);
       if (generation.current === expectedGeneration)
-        setProducts({ phase: 'ready', items });
+        setProducts({ phase: 'ready', items: items.slice(0, 100) });
     } catch (error) {
       const message = handleFailure(error);
       if (message && generation.current === expectedGeneration) {
@@ -337,133 +267,6 @@ export function App() {
     void runReservation(intent);
   }
 
-  async function ensureSession(
-    activeToken: string,
-    expectedGeneration: number,
-    signal: AbortSignal,
-  ) {
-    if (sessionId !== null) return sessionId;
-    const created = await createSupportSession(activeToken, signal);
-    if (generation.current !== expectedGeneration)
-      throw new DOMException('Aborted', 'AbortError');
-    setSessionId(created.sessionId);
-    return created.sessionId;
-  }
-
-  function applyOutcome(
-    outcome: ChatOutcome,
-    reply: string,
-    receiptId?: string | null,
-  ) {
-    setChatStatus(outcomeLabel(outcome));
-    if (outcome === 'action_completed') {
-      // The receipt identifier comes from the response, never from the reply text.
-      setPending({
-        phase: 'confirmed',
-        reply,
-        ...(receiptId ? { receiptId } : {}),
-      });
-    }
-    if (outcome === 'action_pending') setPending({ phase: 'pending', reply });
-    if (outcome === 'action_clarification') {
-      setPending((current) => (current ? { ...current, reply } : null));
-    }
-    if (outcome === 'action_declined') setPending({ phase: 'declined', reply });
-    if (outcome === 'action_expired') setPending({ phase: 'expired', reply });
-    if (outcome === 'action_rejected') setPending({ phase: 'rejected', reply });
-  }
-
-  async function runChat(intent: ChatIntent) {
-    if (token === null || activeChat.current !== null) return;
-    activeChat.current = intent.key;
-    const expectedGeneration = generation.current;
-    const controller = ownController();
-    setChatIntent({ ...intent, phase: 'sending' });
-    setChatStatus('正在等待服务端回复…');
-    try {
-      const activeSession = await ensureSession(
-        token,
-        expectedGeneration,
-        controller.signal,
-      );
-      const result =
-        intent.mode === 'stream'
-          ? await streamChat(
-              token,
-              activeSession,
-              intent.key,
-              intent.message,
-              controller.signal,
-            )
-          : await sendChat(
-              token,
-              activeSession,
-              intent.key,
-              intent.message,
-              controller.signal,
-            );
-      if (generation.current !== expectedGeneration) return;
-      setChat((current) => [
-        ...current,
-        {
-          id: crypto.randomUUID(),
-          speaker: 'citybuddy',
-          text: result.reply,
-          citations: 'citations' in result ? result.citations : undefined,
-        },
-      ]);
-      applyOutcome(result.outcome, result.reply, result.receiptId);
-      setChatIntent(null);
-    } catch (error) {
-      if (generation.current !== expectedGeneration) return;
-      if (
-        error instanceof ApiFailure &&
-        error.kind === 'conflict' &&
-        isConfirmationMessage(intent.message)
-      ) {
-        setChatStatus('确认与另一次处理冲突；请稍后重试，动作未重复执行。');
-        setChatIntent(null);
-      } else {
-        const message = handleFailure(error);
-        if (message && generation.current === expectedGeneration) {
-          setChatStatus(message);
-          setChatIntent({ ...intent, phase: 'error' });
-        }
-      }
-    } finally {
-      if (activeChat.current === intent.key) activeChat.current = null;
-      releaseController(controller);
-    }
-  }
-
-  function submitChat(
-    event: FormEvent<HTMLFormElement>,
-    fixedMessage?: string,
-  ) {
-    event.preventDefault();
-    const form = event.currentTarget;
-    const message =
-      fixedMessage ?? String(new FormData(form).get('message') ?? '').trim();
-    if (
-      !message ||
-      message.length > 4000 ||
-      chatIntent?.phase === 'sending' ||
-      activeChat.current !== null
-    )
-      return;
-    setChat((current) => [
-      ...current,
-      { id: crypto.randomUUID(), speaker: 'you', text: message },
-    ]);
-    if (!fixedMessage) form.reset();
-    void runChat({
-      key: crypto.randomUUID(),
-      message,
-      mode: streamMode ? 'stream' : 'json',
-      phase: 'sending',
-    });
-  }
-
   const signedIn = token !== null && authPhase === 'signed-in';
   return (
     <div className="app-shell">
@@ -472,8 +275,14 @@ export function App() {
           CityBuddy
         </a>
         <nav aria-label="页面导航">
-          <a href="#shop">Shop</a>
-          <a href="#support">Support</a>
+          <a href="#shop">商品与秒杀</a>
+          <a
+            href="http://127.0.0.1:3100/buyer"
+            target="_blank"
+            rel="noopener noreferrer"
+          >
+            购物助手
+          </a>
         </nav>
         {signedIn && (
           <button
@@ -487,11 +296,22 @@ export function App() {
       </header>
       <main id="top">
         <section className="hero" aria-labelledby="hero-title">
-          <p className="eyebrow">LOCAL COMMERCE · BOUNDED SUPPORT</p>
-          <h1 id="hero-title">把交易真相与客服解释，放在各自可靠的边界内。</h1>
+          <p className="eyebrow">JAVA COMMERCE · RETAIL WORKSPACE</p>
+          <h1 id="hero-title">共享真实交易，连接购物与经营。</h1>
           <p>
-            一个最小的 CityBuddy 作品演示：浏览公开商品、提交秒杀
-            reservation，并与受限客服路径交谈。
+            这里保留 CityBuddy 的商品与秒杀工程演示。购物咨询、商品比较、
+            购物车、本人订单及退款确认统一在 ShopMate 买家工作台完成。
+          </p>
+          <a
+            className="buyer-link"
+            href="http://127.0.0.1:3100/buyer"
+            target="_blank"
+            rel="noopener noreferrer"
+          >
+            打开 ShopMate 买家工作台
+          </a>
+          <p className="hint">
+            在新页面使用同一买家账号重新登录；当前页面的登录令牌不会随链接传递。
           </p>
         </section>
 
@@ -548,6 +368,10 @@ export function App() {
                   重新加载
                 </button>
               </div>
+              <p className="hint">
+                这里展示至多 100
+                个已发布商品；完整零售目录、系列规格与购物车请进入 ShopMate。
+              </p>
               {products.phase === 'loading' && (
                 <p role="status">正在加载商品…</p>
               )}
@@ -587,7 +411,8 @@ export function App() {
               <div className="subpanel">
                 <h3>秒杀 reservation</h3>
                 <p>
-                  活动编号与版本来自当前演示数据。提交后只展示服务端 reservation
+                  此表单用于已配置活动的秒杀工程环境。默认零售部署未启用秒杀，
+                  也没有预置可用的秒杀活动；提交后只展示服务端 reservation
                   状态。
                 </p>
                 <form
@@ -658,167 +483,11 @@ export function App() {
                 )}
               </div>
             </section>
-
-            <section
-              id="support"
-              className="panel support"
-              aria-labelledby="support-title"
-            >
-              <div className="section-heading">
-                <div>
-                  <p className="eyebrow">SUPPORT</p>
-                  <h2 id="support-title">受限客服</h2>
-                </div>
-                <label className="mode">
-                  <input
-                    type="checkbox"
-                    checked={streamMode}
-                    onChange={(event) => setStreamMode(event.target.checked)}
-                  />
-                  流式回复
-                </label>
-              </div>
-              <p className="notice">
-                AI 生成的解释可能不准确；交易状态只以服务端状态和回执为准。
-              </p>
-              <div className="chat-log" aria-live="polite">
-                {chat.length === 0 ? (
-                  <p className="empty-chat">
-                    发送一条消息开始当前登录周期的 support session。
-                  </p>
-                ) : (
-                  chat.map((entry) => (
-                    <article
-                      key={entry.id}
-                      className={`message ${entry.speaker}`}
-                    >
-                      <h3>{entry.speaker === 'you' ? '你' : 'CityBuddy'}</h3>
-                      <p>{entry.text}</p>
-                      {entry.citations && entry.citations.length > 0 && (
-                        <ul className="citations">
-                          {entry.citations.map((citation) => (
-                            <li
-                              key={`${citation.sourceId}:${citation.chunkId}`}
-                            >
-                              {citation.title} · {citation.docType} v
-                              {citation.sourceVersion}
-                            </li>
-                          ))}
-                        </ul>
-                      )}
-                    </article>
-                  ))
-                )}
-              </div>
-              {pending && (
-                <aside
-                  className={`pending-card ${pending.phase}`}
-                  aria-labelledby="pending-title"
-                >
-                  <p className="eyebrow">BOUNDARY NOTICE</p>
-                  <h3 id="pending-title">
-                    {pending.phase === 'confirmed'
-                      ? '敏感动作已提交'
-                      : '敏感动作等待处理'}
-                  </h3>
-                  <p>{pending.reply}</p>
-                  {pending.phase === 'pending' && (
-                    <>
-                      <p>
-                        动作尚未执行。可在普通输入中补充说明，或明确确认或拒绝。
-                        过期状态以服务端结果为准。
-                      </p>
-                      <div className="pending-actions">
-                        <form
-                          onSubmit={(event) => submitChat(event, 'confirm')}
-                        >
-                          <button
-                            type="submit"
-                            disabled={chatIntent?.phase === 'sending'}
-                          >
-                            确认此动作
-                          </button>
-                        </form>
-                        <form
-                          onSubmit={(event) => submitChat(event, 'decline')}
-                        >
-                          <button
-                            type="submit"
-                            className="danger"
-                            disabled={chatIntent?.phase === 'sending'}
-                          >
-                            拒绝此动作
-                          </button>
-                        </form>
-                      </div>
-                    </>
-                  )}
-                  {pending.phase === 'confirmed' && (
-                    <p>
-                      服务端已记录该退款申请并返回回执
-                      {pending.receiptId ? (
-                        <>
-                          ：<code>{pending.receiptId}</code>
-                        </>
-                      ) : null}
-                      。回执证明申请已被持久记录，实际退款由服务端异步结算。
-                    </p>
-                  )}
-                  {(pending.phase === 'declined' ||
-                    pending.phase === 'expired' ||
-                    pending.phase === 'rejected') && (
-                    <p>
-                      {pending.phase === 'declined'
-                        ? '服务端已返回拒绝终态；动作未执行。'
-                        : pending.phase === 'expired'
-                          ? '服务端已返回过期终态；动作未执行。'
-                          : 'Commerce 已拒绝该动作；Agent 未收到动作回执。'}
-                    </p>
-                  )}
-                </aside>
-              )}
-              <form className="chat-form" onSubmit={submitChat}>
-                <label htmlFor="message">消息或澄清说明</label>
-                <textarea
-                  id="message"
-                  name="message"
-                  rows={3}
-                  maxLength={4000}
-                />
-                <button
-                  type="submit"
-                  disabled={chatIntent?.phase === 'sending'}
-                >
-                  {chatIntent?.phase === 'sending'
-                    ? '正在发送…'
-                    : streamMode
-                      ? '流式发送'
-                      : '发送'}
-                </button>
-                {chatIntent?.phase === 'error' && (
-                  <button
-                    type="button"
-                    className="quiet"
-                    onClick={() => void runChat(chatIntent)}
-                  >
-                    使用原消息重试
-                  </button>
-                )}
-              </form>
-              {chatStatus && (
-                <p
-                  role={chatIntent?.phase === 'error' ? 'alert' : 'status'}
-                  className={`notice ${chatIntent?.phase === 'error' ? 'error' : ''}`}
-                >
-                  {chatStatus}
-                </p>
-              )}
-            </section>
           </div>
         )}
       </main>
       <footer>
-        <p>Portfolio surface · server-owned identity and business truth</p>
+        <p>CityBuddy 交易服务 · ShopMate 零售工作台</p>
       </footer>
     </div>
   );

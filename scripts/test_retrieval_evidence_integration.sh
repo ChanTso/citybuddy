@@ -8,26 +8,19 @@ source "$repo_root/scripts/test_dynamic_ports.sh"
 tmp_dir="$(mktemp -d)"
 env_file="$tmp_dir/.env"
 project="citybuddy-cb091-test-$$"
-model_port=""
 MYSQL_PORT=""
 ELASTICSEARCH_PORT=""
 REDIS_SUPPORT_PORT=""
 export ELASTICSEARCH_IMAGE="citybuddy-elasticsearch-ik:${project}"
 compose=(docker compose --project-name "$project" --env-file "$env_file" --file compose.yaml)
-model_pid=""
 
 cleanup() {
   local status=$?
   local resource_stop_status=0
-  if [[ -n "$model_pid" ]]; then
-    kill "$model_pid" >/dev/null 2>&1 || true
-    wait "$model_pid" >/dev/null 2>&1 || true
-  fi
   if (( status != 0 )); then
     echo "CB-091 integration failed; collecting diagnostics." >&2
     "${compose[@]}" ps --all >&2 || true
     "${compose[@]}" logs --no-color mysql elasticsearch redis-commerce redis-support >&2 || true
-    sed -E 's/[0-9a-f]{48}/<redacted>/g' "$tmp_dir/model.log" >&2 || true
   fi
   "${compose[@]}" down --volumes --remove-orphans >/dev/null 2>&1 || resource_stop_status=$?
   rm -rf "$tmp_dir"
@@ -103,19 +96,7 @@ uv run python scripts/check_faq_cache.py \
 "${compose[@]}" up --detach --wait --wait-timeout 30 redis-support >/dev/null
 compose_host_port REDIS_SUPPORT_PORT redis-support 6379
 
-uv run python scripts/fake_litellm_server.py --port 0 \
-  >"$tmp_dir/model.log" 2>&1 &
-model_pid=$!
-process_bound_port model_port uvicorn "$model_pid" "$tmp_dir/model.log" 0
-for _ in {1..40}; do
-  if curl --fail --silent "http://127.0.0.1:$model_port/fixture/counts" >/dev/null; then
-    break
-  fi
-  sleep 0.1
-done
-curl --fail --silent "http://127.0.0.1:$model_port/fixture/counts" >/dev/null
-
-probe_expected='{"atomicRollback":"passed","cacheDurableReplay":true,"cacheFinalizeWindow":true,"cacheHitEvidence":true,"cacheOutageFallback":true,"calibrationVersion":"cb091-calibration-v1","indexVersion":"knowledge_docs_v1","metricsBackendMatrix":true,"metricsReplayExcluded":true,"outcomes":10,"replayWithoutExecution":true,"runtimeIsolation":"passed","storedEvidenceCount":3}'
+probe_expected='{"atomicRollback":"passed","cacheDurableReplay":true,"cacheFinalizeWindow":true,"cacheHitEvidence":true,"cacheLookupMetrics":true,"cacheOutageReadBoundary":true,"calibrationVersion":"cb091-calibration-v1","historicalOutcomes":5,"historicalReplay":true,"indexVersion":"knowledge_docs_v1","metricsReplayExcluded":true,"runtimeIsolation":"passed","storedEvidenceCount":3}'
 probe_output="$(
   uv run python scripts/check_retrieval_evidence.py \
     --mysql-host 127.0.0.1 \
@@ -125,7 +106,6 @@ probe_output="$(
     --auth-password "$(read_value MYSQL_AUTH_APP_PASSWORD)" \
     --commerce-password "$(read_value MYSQL_COMMERCE_APP_PASSWORD)" \
     --elasticsearch-url "http://127.0.0.1:$ELASTICSEARCH_PORT" \
-    --model-url "http://127.0.0.1:$model_port" \
     --agent-cache-url \
     "redis://agent_cache:$(read_value REDIS_AGENT_CACHE_PASSWORD)@127.0.0.1:$REDIS_SUPPORT_PORT/0" \
     --indexer-cache-url \
@@ -133,4 +113,4 @@ probe_output="$(
 )"
 assert_exact "retrieval evidence probe" "$probe_expected" "$probe_output"
 
-echo "CB-091/CB-112 rerank, cache, and atomic retrieval evidence checks passed."
+echo "Retained search/cache clients and atomic historical evidence checks passed."

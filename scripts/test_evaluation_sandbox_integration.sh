@@ -31,25 +31,23 @@ project="citybuddy-cb101-test-$$"
 auth_port=""
 commerce_port=""
 agent_port=""
-proxy_port=""
 drop_proxy_port=""
 MYSQL_PORT=""
 compose=(docker compose --project-name "$project" --env-file "$env_file" --file compose.yaml)
 auth_pid=""
 commerce_pid=""
 agent_pid=""
-model_pid=""
 drop_proxy_pid=""
 
 cleanup() {
   local status=$?
   local resource_stop_status=0
-  for pid in "$agent_pid" "$commerce_pid" "$auth_pid" "$model_pid" "$drop_proxy_pid"; do
+  for pid in "$agent_pid" "$commerce_pid" "$auth_pid" "$drop_proxy_pid"; do
     if [[ -n "$pid" ]]; then
       kill "$pid" >/dev/null 2>&1 || true
     fi
   done
-  for pid in "$agent_pid" "$commerce_pid" "$auth_pid" "$model_pid" "$drop_proxy_pid"; do
+  for pid in "$agent_pid" "$commerce_pid" "$auth_pid" "$drop_proxy_pid"; do
     if [[ -n "$pid" ]]; then
       wait "$pid" >/dev/null 2>&1 || true
     fi
@@ -220,7 +218,7 @@ assert_status() {
       tail -n "+$((commerce_log_start + 1))" "$tmp_dir/commerce.log" \
         | grep -E 'evaluation_request_rejected .*reason_code=' >&2 || true
     fi
-    for log in auth commerce agent model drop-proxy; do
+    for log in auth commerce agent drop-proxy; do
       if [[ -f "$tmp_dir/$log.log" ]]; then
         echo "${log}-log-tail" >&2
         tail -n 120 "$tmp_dir/$log.log" >&2
@@ -462,15 +460,12 @@ start_commerce() {
 
 start_agent() {
   local evaluation_enabled="$1"
-  local tools_url="${2:-http://127.0.0.1:$commerce_port}"
-  local evaluation_session_propagation_enabled="${3:-true}"
   local log_offset
   port_log_offset log_offset "$tmp_dir/agent.log"
   AGENT_PORT=0 \
   AGENT_WORKERS=1 \
   AGENT_IDENTITY_ENABLED=true \
   AGENT_EVALUATION_ENABLED="$evaluation_enabled" \
-  AGENT_EVALUATION_SESSION_PROPAGATION_ENABLED="$evaluation_session_propagation_enabled" \
   AGENT_EVALUATION_CLIENT_ID=evaluation-manager \
   AGENT_EVALUATION_CLIENT_SECRET="$management_password" \
   CITYBUDDY_METRICS_ENABLED=true \
@@ -485,8 +480,6 @@ start_agent() {
   AGENT_SERVICE_CLIENT_ID=agent-service \
   AGENT_SERVICE_CLIENT_SECRET="$agent_service_password" \
   AGENT_EXCHANGE_SCOPES='catalog:read refund:create' \
-  AGENT_MODEL_PROXY_URL="http://127.0.0.1:$proxy_port" \
-  AGENT_COMMERCE_TOOLS_URL="$tools_url" \
   AGENT_COMMERCE_LIVENESS_URL="http://127.0.0.1:$commerce_port" \
   uv run citybuddy-agent >>"$tmp_dir/agent.log" 2>&1 &
   agent_pid=$!
@@ -494,71 +487,49 @@ start_agent() {
   wait_http "http://127.0.0.1:$agent_port/api/sessions" "$agent_pid" "$tmp_dir/agent.log"
 }
 
-assert_agent_routing() {
-  local trace_id="$1"
-  local sandbox_id="$2"
-  local refund_context="$3"
-  local refund_context_source="$4"
-  local chitchat="$5"
-  local tool_profile="$6"
-  local session_propagation_enabled="$7"
-  local label="$8"
-  local expected_raw="$refund_context:$refund_context_source:$chitchat:$tool_profile:$session_propagation_enabled"
-  assert_equal "$expected_raw" \
-    "$(mysql_query agent_app "$agent_app_password" cs_db \
-      "SELECT CONCAT(JSON_UNQUOTE(JSON_EXTRACT(payload_json, '$.signals.refundContext')), ':', JSON_UNQUOTE(JSON_EXTRACT(payload_json, '$.signals.refundContextSource')), ':', JSON_UNQUOTE(JSON_EXTRACT(payload_json, '$.signals.chitchat')), ':', JSON_UNQUOTE(JSON_EXTRACT(payload_json, '$.toolProfile')), ':', JSON_UNQUOTE(JSON_EXTRACT(payload_json, '$.sessionPropagationEnabled'))) FROM support_event WHERE trace_id = '$trace_id' AND event_type = 'ROUTING_DECISION'")" \
-    "$label raw routing decision"
-  if [[ -z "$sandbox_id" ]]; then
-    return
-  fi
-  assert_status 200 "$label evaluation routing evidence" \
-    --request GET "http://127.0.0.1:$agent_port/api/eval/evidence/$trace_id" \
-    --user "evaluation-manager:$management_password" \
-    --header "X-Eval-Sandbox-Id: $sandbox_id"
-  jq -e \
-    --argjson refund_context "$refund_context" \
-    --arg refund_context_source "$refund_context_source" \
-    --argjson chitchat "$chitchat" \
-    --arg tool_profile "$tool_profile" \
-    --argjson session_propagation_enabled "$session_propagation_enabled" \
-    '[.events[] | select(.eventKind == "ROUTING_DECISION") | .routing] == [{
-      refundContext: $refund_context,
-      refundContextSource: $refund_context_source,
-      chitchat: $chitchat,
-      toolProfile: $tool_profile,
-      sessionPropagationEnabled: $session_propagation_enabled
-    }]' "$tmp_dir/http-response.json" >/dev/null
-  echo "Verified routing projection: $label"
+# Historical records remain supported after the old model loop is retired. These calls
+# exercise the production store directly; they do not emulate a chat or model response.
+store_fixture() {
+  MYSQL_HOST=127.0.0.1 MYSQL_PORT="$MYSQL_PORT" \
+    MYSQL_AGENT_APP_PASSWORD="$agent_app_password" \
+    uv run python scripts/support_history_fixture.py "$@"
 }
 
-run_agent_chat() {
-  local result_name="$1"
-  local token="$2"
-  local sandbox_id="$3"
-  local session_id="$4"
-  local idempotency_key="$5"
-  local message="$6"
-  local label="$7"
-  if [[ -n "$sandbox_id" ]]; then
-    assert_status 200 "$label" \
-      --request POST "http://127.0.0.1:$agent_port/api/chat" \
-      --header "Authorization: Bearer $token" \
-      --header "X-Eval-Sandbox-Id: $sandbox_id" \
-      --header "X-Session-Id: $session_id" \
-      --header "Idempotency-Key: $idempotency_key" \
-      --header 'Content-Type: application/json' \
-      --data "$(jq -cn --arg message "$message" '{message: $message}')"
-  else
-    assert_status 200 "$label" \
-      --request POST "http://127.0.0.1:$agent_port/api/chat" \
-      --header "Authorization: Bearer $token" \
-      --header "X-Session-Id: $session_id" \
-      --header "Idempotency-Key: $idempotency_key" \
-      --header 'Content-Type: application/json' \
-      --data "$(jq -cn --arg message "$message" '{message: $message}')"
-  fi
-  printf -v "$result_name" '%s' \
-    "$(uv run python scripts/read_json_field.py "$tmp_dir/http-response.json" traceId)"
+prepare_history_action() {
+  local history_session="$1"
+  local history_key="$2"
+  local expected="${3:-success}"
+  local history_trace history_turn history_obo
+  store_fixture begin --session="$history_session" --subject="$payment_subject" \
+    --sandbox=sandbox-payment --key="$history_key" --message='historical preparation' \
+    >"$tmp_dir/history-start.json"
+  history_trace="$(jq -r .traceId "$tmp_dir/history-start.json")"
+  history_turn="$(jq -r .turnId "$tmp_dir/history-start.json")"
+  assert_status 200 "exchange for explicit historical action fixture" \
+    --request POST "http://127.0.0.1:$auth_port/auth/token/exchange" \
+    --user "agent-service:$agent_service_password" \
+    --header "X-User-Authorization: Bearer $payment_token" \
+    --header 'X-Eval-Sandbox-Id: sandbox-payment' \
+    --header 'Content-Type: application/json' \
+    --data "$(jq -cn --arg session "$history_session" --arg subject "$payment_subject" \
+      '{sessionId:$session,userSubject:$subject,scope:"refund:create"}')"
+  history_obo="$(jq -r .accessToken "$tmp_dir/http-response.json")"
+  history_rejection_obo="$history_obo"
+  assert_status 201 "prepare actual Commerce action for historical store fixture" \
+    --request POST "http://127.0.0.1:$commerce_port/internal/tools/actions/prepare" \
+    --header "Authorization: Bearer $history_obo" \
+    --header "X-Support-Session-Id: $history_session" \
+    --header 'X-Eval-Sandbox-Id: sandbox-payment' \
+    --header "X-Agent-Trace-Id: $history_trace" \
+    --header "X-Agent-Turn-Id: $history_turn" \
+    --header 'Content-Type: application/json' \
+    --data "$(jq -cn --arg order "$payment_order_id" \
+      '{actionType:"REFUND_REQUEST",arguments:{orderId:$order,amountMinor:500,currency:"CNY"}}')"
+  cp "$tmp_dir/http-response.json" "$tmp_dir/history-pending.json"
+  store_fixture pending --session="$history_session" --subject="$payment_subject" \
+    --sandbox=sandbox-payment --key="$history_key" --message='historical preparation' \
+    --start-file="$tmp_dir/history-start.json" --pending-file="$tmp_dir/history-pending.json" \
+    --expect="$expected" >"$tmp_dir/http-response.json"
 }
 
 reset_body() {
@@ -1104,7 +1075,7 @@ fi
 
 start_auth production
 start_commerce production "http://127.0.0.1:$auth_port"
-start_agent false "http://127.0.0.1:$commerce_port" false
+start_agent false
 assert_status 404 "production profile omits agent evaluation evidence" \
   --request GET "http://127.0.0.1:$agent_port/api/eval/evidence/00000000-0000-0000-0000-000000000103" \
   --user "evaluation-manager:$management_password" \
@@ -3791,14 +3762,7 @@ assert_equal '1:1:1' \
     "SELECT CONCAT((SELECT COUNT(*) FROM action_receipt WHERE receipt_id = '$action_receipt_id'), ':', (SELECT COUNT(*) FROM mock_refund WHERE refund_id = '$action_refund_id'), ':', (SELECT COUNT(*) FROM commerce_outbox WHERE aggregate_type = 'REFUND' AND aggregate_id = '$action_refund_id' AND event_type = 'REFUND_REQUESTED'))")" \
   "Action confirm commits one receipt, refund, and Outbox row"
 
-uv run python scripts/fake_litellm_server.py --port 0 \
-  --commerce-base-url "http://127.0.0.1:$commerce_port" \
-  >>"$tmp_dir/cb122-model.log" 2>&1 &
-model_pid=$!
-process_bound_port proxy_port uvicorn "$model_pid" "$tmp_dir/cb122-model.log" 0
-wait_http "http://127.0.0.1:$proxy_port/fixture/counts" \
-  "$model_pid" "$tmp_dir/cb122-model.log"
-start_agent true "http://127.0.0.1:$proxy_port"
+start_agent true
 assert_status 201 "CB-122 session binds the payment principal and sandbox" \
   --request POST "http://127.0.0.1:$agent_port/api/sessions" \
   --header "Authorization: Bearer $payment_token" \
@@ -3808,14 +3772,7 @@ assert_status 201 "CB-122 session binds the payment principal and sandbox" \
 cb122_session="$(uv run python scripts/read_json_field.py "$tmp_dir/http-response.json" sessionId)"
 cb122_commerce_before="$(mysql_query root "$root_password" commerce_db \
   "SELECT CONCAT((SELECT COUNT(*) FROM pending_action WHERE order_id = '$payment_order_id'), ':', (SELECT COUNT(*) FROM action_receipt WHERE order_id = '$payment_order_id'), ':', (SELECT COUNT(*) FROM mock_refund WHERE order_id = '$payment_order_id'), ':', (SELECT COUNT(*) FROM commerce_outbox WHERE aggregate_type = 'REFUND'))")"
-assert_status 200 "CB-122 response-loss prepare converges through one bounded same-intent replay" \
-  --request POST "http://127.0.0.1:$agent_port/api/chat" \
-  --header "Authorization: Bearer $payment_token" \
-  --header 'X-Eval-Sandbox-Id: sandbox-payment' \
-  --header "X-Session-Id: $cb122_session" \
-  --header 'Idempotency-Key: cb122-response-loss' \
-  --header 'Content-Type: application/json' \
-  --data '{"message":"action-prepare refund my order"}'
+prepare_history_action "$cb122_session" "cb122-response-loss" success
 cp "$tmp_dir/http-response.json" "$tmp_dir/cb122-prepared.json"
 jq -e '.outcome == "action_pending"' "$tmp_dir/cb122-prepared.json" >/dev/null
 cb122_prepare_trace="$(uv run python scripts/read_json_field.py \
@@ -3832,96 +3789,35 @@ assert_equal 'PENDING:action_pending:1:1' \
   "$(mysql_query root "$root_password" cs_db \
     "SELECT CONCAT(reference.state, ':', turn_record.outcome, ':', (SELECT COUNT(*) FROM support_event WHERE turn_id = turn_record.turn_id AND event_type = 'ACTION_PREPARED'), ':', (SELECT COUNT(*) FROM pending_action_reference WHERE source_turn_id = turn_record.turn_id)) FROM pending_action_reference reference JOIN support_turn turn_record ON turn_record.turn_id = reference.source_turn_id WHERE reference.pending_action_id = '$cb122_pending_id'")" \
   "CB-122 prepare commits one local reference and one preparation event"
-assert_equal 2 \
-  "$(curl --silent --show-error "http://127.0.0.1:$proxy_port/fixture/counts" \
-    | jq -r --arg session "$cb122_session" '.["action-proxy:" + $session]')" \
-  "response-loss fixture observes one upstream commit and one exact replay"
 assert_equal 1 \
   "$(mysql_query root "$root_password" commerce_db \
     "SELECT COUNT(*) FROM pending_action WHERE support_session_id = '$cb122_session' AND turn_id = '$cb122_prepare_turn'")" \
-  "bounded response-loss replay creates one commerce PendingAction"
-cb122_proxy_calls_before_replay="$(curl --silent --show-error \
-  "http://127.0.0.1:$proxy_port/fixture/counts" \
-  | jq -r --arg session "$cb122_session" '.["action-proxy:" + $session]')"
-cb122_model_calls_before_replay="$(curl --silent --show-error \
-  "http://127.0.0.1:$proxy_port/fixture/counts" \
-  | jq -r '.["action-prepare:total"]')"
-assert_status 200 "complete local action closure replays before model and commerce" \
-  --request POST "http://127.0.0.1:$agent_port/api/chat" \
-  --header "Authorization: Bearer $payment_token" \
-  --header 'X-Eval-Sandbox-Id: sandbox-payment' \
-  --header "X-Session-Id: $cb122_session" \
-  --header 'Idempotency-Key: cb122-response-loss' \
-  --header 'Content-Type: application/json' \
-  --data '{"message":"action-prepare refund my order"}'
+  "direct preparation creates one commerce PendingAction"
+store_fixture replay --session="$cb122_session" --subject="$payment_subject" \
+  --sandbox=sandbox-payment --key="cb122-response-loss" --message="historical preparation" \
+  --expect=success >"$tmp_dir/http-response.json"
 cmp "$tmp_dir/cb122-prepared.json" "$tmp_dir/http-response.json"
-assert_equal "$cb122_proxy_calls_before_replay" \
-  "$(curl --silent --show-error "http://127.0.0.1:$proxy_port/fixture/counts" \
-    | jq -r --arg session "$cb122_session" '.["action-proxy:" + $session]')" \
-  "local replay does not call commerce prepare again"
-assert_equal "$cb122_model_calls_before_replay" \
-  "$(curl --silent --show-error "http://127.0.0.1:$proxy_port/fixture/counts" \
-    | jq -r '.["action-prepare:total"]')" \
-  "local replay does not call the model again"
 
 for duplicate in 1 2; do
-  request_status "$tmp_dir/cb122-concurrent-$duplicate.json" \
-    --request POST "http://127.0.0.1:$agent_port/api/chat" \
-    --header "Authorization: Bearer $payment_token" \
-    --header 'X-Eval-Sandbox-Id: sandbox-payment' \
-    --header "X-Session-Id: $cb122_session" \
-    --header 'Idempotency-Key: cb122-response-loss' \
-    --header 'Content-Type: application/json' \
-    --data '{"message":"action-prepare refund my order"}' \
-    >"$tmp_dir/cb122-concurrent-$duplicate.status" &
+  store_fixture replay --session="$cb122_session" --subject="$payment_subject" \
+    --sandbox=sandbox-payment --key=cb122-response-loss --message='historical preparation' \
+    >"$tmp_dir/cb122-concurrent-$duplicate.json" &
   cb122_concurrent_pids[$duplicate]=$!
 done
 for duplicate in 1 2; do
   wait "${cb122_concurrent_pids[$duplicate]}"
-  assert_equal 200 "$(cat "$tmp_dir/cb122-concurrent-$duplicate.status")" \
-    "concurrent stored-closure replay $duplicate status"
   cmp "$tmp_dir/cb122-prepared.json" "$tmp_dir/cb122-concurrent-$duplicate.json"
 done
-assert_equal "$cb122_proxy_calls_before_replay" \
-  "$(curl --silent --show-error "http://127.0.0.1:$proxy_port/fixture/counts" \
-    | jq -r --arg session "$cb122_session" '.["action-proxy:" + $session]')" \
-  "concurrent stored-closure replay does not call commerce"
-assert_equal "$cb122_model_calls_before_replay" \
-  "$(curl --silent --show-error "http://127.0.0.1:$proxy_port/fixture/counts" \
-    | jq -r '.["action-prepare:total"]')" \
-  "concurrent stored-closure replay does not call the model"
-
-assert_status 409 "changed message cannot reuse the completed action key" \
-  --request POST "http://127.0.0.1:$agent_port/api/chat" \
-  --header "Authorization: Bearer $payment_token" \
-  --header 'X-Eval-Sandbox-Id: sandbox-payment' \
-  --header "X-Session-Id: $cb122_session" \
-  --header 'Idempotency-Key: cb122-response-loss' \
-  --header 'Content-Type: application/json' \
-  --data '{"message":"action-prepare refund my order changed"}'
-assert_equal "$cb122_proxy_calls_before_replay" \
-  "$(curl --silent --show-error "http://127.0.0.1:$proxy_port/fixture/counts" \
-    | jq -r --arg session "$cb122_session" '.["action-proxy:" + $session]')" \
-  "changed replay is rejected before commerce"
-assert_equal "$cb122_model_calls_before_replay" \
-  "$(curl --silent --show-error "http://127.0.0.1:$proxy_port/fixture/counts" \
-    | jq -r '.["action-prepare:total"]')" \
-  "changed replay is rejected before the model"
+store_fixture replay --session="$cb122_session" --subject="$payment_subject" \
+  --sandbox=sandbox-payment --key="cb122-response-loss" --message="changed historical preparation" \
+  --expect=conflict >"$tmp_dir/http-response.json"
 
 cb122_cross_trace='00000000-0000-0000-0000-000000000922'
 mysql_query root "$root_password" cs_db \
   "SET FOREIGN_KEY_CHECKS = 0; UPDATE support_event SET trace_id = '$cb122_cross_trace' WHERE turn_id = '$cb122_prepare_turn' AND event_type = 'ACTION_PREPARED'; SET FOREIGN_KEY_CHECKS = 1"
-cb122_agent_log_start="$(wc -l <"$tmp_dir/agent.log")"
-assert_status 409 "conversation replay rejects a cross-trace ACTION_PREPARED row" \
-  --request POST "http://127.0.0.1:$agent_port/api/chat" \
-  --header "Authorization: Bearer $payment_token" \
-  --header 'X-Eval-Sandbox-Id: sandbox-payment' \
-  --header "X-Session-Id: $cb122_session" \
-  --header 'Idempotency-Key: cb122-response-loss' \
-  --header 'Content-Type: application/json' \
-  --data '{"message":"action-prepare refund my order"}'
-tail -n "+$((cb122_agent_log_start + 1))" "$tmp_dir/agent.log" \
-  | grep -Fq 'reason_code=ACTION_DURABLE_TRUTH_INCONSISTENT'
+store_fixture replay --session="$cb122_session" --subject="$payment_subject" \
+  --sandbox=sandbox-payment --key="cb122-response-loss" --message="historical preparation" \
+  --expect=integrity >"$tmp_dir/http-response.json"
 cb122_agent_log_start="$(wc -l <"$tmp_dir/agent.log")"
 assert_status 409 "evaluation evidence rejects the same cross-trace ACTION_PREPARED row" \
   --request GET "http://127.0.0.1:$agent_port/api/eval/evidence/$cb122_prepare_trace" \
@@ -3931,14 +3827,9 @@ tail -n "+$((cb122_agent_log_start + 1))" "$tmp_dir/agent.log" \
   | grep -Fq 'reason_code=ACTION_EVALUATION_DURABLE_TRUTH_INCONSISTENT'
 mysql_query root "$root_password" cs_db \
   "SET FOREIGN_KEY_CHECKS = 0; UPDATE support_event SET trace_id = '$cb122_prepare_trace' WHERE turn_id = '$cb122_prepare_turn' AND event_type = 'ACTION_PREPARED'; SET FOREIGN_KEY_CHECKS = 1"
-assert_status 200 "conversation replay recovers after cross-trace damage is restored" \
-  --request POST "http://127.0.0.1:$agent_port/api/chat" \
-  --header "Authorization: Bearer $payment_token" \
-  --header 'X-Eval-Sandbox-Id: sandbox-payment' \
-  --header "X-Session-Id: $cb122_session" \
-  --header 'Idempotency-Key: cb122-response-loss' \
-  --header 'Content-Type: application/json' \
-  --data '{"message":"action-prepare refund my order"}'
+store_fixture replay --session="$cb122_session" --subject="$payment_subject" \
+  --sandbox=sandbox-payment --key="cb122-response-loss" --message="historical preparation" \
+  --expect=success >"$tmp_dir/http-response.json"
 cmp "$tmp_dir/cb122-prepared.json" "$tmp_dir/http-response.json"
 assert_cb122_action_closure_damage() {
   local label="$1"
@@ -3946,17 +3837,9 @@ assert_cb122_action_closure_damage() {
   local log_start
   closure_before="$(mysql_query root "$root_password" cs_db \
     "SELECT CONCAT((SELECT COUNT(*) FROM support_turn WHERE session_id = '$cb122_session'), ':', (SELECT COUNT(*) FROM support_event WHERE session_id = '$cb122_session'), ':', (SELECT COUNT(*) FROM pending_action_reference WHERE session_id = '$cb122_session'))")"
-  log_start="$(wc -l <"$tmp_dir/agent.log")"
-  assert_status 409 "conversation rejects $label" \
-    --request POST "http://127.0.0.1:$agent_port/api/chat" \
-    --header "Authorization: Bearer $payment_token" \
-    --header 'X-Eval-Sandbox-Id: sandbox-payment' \
-    --header "X-Session-Id: $cb122_session" \
-    --header 'Idempotency-Key: cb122-response-loss' \
-    --header 'Content-Type: application/json' \
-    --data '{"message":"action-prepare refund my order"}'
-  tail -n "+$((log_start + 1))" "$tmp_dir/agent.log" \
-    | grep -Fq 'reason_code=ACTION_DURABLE_TRUTH_INCONSISTENT'
+  store_fixture replay --session="$cb122_session" --subject="$payment_subject" \
+    --sandbox=sandbox-payment --key="cb122-response-loss" --message="historical preparation" \
+    --expect=integrity >"$tmp_dir/http-response.json"
   log_start="$(wc -l <"$tmp_dir/agent.log")"
   assert_status 409 "evaluation rejects $label" \
     --request GET "http://127.0.0.1:$agent_port/api/eval/evidence/$cb122_prepare_trace" \
@@ -3964,14 +3847,6 @@ assert_cb122_action_closure_damage() {
     --header 'X-Eval-Sandbox-Id: sandbox-payment'
   tail -n "+$((log_start + 1))" "$tmp_dir/agent.log" \
     | grep -Fq 'reason_code=ACTION_EVALUATION_DURABLE_TRUTH_INCONSISTENT'
-  assert_equal "$cb122_proxy_calls_before_replay" \
-    "$(curl --silent --show-error "http://127.0.0.1:$proxy_port/fixture/counts" \
-      | jq -r --arg session "$cb122_session" '.["action-proxy:" + $session]')" \
-    "$label does not call commerce"
-  assert_equal "$cb122_model_calls_before_replay" \
-    "$(curl --silent --show-error "http://127.0.0.1:$proxy_port/fixture/counts" \
-      | jq -r '.["action-prepare:total"]')" \
-    "$label does not call the model"
   assert_equal "$closure_before" \
     "$(mysql_query root "$root_password" cs_db \
       "SELECT CONCAT((SELECT COUNT(*) FROM support_turn WHERE session_id = '$cb122_session'), ':', (SELECT COUNT(*) FROM support_event WHERE session_id = '$cb122_session'), ':', (SELECT COUNT(*) FROM pending_action_reference WHERE session_id = '$cb122_session'))")" \
@@ -4016,19 +3891,9 @@ assert_cb122_action_closure_damage "duplicate ACTION_PREPARED evidence"
 mysql_query root "$root_password" cs_db \
   "DELETE FROM support_event WHERE event_id = '00000000-0000-0000-0000-000000000925'"
 
-# The block that asserted confirmation was deliberately unavailable is gone with the
-# behaviour it described: an exact confirmation now commits the action and returns its
-# receipt. That path runs end to end against real services in
-# bench/agent/check_action_confirmation.py, whose output is committed under bench/results.
-# It cannot run here, because every check below depends on this reference staying PENDING.
-assert_status 200 "ambiguous action input produces one local clarification" \
-  --request POST "http://127.0.0.1:$agent_port/api/chat" \
-  --header "Authorization: Bearer $payment_token" \
-  --header 'X-Eval-Sandbox-Id: sandbox-payment' \
-  --header "X-Session-Id: $cb122_session" \
-  --header 'Idempotency-Key: cb122-note-1' \
-  --header 'Content-Type: application/json' \
-  --data '{"message":"maybe change it"}'
+store_fixture clarify --session="$cb122_session" --subject="$payment_subject" \
+  --sandbox=sandbox-payment --key="cb122-note-1" --message="historical clarification" \
+  --expect=success >"$tmp_dir/http-response.json"
 jq -e '.outcome == "action_clarification"' "$tmp_dir/http-response.json" >/dev/null
 assert_equal PENDING \
   "$(mysql_query root "$root_password" cs_db \
@@ -4040,17 +3905,9 @@ cb122_clarification_trace="$(mysql_query root "$root_password" cs_db \
   "SELECT trace_id FROM support_turn WHERE turn_id = '$cb122_clarification_turn'")"
 mysql_query root "$root_password" cs_db \
   "INSERT INTO pending_action_reference (pending_action_id, source_turn_id, source_trace_id, conversation_id, session_id, user_subject, sandbox_id, action_type, argument_commitment, order_id, target_version, amount_minor, currency, state, expires_at, resolved_at, resolution_turn_id, resolution_trace_id) SELECT '00000000-0000-0000-0000-000000000926', turn_record.turn_id, turn_record.trace_id, turn_record.conversation_id, turn_record.session_id, turn_record.user_subject, reference.sandbox_id, reference.action_type, reference.argument_commitment, reference.order_id, reference.target_version, reference.amount_minor, reference.currency, 'DECLINED', reference.expires_at, CURRENT_TIMESTAMP(6), '$cb122_prepare_turn', '$cb122_prepare_trace' FROM support_turn turn_record JOIN pending_action_reference reference ON reference.pending_action_id = '$cb122_pending_id' WHERE turn_record.turn_id = '$cb122_clarification_turn'"
-cb122_agent_log_start="$(wc -l <"$tmp_dir/agent.log")"
-assert_status 409 "clarification replay rejects an orphan PendingAction reference" \
-  --request POST "http://127.0.0.1:$agent_port/api/chat" \
-  --header "Authorization: Bearer $payment_token" \
-  --header 'X-Eval-Sandbox-Id: sandbox-payment' \
-  --header "X-Session-Id: $cb122_session" \
-  --header 'Idempotency-Key: cb122-note-1' \
-  --header 'Content-Type: application/json' \
-  --data '{"message":"maybe change it"}'
-tail -n "+$((cb122_agent_log_start + 1))" "$tmp_dir/agent.log" \
-  | grep -Fq 'reason_code=ACTION_DURABLE_TRUTH_INCONSISTENT'
+store_fixture replay --session="$cb122_session" --subject="$payment_subject" \
+  --sandbox=sandbox-payment --key="cb122-note-1" --message="historical clarification" \
+  --expect=integrity >"$tmp_dir/http-response.json"
 cb122_agent_log_start="$(wc -l <"$tmp_dir/agent.log")"
 assert_status 409 "evaluation rejects the same clarification orphan reference" \
   --request GET \
@@ -4064,17 +3921,9 @@ mysql_query root "$root_password" cs_db \
 
 mysql_query root "$root_password" '' \
   "REVOKE UPDATE (state, resolved_at, resolution_turn_id, resolution_trace_id) ON cs_db.pending_action_reference FROM 'agent_app'@'%'"
-cb122_agent_log_start="$(wc -l <"$tmp_dir/agent.log")"
-assert_status 503 "decline persistence denial is attributed and rolls back the local decision" \
-  --request POST "http://127.0.0.1:$agent_port/api/chat" \
-  --header "Authorization: Bearer $payment_token" \
-  --header 'X-Eval-Sandbox-Id: sandbox-payment' \
-  --header "X-Session-Id: $cb122_session" \
-  --header 'Idempotency-Key: cb122-decline-denied' \
-  --header 'Content-Type: application/json' \
-  --data '{"message":"decline"}'
-tail -n "+$((cb122_agent_log_start + 1))" "$tmp_dir/agent.log" \
-  | grep -Fq 'reason_code=ACTION_DECLINE_PERSISTENCE_UNAVAILABLE'
+store_fixture decline --session="$cb122_session" --subject="$payment_subject" \
+  --sandbox=sandbox-payment --key="cb122-decline-denied" --message="historical decline" \
+  --expect=database >"$tmp_dir/http-response.json"
 assert_equal 'PENDING:0:FAILED' \
   "$(mysql_query root "$root_password" cs_db \
     "SELECT CONCAT((SELECT state FROM pending_action_reference WHERE pending_action_id = '$cb122_pending_id'), ':', (SELECT COUNT(*) FROM support_event WHERE session_id = '$cb122_session' AND event_type = 'ACTION_DECLINED'), ':', (SELECT state FROM support_turn WHERE session_id = '$cb122_session' AND correlation_key = 'cb122-decline-denied'))")" \
@@ -4088,17 +3937,9 @@ assert_equal 'resolution_trace_id:UPDATE,resolution_turn_id:UPDATE,resolved_at:U
 
 mysql_query root "$root_password" '' \
   "CREATE TRIGGER cs_db.cb122_fail_decline_event BEFORE INSERT ON cs_db.support_event FOR EACH ROW SET NEW.sequence = IF(NEW.event_type = 'ACTION_DECLINED', 0, NEW.sequence)"
-cb122_agent_log_start="$(wc -l <"$tmp_dir/agent.log")"
-assert_status 503 "ACTION_DECLINED insert failure rolls back the complete local decision" \
-  --request POST "http://127.0.0.1:$agent_port/api/chat" \
-  --header "Authorization: Bearer $payment_token" \
-  --header 'X-Eval-Sandbox-Id: sandbox-payment' \
-  --header "X-Session-Id: $cb122_session" \
-  --header 'Idempotency-Key: cb122-decline-event-rollback' \
-  --header 'Content-Type: application/json' \
-  --data '{"message":"decline"}'
-tail -n "+$((cb122_agent_log_start + 1))" "$tmp_dir/agent.log" \
-  | grep -Fq 'reason_code=ACTION_DECLINE_PERSISTENCE_UNAVAILABLE'
+store_fixture decline --session="$cb122_session" --subject="$payment_subject" \
+  --sandbox=sandbox-payment --key="cb122-decline-event-rollback" --message="historical decline" \
+  --expect=database >"$tmp_dir/http-response.json"
 assert_equal 'PENDING:0:FAILED' \
   "$(mysql_query root "$root_password" cs_db \
     "SELECT CONCAT((SELECT state FROM pending_action_reference WHERE pending_action_id = '$cb122_pending_id'), ':', (SELECT COUNT(*) FROM support_event WHERE session_id = '$cb122_session' AND event_type = 'ACTION_DECLINED'), ':', (SELECT state FROM support_turn WHERE session_id = '$cb122_session' AND correlation_key = 'cb122-decline-event-rollback'))")" \
@@ -4115,16 +3956,9 @@ for cb122_event_failure in \
   mysql_query root "$root_password" '' \
     "CREATE TRIGGER cs_db.cb122_fail_${cb122_event_suffix//-/_} BEFORE INSERT ON cs_db.support_event FOR EACH ROW SET NEW.sequence = IF(NEW.event_type = '$cb122_event_type', 0, NEW.sequence)"
   cb122_agent_log_start="$(wc -l <"$tmp_dir/agent.log")"
-  assert_status 503 "$cb122_event_type insert failure rolls back the complete local decision" \
-    --request POST "http://127.0.0.1:$agent_port/api/chat" \
-    --header "Authorization: Bearer $payment_token" \
-    --header 'X-Eval-Sandbox-Id: sandbox-payment' \
-    --header "X-Session-Id: $cb122_session" \
-    --header "Idempotency-Key: cb122-decline-$cb122_event_suffix-rollback" \
-    --header 'Content-Type: application/json' \
-    --data '{"message":"decline"}'
-  tail -n "+$((cb122_agent_log_start + 1))" "$tmp_dir/agent.log" \
-    | grep -Fq 'reason_code=ACTION_DECLINE_PERSISTENCE_UNAVAILABLE'
+  store_fixture decline --session="$cb122_session" --subject="$payment_subject" \
+    --sandbox=sandbox-payment --key="cb122-decline-$cb122_event_suffix-rollback" --message="historical decline" \
+    --expect=database >"$tmp_dir/http-response.json"
   assert_equal 'PENDING:0:FAILED' \
     "$(mysql_query root "$root_password" cs_db \
       "SELECT CONCAT((SELECT state FROM pending_action_reference WHERE pending_action_id = '$cb122_pending_id'), ':', (SELECT COUNT(*) FROM support_event WHERE session_id = '$cb122_session' AND event_type = 'ACTION_DECLINED'), ':', (SELECT state FROM support_turn WHERE session_id = '$cb122_session' AND correlation_key = 'cb122-decline-$cb122_event_suffix-rollback'))")" \
@@ -4135,17 +3969,9 @@ done
 
 mysql_query root "$root_password" '' \
   "CREATE TRIGGER cs_db.cb122_fail_decline_turn BEFORE UPDATE ON cs_db.support_turn FOR EACH ROW SET NEW.state = IF(NEW.outcome = 'action_declined', 'PROCESSING', NEW.state)"
-cb122_agent_log_start="$(wc -l <"$tmp_dir/agent.log")"
-assert_status 503 "terminal turn update failure rolls back the complete local decision" \
-  --request POST "http://127.0.0.1:$agent_port/api/chat" \
-  --header "Authorization: Bearer $payment_token" \
-  --header 'X-Eval-Sandbox-Id: sandbox-payment' \
-  --header "X-Session-Id: $cb122_session" \
-  --header 'Idempotency-Key: cb122-decline-turn-rollback' \
-  --header 'Content-Type: application/json' \
-  --data '{"message":"decline"}'
-tail -n "+$((cb122_agent_log_start + 1))" "$tmp_dir/agent.log" \
-  | grep -Fq 'reason_code=ACTION_DECLINE_PERSISTENCE_UNAVAILABLE'
+store_fixture decline --session="$cb122_session" --subject="$payment_subject" \
+  --sandbox=sandbox-payment --key="cb122-decline-turn-rollback" --message="historical decline" \
+  --expect=database >"$tmp_dir/http-response.json"
 assert_equal 'PENDING:0:FAILED' \
   "$(mysql_query root "$root_password" cs_db \
     "SELECT CONCAT((SELECT state FROM pending_action_reference WHERE pending_action_id = '$cb122_pending_id'), ':', (SELECT COUNT(*) FROM support_event WHERE session_id = '$cb122_session' AND event_type = 'ACTION_DECLINED'), ':', (SELECT state FROM support_turn WHERE session_id = '$cb122_session' AND correlation_key = 'cb122-decline-turn-rollback'))")" \
@@ -4153,21 +3979,9 @@ assert_equal 'PENDING:0:FAILED' \
 mysql_query root "$root_password" '' \
   'DROP TRIGGER cs_db.cb122_fail_decline_turn'
 
-assert_status 200 "exact decline commits only the local decision" \
-  --request POST "http://127.0.0.1:$agent_port/api/chat/stream" \
-  --header "Authorization: Bearer $payment_token" \
-  --header 'X-Eval-Sandbox-Id: sandbox-payment' \
-  --header "X-Session-Id: $cb122_session" \
-  --header 'Idempotency-Key: cb122-decline' \
-  --header 'Content-Type: application/json' \
-  --data '{"message":"decline"}'
-cp "$tmp_dir/http-response.json" "$tmp_dir/cb122-declined.sse"
-grep -Fq 'event: done' "$tmp_dir/cb122-declined.sse"
-grep -Fq '"outcome":"action_declined"' "$tmp_dir/cb122-declined.sse"
-if grep -Fq 'event: action_receipt' "$tmp_dir/cb122-declined.sse"; then
-  echo "CB-122 decline emitted a forbidden ActionReceipt." >&2
-  exit 1
-fi
+store_fixture decline --session="$cb122_session" --subject="$payment_subject" \
+  --sandbox=sandbox-payment --key="cb122-decline" --message="historical decline" \
+  --expect=success >"$tmp_dir/http-response.json"
 cb122_decline_turn="$(mysql_query root "$root_password" cs_db \
   "SELECT turn_id FROM support_turn WHERE session_id = '$cb122_session' AND correlation_key = 'cb122-decline'")"
 cb122_decline_trace="$(mysql_query root "$root_password" cs_db \
@@ -4216,17 +4030,9 @@ mysql_query root "$root_password" cs_db \
   "UPDATE support_turn SET outcome = 'completed' WHERE turn_id = '$cb122_decline_turn'; UPDATE support_event SET event_type = 'MODEL_OUTCOME', payload_json = JSON_OBJECT('result', 'success') WHERE turn_id = '$cb122_decline_turn' AND event_type = 'ACTION_DECLINED'"
 cb122_resolution_scope_before="$(mysql_query root "$root_password" cs_db \
   "SELECT CONCAT((SELECT COUNT(*) FROM support_turn WHERE session_id = '$cb122_session'), ':', (SELECT COUNT(*) FROM support_event WHERE session_id = '$cb122_session'), ':', (SELECT COUNT(*) FROM pending_action_reference WHERE session_id = '$cb122_session'))")"
-cb122_agent_log_start="$(wc -l <"$tmp_dir/agent.log")"
-assert_status 409 "conversation uses the resolution reference root after outcome and event-type damage" \
-  --request POST "http://127.0.0.1:$agent_port/api/chat" \
-  --header "Authorization: Bearer $payment_token" \
-  --header 'X-Eval-Sandbox-Id: sandbox-payment' \
-  --header "X-Session-Id: $cb122_session" \
-  --header 'Idempotency-Key: cb122-decline' \
-  --header 'Content-Type: application/json' \
-  --data '{"message":"decline"}'
-tail -n "+$((cb122_agent_log_start + 1))" "$tmp_dir/agent.log" \
-  | grep -Fq 'reason_code=ACTION_DURABLE_TRUTH_INCONSISTENT'
+store_fixture replay --session="$cb122_session" --subject="$payment_subject" \
+  --sandbox=sandbox-payment --key="cb122-decline" --message="historical decline" \
+  --expect=integrity >"$tmp_dir/http-response.json"
 cb122_agent_log_start="$(wc -l <"$tmp_dir/agent.log")"
 assert_status 409 "evaluation uses the resolution reference root after outcome and event-type damage" \
   --request GET "http://127.0.0.1:$agent_port/api/eval/evidence/$cb122_decline_trace" \
@@ -4238,32 +4044,15 @@ assert_equal "$cb122_resolution_scope_before" \
   "$(mysql_query root "$root_password" cs_db \
     "SELECT CONCAT((SELECT COUNT(*) FROM support_turn WHERE session_id = '$cb122_session'), ':', (SELECT COUNT(*) FROM support_event WHERE session_id = '$cb122_session'), ':', (SELECT COUNT(*) FROM pending_action_reference WHERE session_id = '$cb122_session'))")" \
   "resolution-root classification creates zero local durable effects"
-assert_equal "$cb122_proxy_calls_before_replay" \
-  "$(curl --silent --show-error "http://127.0.0.1:$proxy_port/fixture/counts" \
-    | jq -r --arg session "$cb122_session" '.["action-proxy:" + $session]')" \
-  "resolution-root classification does not call commerce"
-assert_equal "$cb122_model_calls_before_replay" \
-  "$(curl --silent --show-error "http://127.0.0.1:$proxy_port/fixture/counts" \
-    | jq -r '.["action-prepare:total"]')" \
-  "resolution-root classification does not call the model"
 mysql_query root "$root_password" cs_db \
   "UPDATE support_turn SET outcome = 'action_declined' WHERE turn_id = '$cb122_decline_turn'; UPDATE support_event SET event_type = 'ACTION_DECLINED', payload_json = JSON_OBJECT('pendingActionId', '$cb122_pending_id', 'outcome', 'declined') WHERE turn_id = '$cb122_decline_turn' AND event_type = 'MODEL_OUTCOME'"
 
 stop_process agent_pid "$agent_pid"
-start_agent true "http://127.0.0.1:$proxy_port"
-assert_status 200 "CB-122 restart replays the durable preparation closure" \
-  --request POST "http://127.0.0.1:$agent_port/api/chat" \
-  --header "Authorization: Bearer $payment_token" \
-  --header 'X-Eval-Sandbox-Id: sandbox-payment' \
-  --header "X-Session-Id: $cb122_session" \
-  --header 'Idempotency-Key: cb122-response-loss' \
-  --header 'Content-Type: application/json' \
-  --data '{"message":"action-prepare refund my order"}'
+start_agent true
+store_fixture replay --session="$cb122_session" --subject="$payment_subject" \
+  --sandbox=sandbox-payment --key="cb122-response-loss" --message="historical preparation" \
+  --expect=success >"$tmp_dir/http-response.json"
 cmp "$tmp_dir/cb122-prepared.json" "$tmp_dir/http-response.json"
-assert_equal "$cb122_proxy_calls_before_replay" \
-  "$(curl --silent --show-error "http://127.0.0.1:$proxy_port/fixture/counts" \
-    | jq -r --arg session "$cb122_session" '.["action-proxy:" + $session]')" \
-  "restart replay performs no model or commerce prepare"
 assert_status 201 "CB-122 failed-local-commit session is isolated" \
   --request POST "http://127.0.0.1:$agent_port/api/sessions" \
   --header "Authorization: Bearer $payment_token" \
@@ -4274,17 +4063,7 @@ cb122_failed_commit_session="$(uv run python scripts/read_json_field.py \
   "$tmp_dir/http-response.json" sessionId)"
 mysql_query root "$root_password" '' \
   "CREATE TRIGGER cs_db.cb122_fail_reference_insert BEFORE INSERT ON cs_db.pending_action_reference FOR EACH ROW SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'controlled pending reference failure'"
-cb122_agent_log_start="$(wc -l <"$tmp_dir/agent.log")"
-assert_status 503 "PendingAction reference insert failure rolls back preparation evidence" \
-  --request POST "http://127.0.0.1:$agent_port/api/chat" \
-  --header "Authorization: Bearer $payment_token" \
-  --header 'X-Eval-Sandbox-Id: sandbox-payment' \
-  --header "X-Session-Id: $cb122_failed_commit_session" \
-  --header 'Idempotency-Key: cb122-reference-insert-rollback' \
-  --header 'Content-Type: application/json' \
-  --data '{"message":"action-prepare refund my order"}'
-tail -n "+$((cb122_agent_log_start + 1))" "$tmp_dir/agent.log" \
-  | grep -Fq 'reason_code=ACTION_REFERENCE_PERSISTENCE_UNAVAILABLE'
+prepare_history_action "$cb122_failed_commit_session" "cb122-reference-insert-rollback" database
 assert_equal '0:0:FAILED' \
   "$(mysql_query root "$root_password" cs_db \
     "SELECT CONCAT((SELECT COUNT(*) FROM pending_action_reference WHERE session_id = '$cb122_failed_commit_session'), ':', (SELECT COUNT(*) FROM support_event WHERE session_id = '$cb122_failed_commit_session' AND event_type = 'ACTION_PREPARED'), ':', (SELECT state FROM support_turn WHERE session_id = '$cb122_failed_commit_session' AND correlation_key = 'cb122-reference-insert-rollback'))")" \
@@ -4292,17 +4071,9 @@ assert_equal '0:0:FAILED' \
 mysql_query root "$root_password" '' \
   'DROP TRIGGER cs_db.cb122_fail_reference_insert'
 stop_process agent_pid "$agent_pid"
-stop_process model_pid "$model_pid"
 stop_process commerce_pid "$commerce_pid"
 start_commerce evaluation "http://127.0.0.1:$auth_port" 1m
-uv run python scripts/fake_litellm_server.py --port 0 \
-  --commerce-base-url "http://127.0.0.1:$commerce_port" \
-  >>"$tmp_dir/cb122-expiry-model.log" 2>&1 &
-model_pid=$!
-process_bound_port proxy_port uvicorn "$model_pid" "$tmp_dir/cb122-expiry-model.log" 0
-wait_http "http://127.0.0.1:$proxy_port/fixture/counts" \
-  "$model_pid" "$tmp_dir/cb122-expiry-model.log"
-start_agent true "http://127.0.0.1:$proxy_port"
+start_agent true
 assert_status 201 "CB-122 expiry session binds the payment principal and sandbox" \
   --request POST "http://127.0.0.1:$agent_port/api/sessions" \
   --header "Authorization: Bearer $payment_token" \
@@ -4311,14 +4082,7 @@ assert_status 201 "CB-122 expiry session binds the payment principal and sandbox
   --data '{}'
 cb122_expiry_session="$(uv run python scripts/read_json_field.py \
   "$tmp_dir/http-response.json" sessionId)"
-assert_status 200 "CB-122 prepares a short-lived action for deterministic expiry" \
-  --request POST "http://127.0.0.1:$agent_port/api/chat" \
-  --header "Authorization: Bearer $payment_token" \
-  --header 'X-Eval-Sandbox-Id: sandbox-payment' \
-  --header "X-Session-Id: $cb122_expiry_session" \
-  --header 'Idempotency-Key: cb122-expiry-prepare' \
-  --header 'Content-Type: application/json' \
-  --data '{"message":"action-prepare refund my order"}'
+prepare_history_action "$cb122_expiry_session" "cb122-expiry-prepare" success
 cb122_expiry_prepare_turn="$(uv run python scripts/read_json_field.py \
   "$tmp_dir/http-response.json" turnId)"
 cb122_expiry_pending_id="$(mysql_query root "$root_password" cs_db \
@@ -4336,53 +4100,23 @@ assert_equal 1 \
   "expiry fixture waits for the recorded database deadline"
 mysql_query root "$root_password" '' \
   "CREATE TRIGGER cs_db.cb122_fail_expiry_event BEFORE INSERT ON cs_db.support_event FOR EACH ROW SET NEW.sequence = IF(NEW.event_type = 'ACTION_EXPIRED', 0, NEW.sequence)"
-cb122_agent_log_start="$(wc -l <"$tmp_dir/agent.log")"
-assert_status 503 "ACTION_EXPIRED insert failure rolls back the complete local decision" \
-  --request POST "http://127.0.0.1:$agent_port/api/chat" \
-  --header "Authorization: Bearer $payment_token" \
-  --header 'X-Eval-Sandbox-Id: sandbox-payment' \
-  --header "X-Session-Id: $cb122_expiry_session" \
-  --header 'Idempotency-Key: cb122-expiry-event-rollback' \
-  --header 'Content-Type: application/json' \
-  --data '{"message":"expire"}'
-tail -n "+$((cb122_agent_log_start + 1))" "$tmp_dir/agent.log" \
-  | grep -Fq 'reason_code=ACTION_EXPIRY_PERSISTENCE_UNAVAILABLE'
+store_fixture expire --session="$cb122_expiry_session" --subject="$payment_subject" \
+  --sandbox=sandbox-payment --key="cb122-expiry-event-rollback" --message="historical expiry" \
+  --expect=database >"$tmp_dir/http-response.json"
 assert_equal 'PENDING:0:FAILED' \
   "$(mysql_query root "$root_password" cs_db \
     "SELECT CONCAT((SELECT state FROM pending_action_reference WHERE pending_action_id = '$cb122_expiry_pending_id'), ':', (SELECT COUNT(*) FROM support_event WHERE session_id = '$cb122_expiry_session' AND event_type = 'ACTION_EXPIRED'), ':', (SELECT state FROM support_turn WHERE session_id = '$cb122_expiry_session' AND correlation_key = 'cb122-expiry-event-rollback'))")" \
   "ACTION_EXPIRED insertion failure leaves no partial local action truth"
 mysql_query root "$root_password" '' \
   'DROP TRIGGER cs_db.cb122_fail_expiry_event'
-assert_status 200 "CB-122 expiry commits only the local expired decision" \
-  --request POST "http://127.0.0.1:$agent_port/api/chat" \
-  --header "Authorization: Bearer $payment_token" \
-  --header 'X-Eval-Sandbox-Id: sandbox-payment' \
-  --header "X-Session-Id: $cb122_expiry_session" \
-  --header 'Idempotency-Key: cb122-end-1' \
-  --header 'Content-Type: application/json' \
-  --data '{"message":"anything"}'
+store_fixture expire --session="$cb122_expiry_session" --subject="$payment_subject" \
+  --sandbox=sandbox-payment --key="cb122-end-1" --message="historical expiry" \
+  --expect=success >"$tmp_dir/http-response.json"
 jq -e '.outcome == "action_expired"' "$tmp_dir/http-response.json" >/dev/null
 assert_equal 'EXPIRED:1:0' \
   "$(mysql_query root "$root_password" cs_db \
     "SELECT CONCAT(reference.state, ':', (SELECT COUNT(*) FROM support_event event_record JOIN support_turn turn_record ON turn_record.turn_id = event_record.turn_id WHERE turn_record.session_id = '$cb122_expiry_session' AND event_record.event_type = 'ACTION_EXPIRED'), ':', (SELECT COUNT(*) FROM support_event event_record JOIN support_turn turn_record ON turn_record.turn_id = event_record.turn_id WHERE turn_record.session_id = '$cb122_expiry_session' AND event_record.event_type = 'ACTION_RECEIPT')) FROM pending_action_reference reference WHERE reference.pending_action_id = '$cb122_expiry_pending_id'")" \
   "expiry writes one exact local event and no receipt"
-curl --fail --silent --show-error \
-  "http://127.0.0.1:$agent_port/internal/metrics/prometheus" \
-  >"$tmp_dir/cb150-agent-metrics.txt"
-for expected_metric in \
-  'citybuddy_agent_operation_requests_total{operation="pending_action_prepare",outcome="replay"} 1.0' \
-  'citybuddy_agent_operation_requests_total{operation="pending_action_expiry",outcome="unavailable"} 1.0' \
-  'citybuddy_agent_operation_requests_total{operation="pending_action_expiry",outcome="expired"} 1.0' \
-  'citybuddy_agent_operation_requests_total{operation="chat_turn",outcome="pending"} 1.0' \
-  'citybuddy_agent_operation_requests_total{operation="chat_turn",outcome="unavailable"} 1.0' \
-  'citybuddy_agent_operation_requests_total{operation="chat_turn",outcome="expired"} 1.0'; do
-  grep -Fq "$expected_metric" "$tmp_dir/cb150-agent-metrics.txt"
-done
-if grep -Eq 'confirmation|traceId|sessionId|turnId|pendingActionId|python_gc|process_' \
-  "$tmp_dir/cb150-agent-metrics.txt"; then
-  echo "Agent metrics exposed an out-of-scope operation, identifier, or default collector." >&2
-  exit 1
-fi
 stop_process agent_pid "$agent_pid"
 start_agent true
 assert_status 201 "deterministic-rejection session binds the payment principal and sandbox" \
@@ -4391,13 +4125,8 @@ assert_status 201 "deterministic-rejection session binds the payment principal a
   --header 'X-Eval-Sandbox-Id: sandbox-payment' \
   --header 'Content-Type: application/json' --data '{}'
 rejection_session="$(uv run python scripts/read_json_field.py "$tmp_dir/http-response.json" sessionId)"
-assert_status 200 "prepare action for a strict Commerce 409" \
-  --request POST "http://127.0.0.1:$agent_port/api/chat" \
-  --header "Authorization: Bearer $payment_token" \
-  --header 'X-Eval-Sandbox-Id: sandbox-payment' \
-  --header "X-Session-Id: $rejection_session" \
-  --header 'Idempotency-Key: rejection-prepare' \
-  --header 'Content-Type: application/json' --data '{"message":"action-prepare refund my order"}'
+prepare_history_action "$rejection_session" "rejection-prepare" success
+rejection_prepare_trace="$(jq -r .traceId "$tmp_dir/http-response.json")"
 rejection_prepare_turn="$(uv run python scripts/read_json_field.py "$tmp_dir/http-response.json" turnId)"
 rejection_pending_id="$(mysql_query root "$root_password" cs_db \
   "SELECT pending_action_id FROM pending_action_reference WHERE source_turn_id = '$rejection_prepare_turn'")"
@@ -4405,28 +4134,29 @@ rejection_pending_hash="$(mysql_query root "$root_password" commerce_db \
   "SELECT pending_hash FROM pending_action WHERE pending_action_id = '$rejection_pending_id'")"
 mysql_query root "$root_password" commerce_db \
   "UPDATE pending_action SET pending_hash = REPEAT('0', 64) WHERE pending_action_id = '$rejection_pending_id'"
-assert_status 200 "strict Commerce 409 closes the claimed action locally" \
-  --request POST "http://127.0.0.1:$agent_port/api/chat" \
-  --header "Authorization: Bearer $payment_token" \
+store_fixture claim --session="$rejection_session" --subject="$payment_subject" \
+  --sandbox=sandbox-payment --key=rejection-confirm
+assert_status 409 "actual Commerce rejects the corrupted pending commitment" \
+  --request POST "http://127.0.0.1:$commerce_port/internal/tools/actions/$rejection_pending_id/confirm" \
+  --header "Authorization: Bearer $history_rejection_obo" \
+  --header "X-Support-Session-Id: $rejection_session" \
   --header 'X-Eval-Sandbox-Id: sandbox-payment' \
-  --header "X-Session-Id: $rejection_session" \
-  --header 'Idempotency-Key: rejection-confirm' \
-  --header 'Content-Type: application/json' --data '{"message":"confirm"}'
+  --header "X-Agent-Trace-Id: $rejection_prepare_trace" \
+  --header "X-Agent-Turn-Id: $rejection_prepare_turn"
+store_fixture reject --session="$rejection_session" --subject="$payment_subject" \
+  --sandbox=sandbox-payment --key="rejection-confirm" --message="historical rejection" \
+  --expect=success >"$tmp_dir/http-response.json"
 cp "$tmp_dir/http-response.json" "$tmp_dir/rejection-confirmed.json"
-jq -e '.outcome == "action_rejected" and .receiptId == null and .reply == "Commerce rejected the prepared action and returned no action receipt."' \
+jq -e '.outcome == "action_rejected" and .receiptId == null' \
   "$tmp_dir/rejection-confirmed.json" >/dev/null
 assert_equal 'REJECTED:COMPLETED:action_rejected:1:0' \
   "$(mysql_query root "$root_password" cs_db \
     "SELECT CONCAT(reference.state, ':', turn_record.state, ':', turn_record.outcome, ':', (SELECT COUNT(*) FROM support_event WHERE turn_id = turn_record.turn_id AND event_type = 'ACTION_REJECTED'), ':', (SELECT COUNT(*) FROM action_receipt_projection WHERE pending_action_id = reference.pending_action_id)) FROM pending_action_reference reference JOIN support_turn turn_record ON turn_record.turn_id = reference.resolution_turn_id WHERE reference.pending_action_id = '$rejection_pending_id'")" \
   "strict rejection commits one terminal local closure and no receipt"
 rejection_log_count="$(grep -c 'reason_code=ACTION_DURABLE_TRUTH_INCONSISTENT' "$tmp_dir/commerce.log")"
-assert_status 200 "same rejection key replays the stored terminal response" \
-  --request POST "http://127.0.0.1:$agent_port/api/chat" \
-  --header "Authorization: Bearer $payment_token" \
-  --header 'X-Eval-Sandbox-Id: sandbox-payment' \
-  --header "X-Session-Id: $rejection_session" \
-  --header 'Idempotency-Key: rejection-confirm' \
-  --header 'Content-Type: application/json' --data '{"message":"confirm"}'
+store_fixture replay --session="$rejection_session" --subject="$payment_subject" \
+  --sandbox=sandbox-payment --key="rejection-confirm" --message="historical rejection" \
+  --expect=success >"$tmp_dir/http-response.json"
 cmp "$tmp_dir/rejection-confirmed.json" "$tmp_dir/http-response.json"
 assert_equal "$rejection_log_count" \
   "$(grep -c 'reason_code=ACTION_DURABLE_TRUTH_INCONSISTENT' "$tmp_dir/commerce.log")" \
@@ -4434,7 +4164,6 @@ assert_equal "$rejection_log_count" \
 mysql_query root "$root_password" commerce_db \
   "UPDATE pending_action SET pending_hash = '$rejection_pending_hash' WHERE pending_action_id = '$rejection_pending_id'"
 stop_process agent_pid "$agent_pid"
-stop_process model_pid "$model_pid"
 stop_process commerce_pid "$commerce_pid"
 start_commerce evaluation "http://127.0.0.1:$auth_port"
 payment_replay_timestamp="$(date +%s)"
@@ -4539,85 +4268,25 @@ assert_status 204 "token header path and registry liveness agree" \
   --header "Authorization: Bearer $direct_token" \
   --header 'X-Eval-Sandbox-Id: sandbox-main'
 
-uv run python scripts/fake_litellm_server.py --port 0 >>"$tmp_dir/model.log" 2>&1 &
-model_pid=$!
-process_bound_port proxy_port uvicorn "$model_pid" "$tmp_dir/model.log" 0
-wait_http "http://127.0.0.1:$proxy_port/fixture/counts" "$model_pid" "$tmp_dir/model.log"
 start_agent true
-assert_status 201 "session propagation default-on session is sandbox-bound" \
-  --request POST "http://127.0.0.1:$agent_port/api/sessions" \
-  --header "Authorization: Bearer $direct_token" \
-  --header 'X-Eval-Sandbox-Id: sandbox-main' \
-  --header 'Content-Type: application/json' \
-  --data '{}'
-session_propagation_on_session="$(uv run python scripts/read_json_field.py \
-  "$tmp_dir/http-response.json" sessionId)"
-run_agent_chat session_propagation_on_current_trace \
-  "$direct_token" sandbox-main "$session_propagation_on_session" \
-  session-propagation-on-current 'refund context-seed propagation-on' \
-  "default-on current refund turn"
-assert_agent_routing "$session_propagation_on_current_trace" sandbox-main \
-  true current false all true "default-on current refund turn"
-run_agent_chat session_propagation_on_followup_trace \
-  "$direct_token" sandbox-main "$session_propagation_on_session" \
-  session-propagation-on-followup 'context-followup propagation-on' \
-  "default-on session refund follow-up"
-assert_agent_routing "$session_propagation_on_followup_trace" sandbox-main \
-  true session false all true "default-on session refund follow-up"
-
-stop_process agent_pid "$agent_pid"
-start_agent true "http://127.0.0.1:$commerce_port" false
-assert_status 401 "evaluation token cannot omit the sandbox while propagation is off" \
+assert_status 401 "evaluation token cannot omit the sandbox" \
   --request POST "http://127.0.0.1:$agent_port/api/sessions" \
   --header "Authorization: Bearer $direct_token" \
   --header 'Content-Type: application/json' \
   --data '{}'
-assert_status 401 "evaluation token cannot substitute the sandbox while propagation is off" \
+assert_status 401 "evaluation token cannot substitute the sandbox" \
   --request POST "http://127.0.0.1:$agent_port/api/sessions" \
   --header "Authorization: Bearer $direct_token" \
   --header 'X-Eval-Sandbox-Id: sandbox-other' \
   --header 'Content-Type: application/json' \
   --data '{}'
-assert_status 201 "session propagation off session is sandbox-bound" \
-  --request POST "http://127.0.0.1:$agent_port/api/sessions" \
-  --header "Authorization: Bearer $direct_token" \
-  --header 'X-Eval-Sandbox-Id: sandbox-main' \
-  --header 'Content-Type: application/json' \
-  --data '{}'
-session_propagation_off_session="$(uv run python scripts/read_json_field.py \
-  "$tmp_dir/http-response.json" sessionId)"
-run_agent_chat session_propagation_off_current_trace \
-  "$direct_token" sandbox-main "$session_propagation_off_session" \
-  session-propagation-off-current 'refund context-seed propagation-off' \
-  "off-arm current refund turn"
-assert_agent_routing "$session_propagation_off_current_trace" sandbox-main \
-  true current false all false "off-arm current refund turn"
-run_agent_chat session_propagation_off_followup_trace \
-  "$direct_token" sandbox-main "$session_propagation_off_session" \
-  session-propagation-off-followup 'context-followup propagation-off' \
-  "off-arm session refund follow-up"
-assert_agent_routing "$session_propagation_off_followup_trace" sandbox-main \
-  true session false read false "off-arm session refund follow-up"
-run_agent_chat session_propagation_off_chitchat_seed_trace \
-  "$direct_token" sandbox-main "$session_propagation_off_session" \
-  session-propagation-off-chitchat-seed 'refund context-seed propagation-off-chitchat' \
-  "off-arm chitchat refund seed"
-assert_agent_routing "$session_propagation_off_chitchat_seed_trace" sandbox-main \
-  true current false all false "off-arm chitchat refund seed"
-run_agent_chat session_propagation_off_chitchat_trace \
-  "$direct_token" sandbox-main "$session_propagation_off_session" \
-  session-propagation-off-chitchat hello \
-  "off-arm exact chitchat with session refund context"
-assert_agent_routing "$session_propagation_off_chitchat_trace" sandbox-main \
-  true session true none false "off-arm exact chitchat with session refund context"
-
-assert_status 200 "issue ordinary direct token for the propagation fail-safe" \
+assert_status 200 "issue ordinary direct token outside evaluation" \
   --request POST "http://127.0.0.1:$auth_port/auth/login" \
   --header 'Content-Type: application/json' \
   --data "{\"loginIdentifier\":\"session-propagation-user\",\"password\":\"$ordinary_user_password\"}"
 ordinary_direct_token="$(uv run python scripts/read_json_field.py \
   "$tmp_dir/http-response.json" accessToken)"
-assert_status 201 "ordinary user session cannot enter the propagation off arm" \
+assert_status 201 "ordinary user session remains non-evaluation" \
   --request POST "http://127.0.0.1:$agent_port/api/sessions" \
   --header "Authorization: Bearer $ordinary_direct_token" \
   --header 'Content-Type: application/json' \
@@ -4628,21 +4297,6 @@ assert_equal 1 \
   "$(mysql_query agent_app "$agent_app_password" cs_db \
     "SELECT COUNT(*) FROM support_session WHERE session_id = '$ordinary_session_propagation_session' AND sandbox_id IS NULL")" \
   "ordinary user session remains outside evaluation sandbox identity"
-run_agent_chat ordinary_session_propagation_current_trace \
-  "$ordinary_direct_token" '' "$ordinary_session_propagation_session" \
-  ordinary-session-propagation-current 'refund context-seed ordinary-user' \
-  "ordinary user current refund turn with raw propagation off"
-assert_agent_routing "$ordinary_session_propagation_current_trace" '' \
-  true current false all true "ordinary user current refund turn with raw propagation off"
-run_agent_chat ordinary_session_propagation_followup_trace \
-  "$ordinary_direct_token" '' "$ordinary_session_propagation_session" \
-  ordinary-session-propagation-followup 'context-followup ordinary-user' \
-  "ordinary user session refund follow-up with raw propagation off"
-assert_agent_routing "$ordinary_session_propagation_followup_trace" '' \
-  true session false all true "ordinary user session refund follow-up with raw propagation off"
-
-stop_process agent_pid "$agent_pid"
-start_agent true
 assert_status 201 "evaluation support session binds subject and sandbox" \
   --request POST "http://127.0.0.1:$agent_port/api/sessions" \
   --header "Authorization: Bearer $direct_token" \
@@ -5032,15 +4686,20 @@ assert_status 403 "OBO tool rejects sandbox substitution" \
   --header "X-Agent-Operation-Id: $direct_operation" \
   --header 'Content-Type: application/json' \
   --data '{"productId":"product-1"}'
-assert_status 200 "evaluation chat executes sandbox-bound OBO tool" \
-  --request POST "http://127.0.0.1:$agent_port/api/chat" \
-  --header "Authorization: Bearer $direct_token" \
-  --header 'X-Eval-Sandbox-Id: sandbox-main' \
-  --header "X-Session-Id: $session_id" \
-  --header 'Idempotency-Key: cb101-tool-turn' \
-  --header 'Content-Type: application/json' \
-  --data '{"message":"tool-success cb103-private-user-text"}'
+# Seed reader input explicitly; the real OBO tool below separately verifies Java truth.
+store_fixture complete --session="$session_id" --subject="$direct_subject" \
+  --sandbox=sandbox-main --key=cb101-tool-turn --message='cb103-private-user-text' \
+  --profile=tool >"$tmp_dir/http-response.json"
 trace_id="$(uv run python scripts/read_json_field.py "$tmp_dir/http-response.json" traceId)"
+history_tool_operation="$(openssl rand -hex 32)"
+assert_status 200 "second sandbox-bound tool observation for audit history" \
+  --request POST "http://127.0.0.1:$commerce_port/internal/tools/catalog.product.get" \
+  --header "Authorization: Bearer $obo_token" \
+  --header "X-Support-Session-Id: $session_id" \
+  --header 'X-Eval-Sandbox-Id: sandbox-main' \
+  --header "X-Agent-Trace-Id: $trace_id" \
+  --header "X-Agent-Operation-Id: $history_tool_operation" \
+  --header 'Content-Type: application/json' --data '{"productId":"product-1"}'
 mysql_query root "$root_password" cs_db \
   "INSERT INTO support_feedback (feedback_id, session_id, user_subject, trace_id, idempotency_key, request_fingerprint, rating, comment_text) VALUES (UUID(), '$session_id', '$direct_subject', '$trace_id', 'cb103-feedback-fixture', REPEAT('f', 64), 'POSITIVE', 'cb103-private-feedback-comment')"
 test "$(mysql_query agent_app "$agent_app_password" cs_db \
@@ -5122,7 +4781,6 @@ assert_status 404 "agent evidence conceals cross-sandbox trace ownership" \
   --header 'X-Eval-Sandbox-Id: sandbox-other'
 agent_truth_before="$(mysql_query agent_app "$agent_app_password" cs_db \
   "SELECT CONCAT((SELECT state FROM support_turn WHERE trace_id = '$trace_id'), ':', (SELECT COUNT(*) FROM support_event WHERE trace_id = '$trace_id'), ':', (SELECT COUNT(*) FROM support_feedback WHERE trace_id = '$trace_id'))")"
-curl --silent --show-error "http://127.0.0.1:$proxy_port/fixture/counts" >"$tmp_dir/model-counts-before-evidence.json"
 assert_status 200 "agent evidence projects complete bounded durable truth" \
   --request GET "http://127.0.0.1:$agent_port/api/eval/evidence/$trace_id" \
   --user "evaluation-manager:$management_password" \
@@ -5144,8 +4802,6 @@ cmp "$tmp_dir/agent-evidence.json" "$tmp_dir/http-response.json"
 assert_equal "$agent_truth_before" "$(mysql_query agent_app "$agent_app_password" cs_db \
   "SELECT CONCAT((SELECT state FROM support_turn WHERE trace_id = '$trace_id'), ':', (SELECT COUNT(*) FROM support_event WHERE trace_id = '$trace_id'), ':', (SELECT COUNT(*) FROM support_feedback WHERE trace_id = '$trace_id'))")" \
   "agent evidence reads do not mutate durable support truth"
-curl --silent --show-error "http://127.0.0.1:$proxy_port/fixture/counts" >"$tmp_dir/model-counts-after-evidence.json"
-cmp "$tmp_dir/model-counts-before-evidence.json" "$tmp_dir/model-counts-after-evidence.json"
 mysql_query root "$root_password" cs_db \
   "UPDATE support_event SET payload_json = JSON_SET(payload_json, '$.outcome', 'provider_denied') WHERE trace_id = '$trace_id' AND event_type = 'AGENT_OUTCOME'"
 assert_status 409 "agent evidence rejects a terminal outcome conflicting with turn truth" \
@@ -5222,14 +4878,9 @@ uv run python scripts/check_agent_evaluation_evidence.py "$tmp_dir/http-response
   --forbid-marker cb103-private-source-title \
   --forbid-marker cb103-private-source-excerpt
 
-assert_status 200 "evaluation chat persists bounded provider denial" \
-  --request POST "http://127.0.0.1:$agent_port/api/chat" \
-  --header "Authorization: Bearer $direct_token" \
-  --header 'X-Eval-Sandbox-Id: sandbox-main' \
-  --header "X-Session-Id: $session_id" \
-  --header 'Idempotency-Key: cb103-provider-denied' \
-  --header 'Content-Type: application/json' \
-  --data '{"message":"provider-failure cb103-private-provider-input"}'
+store_fixture complete --session="$session_id" --subject="$direct_subject" \
+  --sandbox=sandbox-main --key=cb103-provider-denied \
+  --message='cb103-private-provider-input' --profile=provider >"$tmp_dir/http-response.json"
 provider_trace="$(uv run python scripts/read_json_field.py "$tmp_dir/http-response.json" traceId)"
 assert_status 200 "agent evidence projects bounded provider denial without provider identity" \
   --request GET "http://127.0.0.1:$agent_port/api/eval/evidence/$provider_trace" \
@@ -5290,11 +4941,10 @@ assert_status 404 "audit rejects cross-sandbox lookup" \
   --user "evaluation-manager:$management_password" \
   --header 'X-Eval-Sandbox-Id: sandbox-other'
 
-stop_process model_pid "$model_pid"
 stop_process commerce_pid "$commerce_pid"
 stop_process agent_pid "$agent_pid"
 start_agent true
-assert_status 200 "agent evidence survives restart without model or commerce availability" \
+assert_status 200 "agent evidence survives restart without commerce availability" \
   --request GET "http://127.0.0.1:$agent_port/api/eval/evidence/$trace_id" \
   --user "evaluation-manager:$management_password" \
   --header 'X-Eval-Sandbox-Id: sandbox-main'
@@ -5453,14 +5103,14 @@ assert_status 200 "audit recovers after the complete product audit matrix" \
   --request GET "http://127.0.0.1:$commerce_port/api/eval/audit/$session_id" \
   --user "evaluation-manager:$management_password" \
   --header 'X-Eval-Sandbox-Id: sandbox-main'
-assert_status 401 "evaluation chat rejects sandbox header substitution" \
-  --request POST "http://127.0.0.1:$agent_port/api/chat" \
+assert_status 401 "evaluation session rejects sandbox header substitution" \
+  --request POST "http://127.0.0.1:$agent_port/api/sessions" \
   --header "Authorization: Bearer $direct_token" \
   --header 'X-Eval-Sandbox-Id: sandbox-other' \
   --header "X-Session-Id: $session_id" \
   --header 'Idempotency-Key: cb101-cross-sandbox' \
   --header 'Content-Type: application/json' \
-  --data '{"message":"tool-success"}'
+  --data '{}'
 
 # The payment owner must share the actor's sandbox so this path isolates ownership from sandbox
 # isolation. The primary principal is the actor; the payment-order principal is the owner.
@@ -5827,14 +5477,14 @@ assert_equal '0:0' \
   "$(mysql_query root "$root_password" commerce_db \
     "SELECT CONCAT((SELECT COUNT(*) FROM eval_commerce_product_observation WHERE operation_id = '$inactive_tool_operation'), ':', (SELECT COUNT(*) FROM eval_commerce_audit_reference WHERE operation_id = '$inactive_tool_operation'))")" \
   "inactive evaluation product tool leaves no durable residue"
-assert_status 403 "completion immediately blocks new agent work" \
-  --request POST "http://127.0.0.1:$agent_port/api/chat" \
+assert_status 403 "completion immediately blocks new support sessions" \
+  --request POST "http://127.0.0.1:$agent_port/api/sessions" \
   --header "Authorization: Bearer $direct_token" \
   --header 'X-Eval-Sandbox-Id: sandbox-main' \
   --header "X-Session-Id: $session_id" \
   --header 'Idempotency-Key: cb101-after-complete' \
   --header 'Content-Type: application/json' \
-  --data '{"message":"tool-success"}'
+  --data '{}'
 
 # The runtime loses fixture INSERT only after the registry write; compensation must close safely.
 mysql_query root "$root_password" commerce_db \
@@ -5986,7 +5636,7 @@ for private_marker in \
   cb103-private-source-excerpt cb103-private-provider-input private-provider \
   cb105-private-callback-metadata; do
   if grep -Fq "$private_marker" \
-    "$tmp_dir/auth.log" "$tmp_dir/commerce.log" "$tmp_dir/agent.log" "$tmp_dir/model.log"; then
+    "$tmp_dir/auth.log" "$tmp_dir/commerce.log" "$tmp_dir/agent.log" ; then
     echo "Private CB-103 evidence marker leaked into service logs." >&2
     exit 1
   fi

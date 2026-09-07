@@ -1,27 +1,13 @@
 from __future__ import annotations
 
 import json
-from typing import Any
 
 import pytest
-from citybuddy_agent import http_client
-from citybuddy_agent.agent_control import (
-    AgentEvent,
-    AttemptBudget,
-    LiteLlmClient,
-    ModelPlan,
-    ProviderCircuits,
-    ProviderFailure,
-    ProviderRoute,
-    ToolAdapter,
-)
 from citybuddy_agent.knowledge import (
-    KnowledgeSearchInput,
     KnowledgeSearchOutput,
     KnowledgeSearchResult,
     PublicKnowledgeMetadata,
 )
-from citybuddy_agent.metrics import PrometheusCityBuddyMetrics
 from citybuddy_agent.retrieval import (
     RerankCandidate,
     RerankOutput,
@@ -59,16 +45,6 @@ def search_output() -> KnowledgeSearchOutput:
     return KnowledgeSearchOutput(
         index_version="knowledge_docs_v7",
         results=(result("source-a", rank=1), result("source-b", rank=2)),
-    )
-
-
-def plan() -> ModelPlan:
-    return ModelPlan(
-        tier="standard",
-        routes=(ProviderRoute("support-standard-primary", "primary"),),
-        reranker_route=ProviderRoute("support-reranker-standard", "reranker"),
-        attempt_limit=8,
-        tool_profile="read",
     )
 
 
@@ -158,7 +134,7 @@ def test_rerank_scores_reject_non_finite_or_out_of_bounds(score: float) -> None:
 
 
 @pytest.mark.parametrize("score", [True, False, "0.9"])
-def test_reranker_json_score_type_confusion_converges_to_denial(score: object) -> None:
+def test_reranker_json_score_type_confusion_is_rejected(score: object) -> None:
     raw_output = json.dumps(
         {
             "scores": [
@@ -170,46 +146,6 @@ def test_reranker_json_score_type_confusion_converges_to_denial(score: object) -
 
     with pytest.raises(ValidationError):
         RerankOutput.model_validate_json(raw_output)
-
-    class ForbiddenObo:
-        def exchange(self, *args: object) -> str:
-            raise AssertionError(args)
-
-    class Knowledge:
-        def search(self, request: KnowledgeSearchInput, charge: Any) -> KnowledgeSearchOutput:
-            del request
-            charge("knowledge_http", "bounded-fixture")
-            return search_output()
-
-    class MalformedReranker:
-        def rerank(self, *args: object) -> RerankOutput:
-            del args
-            return RerankOutput.model_validate_json(raw_output)
-
-    events: list[AgentEvent] = []
-    adapter = ToolAdapter(
-        "https://commerce.test",
-        ForbiddenObo(),
-        Knowledge(),
-        MalformedReranker(),
-        load_calibration(),
-    )
-    denied = adapter.execute(
-        name="knowledge.search",
-        serialized_arguments='{"query":"public question"}',
-        direct_token="not-forwarded",
-        subject="not-forwarded",
-        session_id="not-forwarded",
-        budget=AttemptBudget(4, events),
-        events=events,
-        plan=plan(),
-    )
-
-    assert denied.outcome == "deny_with_feedback"
-    assert denied.retrieval_decision is not None
-    assert denied.retrieval_decision.outcome == "INSUFFICIENT"
-    assert denied.retrieval_decision.reason == "reranker_denied"
-    assert denied.retrieval_decision.evidence == ()
 
 
 def test_normalization_is_deterministic_and_gate_is_fail_closed() -> None:
@@ -254,172 +190,3 @@ def test_normalization_is_deterministic_and_gate_is_fail_closed() -> None:
     assert below.outcome == "INSUFFICIENT"
     assert below.reason == "below_threshold"
     assert below.evidence == ()
-
-
-def test_litellm_reranker_uses_fixed_alias_shared_budget_and_one_retry(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    calls: list[dict[str, Any]] = []
-
-    class Response:
-        def __init__(self, status_code: int, payload: dict[str, object]) -> None:
-            self.status_code = status_code
-            self._payload = payload
-
-        def json(self) -> dict[str, object]:
-            return self._payload
-
-    def post(url: str, **kwargs: Any) -> Response:
-        assert url == "https://proxy.test/v1/chat/completions"
-        payload = kwargs["json"]
-        assert isinstance(payload, dict)
-        calls.append(payload)
-        if len(calls) == 1:
-            return Response(503, {"error": "transient"})
-        content = json.dumps(
-            {
-                "scores": [
-                    {"candidate_id": "source-a:chunk", "score": 0.9},
-                    {"candidate_id": "source-b:chunk", "score": 0.6},
-                ]
-            }
-        )
-        return Response(200, {"choices": [{"message": {"content": content}}]})
-
-    monkeypatch.setattr(http_client, "post", post)
-    events: list[AgentEvent] = []
-    budget = AttemptBudget(3, events)
-    metrics = PrometheusCityBuddyMetrics()
-    client = LiteLlmClient(
-        "https://proxy.test",
-        ProviderCircuits(minimum_requests=2, open_seconds=1, half_open_probes=1),
-        metrics,
-    )
-    request = RerankRequest(
-        query="public question",
-        candidates=tuple(
-            RerankCandidate.from_search_result(item) for item in search_output().results
-        ),
-    )
-
-    output = client.rerank(plan(), request, budget, events)
-
-    assert len(output.scores) == 2
-    assert budget.used == 2
-    assert [call["model"] for call in calls] == [
-        "support-reranker-standard",
-        "support-reranker-standard",
-    ]
-    assert all(set(call) == {"model", "messages"} for call in calls)
-    assert any(event.payload.get("result") == "rerank-transient" for event in events)
-    metric_payload = metrics.render().decode("utf-8")
-    assert (
-        'citybuddy_agent_model_request_attempts_total{outcome="transient",role="reranker"} 1.0'
-        in metric_payload
-    )
-    assert (
-        'citybuddy_agent_model_request_attempts_total{outcome="success",role="reranker"} 1.0'
-        in metric_payload
-    )
-
-
-@pytest.mark.parametrize(
-    ("status_code", "payload", "expected_outcome"),
-    [
-        (403, {"error": "bounded denial"}, "denied"),
-        (200, {"choices": []}, "invalid"),
-    ],
-)
-def test_reranker_denial_and_invalid_response_record_one_actual_attempt(
-    monkeypatch: pytest.MonkeyPatch,
-    status_code: int,
-    payload: dict[str, object],
-    expected_outcome: str,
-) -> None:
-    class Response:
-        def __init__(self) -> None:
-            self.status_code = status_code
-
-        def json(self) -> dict[str, object]:
-            return payload
-
-    calls = 0
-
-    def post(*args: object, **kwargs: object) -> Response:
-        nonlocal calls
-        del args, kwargs
-        calls += 1
-        return Response()
-
-    monkeypatch.setattr(http_client, "post", post)
-    metrics = PrometheusCityBuddyMetrics()
-    client = LiteLlmClient(
-        "https://proxy.test",
-        ProviderCircuits(minimum_requests=2, open_seconds=1, half_open_probes=1),
-        metrics,
-    )
-
-    with pytest.raises(ProviderFailure):
-        client.rerank(
-            plan(),
-            RerankRequest(
-                query="public question",
-                candidates=tuple(
-                    RerankCandidate.from_search_result(item) for item in search_output().results
-                ),
-            ),
-            AttemptBudget(2, []),
-            [],
-        )
-
-    assert calls == 1
-    metric_payload = metrics.render().decode("utf-8")
-    assert (
-        "citybuddy_agent_model_request_attempts_total"
-        f'{{outcome="{expected_outcome}",role="reranker"}} 1.0'
-    ) in metric_payload
-
-
-def test_reranker_failure_becomes_structured_insufficient_decision() -> None:
-    class ForbiddenObo:
-        def exchange(self, *args: object) -> str:
-            raise AssertionError(args)
-
-    class Knowledge:
-        def search(self, request: KnowledgeSearchInput, charge: Any) -> KnowledgeSearchOutput:
-            del request
-            charge("knowledge_http", "bounded-fixture")
-            return search_output()
-
-    class FailedReranker:
-        def rerank(self, *args: object) -> RerankOutput:
-            raise ProviderFailure(transient=True)
-
-    events: list[AgentEvent] = []
-    adapter = ToolAdapter(
-        "https://commerce.test",
-        ForbiddenObo(),
-        Knowledge(),
-        FailedReranker(),
-        load_calibration(),
-    )
-
-    denied = adapter.execute(
-        name="knowledge.search",
-        serialized_arguments='{"query":"public question"}',
-        direct_token="not-forwarded",
-        subject="not-forwarded",
-        session_id="not-forwarded",
-        budget=AttemptBudget(4, events),
-        events=events,
-        plan=plan(),
-    )
-
-    assert denied.outcome == "deny_with_feedback"
-    assert denied.model_view == {
-        "outcome": "deny_with_feedback",
-        "reason": "reranker_denied",
-    }
-    assert denied.retrieval_decision is not None
-    assert denied.retrieval_decision.outcome == "INSUFFICIENT"
-    assert denied.retrieval_decision.evidence == ()
