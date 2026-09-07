@@ -12,6 +12,8 @@ durations = collections.defaultdict(list)
 decisions = collections.defaultdict(collections.Counter)
 failures = collections.defaultdict(float)
 drops = collections.defaultdict(float)
+replays = collections.defaultdict(collections.Counter)
+negative_timings = collections.defaultdict(list)
 
 
 def point_rate(tags):
@@ -32,6 +34,14 @@ with open(path) as stream:
             continue
         data = record["data"]
         tags = data.get("tags", {})
+        metric, raw_value = record.get("metric"), data.get("value")
+        if not isinstance(raw_value, int | float):
+            continue
+        if str(metric).startswith("http_req_") and raw_value < 0:
+            negative_timings[(str(tags.get("scenario", "untagged")), metric)].append(raw_value)
+        # The rejection script has an explicit warm-up; historical untagged series remain readable.
+        if tags.get("phase") == "warmup" or tags.get("scenario") == "warmup":
+            continue
         rate = point_rate(tags)
         if rate is None or not isinstance(data.get("value"), int | float):
             continue
@@ -44,6 +54,7 @@ with open(path) as stream:
             drops[rate] += value
         elif metric == "seckill_decisions":
             decisions[rate][str(tags.get("decision", "?"))] += value
+            replays[rate][str(tags.get("replay", "unknown"))] += value
 
 
 def percentile(values, percent):
@@ -70,9 +81,17 @@ for rate in rates:
         " ".join(f"{value:>9.1f}" for value in latencies)
         or "        -         -         -         -"
     )
-    mix = ", ".join(f"{key}={int(value)}" for key, value in decisions[rate].most_common(3))
+    mix = ", ".join(f"{key}={int(value)}" for key, value in decisions[rate].most_common())
     print(
         f"{rate:>7} {int(rate) * step_seconds:>8} {done:>8} {dropped:>8} {failed:>7} "
         f"{failed * 100 / done if done else 0:>7.2f} {done / step_seconds:>11.1f} "
-        f"{latency_text}  {mix}"
+        f"{latency_text}  {mix} "
+        f"replay={dict(replays[rate])} "
+        f"negative_durations={sum(value < 0 for value in values)} "
+        f"min_ms={min(values) if values else 'none'}"
+    )
+
+for (scenario, metric), values in sorted(negative_timings.items()):
+    print(
+        f"negative_timing scenario={scenario} metric={metric} count={len(values)} min={min(values)}"
     )

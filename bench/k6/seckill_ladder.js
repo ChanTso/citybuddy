@@ -11,6 +11,7 @@ const GAP_SECONDS = Number(__ENV.GAP_SECONDS || 5);
 const ACTIVITIES = Number(__ENV.ACTIVITIES || 1);
 const BASE = __ENV.BASE_URL || 'http://citybuddy-bench-commerce:8080';
 const REQUEST_KEY_PREFIX = __ENV.REQUEST_KEY_PREFIX || 'k6';
+const ACTIVITY_PREFIX = __ENV.ACTIVITY_PREFIX || 'bench-activity-';
 
 const tokens = new SharedArray('tokens', () => JSON.parse(open(__ENV.TOKENS_FILE)));
 
@@ -50,8 +51,8 @@ export function reserve() {
   const token = tokens[idx];
   // ACTIVITIES=1 concentrates every request on one activity row; ACTIVITIES=N spreads them.
   const activity = ACTIVITIES === 1
-    ? 'bench-activity-0'
-    : `bench-activity-${exec.scenario.iterationInTest % ACTIVITIES}`;
+    ? `${ACTIVITY_PREFIX}0`
+    : `${ACTIVITY_PREFIX}${exec.scenario.iterationInTest % ACTIVITIES}`;
 
   const res = http.post(
     `${BASE}/api/seckill/activities/${activity}/reservations`,
