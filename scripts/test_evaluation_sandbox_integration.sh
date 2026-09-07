@@ -3833,11 +3833,12 @@ store_fixture replay --session="$cb122_session" --subject="$payment_subject" \
 cmp "$tmp_dir/cb122-prepared.json" "$tmp_dir/http-response.json"
 assert_cb122_action_closure_damage() {
   local label="$1"
+  local store_read="${2:-replay}"
   local closure_before
   local log_start
   closure_before="$(mysql_query root "$root_password" cs_db \
     "SELECT CONCAT((SELECT COUNT(*) FROM support_turn WHERE session_id = '$cb122_session'), ':', (SELECT COUNT(*) FROM support_event WHERE session_id = '$cb122_session'), ':', (SELECT COUNT(*) FROM pending_action_reference WHERE session_id = '$cb122_session'))")"
-  store_fixture replay --session="$cb122_session" --subject="$payment_subject" \
+  store_fixture "$store_read" --session="$cb122_session" --subject="$payment_subject" \
     --sandbox=sandbox-payment --key="cb122-response-loss" --message="historical preparation" \
     --expect=integrity >"$tmp_dir/http-response.json"
   log_start="$(wc -l <"$tmp_dir/agent.log")"
@@ -3879,7 +3880,9 @@ cb122_source_user="$(mysql_query root "$root_password" cs_db \
   "SELECT user_subject FROM support_turn WHERE turn_id = '$cb122_prepare_turn'")"
 mysql_query root "$root_password" cs_db \
   "SET FOREIGN_KEY_CHECKS = 0; UPDATE support_turn SET user_subject = 'corrupted-owner' WHERE turn_id = '$cb122_prepare_turn'; SET FOREIGN_KEY_CHECKS = 1"
-assert_cb122_action_closure_damage "a source turn with contradictory owner binding"
+# Owner-filtered replay cannot see this damaged turn. The retained current-reference
+# reader detects the source/reference mismatch, as it did after an empty replay.
+assert_cb122_action_closure_damage "a source turn with contradictory owner binding" current-pending
 mysql_query root "$root_password" cs_db \
   "SET FOREIGN_KEY_CHECKS = 0; UPDATE support_turn SET user_subject = '$cb122_source_user' WHERE turn_id = '$cb122_prepare_turn'; SET FOREIGN_KEY_CHECKS = 1"
 

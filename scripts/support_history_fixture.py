@@ -94,6 +94,7 @@ def main() -> None:
             "reject",
             "pending",
             "claim",
+            "current-pending",
         ),
     )
     parser.add_argument("--session", required=True)
@@ -132,6 +133,12 @@ def main() -> None:
         "database": pymysql.MySQLError,
     }
     try:
+        if args.command == "current-pending":
+            current = store.current_pending_action(**identity)
+            if args.expect != "success":
+                raise AssertionError(f"Expected {args.expect} rejection")
+            print(json.dumps({"state": current[1] if current is not None else None}))
+            return
         if args.command == "replay":
             result = store.replay_turn(**turn)
             if result is None:
