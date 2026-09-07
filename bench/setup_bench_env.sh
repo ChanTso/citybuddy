@@ -108,7 +108,7 @@ elif ! cmp -s "$current" "$backup"; then
     echo "Signing metadata differs from the saved original and from the bench key; preserve state." >&2; exit 1
   fi
 fi
-payment_env_args=()
+commerce_env_args=(--env "SPRING_DATASOURCE_PASSWORD=$commerce_pw")
 normal_enabled=false
 seckill_enabled=true
 if [ "$BENCH_WORKLOAD" = order-payment ]; then
@@ -136,7 +136,7 @@ PY
     cp "$payment_env" "$fixture_dir/payment.env"
     chmod 600 "$fixture_dir/payment.env"
   fi
-  payment_env_args=(--env-file "$fixture_dir/payment.env")
+  commerce_env_args+=(--env-file "$fixture_dir/payment.env")
 fi
 
 tx_topic="cb060-seckill-transaction-$topic_suffix"
@@ -236,8 +236,7 @@ docker run --detach --name citybuddy-bench-commerce \
   --publish 127.0.0.1:18081:8080 \
   --cpus 4 \
   --volume "$commerce_jar:/opt/citybuddy/commerce.jar:ro" \
-  --env SPRING_DATASOURCE_PASSWORD="$commerce_pw" \
-  "${payment_env_args[@]}" \
+  "${commerce_env_args[@]}" \
   eclipse-temurin:21.0.8_9-jre-noble@sha256:20e7f7288e1c18eebe8f06a442c9f7183342d9b022d3b9a9677cae2b558ddddd \
   java -XX:MaxRAMPercentage=70 -jar /opt/citybuddy/commerce.jar \
   --server.port=8080 \
