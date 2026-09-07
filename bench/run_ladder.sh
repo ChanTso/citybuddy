@@ -11,6 +11,7 @@ ACTIVITIES="${2:-1}"
 RATES="${RATES:-50,100,200,400,800}"
 STEP_SECONDS="${STEP_SECONDS:-15}"
 GAP_SECONDS="${GAP_SECONDS:-5}"
+REJECTION_VUS="${REJECTION_VUS:-500}"
 K6_IMAGE_REFERENCE="grafana/k6@sha256:5221b620a4f874faff6e32ba597aa667c058391fe4898b1c6f6377f062c6cdec"
 if [[ ! "$LABEL" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]] || [ "${#LABEL}" -gt 96 ]; then
   echo "LABEL must be 1-96 safe characters and start with an alphanumeric." >&2
@@ -19,8 +20,9 @@ fi
 if [[ ! "$ACTIVITIES" =~ ^[1-9][0-9]*$ ]] \
   || [[ ! "$RATES" =~ ^[1-9][0-9]*(,[1-9][0-9]*)*$ ]] \
   || [[ ! "$STEP_SECONDS" =~ ^[1-9][0-9]*$ ]] \
-  || [[ ! "$GAP_SECONDS" =~ ^[0-9]+$ ]]; then
-  echo "ACTIVITIES, RATES, STEP_SECONDS and GAP_SECONDS must be ASCII integers." >&2
+  || [[ ! "$GAP_SECONDS" =~ ^[0-9]+$ ]] \
+  || [[ ! "$REJECTION_VUS" =~ ^[1-9][0-9]*$ ]]; then
+  echo "ACTIVITIES, RATES, STEP_SECONDS, GAP_SECONDS and REJECTION_VUS must be ASCII integers." >&2
   exit 2
 fi
 
@@ -137,7 +139,7 @@ metadata() {
   printf 'k6_image=%s\n' "$K6_IMAGE_REFERENCE"
   printf 'request_key_prefix=%s activity_prefix=%s workload=%s\n' "$LABEL" "${ACTIVITY_PREFIX:-bench-activity-}" "${BENCH_WORKLOAD:-seckill}"
   if [ "${BENCH_WORKLOAD:-seckill}" = seckill-rejection ]; then
-    printf 'warmup=1000/s*30s warmup_gap=5s rates=%s load_users=16384 preparation_users=320 fixed_vus_per_phase=500\n' "$RATES"
+    printf 'warmup=1000/s*30s warmup_gap=5s rates=%s load_users=16384 preparation_users=320 fixed_vus_per_phase=%s\n' "$RATES" "$REJECTION_VUS"
     if [[ "$RATES" == *,* ]]; then
       printf 'measurement_kind=coarse_probe stop=per_phase_drops_1pct_nominal_or_unexpected_1pct_or_p99_1000ms delay=5s\n'
     else
@@ -170,6 +172,7 @@ k6_container_id="$(docker run --detach --name citybuddy-bench-k6 \
   --volume "$out:/out" \
   --env TOKENS_FILE=/run-data/tokens.json \
   --env RATES="$RATES" --env STEP_SECONDS="$STEP_SECONDS" --env GAP_SECONDS="$GAP_SECONDS" \
+  --env REJECTION_VUS="$REJECTION_VUS" \
   --env ACTIVITIES="$ACTIVITIES" \
   --env REQUEST_KEY_PREFIX="$LABEL" --env ACTIVITY_PREFIX="${ACTIVITY_PREFIX:-bench-activity-}" \
   --entrypoint k6 "$K6_IMAGE_REFERENCE" run \
@@ -200,7 +203,7 @@ fi
 
 if [ -s "$out/$summary_name" ]; then
   python3 - "$out/$summary_name" "$CITYBUDDY_COMMIT" "$run_started_at" "$run_completed_at" \
-    "$LABEL" "$ACTIVITIES" "$RATES" "$STEP_SECONDS" "$GAP_SECONDS" "$K6_IMAGE_REFERENCE" "${BENCH_WORKLOAD:-seckill}" <<'PY'
+    "$LABEL" "$ACTIVITIES" "$RATES" "$STEP_SECONDS" "$GAP_SECONDS" "$K6_IMAGE_REFERENCE" "${BENCH_WORKLOAD:-seckill}" "$REJECTION_VUS" <<'PY'
 import json, sys
 path = sys.argv[1]
 document = json.load(open(path))
@@ -212,6 +215,8 @@ document["benchmark"] = {
     "rates": [int(value) for value in sys.argv[7].split(",")],
     "workload": sys.argv[11], "stepSeconds": int(sys.argv[8]), "gapSeconds": int(sys.argv[9]), "k6Image": sys.argv[10],
 }
+if sys.argv[11] == "seckill-rejection":
+    document["benchmark"]["preAllocatedVusPerPhase"] = int(sys.argv[12])
 json.dump(document, open(path, "w"), indent=2, sort_keys=True)
 open(path, "a").write("\n")
 PY

@@ -7,6 +7,7 @@ const rates = __ENV.RATES.split(',').map(Number);
 const probe = rates.length > 1;
 const seconds = Number(__ENV.STEP_SECONDS);
 const gap = Number(__ENV.GAP_SECONDS || 5);
+const vus = Number(__ENV.REJECTION_VUS || 500);
 const base = __ENV.BASE_URL || 'http://citybuddy-bench-commerce:8080';
 const prefix = __ENV.REQUEST_KEY_PREFIX;
 const activities = __ENV.ACTIVITY_PREFIX;
@@ -18,12 +19,13 @@ http.setResponseCallback(http.expectedStatuses(409));
 if (rates.some((rate) => !Number.isInteger(rate) || rate < 1)
     || new Set(rates).size !== rates.length || ![30, 120].includes(seconds)
     || !Number.isInteger(gap) || gap < 5 || (probe && seconds !== 30)
+    || !Number.isInteger(vus) || vus < 1
     || tokens.length !== pool + 320 || !prefix || !activities) {
   throw new Error('Invalid rejection fixture; expected a separate 320-user preparation range');
 }
 const phase = (target, duration, start, tag) => ({
   executor: 'constant-arrival-rate', rate: target, timeUnit: '1s', duration: `${duration}s`,
-  startTime: `${start}s`, preAllocatedVUs: 500, maxVUs: 500,
+  startTime: `${start}s`, preAllocatedVUs: vus, maxVUs: vus,
   gracefulStop: tag === 'warmup' ? '5s' : probe ? `${gap}s` : '10s',
   exec: 'reserve', tags: { rate: String(target), phase: tag },
 });

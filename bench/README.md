@@ -95,6 +95,12 @@ formal scenario, each with 500 fixed VUs. The calculator excludes warm-up from f
 prints every decision/replay bucket and retains negative timing observations from both phases.
 A zero k6 exit code alone is not a business or capacity verdict.
 
+`REJECTION_VUS` changes the pre-allocated and maximum VUs together (default 500), without
+allocating additional VUs during input. To diagnose a VU ceiling, repeat the same fixed rate
+with `REJECTION_VUS=1000`, keeping the workload, output and service resources unchanged.
+The runner records this setting in raw metadata. A higher achieved rate after changing the
+generator is not a backend optimization, and VU exhaustion alone does not identify its cause.
+
 For a coarse search, pass the same comma-separated rates to preparation and the runner, e.g.
 `--rate 9000,18000,36000` and `RATES=9000,18000,36000 STEP_SECONDS=30`. These phases share
 one exhausted fixture and accumulated Redis state; they locate an interval, not independent
