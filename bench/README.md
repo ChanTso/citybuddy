@@ -1,5 +1,7 @@
 # Transaction measurement
 
+Latest completed results: [transaction results, 2026-09-08](results/transaction_results_20260908.md).
+
 Current scripts cover three distinct workloads on the existing Docker network: sustained
 seckill admission and order creation, ordinary order-to-payment flows, and already-sold-out
 seckill rejection. Commerce remains limited to 4 CPUs in the 8-CPU Docker VM.
