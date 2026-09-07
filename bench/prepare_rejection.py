@@ -24,12 +24,19 @@ class NoRedirect(urllib.request.HTTPRedirectHandler):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--label", required=True)
-    parser.add_argument("--rate", type=int, required=True)
+    parser.add_argument(
+        "--rate", required=True, help="single rate or comma-separated coarse probe rates"
+    )
     parser.add_argument("--seconds", type=int, choices=(30, 120), default=30)
     parser.add_argument("--citybuddy-sha", required=True)
     args = parser.parse_args()
-    if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,39}", args.label) or args.rate < 1:
-        parser.error("label must be 1-40 safe characters; rate must be positive")
+    if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,39}", args.label) or not re.fullmatch(
+        r"[1-9][0-9]*(,[1-9][0-9]*)*", args.rate
+    ):
+        parser.error("label must be 1-40 safe characters; rates must be positive integers")
+    rates = [int(rate) for rate in args.rate.split(",")]
+    if len(set(rates)) != len(rates) or (len(rates) > 1 and args.seconds != 30):
+        parser.error("probe rates must be distinct and use 30-second phases")
     if not re.fullmatch(r"[0-9a-f]{40}", args.citybuddy_sha):
         parser.error("citybuddy-sha must be a full SHA")
     root = Path(__file__).resolve().parents[1]
@@ -162,7 +169,8 @@ def main():
                 "warmup_rate": 1000,
                 "warmup_seconds": 30,
                 "gap_seconds": 5,
-                "formal_rate": args.rate,
+                "formal_rate": rates[0] if len(rates) == 1 else None,
+                "probe_rates": rates if len(rates) > 1 else None,
                 "formal_seconds": args.seconds,
             }
         )
