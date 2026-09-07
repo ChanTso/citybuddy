@@ -67,8 +67,11 @@ setup_safety() {
       echo "Preserve/drain the prior result and stop $name before setup; no fixture changed." >&2; return 1
     fi
   done
+  # Admission-only integration fixtures have no MQ delivery; this lifecycle owns bench activities.
+  # Timeout dispatch and Redis handoffs remain global because the workers scan them globally.
   if [ "$(sql root "$root_pw" commerce_db "SELECT
-      (SELECT COUNT(*) FROM seckill_reservation WHERE state IN ('PENDING','ADMITTED'))+
+      (SELECT COUNT(*) FROM seckill_reservation WHERE state IN ('PENDING','ADMITTED')
+        AND BINARY LEFT(activity_id,CHAR_LENGTH('bench-activity-'))=BINARY 'bench-activity-')+
       (SELECT COUNT(*) FROM seckill_order WHERE status='UNPAID' AND timeout_dispatch_state IN ('PENDING','FAILED'));")" != 0 ] \
     || [ "$(REDISCLI_AUTH="$redis_pw" docker exec --env REDISCLI_AUTH citybuddy-redis-commerce-1 redis-cli --no-auth-warning --raw ZCARD commerce:seckill:handoff:pending)" != 0 ]; then
     echo "Prior async work is unresolved; preserve/drain it before changing the bench runtime." >&2; return 1

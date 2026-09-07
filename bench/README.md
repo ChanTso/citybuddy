@@ -8,7 +8,9 @@ Every setup uses a new `TOPIC_SUFFIX` of at most 40 safe characters. It creates 
 users, products and activities; it does not delete prior transactions or alter checkout foreign
 keys. Before setup, preserve the preceding SQL/MQ/Redis results, finish its admitted work and
 stop the old benchmark applications and generator. Setup refuses running benchmark containers
-or pending handoff/order work. It saves the original public signing metadata once in ignored
+or unfinished reservations under `bench-activity-`, global pending handoffs, or unsent unpaid-order
+timeouts. Admission-only integration fixtures intentionally stop before MQ delivery and are not
+benchmark order backlog; their rows stay unchanged. Setup saves public signing metadata once in ignored
 state; it refuses to mistake an already installed synthetic key for that original.
 
 Build and commit the exact source before measuring. Setup records full source/JAR revisions,
