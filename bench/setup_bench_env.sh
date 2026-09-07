@@ -268,7 +268,8 @@ docker run --detach --name citybuddy-bench-commerce \
   --citybuddy.seckill.order.rocketmq-topic="$tx_topic" \
   --citybuddy.seckill.order.rocketmq-consumer-group="$tx_group" \
   --citybuddy.seckill.order.worker-initial-delay-ms=1000 \
-  --citybuddy.seckill.order.worker-delay-ms=50 \
+  --citybuddy.seckill.order.worker-delay-ms=10 \
+  --citybuddy.seckill.order.receive-batch-size=32 \
   --citybuddy.seckill.order.resolution-worker-initial-delay=2000 \
   --citybuddy.seckill.order.resolution-worker-delay=1000 \
   --citybuddy.seckill.order.receive-await=1s \
@@ -342,7 +343,8 @@ SETUP_COMPLETED_AT_UTC=$setup_completed_at
 DOCKER_CPUS=$docker_cpus
 DOCKER_MEMORY_BYTES=$docker_memory_bytes
 COMMERCE_CPU_LIMIT=4
-ORDER_WORKER_DELAY_MS=50
+ORDER_WORKER_DELAY_MS=10
+ORDER_RECEIVE_BATCH_SIZE=32
 TIMEOUT_DISPATCH_WORKER_DELAY_MS=50
 EOF
 cp "$bench_env" "$fixture_dir/setup.env"

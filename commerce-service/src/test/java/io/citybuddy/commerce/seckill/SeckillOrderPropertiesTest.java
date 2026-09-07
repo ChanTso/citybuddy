@@ -17,7 +17,7 @@ class SeckillOrderPropertiesTest {
     assertThat(properties.unpaidTimeout()).isEqualTo(Duration.ofMinutes(15));
     assertThat(properties.receiveAwait()).isEqualTo(Duration.ofSeconds(2));
     assertThat(properties.receiveInvisibleDuration()).isEqualTo(Duration.ofSeconds(30));
-    assertThat(properties.receiveBatchSize()).isEqualTo(16);
+    assertThat(properties.receiveBatchSize()).isEqualTo(32);
   }
 
   @Test
