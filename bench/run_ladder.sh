@@ -12,6 +12,8 @@ RATES="${RATES:-50,100,200,400,800}"
 STEP_SECONDS="${STEP_SECONDS:-15}"
 GAP_SECONDS="${GAP_SECONDS:-5}"
 REJECTION_VUS="${REJECTION_VUS:-500}"
+REJECTION_OUTPUT="${REJECTION_OUTPUT:-points}"
+case "$REJECTION_OUTPUT" in points|summary) ;; *) echo "REJECTION_OUTPUT must be points or summary." >&2; exit 2 ;; esac
 K6_IMAGE_REFERENCE="grafana/k6@sha256:5221b620a4f874faff6e32ba597aa667c058391fe4898b1c6f6377f062c6cdec"
 if [[ ! "$LABEL" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]] || [ "${#LABEL}" -gt 96 ]; then
   echo "LABEL must be 1-96 safe characters and start with an alphanumeric." >&2
@@ -40,6 +42,9 @@ if [ ! -s "$bench_env" ]; then
 fi
 # shellcheck disable=SC1090
 source "$bench_env"
+if [ "$REJECTION_OUTPUT" = summary ] && [ "${BENCH_WORKLOAD:-seckill}" != seckill-rejection ]; then
+  echo "Summary-only output is supported only for rejection calibration." >&2; exit 2
+fi
 if [ "${BENCH_WORKLOAD:-seckill}" = order-payment ]; then
   echo "Use run_order_payment.sh for the normal transaction fixture." >&2; exit 2
 fi
@@ -95,6 +100,10 @@ points_name="k6_${LABEL}_points.json"
 cpu_name="k6_${LABEL}_cpu.txt"
 console_name="k6_${LABEL}_console.txt"
 steps_name="ladder_${LABEL}_steps.txt"
+output_args=(--out "json=/out/$points_name")
+if [ "$REJECTION_OUTPUT" = summary ]; then
+  output_args=(--summary-mode full --new-machine-readable-summary)
+fi
 setup_name="seckill_${LABEL}_setup.txt"
 for name in "$summary_name" "$points_name" "$cpu_name" "$console_name" "$steps_name" "$setup_name"; do
   if [ -e "$out/$name" ]; then
@@ -139,6 +148,7 @@ metadata() {
   printf 'k6_image=%s\n' "$K6_IMAGE_REFERENCE"
   printf 'request_key_prefix=%s activity_prefix=%s workload=%s\n' "$LABEL" "${ACTIVITY_PREFIX:-bench-activity-}" "${BENCH_WORKLOAD:-seckill}"
   if [ "${BENCH_WORKLOAD:-seckill}" = seckill-rejection ]; then
+    printf 'rejection_output=%s\n' "$REJECTION_OUTPUT"
     printf 'warmup=1000/s*30s warmup_gap=5s rates=%s load_users=16384 preparation_users=320 fixed_vus_per_phase=%s\n' "$RATES" "$REJECTION_VUS"
     if [[ "$RATES" == *,* ]]; then
       printf 'measurement_kind=coarse_probe stop=per_phase_drops_1pct_nominal_or_unexpected_1pct_or_p99_1000ms delay=5s\n'
@@ -173,13 +183,14 @@ k6_container_id="$(docker run --detach --name citybuddy-bench-k6 \
   --env TOKENS_FILE=/run-data/tokens.json \
   --env RATES="$RATES" --env STEP_SECONDS="$STEP_SECONDS" --env GAP_SECONDS="$GAP_SECONDS" \
   --env REJECTION_VUS="$REJECTION_VUS" \
+  --env REJECTION_OUTPUT="$REJECTION_OUTPUT" \
   --env ACTIVITIES="$ACTIVITIES" \
   --env REQUEST_KEY_PREFIX="$LABEL" --env ACTIVITY_PREFIX="${ACTIVITY_PREFIX:-bench-activity-}" \
   --entrypoint k6 "$K6_IMAGE_REFERENCE" run \
   --tag "citybuddy_commit=$CITYBUDDY_COMMIT" --tag "bench_label=$LABEL" \
   --tag "run_started_at_utc=$run_started_at" --tag "activities=$ACTIVITIES" \
   --tag "step_seconds=$STEP_SECONDS" \
-  --summary-export="/out/$summary_name" --out "json=/out/$points_name" \
+  --summary-export="/out/$summary_name" "${output_args[@]}" \
   "/scripts/$script_name")"
 while [ "$(docker inspect -f '{{.State.Running}}' "$k6_container_id" 2>/dev/null)" = true ]; do
   if [ "${EXTERNAL_RESOURCE_OBSERVER:-0}" = 0 ]; then
@@ -203,7 +214,7 @@ fi
 
 if [ -s "$out/$summary_name" ]; then
   python3 - "$out/$summary_name" "$CITYBUDDY_COMMIT" "$run_started_at" "$run_completed_at" \
-    "$LABEL" "$ACTIVITIES" "$RATES" "$STEP_SECONDS" "$GAP_SECONDS" "$K6_IMAGE_REFERENCE" "${BENCH_WORKLOAD:-seckill}" "$REJECTION_VUS" <<'PY'
+    "$LABEL" "$ACTIVITIES" "$RATES" "$STEP_SECONDS" "$GAP_SECONDS" "$K6_IMAGE_REFERENCE" "${BENCH_WORKLOAD:-seckill}" "$REJECTION_VUS" "$REJECTION_OUTPUT" <<'PY'
 import json, sys
 path = sys.argv[1]
 document = json.load(open(path))
@@ -217,6 +228,7 @@ document["benchmark"] = {
 }
 if sys.argv[11] == "seckill-rejection":
     document["benchmark"]["preAllocatedVusPerPhase"] = int(sys.argv[12])
+    document["benchmark"]["outputMode"] = sys.argv[13]
 json.dump(document, open(path, "w"), indent=2, sort_keys=True)
 open(path, "a").write("\n")
 PY
@@ -225,14 +237,18 @@ if [ "$(git rev-parse --verify HEAD)" != "$CITYBUDDY_COMMIT" ] || [ -n "$(git st
   echo "CityBuddy HEAD changed during the ladder." >&2
   exit 1
 fi
-{ metadata; echo; python3 bench/analyze_ladder.py "$out/$points_name" "$LABEL" \
-  --rates "$RATES" --step-seconds "$STEP_SECONDS"; } > "$out/$steps_name"
+if [ "$REJECTION_OUTPUT" = points ]; then
+  { metadata; echo; python3 bench/analyze_ladder.py "$out/$points_name" "$LABEL" \
+    --rates "$RATES" --step-seconds "$STEP_SECONDS"; } > "$out/$steps_name"
+else
+  { metadata; echo "Native tagged aggregates: $summary_name (no per-request points exported)."; } > "$out/$steps_name"
+fi
 if [[ ! "$k6_exit_code" =~ ^[0-9]+$ ]] || [ "$k6_exit_code" -ne 0 ]; then
   echo "k6 exited with status ${k6_exit_code:-unknown}." >&2
   exit 1
 fi
-if [ ! -s "$out/$summary_name" ] || [ ! -s "$out/$points_name" ]; then
-  echo "k6 did not produce both required raw outputs." >&2
+if [ ! -s "$out/$summary_name" ] || { [ "$REJECTION_OUTPUT" = points ] && [ ! -s "$out/$points_name" ]; }; then
+  echo "k6 did not produce the required raw outputs for $REJECTION_OUTPUT mode." >&2
   exit 1
 fi
 echo "-- peak generator CPU --"

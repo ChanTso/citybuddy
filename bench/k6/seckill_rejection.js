@@ -43,6 +43,17 @@ rates.forEach((rate, index) => {
     thresholds[`http_req_duration{scenario:${scenario}}`] = stop('p(99)<1000');
   }
 });
+if (__ENV.REJECTION_OUTPUT === 'summary') {
+  // Empty threshold lists expose native tagged aggregates without imposing a pass criterion.
+  for (const name of Object.keys(scenarios)) {
+    for (const metric of ['http_reqs', 'http_req_duration', 'http_req_failed',
+      'iterations', 'dropped_iterations', 'seckill_decisions']) {
+      const key = `${metric}{scenario:${name}}`;
+      if (!(key in thresholds)) thresholds[key] = [];
+    }
+    thresholds[`seckill_decisions{scenario:${name},decision:EXHAUSTED,replay:false}`] = [];
+  }
+}
 export const options = {
   scenarios,
   summaryTrendStats: ['avg', 'min', 'med', 'p(90)', 'p(95)', 'p(99)', 'max'],

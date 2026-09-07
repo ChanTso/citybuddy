@@ -101,6 +101,16 @@ with `REJECTION_VUS=1000`, keeping the workload, output and service resources un
 The runner records this setting in raw metadata. A higher achieved rate after changing the
 generator is not a backend optimization, and VU exhaustion alone does not identify its cause.
 
+For a separate output-overhead diagnostic, use `REJECTION_OUTPUT=summary` with the same rate
+and VUs. This retains the native k6 JSON summary, console, resource logs and before/after SQL,
+but does not write per-request JSON points. Empty native threshold lists expose warm-up and
+formal HTTP counts, failures, drops, durations and expected EXHAUSTED/non-replay decision
+counts; they impose no pass criterion. Compare expected decisions with all HTTP/decision
+counts. Native timing minima retain the indication of negative samples, but summary-only
+output cannot recover their individual timestamps or exact count. The response parsing and
+HTTP requests are unchanged; tagged aggregation is part of this output configuration. Record
+the mode and start a separately identified series if it is adopted for subsequent measurements.
+
 For a coarse search, pass the same comma-separated rates to preparation and the runner, e.g.
 `--rate 9000,18000,36000` and `RATES=9000,18000,36000 STEP_SECONDS=30`. These phases share
 one exhausted fixture and accumulated Redis state; they locate an interval, not independent
