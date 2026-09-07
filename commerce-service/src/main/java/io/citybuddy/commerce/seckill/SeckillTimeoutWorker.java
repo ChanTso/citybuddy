@@ -41,7 +41,7 @@ public final class SeckillTimeoutWorker {
   @Scheduled(
       scheduler = "seckillTimeoutScheduler",
       initialDelayString = "${citybuddy.seckill.timeout.consumer-worker-initial-delay-ms:5000}",
-      fixedDelayString = "${citybuddy.seckill.timeout.consumer-worker-delay-ms:1000}")
+      fixedDelayString = "${citybuddy.seckill.timeout.consumer-worker-delay-ms:50}")
   public int consumeOnce() throws Exception {
     return messaging.consumeOnce(cancellations);
   }
