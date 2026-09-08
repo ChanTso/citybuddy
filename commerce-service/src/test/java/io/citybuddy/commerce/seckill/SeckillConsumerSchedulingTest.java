@@ -98,7 +98,7 @@ class SeckillConsumerSchedulingTest {
     final RocketMqSeckillTimeouts timeouts = mock(RocketMqSeckillTimeouts.class);
     final SeckillTimeoutDispatchService dispatch = mock(SeckillTimeoutDispatchService.class);
     final SeckillReservationService reservations = mock(SeckillReservationService.class);
-    final CountDownLatch orderEntered = new CountDownLatch(1);
+    final CountDownLatch orderEntered = new CountDownLatch(4);
     final CountDownLatch timeoutEntered = new CountDownLatch(1);
     final CountDownLatch release = new CountDownLatch(1);
     final CountDownLatch recoveryWhileBlocked = new CountDownLatch(1);

@@ -13,7 +13,15 @@ public final class SeckillOrderRepository {
     this.jdbc = jdbc;
   }
 
+  public Optional<ProductSnapshot> findProduct(String productId) {
+    return queryProduct(productId, false);
+  }
+
   public Optional<ProductSnapshot> findProductForUpdate(String productId) {
+    return queryProduct(productId, true);
+  }
+
+  private Optional<ProductSnapshot> queryProduct(String productId, boolean lock) {
     return jdbc
         .query(
             """
@@ -21,8 +29,8 @@ public final class SeckillOrderRepository {
                    available, publication_state, publication_version
             FROM product
             WHERE product_id = ?
-            FOR UPDATE
-            """,
+            """
+                + (lock ? " FOR UPDATE" : ""),
             (result, row) ->
                 new ProductSnapshot(
                     result.getString("product_id"),
@@ -44,13 +52,13 @@ public final class SeckillOrderRepository {
             UPDATE product
             SET stock_quantity = stock_quantity - ?
             WHERE product_id = ?
-              AND stock_quantity = ?
               AND stock_quantity >= ?
               AND publication_version = ?
+              AND publication_state = 'PUBLISHED'
+              AND available = TRUE
             """,
             quantity,
             product.productId(),
-            product.stockQuantity(),
             quantity,
             product.publicationVersion())
         == 1;

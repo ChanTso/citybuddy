@@ -54,11 +54,11 @@ public final class SeckillOrderService {
 
     SeckillActivity activity =
         activities
-            .findForUpdate(reservation.activityId())
+            .findForShare(reservation.activityId())
             .orElseThrow(() -> new IllegalStateException("Seckill activity truth is missing"));
     SeckillOrderRepository.ProductSnapshot product =
         orders
-            .findProductForUpdate(activity.productId())
+            .findProduct(activity.productId())
             .orElseThrow(() -> new IllegalStateException("Seckill product truth is missing"));
     var existingByReservation = orders.findByReservation(reservation.reservationId());
     var existingByUser =
@@ -72,10 +72,6 @@ public final class SeckillOrderService {
     }
     if (!"PUBLISHED".equals(product.publicationState()) || !product.available()) {
       throw new IllegalStateException("Seckill product is not orderable");
-    }
-    if (product.stockQuantity() < reservation.quantity()) {
-      reservations.markUnfulfilled(reservation);
-      return;
     }
 
     String orderId = UUID.randomUUID().toString();
@@ -100,8 +96,18 @@ public final class SeckillOrderService {
             reservation.quantity(),
             totalPrice,
             unpaidDeadline);
+    // Acquire the hot product lock only for the conditional write. A snapshot's stock may
+    // already be stale; only a current read after a failed write can establish exhaustion.
     if (!orders.decrementInventory(product, reservation.quantity())) {
-      throw new IllegalStateException("Authoritative inventory changed during order creation");
+      var current = orders.findProductForUpdate(product.productId()).orElseThrow();
+      if (current.publicationVersion() == product.publicationVersion()
+          && "PUBLISHED".equals(current.publicationState())
+          && current.available()
+          && current.stockQuantity() < reservation.quantity()) {
+        reservations.markUnfulfilled(reservation);
+        return;
+      }
+      throw new IllegalStateException("Product publication changed during order creation");
     }
     orders.insertOrder(order);
     orders.insertOrderCreateMovement(order);
