@@ -6,12 +6,14 @@ Current scripts cover three distinct workloads on the existing Docker network: s
 seckill admission and order creation, ordinary order-to-payment flows, and already-sold-out
 seckill rejection. Commerce remains limited to 4 CPUs in the 8-CPU Docker VM.
 
-The order consumer now receives up to 32 messages and waits 10 ms between batches.
-It still processes one transaction and then acknowledges each message serially; the
-timeout dispatch and cancellation cadence is unchanged. Empty receives retain long polling.
-The smaller fixed delay also permits more frequent retries after immediate failures.
-Compare this combined batch/cadence change at the same input rate; do not attribute
-its result to either factor alone or reuse earlier 16-message/50-ms results as new measurements.
+The order consumer runs four bounded receive/transaction/ACK loops. Each loop receives up to
+32 messages and waits 10 ms between batches; each order still commits independently before ACK.
+Activity read checks use shared locks, and inventory is conditionally updated before the order INSERT.
+Timeout dispatch selects an indexed ready queue, sends outside the database transaction, then commits
+one batch of delivery receipts. A lost receipt can cause replay; cancellation remains idempotent.
+Empty order receives retain long polling. See the [final comparison](results/seckill_order_final_comparison_20260908.md)
+for the combined result and the unsuccessful 400/s sustained-capacity test; do not reuse an intermediate
+version's lower p99 as the final version's score.
 
 Every setup uses a new `TOPIC_SUFFIX` of at most 40 safe characters. It creates label-scoped
 users, products and activities; it does not delete prior transactions or alter checkout foreign
@@ -34,15 +36,15 @@ capacity search. Stop the benchmark applications only after preserving and inspe
 previous point. `LABEL` examples fit the fixture identifier limit.
 
 ```sh
-LABEL="a160_$(git rev-parse --short=7 HEAD)_$(date -u +%Y%m%dT%H%M%SZ)"
-BENCH_WORKLOAD=seckill TOPIC_SUFFIX="$LABEL" BENCH_USERS=48050 \
-  BENCH_ACTIVITIES=1 BENCH_QUOTA=48050 BENCH_STOCK=48050 bash bench/setup_bench_env.sh
+LABEL="a200_$(git rev-parse --short=7 HEAD)_$(date -u +%Y%m%dT%H%M%SZ)"
+BENCH_WORKLOAD=seckill TOPIC_SUFFIX="$LABEL" BENCH_USERS=60050 \
+  BENCH_ACTIVITIES=1 BENCH_QUOTA=60050 BENCH_STOCK=60050 bash bench/setup_bench_env.sh
 python3 bench/observe_orders.py "$LABEL" --snapshot before
 python3 bench/observe_orders.py "$LABEL" &
 OBSERVER_PID=$!
 # A single shell owns the observer throughout input and drain; retain its exact PID.
 sleep 5
-EXTERNAL_RESOURCE_OBSERVER=1 RATES=160 STEP_SECONDS=300 GAP_SECONDS=0 \
+EXTERNAL_RESOURCE_OBSERVER=1 RATES=200 STEP_SECONDS=300 GAP_SECONDS=0 \
   bash bench/run_ladder.sh "$LABEL" 1
 ```
 
@@ -56,7 +58,7 @@ wait "$OBSERVER_PID"
 python3 bench/observe_orders.py "$LABEL" --snapshot after
 ```
 
-The observer performs two grouped SQL reads every five seconds and reads the oldest waiting
+The observer performs two grouped SQL reads every ten seconds and reads the oldest waiting
 reservation at most once per minute. It records actual query times and does not issue catch-up
 bursts when a sample overruns. Full joins, inventory/payment ledgers and SQL wait percentiles
 are confined to snapshots. A 650-second observation is bounded; reaching that bound is not a
@@ -208,7 +210,11 @@ two-times line. These are admission-entry results with an intentional asynchrono
 order-completion throughput. One fresh 800/s old/new pair moved p50 6.27→2.35 ms but p99
 34.79→62.73 ms; the mixed single pair does not establish a performance improvement.
 
-## Sustained completed orders
+## Historical sustained completed orders
+
+The current four-consumer implementation and all final observations are in the
+[final eight-point report](results/seckill_order_final_comparison_20260908.md). The paragraphs below
+describe the earlier revisions and their original measurements.
 
 The [five-minute results](results/seckill_sustained_orders_20260906.md) and
 [registration](results/seckill_sustained_registration_20260906.md) separate admission from order production and timeout-message dispatch. The initial

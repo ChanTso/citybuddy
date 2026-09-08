@@ -94,8 +94,11 @@ public class SeckillOrderConfiguration {
   SeckillTimeoutDispatchService seckillTimeoutDispatchService(
       SeckillOrderRepository orders,
       RocketMqSeckillTimeouts messaging,
-      SeckillTimeoutProperties properties) {
-    return new SeckillTimeoutDispatchService(orders, messaging, properties);
+      SeckillTimeoutProperties properties,
+      PlatformTransactionManager transactionManager) {
+    TransactionTemplate transaction = new TransactionTemplate(transactionManager);
+    transaction.setPropagationBehavior(TransactionDefinition.PROPAGATION_REQUIRES_NEW);
+    return new SeckillTimeoutDispatchService(orders, messaging, properties, transaction);
   }
 
   @Bean

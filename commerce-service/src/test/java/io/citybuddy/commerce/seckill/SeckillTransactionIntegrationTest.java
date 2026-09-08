@@ -6,6 +6,7 @@ import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.clearInvocations;
 import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.spy;
 import static org.mockito.Mockito.timeout;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.verifyNoInteractions;
@@ -124,6 +125,7 @@ class SeckillTransactionIntegrationTest {
   @Autowired private ReservationAdmissionStore admissionStore;
   @Autowired private RocketMqSeckillTransactions messaging;
   @Autowired private SeckillOrderService orderService;
+  @Autowired private SeckillOrderProperties orderProperties;
   @Autowired private SeckillTransactionResolutionWorker resolutionWorker;
   @Autowired private SeckillOrderRepository orderRepository;
   @Autowired private SeckillTimeoutProperties timeoutProperties;
@@ -132,6 +134,69 @@ class SeckillTransactionIntegrationTest {
   @Autowired private SeckillCancellationService cancellationService;
   @Autowired private SeckillTimeoutWorker timeoutWorker;
   @Autowired private PlatformTransactionManager transactionManager;
+
+  @Test
+  @Order(0)
+  void lostBatchReceiptsRollbackTogetherAndDuplicateTimeoutsCancelOnce() throws Exception {
+    String activity = "cb061-batch-receipts";
+    String product = activity + "-product";
+    seedActivity(activity, product, SeckillActivityState.ACTIVE, 2, 2);
+    var first = admittedWithoutMessage(activity, "batch-first");
+    var second = admittedWithoutMessage(activity, "batch-second");
+    orderService.create(SeckillTransactionMessage.from(first));
+    orderService.create(SeckillTransactionMessage.from(second));
+    forceOrderDueIn(first.reservationId(), Duration.ofSeconds(1));
+    forceOrderDueIn(second.reservationId(), Duration.ofSeconds(1));
+    var firstOrder = orderRepository.findByReservation(first.reservationId()).orElseThrow();
+    var secondOrder = orderRepository.findByReservation(second.reservationId()).orElseThrow();
+    var repository = spy(new SeckillOrderRepository(jdbc));
+    org.mockito.Mockito.doReturn(java.util.List.of(firstOrder, secondOrder))
+        .when(repository)
+        .findRecoverableTimeoutDispatches(null, timeoutProperties.dispatchBatchSize());
+    AtomicInteger recorded = new AtomicInteger();
+    doAnswer(
+            invocation -> {
+              invocation.callRealMethod();
+              if (recorded.incrementAndGet() == 2) {
+                throw new IllegalStateException("controlled receipt transaction failure");
+              }
+              return null;
+            })
+        .when(repository)
+        .markTimeoutDispatched(any(), any());
+    AtomicInteger published = new AtomicInteger();
+    SeckillTimeoutPublisher publisher =
+        message -> {
+          assertThat(
+                  org.springframework.transaction.support.TransactionSynchronizationManager
+                      .isActualTransactionActive())
+              .isFalse();
+          String id = timeoutMessaging.send(message);
+          published.incrementAndGet();
+          return id;
+        };
+    var dispatch =
+        new SeckillTimeoutDispatchService(
+            repository, publisher, timeoutProperties, new TransactionTemplate(transactionManager));
+    assertThatThrownBy(dispatch::dispatchCurrentOnce)
+        .isInstanceOf(IllegalStateException.class)
+        .hasMessage("controlled receipt transaction failure");
+    assertThat(timeoutDispatchState(first.reservationId())).isEqualTo("PENDING");
+    assertThat(timeoutDispatchState(second.reservationId())).isEqualTo("PENDING");
+    assertThat(dispatch.dispatchCurrentOnce().sent()).isEqualTo(2);
+    assertThat(published.get()).isEqualTo(4);
+    assertDispatchEvidence(first.reservationId());
+    assertDispatchEvidence(second.reservationId());
+    long deadline = System.nanoTime() + Duration.ofSeconds(20).toNanos();
+    while ((!("CANCELLED".equals(orderStatus(first.reservationId())))
+            || !("CANCELLED".equals(orderStatus(second.reservationId()))))
+        && System.nanoTime() < deadline) {
+      timeoutMessaging.consumeOnce(cancellationService);
+    }
+    timeoutMessaging.consumeOnce(cancellationService);
+    assertCancelledAndRestored(first.reservationId(), 2, 2);
+    assertCancelledAndRestored(second.reservationId(), 2, 2);
+  }
 
   @Test
   @Order(1)
@@ -403,6 +468,147 @@ class SeckillTransactionIntegrationTest {
                 Integer.class,
                 pending.reservationId()))
         .isZero();
+  }
+
+  @Test
+  @Order(3)
+  void concurrentSnapshotsDoNotLoseStockOrRejectAnAvailableUnit() throws Exception {
+    for (int stock : new int[] {1, 2}) {
+      String activity = "cb060-concurrent-stock-" + stock;
+      String product = activity + "-product";
+      seedActivity(activity, product, SeckillActivityState.ACTIVE, 2, stock);
+      var first = admittedWithoutMessage(activity, "first");
+      var second = admittedWithoutMessage(activity, "second");
+      var snapshotsRead = new CountDownLatch(2);
+      var repository = spy(new SeckillOrderRepository(jdbc));
+      doAnswer(
+              invocation -> {
+                Object snapshot = invocation.callRealMethod();
+                snapshotsRead.countDown();
+                if (!snapshotsRead.await(10, TimeUnit.SECONDS)) {
+                  throw new IllegalStateException("Concurrent product reads did not overlap");
+                }
+                return snapshot;
+              })
+          .when(repository)
+          .findProduct(product);
+      var concurrent =
+          new SeckillOrderService(
+              reservationRepository,
+              activityRepository,
+              repository,
+              orderProperties,
+              new TransactionTemplate(transactionManager),
+              Clock.systemUTC());
+      var one =
+          CompletableFuture.runAsync(
+              () -> concurrent.create(SeckillTransactionMessage.from(first)));
+      var two =
+          CompletableFuture.runAsync(
+              () -> concurrent.create(SeckillTransactionMessage.from(second)));
+      CompletableFuture.allOf(one, two).get(20, TimeUnit.SECONDS);
+      assertThat(productStock(product)).isZero();
+      assertThat(
+              jdbc.queryForObject(
+                  "SELECT COUNT(*) FROM seckill_order WHERE activity_id = ?",
+                  Integer.class,
+                  activity))
+          .isEqualTo(stock);
+      assertThat(
+              jdbc.queryForObject(
+                  "SELECT COUNT(*) FROM inventory_ledger WHERE activity_id = ?",
+                  Integer.class,
+                  activity))
+          .isEqualTo(stock);
+      assertThat(
+              jdbc.queryForObject(
+                  "SELECT COUNT(*) FROM seckill_reservation WHERE activity_id = ? AND state = 'UNFULFILLED'",
+                  Integer.class,
+                  activity))
+          .isEqualTo(2 - stock);
+      orderService.create(SeckillTransactionMessage.from(first));
+      orderService.create(SeckillTransactionMessage.from(second));
+      assertThat(productStock(product)).isZero();
+    }
+  }
+
+  @Test
+  @Order(3)
+  void publicationChangeRollsBackStalePriceAndRedeliveryUsesCurrentPrice() throws Exception {
+    String activity = "cb060-concurrent-publication";
+    String product = activity + "-product";
+    seedActivity(activity, product, SeckillActivityState.ACTIVE, 1, 1);
+    var admitted = admittedWithoutMessage(activity, "buyer");
+    var snapshotRead = new CountDownLatch(1);
+    var publicationDone = new CountDownLatch(1);
+    var repository = spy(new SeckillOrderRepository(jdbc));
+    doAnswer(
+            invocation -> {
+              Object snapshot = invocation.callRealMethod();
+              snapshotRead.countDown();
+              if (!publicationDone.await(10, TimeUnit.SECONDS)) {
+                throw new IllegalStateException("Publication did not complete");
+              }
+              return snapshot;
+            })
+        .when(repository)
+        .findProduct(product);
+    var concurrent =
+        new SeckillOrderService(
+            reservationRepository,
+            activityRepository,
+            repository,
+            orderProperties,
+            new TransactionTemplate(transactionManager),
+            Clock.systemUTC());
+    var creation =
+        CompletableFuture.runAsync(
+            () ->
+                assertThatThrownBy(
+                        () -> concurrent.create(SeckillTransactionMessage.from(admitted)))
+                    .isInstanceOf(IllegalStateException.class)
+                    .hasMessage("Product publication changed during order creation"));
+    try {
+      assertThat(snapshotRead.await(10, TimeUnit.SECONDS)).isTrue();
+      jdbc.update(
+          "UPDATE product SET publication_version = publication_version + 1, price_minor = 2990 WHERE product_id = ?",
+          product);
+    } finally {
+      publicationDone.countDown();
+    }
+    creation.get(20, TimeUnit.SECONDS);
+    assertThat(productStock(product)).isEqualTo(1);
+    assertThat(orderRepository.findByReservation(admitted.reservationId())).isEmpty();
+    assertThat(reservationRepository.find(admitted.reservationId()).orElseThrow().state())
+        .isEqualTo(ReservationState.ADMITTED);
+    orderService.create(SeckillTransactionMessage.from(admitted));
+    assertThat(
+            orderRepository
+                .findByReservation(admitted.reservationId())
+                .orElseThrow()
+                .unitPriceMinor())
+        .isEqualTo(2990);
+    assertThat(productStock(product)).isZero();
+  }
+
+  private SeckillReservation admittedWithoutMessage(String activity, String user) {
+    var pending =
+        new SeckillReservation(
+            UUID.randomUUID().toString(),
+            user,
+            activity,
+            UUID.randomUUID().toString(),
+            "0".repeat(64),
+            1,
+            1,
+            ReservationState.PENDING,
+            null,
+            1);
+    reservationRepository.reservePending(pending, reservationProperties.minimumBrokerCoverage());
+    return reservationRepository.applyDecision(
+        reservationRepository.find(pending.reservationId()).orElseThrow(),
+        ReservationState.ADMITTED,
+        ReservationDecisionCode.ADMITTED);
   }
 
   @Test
@@ -747,7 +953,11 @@ class SeckillTransactionIntegrationTest {
 
     SeckillTimeoutWorker restartedWorker =
         new SeckillTimeoutWorker(
-            new SeckillTimeoutDispatchService(orderRepository, timeoutMessaging, timeoutProperties),
+            new SeckillTimeoutDispatchService(
+                orderRepository,
+                timeoutMessaging,
+                timeoutProperties,
+                new TransactionTemplate(transactionManager)),
             timeoutMessaging,
             cancellationService,
             timeoutProperties,
@@ -1106,7 +1316,8 @@ class SeckillTransactionIntegrationTest {
               throw new org.apache.rocketmq.client.apis.ClientException(
                   "controlled lost send receipt");
             },
-            timeoutProperties);
+            timeoutProperties,
+            new TransactionTemplate(transactionManager));
     assertThat(ambiguousDispatch.dispatchCurrentOnce().failed()).isGreaterThanOrEqualTo(1);
     assertThat(timeoutDispatchAttempts(dispatchReservation)).isEqualTo(1);
     assertThat(timeoutDispatchState(dispatchReservation)).isEqualTo("FAILED");
@@ -1128,7 +1339,8 @@ class SeckillTransactionIntegrationTest {
               throw new org.apache.rocketmq.client.apis.ClientException(
                   "controlled broker unavailability");
             },
-            timeoutProperties);
+            timeoutProperties,
+            new TransactionTemplate(transactionManager));
     for (int attempt = 0; attempt < 6; attempt++) {
       alwaysFailing.dispatchCurrentOnce();
     }

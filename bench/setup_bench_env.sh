@@ -276,7 +276,7 @@ docker run --detach --name citybuddy-bench-commerce \
   --citybuddy.seckill.order.receive-invisible-duration=10s \
   --citybuddy.seckill.order.unpaid-timeout=15m \
   --citybuddy.seckill.timeout.enabled="$seckill_enabled" \
-  --citybuddy.seckill.timeout.dispatch-worker-delay-ms=50 \
+  --citybuddy.seckill.timeout.dispatch-worker-delay-ms=10 \
   --citybuddy.seckill.timeout.consumer-worker-delay-ms=50 \
   --citybuddy.seckill.timeout.rocketmq-endpoints=rocketmq-broker-proxy:8081 \
   --citybuddy.seckill.timeout.rocketmq-topic="$to_topic" \
