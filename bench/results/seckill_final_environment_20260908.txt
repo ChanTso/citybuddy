@@ -1,0 +1,45 @@
+citybuddy_commit=9bb08c6087d9a73befb909b021debb30a9fb9aa1
+Retained isolated fixtures are UNPAID/SENT, not cancelled. Old consumers stopped. No fixture or message deletion.
+SET SESSION time_zone='+00:00';
+SELECT '9bb08c6087d9a73befb909b021debb30a9fb9aa1' AS citybuddy_commit,UTC_TIMESTAMP(6) AS observed_at_utc;
+SELECT activity_id,status,timeout_dispatch_state,COUNT(*) AS orders FROM seckill_order WHERE activity_id IN ('bench-activity-a200n_20260908T061729Z-0','bench-activity-c200n_20260908T062708Z-0','bench-activity-c400p_20260908T063510Z-0','bench-activity-c800p_20260908T064255Z-0','bench-activity-c400r1_20260908T065204Z-0','bench-activity-c2_200r1_20260908T072339Z-0','bench-activity-c2_400r1_20260908T073148Z-0','bench-activity-c2_200r2_20260908T074349Z-0') GROUP BY activity_id,status,timeout_dispatch_state ORDER BY activity_id;
+SELECT COUNT(*) AS unresolved_bench_reservations FROM seckill_reservation WHERE activity_id IN ('bench-activity-a200n_20260908T061729Z-0','bench-activity-c200n_20260908T062708Z-0','bench-activity-c400p_20260908T063510Z-0','bench-activity-c800p_20260908T064255Z-0','bench-activity-c400r1_20260908T065204Z-0','bench-activity-c2_200r1_20260908T072339Z-0','bench-activity-c2_400r1_20260908T073148Z-0','bench-activity-c2_200r2_20260908T074349Z-0') AND state IN ('PENDING','ADMITTED');
+SELECT COUNT(*) AS globally_pending_timeout_dispatches FROM seckill_order WHERE timeout_dispatch_ready=TRUE;
+SELECT @@global.innodb_buffer_pool_size AS buffer_pool_before,@@global.innodb_flush_log_at_trx_commit,@@global.sync_binlog;
+SET GLOBAL innodb_buffer_pool_size=134217728;
+SELECT @@global.innodb_buffer_pool_size AS buffer_pool_requested,@@global.innodb_flush_log_at_trx_commit,@@global.sync_binlog;
+
+citybuddy_commit	observed_at_utc
+9bb08c6087d9a73befb909b021debb30a9fb9aa1	2026-09-08 07:55:37.355349
+activity_id	status	timeout_dispatch_state	orders
+bench-activity-a200n_20260908T061729Z-0	UNPAID	SENT	60001
+bench-activity-c2_200r1_20260908T072339Z-0	UNPAID	SENT	60001
+bench-activity-c2_200r2_20260908T074349Z-0	UNPAID	SENT	59963
+bench-activity-c2_400r1_20260908T073148Z-0	UNPAID	SENT	120001
+bench-activity-c200n_20260908T062708Z-0	UNPAID	SENT	60001
+bench-activity-c400p_20260908T063510Z-0	UNPAID	SENT	24001
+bench-activity-c400r1_20260908T065204Z-0	UNPAID	SENT	120000
+bench-activity-c800p_20260908T064255Z-0	UNPAID	SENT	47856
+unresolved_bench_reservations
+0
+globally_pending_timeout_dispatches
+0
+buffer_pool_before	@@global.innodb_flush_log_at_trx_commit	@@global.sync_binlog
+1073741824	1	1
+buffer_pool_requested	@@global.innodb_flush_log_at_trx_commit	@@global.sync_binlog
+134217728	1	1
+Original public signing metadata restored; fixture rows, outputs and key files retained.
+docker_cpus=8 docker_memory_bytes=14638391296
+
+SELECT UTC_TIMESTAMP(6),@@global.innodb_buffer_pool_size; SHOW GLOBAL STATUS LIKE 'Innodb_buffer_pool_resize%';
+UTC_TIMESTAMP(6)	@@global.innodb_buffer_pool_size
+2026-09-08 07:59:28.812969	134217728
+Variable_name	Value
+Innodb_buffer_pool_resize_status	Completed resizing buffer pool at 260908  7:55:41.
+Innodb_buffer_pool_resize_status_code	0
+Innodb_buffer_pool_resize_status_progress	100
+citybuddy-rocketmq-broker-proxy-1
+citybuddy-rocketmq-namesrv-1
+citybuddy-mysql-1
+citybuddy-redis-commerce-1
+✓ Stopping Docker Desktop
