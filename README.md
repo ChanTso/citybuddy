@@ -15,29 +15,29 @@ The former buyer support model loop and chat endpoints are retired.
 
 | Path or change | Observed result | Workload and source |
 |---|---|---|
-| Redis-first sold-out rejection | 3,000 requests/s; 90,000 expected rejections; zero dropped iterations | 32 activities, 30-second input window. [Report and raw k6/SQL](bench/results/seckill_rejection_capacity_20260905.md). |
-| Order and timeout-dispatch cadence | Order-wait p99 134.368 s → 72.234 ms; 12,000/12,000 orders completed on both sides | Same single-activity 40 requests/s × 300 seconds. Batch sizes and serial processing unchanged; order/dispatch queues stayed bounded after adjustment. [Comparison and higher-rate observations](bench/results/seckill_sustained_orders_20260906.md). |
+| Redis-first sold-out rejection | 6,000 requests/s; 180,002 correct rejections; p99 4.92 ms; zero dropped iterations | 32 activities, 30 seconds. A measured work point, not the maximum or a long-run capacity claim. [Report](bench/results/soldout_fixed_series_20260907.md). |
+| Order-consumer combination | SQL order-wait p99 9.26 s → 1.70 s; 60,001 orders completed on both sides with no dropped iterations | Same single-activity/SKU 200 requests/s × 300 seconds, including startup, MySQL buffer pool 1 GiB. [Final eight-point comparison](bench/results/seckill_order_final_comparison_20260908.md). |
+| Ordinary order to simulated payment | 4,801 completed flows across two runs, with SQL amount/inventory checks | 20 flows/s × 120 seconds per run; a baseline, not maximum throughput. [Report](bench/results/order_payment_baseline_20260907.md). |
 | Activity lock: `FOR UPDATE` → `FOR SHARE` | p50 1,535.1 → 6.1 ms; dropped iterations 949 → 0 | Historical one-activity comparison at 800 requests/s. [Paired results](bench/README.md#shared-activity-lock-result). |
 | Generated machine credential: BCrypt → digest | Refund-preparation p50 4,139.8 → 13.4 ms; Auth median CPU 694.42% → 4.30% | Historical 30 requests/s step, one Agent worker and deterministic model. [Paired results](bench/agent/README.md#repeated-obo-service-credential-verification). |
-| Historical in-transaction resource ownership binding | Unauthorized refund requests 55/300 → 0/300 | StateEval's fixed 600 real-model trials, graded against independent SQL. [Campaign artifacts](https://github.com/ChanTso/state-eval/tree/main/results/ownership-campaign-v1/formal). |
 
 Performance measurements ran on a MacBook Pro M4, Docker 8 CPUs / 14 GB, with Commerce limited to
-4 CPUs. Each linked report records its measured revision, workload and raw output.
-The cadence comparison measured `1993c281c81e1ea34708773eea3a2825657bef84` and
-`16cb21154d1ae94c65fff56b8a96ea7f4514f924`; the other comparisons retain their
-historical revisions and are not combined into a single before/after result.
+4 CPUs. The final order comparison measured baseline `fe60d7c3c95eb09399a95562745e96ff5cc386c7`
+and final code `9bb08c6087d9a73befb909b021debb30a9fb9aa1`. Linked reports retain exact revisions,
+workloads, persistence settings and raw output; historical comparisons are not combined into one result.
 
-The sold-out path ends before business MySQL/MQ work; at the historical 4,000/s point, the
-limiting side between Commerce and the co-located generator was not isolated. A subsequent
-[fixed-warmup diagnosis](bench/results/seckill_rejection_diagnosis_20260906.md) completed
-120,000 expected rejections at 4,000/s without drops; it did not identify a limiting side at
-that load or retroactively establish the historical cause. The historical headline remains
-separate from that newer workload. Sustained order input at 200/s accumulated work; its eventual
-completion is not stable capacity. The earlier [blocking-scheduler diagnosis](bench/results/local_seckill_diagnosis_20260906.md)
-retains its separate 10/s comparison. The StateEval campaign measured the former support caller,
-not the new ShopMate buyer chain. A new-chain ownership campaign and the expanded retail task
-acceptance remain separate work; neither inherits the old campaign or prior merchant-only scores.
-[Historical ShopMate evaluations](https://github.com/ChanTso/shopmate/blob/b327368d557150e5459cd6814d60721e6fa5c489/evals/records/README.md) retain their original scope.
+The final 200/s repeat completed all 59,963 admitted orders but had 37 unissued startup iterations;
+it is not a second zero-drop pass. At 400/s orders still accumulated, then cleared after input stopped.
+One negative HTTP receiving-time sample also prevents certifying that point as clean HTTP capacity.
+The final report keeps both limits, SQL correctness and recovery observations. The maximum sustained
+order rate and the limiting side of the higher sold-out loads remain undetermined.
+
+[StateEval](https://github.com/ChanTso/state-eval) checks the Agent call chain against SQL business state.
+In the final ShopMate ownership ablation, both foreign-order arms stopped before refund preparation;
+there was no observed incremental ownership-guard benefit. The former support caller's 55/300 → 0/300
+campaign remains historical and is not reused as the new chain's result. ShopMate's separate retail
+acceptance retains 24 passes, 3 business failures and 3 provider failures across 30 real-model attempts;
+it does not claim that every task passed. See [ShopMate](https://github.com/ChanTso/shopmate) for its scope.
 
 ## Transaction and identity design
 
