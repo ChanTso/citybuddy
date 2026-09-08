@@ -1,4 +1,4 @@
-"""Fixed five-second order progress and resources; full business SQL only before/after."""
+"""Fixed ten-second order progress and resources; full business SQL only before/after."""
 
 from __future__ import annotations
 
@@ -127,7 +127,7 @@ SELECT MIN(unpaid_deadline) AS earliest_unpaid_deadline FROM seckill_order
         (root / f"bench/results/orders_{args.label}_resources.txt").open("x") as resources,
     ):
         for output in (sql, resources):
-            output.write(f"citybuddy_commit={sha}\nlabel={args.label}\ninterval_seconds=5\n")
+            output.write(f"citybuddy_commit={sha}\nlabel={args.label}\ninterval_seconds=10\n")
             output.flush()
         started = next_oldest = time.monotonic()
         while not stop and time.monotonic() - started < 650:
@@ -175,23 +175,35 @@ SELECT MIN(unpaid_deadline) AS earliest_unpaid_deadline FROM seckill_order
             ]
             if not names:
                 raise RuntimeError("No measurement containers remain")
-            subprocess.run(
-                [
+            stats_command = [
                     "docker",
                     "stats",
                     "--no-stream",
                     "--format",
                     "{{.Name}} cpu={{.CPUPerc}} mem={{.MemUsage}}",
                     *names,
-                ],
-                stdout=resources,
-                stderr=subprocess.STDOUT,
-                timeout=10,
-                check=True,
-            )
+                ]
+            sampled = subprocess.run(stats_command, capture_output=True, text=True, timeout=10)
+            resources.write(sampled.stdout + sampled.stderr)
+            if sampled.returncode:
+                active_after = subprocess.check_output(
+                    ["docker", "ps", "--format", "{{.Names}}"], text=True
+                ).splitlines()
+                # k6 exits and is removed by its runner while stats may still be reading it.
+                if (
+                    "citybuddy-bench-k6" not in names
+                    or "citybuddy-bench-k6" in active_after
+                    or sampled.stderr.strip() != "EOF"
+                ):
+                    sampled.check_returncode()
+                resources.write("k6 exited during stats; retrying remaining containers\n")
+                subprocess.run(
+                    [arg for arg in stats_command if arg != "citybuddy-bench-k6"],
+                    stdout=resources, stderr=subprocess.STDOUT, timeout=10, check=True,
+                )
             resources.flush()
             # Never catch up an overlong observation with a burst of additional SQL.
-            until = max(sample + 5, time.monotonic())
+            until = max(sample + 10, time.monotonic())
             while not stop and time.monotonic() < until:
                 time.sleep(min(0.2, until - time.monotonic()))
         resources.write(
