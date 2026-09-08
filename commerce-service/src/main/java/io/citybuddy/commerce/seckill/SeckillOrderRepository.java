@@ -172,8 +172,7 @@ public final class SeckillOrderRepository {
     return jdbc.query(
         "SELECT "
             + columns()
-            + " FROM seckill_order WHERE timeout_dispatch_state IN ('PENDING', 'FAILED') "
-            + "AND status = 'UNPAID'"
+            + " FROM seckill_order WHERE timeout_dispatch_ready = TRUE"
             + cutoff
             + " ORDER BY timeout_dispatch_attempts, created_at, order_id LIMIT ?",
         SeckillOrderRepository::mapOrder,

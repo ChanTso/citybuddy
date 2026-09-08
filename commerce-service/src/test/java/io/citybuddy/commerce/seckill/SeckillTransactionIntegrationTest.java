@@ -136,6 +136,69 @@ class SeckillTransactionIntegrationTest {
   @Autowired private PlatformTransactionManager transactionManager;
 
   @Test
+  @Order(0)
+  void lostBatchReceiptsRollbackTogetherAndDuplicateTimeoutsCancelOnce() throws Exception {
+    String activity = "cb061-batch-receipts";
+    String product = activity + "-product";
+    seedActivity(activity, product, SeckillActivityState.ACTIVE, 2, 2);
+    var first = admittedWithoutMessage(activity, "batch-first");
+    var second = admittedWithoutMessage(activity, "batch-second");
+    orderService.create(SeckillTransactionMessage.from(first));
+    orderService.create(SeckillTransactionMessage.from(second));
+    forceOrderDueIn(first.reservationId(), Duration.ofSeconds(1));
+    forceOrderDueIn(second.reservationId(), Duration.ofSeconds(1));
+    var firstOrder = orderRepository.findByReservation(first.reservationId()).orElseThrow();
+    var secondOrder = orderRepository.findByReservation(second.reservationId()).orElseThrow();
+    var repository = spy(new SeckillOrderRepository(jdbc));
+    org.mockito.Mockito.doReturn(java.util.List.of(firstOrder, secondOrder))
+        .when(repository)
+        .findRecoverableTimeoutDispatches(null, timeoutProperties.dispatchBatchSize());
+    AtomicInteger recorded = new AtomicInteger();
+    doAnswer(
+            invocation -> {
+              invocation.callRealMethod();
+              if (recorded.incrementAndGet() == 2) {
+                throw new IllegalStateException("controlled receipt transaction failure");
+              }
+              return null;
+            })
+        .when(repository)
+        .markTimeoutDispatched(any(), any());
+    AtomicInteger published = new AtomicInteger();
+    SeckillTimeoutPublisher publisher =
+        message -> {
+          assertThat(
+                  org.springframework.transaction.support.TransactionSynchronizationManager
+                      .isActualTransactionActive())
+              .isFalse();
+          String id = timeoutMessaging.send(message);
+          published.incrementAndGet();
+          return id;
+        };
+    var dispatch =
+        new SeckillTimeoutDispatchService(
+            repository, publisher, timeoutProperties, new TransactionTemplate(transactionManager));
+    assertThatThrownBy(dispatch::dispatchCurrentOnce)
+        .isInstanceOf(IllegalStateException.class)
+        .hasMessage("controlled receipt transaction failure");
+    assertThat(timeoutDispatchState(first.reservationId())).isEqualTo("PENDING");
+    assertThat(timeoutDispatchState(second.reservationId())).isEqualTo("PENDING");
+    assertThat(dispatch.dispatchCurrentOnce().sent()).isEqualTo(2);
+    assertThat(published.get()).isEqualTo(4);
+    assertDispatchEvidence(first.reservationId());
+    assertDispatchEvidence(second.reservationId());
+    long deadline = System.nanoTime() + Duration.ofSeconds(20).toNanos();
+    while ((!("CANCELLED".equals(orderStatus(first.reservationId())))
+            || !("CANCELLED".equals(orderStatus(second.reservationId()))))
+        && System.nanoTime() < deadline) {
+      timeoutMessaging.consumeOnce(cancellationService);
+    }
+    timeoutMessaging.consumeOnce(cancellationService);
+    assertCancelledAndRestored(first.reservationId(), 2, 2);
+    assertCancelledAndRestored(second.reservationId(), 2, 2);
+  }
+
+  @Test
   @Order(1)
   void publicCommitCreatesOneAtomicOrderAndDuplicateDeliveryIsHarmless() throws Exception {
     String activityId = "cb060-commit";
@@ -890,7 +953,11 @@ class SeckillTransactionIntegrationTest {
 
     SeckillTimeoutWorker restartedWorker =
         new SeckillTimeoutWorker(
-            new SeckillTimeoutDispatchService(orderRepository, timeoutMessaging, timeoutProperties),
+            new SeckillTimeoutDispatchService(
+                orderRepository,
+                timeoutMessaging,
+                timeoutProperties,
+                new TransactionTemplate(transactionManager)),
             timeoutMessaging,
             cancellationService,
             timeoutProperties,
@@ -1249,7 +1316,8 @@ class SeckillTransactionIntegrationTest {
               throw new org.apache.rocketmq.client.apis.ClientException(
                   "controlled lost send receipt");
             },
-            timeoutProperties);
+            timeoutProperties,
+            new TransactionTemplate(transactionManager));
     assertThat(ambiguousDispatch.dispatchCurrentOnce().failed()).isGreaterThanOrEqualTo(1);
     assertThat(timeoutDispatchAttempts(dispatchReservation)).isEqualTo(1);
     assertThat(timeoutDispatchState(dispatchReservation)).isEqualTo("FAILED");
@@ -1271,7 +1339,8 @@ class SeckillTransactionIntegrationTest {
               throw new org.apache.rocketmq.client.apis.ClientException(
                   "controlled broker unavailability");
             },
-            timeoutProperties);
+            timeoutProperties,
+            new TransactionTemplate(transactionManager));
     for (int attempt = 0; attempt < 6; attempt++) {
       alwaysFailing.dispatchCurrentOnce();
     }
