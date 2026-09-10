@@ -3,6 +3,7 @@ package io.citybuddy.commerce.seckill;
 import java.sql.ResultSet;
 import java.sql.SQLException;
 import java.sql.Timestamp;
+import java.util.List;
 import java.util.Optional;
 import org.springframework.jdbc.core.JdbcTemplate;
 
@@ -14,6 +15,30 @@ public final class SeckillActivityRepository {
 
   public SeckillActivityRepository(JdbcTemplate jdbc) {
     this.jdbc = jdbc;
+  }
+
+  public List<SeckillOffer> visibleOffers(int limit) {
+    return jdbc.query(
+        """
+        SELECT a.activity_id, a.product_id, p.name, p.price_minor, p.currency,
+               a.starts_at, a.ends_at, a.projection_version
+        FROM seckill_activity a JOIN product p ON p.product_id = a.product_id
+        WHERE a.state = 'ACTIVE' AND a.ends_at > CURRENT_TIMESTAMP(6)
+          AND p.publication_state = 'PUBLISHED' AND p.available = TRUE
+        ORDER BY a.starts_at, a.activity_id
+        LIMIT ?
+        """,
+        (row, index) ->
+            new SeckillOffer(
+                row.getString("activity_id"),
+                row.getString("product_id"),
+                row.getString("name"),
+                row.getLong("price_minor"),
+                row.getString("currency"),
+                row.getTimestamp("starts_at").toInstant(),
+                row.getTimestamp("ends_at").toInstant(),
+                row.getLong("projection_version")),
+        limit);
   }
 
   public Optional<Long> lockProductInventory(String productId) {

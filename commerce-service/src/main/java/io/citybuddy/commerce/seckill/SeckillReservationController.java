@@ -2,6 +2,7 @@ package io.citybuddy.commerce.seckill;
 
 import io.citybuddy.commerce.catalog.CatalogException;
 import io.citybuddy.commerce.catalog.DirectUserAuthorizer;
+import java.util.List;
 import java.util.Map;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.http.HttpStatus;
@@ -13,6 +14,7 @@ import org.springframework.web.bind.annotation.PathVariable;
 import org.springframework.web.bind.annotation.PostMapping;
 import org.springframework.web.bind.annotation.RequestBody;
 import org.springframework.web.bind.annotation.RequestHeader;
+import org.springframework.web.bind.annotation.RequestParam;
 import org.springframework.web.bind.annotation.RestController;
 import org.springframework.web.bind.annotation.RestControllerAdvice;
 
@@ -22,14 +24,30 @@ public final class SeckillReservationController {
   private final DirectUserAuthorizer authorizer;
   private final SeckillOrderProperties properties;
   private final SeckillTransactionCoordinator coordinator;
+  private final SeckillActivityRepository activities;
 
   public SeckillReservationController(
       DirectUserAuthorizer authorizer,
       SeckillOrderProperties properties,
-      SeckillTransactionCoordinator coordinator) {
+      SeckillTransactionCoordinator coordinator,
+      SeckillActivityRepository activities) {
     this.authorizer = authorizer;
     this.properties = properties;
     this.coordinator = coordinator;
+    this.activities = activities;
+  }
+
+  @GetMapping("/api/seckill/activities")
+  public Map<String, List<SeckillOffer>> activities(
+      @RequestHeader(value = "Authorization", required = false) String authorization,
+      @RequestHeader(value = "X-Eval-Sandbox-Id", required = false) String evalSandbox,
+      @RequestParam(defaultValue = "20") int limit) {
+    authorize(authorization, evalSandbox);
+    if (limit < 1 || limit > 50) {
+      throw new SeckillRequestException(
+          400, "VALIDATION", "Activity limit must be between 1 and 50");
+    }
+    return Map.of("activities", activities.visibleOffers(limit));
   }
 
   @PostMapping("/api/seckill/activities/{activityId}/reservations")

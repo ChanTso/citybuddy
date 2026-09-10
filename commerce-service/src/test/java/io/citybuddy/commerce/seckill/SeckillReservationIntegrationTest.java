@@ -61,6 +61,51 @@ class SeckillReservationIntegrationTest {
   @Autowired private TransactionTemplate transactions;
 
   @Test
+  @org.springframework.transaction.annotation.Transactional
+  void buyerOffersExcludeDraftExpiredAndUnpublishedButKeepSoldOutActivities() {
+    String suffix = UUID.randomUUID().toString();
+    String product = "offer-p-" + suffix;
+    String hidden = "offer-h-" + suffix;
+    seedProduct(product, 0);
+    seedProduct(hidden, 5);
+    jdbc.update(
+        "UPDATE product SET publication_state = 'UNPUBLISHED' WHERE product_id = ?", hidden);
+    Instant early = Instant.parse("2000-01-01T00:00:00Z");
+    Instant future = Instant.now().plusSeconds(3600);
+    activityRepository.insert(
+        new SeckillActivity(
+            "offer-a-" + suffix, product, early, future, SeckillActivityState.ACTIVE, 1, 3));
+    activityRepository.insert(
+        new SeckillActivity(
+            "offer-d-" + suffix, product, early, future, SeckillActivityState.DRAFT, 1, 1));
+    activityRepository.insert(
+        new SeckillActivity(
+            "offer-e-" + suffix,
+            product,
+            early,
+            early.plusSeconds(60),
+            SeckillActivityState.ACTIVE,
+            1,
+            1));
+    activityRepository.insert(
+        new SeckillActivity(
+            "offer-h-" + suffix, hidden, early, future, SeckillActivityState.ACTIVE, 1, 1));
+    var offers = activityRepository.visibleOffers(50);
+    assertThat(offers)
+        .extracting(SeckillOffer::activityId)
+        .contains("offer-a-" + suffix)
+        .doesNotContain("offer-d-" + suffix, "offer-e-" + suffix, "offer-h-" + suffix);
+    var visible =
+        offers.stream()
+            .filter(offer -> offer.activityId().equals("offer-a-" + suffix))
+            .findFirst()
+            .orElseThrow();
+    assertThat(visible.activityVersion()).isEqualTo(3);
+    assertThat(visible.unitPriceMinor()).isEqualTo(1000);
+    assertThat(activityRepository.visibleOffers(1)).hasSize(1);
+  }
+
+  @Test
   void admittedUserMarkerOutlivesTheReplayWindowUntilActivityEnds() throws Exception {
     String activityId = "reservation-user-ttl-" + UUID.randomUUID();
     Instant now = Instant.now();
