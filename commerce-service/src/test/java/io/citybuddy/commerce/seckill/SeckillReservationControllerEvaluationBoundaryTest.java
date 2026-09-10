@@ -30,7 +30,11 @@ class SeckillReservationControllerEvaluationBoundaryTest {
             1);
     MockMvc http =
         MockMvcBuilders.standaloneSetup(
-                new SeckillReservationController(identity.authorizer(), properties, coordinator))
+                new SeckillReservationController(
+                    identity.authorizer(),
+                    properties,
+                    coordinator,
+                    mock(SeckillActivityRepository.class)))
             .setControllerAdvice(new SeckillRequestExceptionHandler())
             .build();
 
