@@ -277,11 +277,11 @@ export function App() {
         <nav aria-label="页面导航">
           <a href="#shop">商品与秒杀</a>
           <a
-            href="http://127.0.0.1:3100/buyer"
+            href="https://github.com/ChanTso/shopmate/blob/main/android/README.md"
             target="_blank"
             rel="noopener noreferrer"
           >
-            购物助手
+            买家 App
           </a>
         </nav>
         {signedIn && (
@@ -300,18 +300,19 @@ export function App() {
           <h1 id="hero-title">共享真实交易，连接购物与经营。</h1>
           <p>
             这里保留 CityBuddy 的商品与秒杀工程演示。购物咨询、商品比较、
-            购物车、本人订单及退款确认统一在 ShopMate 买家工作台完成。
+            购物车、本人订单及退款确认统一在 ShopMate Android App 完成。
           </p>
           <a
             className="buyer-link"
-            href="http://127.0.0.1:3100/buyer"
+            href="https://github.com/ChanTso/shopmate/blob/main/android/README.md"
             target="_blank"
             rel="noopener noreferrer"
           >
-            打开 ShopMate 买家工作台
+            安装 ShopMate 买家 App
           </a>
           <p className="hint">
-            在新页面使用同一买家账号重新登录；当前页面的登录令牌不会随链接传递。
+            安装后在 App
+            中登录对应服务的买家账号；当前页面的登录令牌不会随链接传递。
           </p>
         </section>
 
