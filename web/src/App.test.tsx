@@ -100,8 +100,11 @@ describe('CityBuddy portfolio surface', () => {
     expect(screen.getAllByRole('listitem')).toHaveLength(100);
     expect(screen.queryByText('Retail SKU 100')).not.toBeInTheDocument();
     expect(
-      screen.getByRole('link', { name: '打开 ShopMate 买家工作台' }),
-    ).toHaveAttribute('href', 'http://127.0.0.1:3100/buyer');
+      screen.getByRole('link', { name: '安装 ShopMate 买家 App' }),
+    ).toHaveAttribute(
+      'href',
+      'https://github.com/ChanTso/shopmate/blob/main/android/README.md',
+    );
   });
 
   it('logs in, loads published products, stays keyboard-addressable, and clears user state on logout', async () => {
@@ -391,13 +394,19 @@ describe('CityBuddy portfolio surface', () => {
 
   it('links to the single buyer workspace without transferring a login token', async () => {
     render(<App />);
-    const link = screen.getByRole('link', { name: '打开 ShopMate 买家工作台' });
-    expect(link).toHaveAttribute('href', 'http://127.0.0.1:3100/buyer');
+    const link = screen.getByRole('link', { name: '安装 ShopMate 买家 App' });
+    expect(link).toHaveAttribute(
+      'href',
+      'https://github.com/ChanTso/shopmate/blob/main/android/README.md',
+    );
     expect(link).toHaveAttribute('rel', 'noopener noreferrer');
     link.focus();
     expect(link).toHaveFocus();
     await signIn();
-    expect(link).toHaveAttribute('href', 'http://127.0.0.1:3100/buyer');
+    expect(link).toHaveAttribute(
+      'href',
+      'https://github.com/ChanTso/shopmate/blob/main/android/README.md',
+    );
     expect(screen.queryByLabelText('消息或澄清说明')).not.toBeInTheDocument();
     expect(
       screen.queryByRole('heading', { name: '受限客服' }),
