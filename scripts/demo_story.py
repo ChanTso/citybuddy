@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Print the shared retail startup, browser story, or shutdown instructions; perform no actions."""
+"""Print shared retail startup, native buyer walkthrough, or shutdown; perform no actions."""
 
 from __future__ import annotations
 
@@ -28,13 +28,14 @@ def startup() -> None:
     print("确认 ShopMate API 已停止后，准备同一套零售 Java/数据服务：")
     print(f"  CITYBUDDY_DIR={quote(str(CITY))} python3 scripts/local_runtime.py up")
     print("up 首次初始化零售夹具，已有当前版本数据则保留业务变更；不是手工 reset。")
-    print("终端一，在 ShopMate 目录启动 API：")
-    print("  uv run uvicorn shopmate.app:create_app --factory --host 127.0.0.1 --port 8101")
-    print("终端二，在 ShopMate 目录启动网页：")
+    print("在 ShopMate 目录构建商家 Web，再启动同源 API：")
     print("  npm --prefix web ci")
     print("  npm --prefix web run build")
-    print("  npm --prefix web run start")
-    print("买家 http://127.0.0.1:3100/buyer；商家 http://127.0.0.1:3100。")
+    print("  uv run uvicorn shopmate.app:create_app --factory --host 127.0.0.1 --port 8101")
+    print("商家 http://127.0.0.1:8101/；买家使用 Android/iOS 原生 App。")
+    print(f"客户端构建与安装：{SHOP / 'android/README.md'}、{SHOP / 'ios/README.md'}。")
+    print("Android 模拟器：API 10.0.2.2:8101、Commerce 10.0.2.2:9082；iOS 模拟器使用 localhost。")
+    print("如需 Web 热更新，另开终端 npm --prefix web run dev；3100 代理 API 8101。")
     print("可选的 City 商品/秒杀工程页面（另开终端，不是第二个 Agent）：")
     print(f"  cd {quote(str(CITY))}")
     print("  npm --prefix web ci")
@@ -47,24 +48,26 @@ def startup() -> None:
 def story() -> None:
     print("演示步骤导引：未启动或停止任何服务，未调用模型、下单、付款或退款。")
     print("先按 make demo 的说明启动共享零售部署。")
-    print("买家页面：http://127.0.0.1:3100/buyer")
+    print("买家入口：ShopMate Android/iOS App；构建安装见其 android/README.md 和 ios/README.md。")
     print(f"账号 shopmate-retail-buyer；密码文件 {SHOP / '.run/buyer_1_password'}。")
     print("密码只在本机读取，不复制到执行记录、URL 或提交。")
-    print("1. 登录并打开商品页，选一个有货的实际 SKU，核对规格后加入购物车。")
+    print("1. 在 App 登录并打开商品页，选一个有货的实际 SKU，核对规格后加入购物车。")
     print("2. 可向助手提问推荐、比较或政策；回答和卡片不自动构成业务确认。")
-    print("3. 打开结账页，核对整车 SKU、数量、当前价格与合计，勾选后确认结账。")
+    print("3. 打开结账页，核对整车 SKU、数量、当前价格与合计，确认结账。")
     print("4. 对创建的结账记录明确确认模拟付款；订单创建、付款成功和发货分别核对。")
     print("5. 在本人订单页准备退款，核对保存的订单、金额和有效期，再明确提交申请。")
     print("6. 查看真实退款回执和订单状态；REQUESTED 是申请受理，不代表资金到账。")
-    print("7. 刷新并重新登录，恢复原会话及业务记录；未知写入先只读恢复，再决定原请求重试。")
-    print("City 页面用同一买家账号登录 9081，打开 ShopMate 链接后需重新登录，不传 JWT。")
-    print("默认零售部署没有启用秒杀或预置活动。秒杀页面与 bench 保留为独立工程演示。")
+    print("7. 重新打开 App 并恢复原会话及业务记录；未知写入先只读恢复，再决定原请求重试。")
+    print("8. 从 App 首页进入限量活动，确认预约，区分准入、成单与模拟付款；退出页面停止自动轮询。")
+    print("up 已启用秒杀并首次初始化 shopmate-demo-seckill（10 份配额）；重启不补充配额。")
+    print("App 秒杀直连 Commerce 9082，成单后的模拟付款使用 ShopMate API；两者共用买家身份。")
+    print("City 工程页使用同一买家账号；客户端安装链接不传 JWT。功能演示不复用 bench 容量结论。")
     print("这些是操作说明，不是自动验收或新的模型成功率；业务回归使用 ShopMate 的真实集成测试。")
 
 
 def shutdown() -> None:
     print("停止导引：未停止任何服务，未发送进程信号，也未删除容器、数据或凭证。")
-    print("先在自己启动的 ShopMate API、ShopMate 网页与 City Vite 终端分别按 Ctrl-C。")
+    print("先在自己启动的 ShopMate API、可选商家 Web 开发服务及 City Vite 终端分别按 Ctrl-C。")
     print("确认没有运行中的任务或未知业务写入后，在 ShopMate 目录停止其 Java/数据服务：")
     print(f"  cd {quote(str(SHOP))}")
     print(f"  CITYBUDDY_DIR={quote(str(CITY))} python3 scripts/local_runtime.py stop")

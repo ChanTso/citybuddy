@@ -1,8 +1,8 @@
 # CityBuddy 与 ShopMate 演示
 
-CityBuddy 提供身份与 Java 交易服务；ShopMate 提供统一的商家和买家零售 Agent。正式演示只使用 ShopMate 零售部署中的一套 Auth、Commerce 与数据卷：Auth 为 `127.0.0.1:9081`，Commerce 为 `127.0.0.1:9082`，ShopMate API 为 `127.0.0.1:8101`，网页为 `127.0.0.1:3100`。
+CityBuddy 提供身份与 Java 交易服务；ShopMate 提供 Android/iOS 买家 App、React 商家工作台及双端 Agent。正式演示使用 ShopMate 零售部署中的一套 Auth、Commerce 与数据卷：Auth 为 `127.0.0.1:9081`，Commerce 为 `127.0.0.1:9082`，ShopMate API 与已构建的商家 Web 同源提供于 `127.0.0.1:8101`。
 
-City 的可选 Vite 页面保留基本商品读取与秒杀工程表单，默认代理同一套 9081/9082。购物助手链接直接打开 `http://127.0.0.1:3100/buyer`；新页面使用同一买家账号重新登录。页面间不传 JWT、不共享浏览器令牌，也不保留旧客服会话或聊天接口。
+City 的可选 Vite 页面保留基本商品读取与秒杀工程表单，默认代理同一套 9081/9082。买家使用原生 App，客户端安装说明见 [Android](https://github.com/ChanTso/shopmate/blob/main/android/README.md) 与 [iOS](https://github.com/ChanTso/shopmate/blob/main/ios/README.md)。各入口使用同一套账号独立登录，链接不传递 JWT。
 
 ## 启动导引
 
@@ -27,21 +27,17 @@ python3 scripts/local_runtime.py up
 
 `up` 前先停止 ShopMate API。它使用 `shopmate` Compose 项目及其持久卷，首次初始化当前零售夹具；已有该版本数据时保留实际业务变更。它不是手工业务 reset，也不会将旧 City 演示库迁入零售库。需要恢复夹具时，先停业务写入并按 ShopMate 的 `docs/retail-fixture.md` 操作。
 
-在 ShopMate 目录的一个终端启动 API：
-
-```sh
-uv run uvicorn shopmate.app:create_app --factory --host 127.0.0.1 --port 8101
-```
-
-另一个终端启动网页：
+在 ShopMate 目录构建商家 Web，然后启动 API：
 
 ```sh
 npm --prefix web ci
 npm --prefix web run build
-npm --prefix web run start
+uv run uvicorn shopmate.app:create_app --factory --host 127.0.0.1 --port 8101
 ```
 
-买家入口为 <http://127.0.0.1:3100/buyer>，商家入口为 <http://127.0.0.1:3100>。演示账号与私有密码文件：
+商家入口为 <http://127.0.0.1:8101/>，无需另起 Node 服务。需要 Web 热更新时，另开终端运行 `npm --prefix web run dev`，3100 将 API 请求代理到 8101。
+
+Android 模拟器将 API/Commerce 配为 `http://10.0.2.2:8101` 与 `http://10.0.2.2:9082`；iOS 模拟器使用 `http://localhost:8101` 与 `http://localhost:9082`。实体设备连接与签名配置见各客户端说明。演示账号与私有密码文件：
 
 | 角色 | 账号 | ShopMate 内的密码文件 |
 | --- | --- | --- |
@@ -62,20 +58,22 @@ npm --prefix web run dev -- --host 127.0.0.1
 
 ## 买家操作顺序
 
-1. 登录买家页面，读取真实目录与规格，选择有货 SKU 加入购物车。City 的基础商品列表最多展示 100 条；完整目录、商品系列与规格以 ShopMate 为入口。
+1. 在买家 App 登录，读取真实目录与规格，选择有货 SKU 加入购物车。City 的基础商品列表最多展示 100 条；完整目录、商品系列与规格以 ShopMate App 为入口。
 2. 可向助手询问推荐、比较、购物规划、本人订单或政策。资料页按关键词搜索已发布政策，每次最多返回三条匹配；不是全部政策列表。
-3. 打开结账页，核对整车 SKU、规格、数量、当前价格与商品合计，勾选后确认创建订单。旧报价冲突时重新读回再决定，不自动接受新价。
+3. 打开结账页，核对整车 SKU、规格、数量、当前价格与商品合计，确认创建订单。旧报价冲突时重新读回再决定，不自动接受新价。
 4. 对结账记录明确确认模拟付款。创建订单不等于付款成功，付款成功也不等于已发货；配送估算不加入商品付款。
 5. 在本人订单页或通过助手准备退款申请，核对保存的订单、金额和有效期，再由登录买家明确确认。`REQUESTED` 表示退款申请已记录，不代表真实资金到账。
-6. 刷新、重新登录并恢复原会话，核对持久订单、购物车和退款回执。未知写入先只读恢复，再按页面提示决定是否重试原请求。
+6. 重新打开 App 并恢复原会话，核对持久订单、购物车和退款回执。未知写入先只读恢复，再按页面提示决定是否重试原请求。
 
 这些步骤是操作说明，不代表自动执行成功或新的模型成绩。写入正确性由 ShopMate 的 `integration_tests` 通过真实接口及权威 SQL 验证；混合确认、重复提交、归属隔离等业务断言不依赖旧页面或旧聊天协议。
 
-## 秒杀工程演示的边界
+## 秒杀功能演示
 
-默认零售 `local_runtime.py up` **未启用秒杀，也没有预置可用秒杀活动或买家秒杀权限**。City 秒杀表单仍保留原请求幂等、版本提交、有界轮询、终态展示和退出取消行为，供已有秒杀专用部署与活动夹具使用；不能把默认零售页上的表单视为已开放活动。
+当前 `local_runtime.py up` 启用秒杀准入、成单与超时消息链路，为演示买家授予预约权限。首次启动创建 `shopmate-demo-seckill` 活动与 `SM-LIMITED-CUP` 商品，活动配额为 10；已有活动时不补充配额，保留预约和订单状态。
 
-秒杀专用启动、压测脚本与历史结果继续保留在 [bench](../bench/README.md)。若切到专用测量环境，应明确该环境的身份与数据库，不能把另一套默认 City 库中的订单当成 ShopMate 账户的订单。此入口切换不新增活动、改容量参数或重跑压测。
+从 App 首页进入限量活动并确认预约。活动读取、预约提交与状态查询直连 Commerce 9082；成单后的模拟付款通过 ShopMate API 使用服务端签名，App 不持有回调密钥。客户端仅在前台可见活动页进行有界轮询，准入、成单和付款分开显示。City 的工程表单也可使用同一活动与买家账号。
+
+这是有限库存功能演示，不是容量测量。秒杀专用工作负载与历史结果保留在 [bench](../bench/README.md)；切换专用测量环境时，应区分对应身份和数据库，不能混用订单或性能数字。
 
 ## 停止与历史数据
 
@@ -83,7 +81,7 @@ npm --prefix web run dev -- --host 127.0.0.1
 make demo-stop
 ```
 
-此命令**未停止任何服务**。先在自己启动 API、ShopMate 网页、City Vite 的终端按 Ctrl-C，确认没有运行中的任务或未知写入，再在 ShopMate 目录执行：
+此命令**未停止任何服务**。先在自己启动的 API、可选商家 Web 开发服务与 City Vite 终端按 Ctrl-C，确认没有运行中的任务或未知写入，再在 ShopMate 目录执行：
 
 ```sh
 python3 scripts/local_runtime.py stop
