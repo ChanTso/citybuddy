@@ -53,7 +53,7 @@ flowchart TB
     Host -->|受限工具与用户操作| Commerce
     Host -->|SELECT-only 经营视图| DB[(MySQL)]
     Auth --> DB
-    Commerce --> DB
+    Commerce ---> DB
     Commerce --> Redis[(Redis)]
     Commerce --> MQ[RocketMQ]
 ```

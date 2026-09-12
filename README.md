@@ -53,7 +53,7 @@ flowchart TB
     Host -->|Scoped tools and user actions| Commerce
     Host -->|SELECT-only reporting views| DB[(MySQL)]
     Auth --> DB
-    Commerce --> DB
+    Commerce ---> DB
     Commerce --> Redis[(Redis)]
     Commerce --> MQ[RocketMQ]
 ```
