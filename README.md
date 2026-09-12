@@ -16,11 +16,11 @@ CityBuddy 负责业务规则、授权和事务；ShopMate 负责交互、对话�
 
 ## 代表性结果
 
-| 场景 | 实测结果 | 测量范围 |
-|---|---|---|
-| 售罄快速拒绝 | **6,000 请求/秒 · p99 4.92 ms · 零丢弃** | 32 活动、30 秒，180,002 次正确售罄拒绝；已验证工作点。[报告](bench/results/soldout_fixed_series_20260907.md) |
-| 单热点成单优化 | **等待 p99 9.26 → 1.70 秒** | 两版同为 200 请求/秒 × 300 秒，各完成 60,001 单；MySQL buffer pool 1 GiB。[对照](bench/results/seckill_order_final_comparison_20260908.md) |
-| 普通下单到模拟支付 | **4,801 次完整流程，订单、金额与库存核对一致** | 两轮各 20 流程/秒 × 120 秒，覆盖下单、支付尝试与成功回调。[基线](bench/results/order_payment_baseline_20260907.md) |
+| 实测结果 | 工作负载与记录 |
+|---|---|
+| **6,000 请求/秒 · p99 4.92 ms**<br>售罄拒绝，零丢弃 | 32 活动 × 30 秒，180,002 次正确拒绝。[报告](bench/results/soldout_fixed_series_20260907.md) |
+| **成单等待 p99：9.26 → 1.70 秒** | 同一热点 SKU，200 请求/秒 × 300 秒；两版各完成 60,001 单，MySQL buffer pool 1 GiB。[对照](bench/results/seckill_order_final_comparison_20260908.md) |
+| **4,801 次普通下单到模拟支付**<br>订单、金额与库存核对一致 | 两轮各 20 流程/秒 × 120 秒；覆盖下单、支付尝试和成功回调。[基线](bench/results/order_payment_baseline_20260907.md) |
 
 环境：MacBook Pro M4，Docker 8 CPU / 14 GB，Commerce 限 4 CPU，发生器与服务同机。
 成单等待为预约创建至订单创建的 SQL 时间差；各路径分别测量，售罄请求吞吐不等于成功成单能力。
