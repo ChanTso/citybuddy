@@ -1,53 +1,65 @@
-# 单热点成单：接收批量与批后等待组合对照
+<a id="单热点成单接收批量与批后等待组合对照"></a>
 
-本页为128MiB缓存下的历史实验。后续最终版本和完整8点结论见[最终组合对照](seckill_order_final_comparison_20260908.md)；本页的停止决定与单线程描述仅对应当时版本。
+# Single-hotspot order creation: receive batch size and inter-batch delay
 
-## 条件与问题
+This is a historical experiment with a 128MiB buffer pool. The final implementation and all eight later measurement points are in the [final comparison](seckill_order_final_comparison_20260908.md). The stopping decision and single-threaded implementation described here apply only to the version measured at that time.
 
-基线CityBuddy `76c293178923bf78e747ab1ba9590e6348108ad8`，label `a200r1_76c2931_20260907T145922Z`。调整后CityBuddy `2093b1355397ea330e9e03f806454722db1a2246`，label `aopt_2093b13_20260907T202251Z`。两点均M4、Docker8CPU/14,638,391,296 bytes、Commerce4CPU、VM内k6；单活动/单SKU、60050独立用户和库存配额，200新请求/秒持续300秒，无正向预热。逐次新幂等键，登录造数不计入。
+<a id="条件与问题"></a>
 
-基线逐笔串行事务后ACK，每次最多16条、批后等待50ms；调整后最多32条、等待10ms。收消息等待1秒、不可见期10秒、超时派发和取消节拍、事务写入、持久化配置保持。组合目标是减少串行消费链路中的批次与等待开销，不预先认定收消息、SQL、ACK或调度中哪项占主导。
+## Conditions and question
 
-沿用相同k6与周期SQL/资源观察；当前完整后置SQL客户端上限60秒，基线原15秒失败后同SQL60秒重查成功，不改变输入期观察。数据库历史持续累积，缓存初态和后台工作不完全相同，不声称磁盘/内存逐字节相同；不是生产容量或精确最大TPS。
+Baseline CityBuddy: `76c293178923bf78e747ab1ba9590e6348108ad8`, label `a200r1_76c2931_20260907T145922Z`. Modified CityBuddy: `2093b1355397ea330e9e03f806454722db1a2246`, label `aopt_2093b13_20260907T202251Z`. Both used an M4, Docker with 8CPU / 14,638,391,296 bytes, Commerce limited to 4CPU, and k6 inside the VM. Each used one activity / SKU, 60050 distinct users and matching stock/quota, with 200 new requests/s for 300 seconds and no successful-admission warm-up. Every request used a new idempotency key; login and fixture preparation were outside the window.
 
-## 结果
+The baseline processed each transaction and ACK serially, receiving up to 16 messages per batch and waiting 50ms afterward. The modified version received up to 32 and waited 10ms. The 1-second receive wait, 10-second invisibility period, timeout-dispatch and cancellation cadence, transaction writes, and persistence settings were unchanged. The combined change targeted batching and waiting overhead in the serial consumer; it did not assume that receiving, SQL, ACK, or scheduling was the dominant component.
 
-| 指标 | 16条／50ms | 32条／10ms |
+Both used the same k6 workload and periodic SQL/resource observation. The current full post-run SQL used a 60-second client timeout; the baseline's original 15-second query timed out, then the same SQL succeeded with 60 seconds. This did not change observation during input. Database history accumulated, and initial cache state and background work were not identical. This is neither a byte-identical disk/memory comparison nor a production-capacity or exact maximum-TPS claim.
+
+<a id="结果"></a>
+
+## Results
+
+| Metric | 16 messages / 50ms | 32 messages / 10ms |
 |---|---:|---:|
-| 新获准请求／最终成单 | 60001／60001 | 60001／60001 |
-| HTTP失败／丢弃／中断 | 0／0／0 | 0／0／0 |
-| 预约落库至成单p50 | 36989.468ms | 37.330ms |
-| 同口径p95 | 87338.829ms | 2684.519ms |
-| 同口径p99（保留启动） | 91124.602ms | 5343.929ms |
-| 同口径最大等待 | 95255.726ms | 7768.808ms |
-| 5秒采样最大未成单 | 12294 | 730 |
-| 5秒采样最大待超时派发 | 16 | 23 |
-| 输入中后段积压 | 持续增长 | 能回落并跟随输入 |
+| Newly admitted requests / final orders | 60001 / 60001 | 60001 / 60001 |
+| HTTP failures / dropped / interrupted iterations | 0 / 0 / 0 | 0 / 0 / 0 |
+| Reservation persistence to order creation, p50 | 36989.468ms | 37.330ms |
+| Same interval, p95 | 87338.829ms | 2684.519ms |
+| Same interval, p99, including startup | 91124.602ms | 5343.929ms |
+| Same interval, maximum wait | 95255.726ms | 7768.808ms |
+| Maximum sampled uncreated orders, 5-second cadence | 12294 | 730 |
+| Maximum sampled pending timeout dispatches, 5-second cadence | 16 | 23 |
+| Backlog in the middle and later input window | Continued growing | Fell again and tracked input |
 
-新点五个完整分钟的产出为199.7000、198.9333、201.0333、197.2333、202.7500单/秒；最后22笔是不足一分钟的尾部，不能以22/60当尾部消费能力。新点预约分钟p99分别6937.574、1050.409、156.085、1414.026、336.338ms，整体仍有启动和间歇等待，不能用后段分位替代全窗5.34秒。
+Output in the modified run's five complete minutes was 199.7000, 198.9333, 201.0333, 197.2333, and 202.7500 orders/s. The final 22 orders occupied an incomplete minute; 22/60 is not a tail consumption-capacity estimate. Reservation-minute p99 values were 6937.574, 1050.409, 156.085, 1414.026, and 336.338ms. Startup and intermittent waiting remained; later-minute percentiles cannot replace the full-window 5.34 seconds.
 
-完整原始HTTP窗口20:24:35.444784260–20:29:35.074145926 UTC，60001次201/ADMITTED/replay=false，所有HTTP计时分量未发现负值，HTTP p99 42.807667ms。HTTP准入延迟不是成单等待。SQL最后一单创建时间20:29:35.104352 UTC，距最后HTTP约30.206ms；这个跨HTTP与数据库时间的差值不等于ACK完成或全部超时派发清空。
+The complete raw HTTP window was 20:24:35.444784260–20:29:35.074145926 UTC: 60001 responses with 201 / ADMITTED / replay=false, no negative HTTP timing components, and HTTP p99 of 42.807667ms. HTTP admission latency is not order-creation wait. SQL records the last order's creation at 20:29:35.104352 UTC, approximately 30.206ms after the last HTTP point. This cross-clock difference does not establish ACK completion or clearance of all timeout dispatches.
 
-## 正确性与观察限制
+<a id="正确性与观察限制"></a>
 
-完整after SQL确认60001订单、60001库存/配额扣减，库存49+60001=60050；缺单、重复用户/预约、绑定、账本、截止时间及负等待错误均0。20:33:16.812012 UTC独立分组SQL确认60001 UNPAID/SENT、60001 ORDERED/ADMITTED；两个MQ组Diff/Inflight0、Redis handoff0。
+## Correctness and observation limits
 
-观察器在最后一段资源采样遇到docker stats EOF并退出，与k6容器退出时间相近；未独立证明根因。原错误及61次进度样本保留，输入脚本成功不代表观察器成功。最后常规样本为59328成单/4待成单/4待派发，不能声称停压后首个5秒样本已清空。后置SQL和独立分组补齐最终正确性；没有可与基线(89.16,95.04]秒直接对照的精确全链路排空区间，因此不虚构排空提升比例。
+Full after SQL confirmed 60001 orders and 60001 stock/quota deductions, with stock conservation of 49+60001=60050. Missing orders, duplicate users/reservations, binding, ledger, deadline, and negative-wait errors were all 0. At 20:33:16.812012 UTC, independent grouped SQL confirmed 60001 UNPAID/SENT orders and 60001 ORDERED/ADMITTED reservations; both MQ groups had Diff/Inflight 0 and Redis handoff was 0.
 
-资源采样范围包含启动且末尾中断：Commerce峰177.27%、k615.45%、MySQL45.05%、Redis5.89%、Broker102.95%；Commerce节流增量7次/461611微秒。它们不是瓶颈根因证明，也不作为独立CPU优化收益。
+The observer exited on docker stats EOF during the final resource sample, close to the k6 container's exit; the cause was not independently established. The original error and 61 progress samples are retained. Successful input-script completion does not imply successful observer completion. The last regular sample had 59328 created / 4 pending creation / 4 pending dispatch; it cannot establish clearance at the first 5-second sample after input stopped. Post-run SQL and independent grouped checks establish final correctness. There is no exact end-to-end drain interval directly comparable with the baseline's (89.16,95.04] seconds, so no drain-time improvement ratio is claimed.
 
-## 判定与取舍
+Resource sampling included startup and an interrupted tail: Commerce peaked at 177.27%, k6 at 15.45%, MySQL at 45.05%, Redis at 5.89%, and Broker at 102.95%. Commerce throttling increased by 7 events / 461611 microseconds. These observations neither prove the root bottleneck nor establish a separate CPU improvement.
 
-相同200/s负载下，组合调整使后段成单跟上输入，全窗等待p99从91.12秒降至5.34秒，最大采样积压从12294降至730；最终业务SQL正确。结果足以支持一次整体改进，不继续拆因素、追更高档位或追加并发架构。保留单线程与逐条事务ACK，减小等待会提高立即失败时的重试频率；正常空闲仍由长轮询阻塞。
+<a id="判定与取舍"></a>
 
-这是一次前后对照，不宣称通过多轮重复确定新容量上限。五分钟未付款成单不代表未付取消全生命周期稳态。自然取消恢复另记，恢复期间的整理工作不属于性能对照窗口。
+## Decision and tradeoffs
 
-本地验证：make java-ci python-ci web-ci repo-ci、make test-catalog-integration全部通过；独立只读代码评审无阻断项。基线原件见[基线报告](orders_a200r1_76c2931_20260907T145922Z_report.md)及其归档。新点同label的setup、k6、progress/resources、before/after、drained_groups、原生SQL及MQ原件保留。
+At the same 200/s load, the combined change allowed later order creation to track input, reduced full-window wait p99 from 91.12 seconds to 5.34 seconds, and reduced maximum sampled backlog from 12294 to 730. Final business SQL was correct. At this stage, the result supported one combined improvement without further factor separation, higher-rate exploration, or concurrent-consumer restructuring. The single thread and per-order transaction/ACK were retained. A shorter delay increases retry frequency on immediate failures; normal idle reception still blocks in long polling.
 
-## 测量后的清理资源调整
+This was one before/after comparison, not a new capacity ceiling established through repeated runs. Five minutes of unpaid order creation does not demonstrate steady state over the complete unpaid-order cancellation lifecycle. Natural cancellation recovery is recorded separately; cleanup during recovery is outside the performance comparison.
 
-正式HTTP和成单SQL核对均在20:33 UTC前结束。随后未付订单自然取消较慢，20:51:32仍有55481笔未付款。为了缩短纯清理等待，在20:54:25 UTC将MySQL运行时buffer pool从134217728临时增至1073741824 bytes；记录确认MySQL8.4.10、flush-at-commit=1和sync-binlog=1不变，未改取消业务代码、事务或消息。此后取消耗时不与旧基线比较，不能当作同配置取消性能成绩；最终清理完成后恢复原缓存值并记录。正式200/s前后对照的缓存配置均为原128MiB。
+Local validation: `make java-ci python-ci web-ci repo-ci` and `make test-catalog-integration` passed. Independent read-only code review found no blocking issues. Baseline originals are linked from the [baseline report](orders_a200r1_76c2931_20260907T145922Z_report.md) and its archive. The new point retains same-label setup, k6, progress/resources, before/after, drained_groups, and native SQL/MQ outputs.
 
-最终清理：2026-09-07 21:37:36 UTC SQL确认60001笔全部CANCELLED，库存及活动配额恢复60050，成单/取消流水各60001，未结预约、坏取消绑定、未完成准入及未派发超时均0；两个MQ组Diff/Inflight与Redis handoff均0。21:38:25恢复buffer pool为134217728 bytes，21:38:51确认缩容完成（状态0、进度100%）。原公共签名元数据已恢复，测试应用及依赖随后停止，保留数据卷。
+<a id="测量后的清理资源调整"></a>
 
-原件：[正式200/s测量](seckill-orders-aopt-20260908.tar.gz)、[后置恢复与缓存还原](seckill-orders-aopt-recovery-20260908.tar.gz)。后一个归档的清理耗时不参与上述性能对照。
+## Post-measurement cleanup resource adjustment
+
+Formal HTTP measurement and order SQL checks both finished before 20:33 UTC. Natural cancellation of unpaid orders was subsequently slow: 55481 orders remained unpaid at 20:51:32. To shorten cleanup-only waiting, MySQL's runtime buffer pool was temporarily increased from 134217728 to 1073741824 bytes at 20:54:25 UTC. The record confirms unchanged MySQL 8.4.10, flush-at-commit=1, and sync-binlog=1; cancellation code, transactions, and messages were not changed. Subsequent cancellation duration is not compared with the old baseline and is not a same-configuration cancellation-performance result. The original buffer size was restored and recorded after final cleanup. Both formal 200/s comparison runs used the original 128MiB configuration.
+
+Final cleanup: at 2026-09-07 21:37:36 UTC, SQL confirmed all 60001 orders CANCELLED, stock and activity quota restored to 60050, and 60001 creation and cancellation ledger entries each. Unsettled reservations, invalid cancellation bindings, unfinished admissions, and undispatched timeouts were all 0; both MQ groups' Diff/Inflight and Redis handoff were 0. The buffer pool was restored to 134217728 bytes at 21:38:25; shrink completion was confirmed at 21:38:51, with status 0 and progress 100%. Original public signing metadata was restored, then test applications and dependencies were stopped while retaining volumes.
+
+Originals: [formal 200/s measurement](seckill-orders-aopt-20260908.tar.gz), [post-run recovery and buffer restoration](seckill-orders-aopt-recovery-20260908.tar.gz). Cleanup durations in the latter archive are excluded from the performance comparison above.

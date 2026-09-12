@@ -1,10 +1,9 @@
-![CityBuddy · Commerce & Identity](docs/assets/cover.png)
-
 # CityBuddy
 
 [English](README.md) · **简体中文** · [参与贡献](CONTRIBUTING.md)
 
 [![CI](https://github.com/ChanTso/citybuddy/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/ChanTso/citybuddy/actions/workflows/ci.yml)
+[![Ask DeepWiki](https://deepwiki.com/badge.svg)](https://deepwiki.com/ChanTso/citybuddy)
 
 **零售交易与身份后端：从并发准入到订单落库，从受限委托到确认执行。**
 
@@ -46,13 +45,13 @@ CityBuddy 负责业务规则、授权和事务；ShopMate 负责交互、对话�
 ## 服务与数据边界
 
 ```mermaid
-flowchart LR
-    Client[ShopMate Android / iOS] --> Host[ShopMate API / Agents]
+flowchart TB
+    Client[ShopMate Android / iOS] --> Host[ShopMate API 与 Agent]
     Web[ShopMate 商家 Web] --> Host
-    Client -->|秒杀| Commerce[Commerce / Java]
-    Host -->|登录与委托交换| Auth[Auth / Java]
-    Host -->|受限工具 / 人工确认| Commerce
-    Host -->|只读经营视图| DB[(MySQL)]
+    Client -->|秒杀预约与状态查询| Commerce[Commerce: Java]
+    Host -->|登录与受限委托交换| Auth[Auth: Java]
+    Host -->|受限工具与用户操作| Commerce
+    Host -->|SELECT-only 经营视图| DB[(MySQL)]
     Auth --> DB
     Commerce --> DB
     Commerce --> Redis[(Redis)]
@@ -81,7 +80,7 @@ uv run uvicorn shopmate.app:create_app --factory --host 127.0.0.1 --port 8101
 
 打开商家工作台 **http://127.0.0.1:8101/**；买家使用 [Android](https://github.com/ChanTso/shopmate/blob/main/android/README.md)
 或 [iOS](https://github.com/ChanTso/shopmate/blob/main/ios/README.md) 客户端。Auth/Commerce 使用 9081/9082，Web 由 ShopMate API 同源提供。
-首次启动、模型配置、演示账号及停止步骤见 [ShopMate 运行说明](https://github.com/ChanTso/shopmate/blob/main/docs/RUNTIME.md#本地运行)；已有零售数据时 `up` 保留业务变更。
+首次启动、模型配置、演示账号及停止步骤见 [ShopMate 运行说明](https://github.com/ChanTso/shopmate/blob/main/docs/RUNTIME.md#run-locally)；已有零售数据时 `up` 保留业务变更。
 
 ## 验证与进一步阅读
 

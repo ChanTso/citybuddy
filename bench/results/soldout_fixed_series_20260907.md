@@ -1,49 +1,59 @@
-# 固定预热的本机售罄系列
+<a id="固定预热的本机售罄系列"></a>
 
-## 最终采用范围
+# Local sold-out series with fixed warm-up
 
-售罄上限探索已停止。最终选择6000/s、30秒独立固定负载的已验证工作点（单次，不称最高或长期稳态）；9000的计时异常及后续发生器校准完整保留。下文各点的“下一档”是当时记录，不是待执行计划。被测提交仍为下文76c2931完整SHA。
+<a id="最终采用范围"></a>
 
-被测CityBuddy：`76c293178923bf78e747ab1ba9590e6348108ad8`。M4，Docker8CPU/14GB（14,638,391,296 bytes）、Commerce4CPU；发生器与服务同Docker VM网络。每点独立32活动，各10配额，由320个独立准备买家真实耗尽；负载使用另16384买家，逐次新幂等键。固定500VU，1000/s预热30秒、间隔5秒，再进入正式窗口。登录与造数不计入测量。每点后等待未付取消和最后拒绝15分钟TTL及回收背景，不清库或关闭AOF。
+## Final scope of use
 
-## 4000/s 控制点（后续阶梯未完成）
+Sold-out limit exploration has stopped. The final selected result is the verified 6000/s, 30-second independent fixed-load work point: a single run, not the maximum or a long-run steady-state claim. The 9000 timing anomaly and subsequent generator calibrations remain intact. References below to a “next point” describe decisions at the time, not pending work. The measured revision remains the full 76c2931 SHA below.
 
-label：`b4000r1_76c2931_20260907T160828Z`。正式时间2026-09-07 16:10:48.172443–16:11:18.169443 UTC，30秒120000次全部409/EXHAUSTED/replay=false；失败、丢弃、中断与负HTTP时长均0。p99 3.075931ms，p50约0.3ms。预热30001次另列，p99约13.707ms，不计入正式吞吐。完整HTTP分位按原始k6 Point线性插值，未剔除任何正式样本。
+Measured CityBuddy: `76c293178923bf78e747ab1ba9590e6348108ad8`. M4, Docker 8 CPUs / 14 GB (14,638,391,296 bytes), Commerce 4 CPUs; generator and services share the Docker VM network. Each point uses 32 independent activities, with quota 10 each, exhausted through actual purchases by 320 separate preparation buyers. Load uses another 16384 buyers and a new idempotency key for every request. Fixed 500 VUs, 1000/s warm-up for 30 seconds, a 5-second gap, then the measured window. Login and fixture preparation are excluded. After each point, unpaid cancellation, the last rejection's 15-minute TTL and background reclamation are allowed to finish; the database is not cleared and AOF is not disabled.
 
-前后SQL均为320 ORDERED/ADMITTED、320 UNPAID/SENT，库存1999680、扣减320，账本320，无孤儿或归属绑定不符；正式拒绝没有新增数据库订单/预约/扣减。事务MQ Diff/Inflight0。此时未来未付取消另计，不能把这份after当取消后的库存结果。
+<a id="4000s-控制点后续阶梯未完成"></a>
 
-正式HTTP时间范围内6个资源采样：Commerce峰92.42%、k6 99.48%、Redis35.64%、MySQL2.51%、Broker110.75%。首末两个窗内cgroup计数均nr_throttled=8、throttled_usec=287031，采样之间未增加；不能用两个不覆盖边缘的点断言完整窗口精确零节流。当前数据未显示Commerce四核达到上限，也未证明发生器或任何依赖已到顶。
+## 4000/s control point (subsequent ladder incomplete)
 
-Redis used_memory从79112856至327530088 bytes，增加248417232 bytes；按预热与正式合计150001请求约1656.10 bytes/请求。RSS106713088→342904832；前后AOF rewrite均不在进行中，但累计rewrites从8增至11，不能称整个窗口无rewrite。expired_keys未增加，三项短期状态仍在TTL内。这个增量仅用于下一档内存估算，不是Redis长期稳态容量。
+Label: `b4000r1_76c2931_20260907T160828Z`. Measured interval: 2026-09-07 16:10:48.172443–16:11:18.169443 UTC. All 120000 requests in 30 seconds returned 409/EXHAUSTED/replay=false; failures, drops, interruptions and negative HTTP durations were all zero. p99 3.075931 ms, p50 approximately 0.3 ms. The 30001 warm-up requests are separate, with p99 approximately 13.707 ms, and excluded from measured throughput. HTTP percentiles use linear interpolation over original k6 Points without removing measured samples.
 
-原件：同label的`k6_*`、`rejection_*_before/after.txt`、`rejection_prep_*.jsonl`及`seckill_*_setup.txt`。后续阶梯与重复点完成后再给系列结论；不能把此单点称售罄上限。
+Before/after SQL both show 320 ORDERED/ADMITTED and 320 UNPAID/SENT, inventory 1999680, 320 deductions and 320 ledger entries, with no orphans or ownership-binding mismatches. Measured rejections created no additional database orders, reservations or deductions. Transaction MQ Diff/Inflight is zero. Future unpaid cancellations are separate; this after-state is not the post-cancellation inventory result.
 
-冷却记录：16:27:20已全部320 CANCELLED；16:28:14完整SQL确认库存恢复2000000、各活动配额10、取消/成单流水各320，绑定错误及未结束任务0；两个MQ及handoff0。16:27:20/16:29:02两次Redis原生快照used_memory为91939240/89133624 bytes，AOF rewrite/scheduled均0，expired_keys765739/771002。RSS未回到起始值，少量到期物理回收继续进行，不宣称与起始逐字节相同。原件`recovery_b4000r1_76c2931_20260907T160828Z_final_1788798494430603000.txt`、`recovery_mq_b4000r1_76c2931_20260907T160828Z_1788798527244624000.txt`及同label两份rejection_cooldown。
+Six resource samples fall within the measured HTTP interval: peaks of Commerce 92.42%, k6 99.48%, Redis 35.64%, MySQL 2.51% and Broker 110.75%. The first and last in-window cgroup counts both show nr_throttled=8 and throttled_usec=287031, with no increase between them. Two samples that omit the window edges cannot establish exactly zero throttling over the whole window. The data does not show Commerce reaching its four-CPU limit or prove that the generator or a dependency reached its ceiling.
 
-## 6000/s 点
+Redis used_memory rose from 79112856 to 327530088 bytes, an increase of 248417232 bytes, approximately 1656.10 bytes/request across 150001 warm-up and measured requests. RSS was 106713088 → 342904832. No AOF rewrite was active at either snapshot, but cumulative rewrites rose from 8 to 11, so the window cannot be described as rewrite-free. expired_keys did not increase; the three short-lived state entries remained within TTL. This increment only estimates memory for the next load point, not Redis long-run steady-state capacity.
 
-label：`b6000r1_76c2931_20260907T163035Z`。正式HTTP时间16:32:49.955178–16:33:19.952130 UTC，实际180002次均409/EXHAUSTED/replay=false，零失败/丢弃/中断/负HTTP时长，p99 4.915332ms。边界多两次按实际保留；预热30001另列，p99 13.797833ms。前后SQL仍320 ORDERED/ADMITTED、UNPAID/SENT，扣库存及账本320、库存1999680、绑定错误0，MQ Diff/Inflight0。
+Raw artifacts: same-label `k6_*`, `rejection_*_before/after.txt`, `rejection_prep_*.jsonl` and `seckill_*_setup.txt`. At this stage, a series conclusion awaited further points and repeats; this single point was not the sold-out limit.
 
-正式6资源采样Commerce峰143.13%、k6 129.74%、Redis63.38%、MySQL3.11%、Broker115.29%；首末窗内throttle计数均12/601956微秒。未出现持续打满Commerce4核或发生器调度不足的证据。Redis used_memory87879400→423686072，增加335806672 bytes，按210003总请求约1599.06 bytes/请求；RSS123678720→439824384；expired_keys增加374，表明上一点少量物理过期回收尾部存在。AOF前后无rewrite进行，但累计rewrite11→13，不能称窗口内没重写。
+Cooldown: all 320 orders were CANCELLED by 16:27:20. At 16:28:14, full SQL confirmed restored inventory 2000000, quota 10 per activity, 320 cancellation and 320 creation ledger entries, and zero binding errors or unfinished work; both MQ groups and handoff were zero. Native Redis snapshots at 16:27:20/16:29:02 showed used_memory 91939240/89133624 bytes, AOF rewrite/scheduled zero and expired_keys 765739/771002. RSS did not return to its initial value and a small amount of physical expiry reclamation continued; byte-for-byte equality with the starting state is not claimed. Originals: `recovery_b4000r1_76c2931_20260907T160828Z_final_1788798494430603000.txt`, `recovery_mq_b4000r1_76c2931_20260907T160828Z_1788798527244624000.txt`, and two same-label rejection_cooldown files.
 
-6000/s仍不是已测上限。下一档9000/s，按当前每请求约1.6KB估计预热+正式300000请求新增约480MB状态，保持CPU、TTL与持久化配置；先完成本点自然取消和TTL冷却再准备新夹具。
+<a id="6000s-点"></a>
 
-[4000点原始输出无损归档](soldout-b4000r1-20260907.tar.gz)包含正式、预热、准备和自然恢复记录。其余点在恢复完成后分别归档。
+## 6000/s point
 
-6000点冷却：16:49:20已320 CANCELLED；16:49:56完整SQL确认库存2000000、各活动配额10、两个流水各320、错误及未结束任务0；MQ/handoff0。16:49:20/16:50:39 Redis used_memory96651736/91890552 bytes，expired_keys1388074/1396987，AOF rewrite/scheduled均0；背景CPU记录另存。保留小量物理过期尾部和RSS差异。原件`recovery_b6000r1_76c2931_20260907T163035Z_final_1788799796582807000.txt`及`recovery_mq_b6000r1_76c2931_20260907T163035Z_1788799814242924000.txt`。
+Label: `b6000r1_76c2931_20260907T163035Z`. Measured HTTP interval: 16:32:49.955178–16:33:19.952130 UTC. All 180002 actual requests returned 409/EXHAUSTED/replay=false, with zero failures, drops, interruptions or negative HTTP durations; p99 4.915332 ms. The two extra boundary requests remain in the actual count. Warm-up is separate: 30001 requests, p99 13.797833 ms. Before/after SQL still show 320 ORDERED/ADMITTED and UNPAID/SENT, 320 stock deductions and ledger entries, inventory 1999680, zero binding errors and MQ Diff/Inflight zero.
 
-[6000点原始输出无损归档](soldout-b6000r1-20260907.tar.gz)。
+The six measured resource samples peak at Commerce 143.13%, k6 129.74%, Redis 63.38%, MySQL 3.11% and Broker 115.29%; first/last in-window throttle counts are both 12/601956 microseconds. There is no evidence of sustained saturation of Commerce's 4 CPUs or insufficient generator scheduling. Redis used_memory was 87879400 → 423686072, up 335806672 bytes, approximately 1599.06 bytes/request across 210003 total requests. RSS was 123678720 → 439824384; expired_keys increased by 374, showing a small physical-expiry tail from the prior point. No AOF rewrite was active at the endpoints, but cumulative rewrites increased 11 → 13; the window was not necessarily rewrite-free.
 
-## 9000/s 点：数量正确，计时有异常
+6000/s is still not a measured limit. The next planned point was 9000/s. At approximately 1.6 KB/request, 300000 warm-up plus measured requests were expected to add about 480 MB of state, keeping CPU, TTL and durability settings unchanged. Natural cancellation and TTL cooldown were to finish before preparing the new fixture.
 
-被测CityBuddy仍为`76c293178923bf78e747ab1ba9590e6348108ad8`。label：`b9000r1_76c2931_20260907T165208Z`，正式HTTP窗口16:54:20.193317–16:54:50.189658 UTC，270001次全部409/EXHAUSTED/replay=false，失败、丢弃、中断0。预热30001次另列。前后SQL保留320准备订单，库存1999680、账本320，绑定及孤儿错误0，事务MQ无积压。
+The [4000-point lossless raw archive](soldout-b4000r1-20260907.tar.gz) includes measured, warm-up, preparation and natural-recovery records. Other points were archived separately after recovery.
 
-正式样本有两条负http_req_duration（-0.987848/-0.882348ms），对应sending为-1.476806/-1.413223ms，发生在16:54:42.531515291/16:54:42.531548166，两条均HTTP/1.1、409、连接耗时0。原始线性p99为13.441083ms，但这份延迟记录不能称为干净成绩；不剔除或截零。固定镜像实际为k6 v2.2.0、Go1.26.5、linux/arm64。该版[HTTP tracer](https://github.com/grafana/k6/blob/v2.2.0/lib/netext/httpext/tracer.go)以UnixNano差值计算阶段时长；[上游类似问题](https://github.com/grafana/k6/issues/1872)不能证明本次根因。计时异常不等同于服务吞吐过载，也不能据此推断浏览器干扰。
+6000-point cooldown: 320 orders were CANCELLED by 16:49:20. Full SQL at 16:49:56 confirmed inventory 2000000, quota 10 per activity, 320 entries in each ledger, zero errors or unfinished work, and MQ/handoff zero. At 16:49:20/16:50:39, Redis used_memory was 96651736/91890552 bytes, expired_keys 1388074/1396987, and AOF rewrite/scheduled zero. Background CPU is recorded separately. Small physical-expiry tails and RSS differences are retained. Originals: `recovery_b6000r1_76c2931_20260907T163035Z_final_1788799796582807000.txt` and `recovery_mq_b6000r1_76c2931_20260907T163035Z_1788799814242924000.txt`.
 
-正式6个资源采样峰值Commerce186.38%、k6 162.91%、Redis43.06%、MySQL2.55%、Broker116.55%；窗内首末throttle计数同为8/271264微秒。尚无持续打满Commerce四核的证据。Redis used_memory88247096→584541048 bytes，增496293952，按300002总请求约1654.30 bytes/请求；RSS132964352→602361856，expired_keys1404958→1405872。原始JSON约2.4GB，写出延续至16:57:14，后处理CPU不计入正式HTTP窗口。
+[6000-point lossless raw archive](soldout-b6000r1-20260907.tar.gz).
 
-17:10:51自然恢复快照已320 CANCELLED，Redis used_memory75937976 bytes、expired_keys2304453、AOF rewrite0；17:15:02完整SQL确认库存2000000、32活动各配额10、成单及取消流水各320、绑定及未完成错误0；两个MQ与handoff均0。对应原件`recovery_b9000r1_76c2931_20260907T165208Z_final_1788801302425040000.txt`与`recovery_mq_b9000r1_76c2931_20260907T165208Z_1788801584785252000.txt`。
+<a id="9000s-点数量正确计时有异常"></a>
 
-9000/s没有构成吞吐坏档。后续改用一次连续短阶梯粗探区间，再用独立固定负载确认。多阶段共用夹具、累积Redis状态的探索不能与以上独立点混成正式容量对照；3,000到9,000的数字变化也不是代码优化收益。
+## 9000/s point: correct counts, anomalous timing
 
-[9000点原始输出无损归档](soldout-b9000r1-20260907.tar.gz)，包括负计时原件与自然恢复。
+Measured CityBuddy remains `76c293178923bf78e747ab1ba9590e6348108ad8`. Label: `b9000r1_76c2931_20260907T165208Z`. Measured HTTP window: 16:54:20.193317–16:54:50.189658 UTC. All 270001 requests returned 409/EXHAUSTED/replay=false; failures, drops and interruptions were zero. The 30001 warm-up requests are separate. Before/after SQL retain 320 preparation orders, inventory 1999680, 320 ledger entries, zero binding or orphan errors, and no transaction-MQ backlog.
+
+Two measured http_req_duration samples are negative (-0.987848/-0.882348 ms), with sending values -1.476806/-1.413223 ms at 16:54:42.531515291/16:54:42.531548166. Both used HTTP/1.1, returned 409 and had zero connection duration. Raw linear p99 is 13.441083 ms, but this latency record is not a clean result; samples are neither removed nor clamped to zero. The pinned image actually contains k6 v2.2.0, Go 1.26.5, linux/arm64. That version's [HTTP tracer](https://github.com/grafana/k6/blob/v2.2.0/lib/netext/httpext/tracer.go) calculates phase durations from UnixNano differences; a [similar upstream issue](https://github.com/grafana/k6/issues/1872) does not establish the cause here. Timing anomalies are not throughput overload and do not establish browser interference.
+
+The six measured resource samples peak at Commerce 186.38%, k6 162.91%, Redis 43.06%, MySQL 2.55% and Broker 116.55%. First/last in-window throttle counts are both 8/271264 microseconds. There is still no evidence of sustained Commerce four-CPU saturation. Redis used_memory was 88247096 → 584541048 bytes, up 496293952, approximately 1654.30 bytes/request over 300002 total requests. RSS was 132964352 → 602361856; expired_keys 1404958 → 1405872. Raw JSON is approximately 2.4 GB and writing continued until 16:57:14. Post-processing CPU is outside the measured HTTP window.
+
+The natural-recovery snapshot at 17:10:51 showed 320 CANCELLED orders, Redis used_memory 75937976 bytes, expired_keys 2304453 and AOF rewrite zero. Full SQL at 17:15:02 confirmed inventory 2000000, quota 10 for each of 32 activities, 320 creation and 320 cancellation ledger entries, and zero binding or incomplete-work errors; both MQ groups and handoff were zero. Originals: `recovery_b9000r1_76c2931_20260907T165208Z_final_1788801302425040000.txt` and `recovery_mq_b9000r1_76c2931_20260907T165208Z_1788801584785252000.txt`.
+
+9000/s was not a throughput-overload point. The next approach used a short continuous ladder to bracket the range, followed by independent fixed-load confirmation. An exploratory run sharing fixtures and accumulating Redis state across stages is not merged with the independent points as a formal capacity comparison. The change from 3,000 to 9,000 is not a code-optimization gain.
+
+[9000-point lossless raw archive](soldout-b9000r1-20260907.tar.gz), including anomalous timing samples and natural recovery.

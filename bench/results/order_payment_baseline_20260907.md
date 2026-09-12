@@ -1,26 +1,29 @@
-# 普通下单与模拟支付：两次完整业务基线
+<a id="普通下单与模拟支付两次完整业务基线"></a>
 
-被测CityBuddy：`76c293178923bf78e747ab1ba9590e6348108ad8`。MacBook Pro M4，Docker 8CPU/14GB（实际14,638,391,296 bytes），Commerce限4CPU；k6在同一Docker网络。每轮32个新SKU，各1000库存，2450个新用户；20完整流程/s持续120秒，固定100VU。每笔依次调用下单、创建支付尝试、签名成功回调，预期HTTP201/201/200；登录、造数不计入测量。未并行模型、构建或其他压力；此前秒杀取消与MQ已清空。两轮同源码和配置，保留累积数据库历史。
+# Ordinary orders and simulated payment: two complete-flow baselines
 
-| 结果 | 第一轮 | 第二轮 |
+Measured CityBuddy: `76c293178923bf78e747ab1ba9590e6348108ad8`. MacBook Pro M4, Docker 8 CPUs / 14 GB (actual 14,638,391,296 bytes), Commerce limited to 4 CPUs; k6 runs on the same Docker network. Each run uses 32 new SKUs with 1000 units each and 2450 new users, at 20 complete flows/s for 120 seconds with 100 fixed VUs. Each flow submits an order, creates a payment attempt and sends a signed success callback, expecting HTTP 201/201/200. Login and fixture preparation are outside the measurement. No model calls, builds or other load ran concurrently; earlier flash-sale cancellation and MQ work had drained. Both runs use the same source and configuration while retaining accumulated database history.
+
+| Result | First run | Second run |
 |---|---:|---:|
-| 完整下单付款流程 | 2400 | 2401 |
-| HTTP请求数 | 7200 | 7203 |
-| 失败／丢弃／中断 | 0／0／0 | 0／0／0 |
-| 完整流程p50 / p99 | 10 / 84.02 ms | 9 / 84 ms |
-| 下单HTTP p99 | 22.682 ms | 22.349 ms |
-| 创建支付尝试HTTP p99 | 27.374 ms | 29.098 ms |
-| 回调HTTP p99 | 30.941 ms | 33.970 ms |
-| 支付金额（分） | 4,813,200 | 4,815,190 |
+| Complete order/payment flows | 2400 | 2401 |
+| HTTP requests | 7200 | 7203 |
+| Failed / dropped / interrupted | 0 / 0 / 0 | 0 / 0 / 0 |
+| Complete-flow p50 / p99 | 10 / 84.02 ms | 9 / 84 ms |
+| Order HTTP p99 | 22.682 ms | 22.349 ms |
+| Payment-attempt HTTP p99 | 27.374 ms | 29.098 ms |
+| Callback HTTP p99 | 30.941 ms | 33.970 ms |
+| Payment amount (minor units) | 4,813,200 | 4,815,190 |
 
-第二轮边界多启动一次，按实际2401笔报告，不裁掉原样本。四个阶段started/order_created/payment_started/paid分别全部一致；四阶段事件总数不是订单数。所有HTTP时长非负。完整流程为k6的Date.now差值，包含三次HTTP及客户端HMAC等处理；分位来自k6 summary。分阶段HTTP分位由原始Point按nearest-rank计算，不将三个p99相加。
+The second run started one extra flow at the window boundary. All 2401 are reported; no original samples are discarded. The four stages started/order_created/payment_started/paid have matching counts; their combined event count is not an order count. All HTTP durations are nonnegative. Complete-flow duration is a k6 Date.now difference, including the three HTTP calls and client-side HMAC work; percentiles come from the k6 summary. Per-stage HTTP percentiles use nearest-rank over original Points; the three p99 values are not added together.
 
-两次权威SQL均确认全部订单PAID、支付尝试SUCCEEDED、回调APPLIED，订单幂等键、支付流水和订单创建Outbox各一条；订单总额、支付尝试总额、支付流水总额三份独立汇总相同。32SKU库存差额均0，STANDARD_PAYMENT库存变化为0；owner/key、金额、币种、版本和回调绑定错误均0，无夹具外订单。Outbox为PENDING，此负载证明同事务持久化，不声称已经消费。不是整车结账、外部真实支付或退款测量。
+Both authoritative SQL checks confirm every order PAID, payment attempt SUCCEEDED and callback APPLIED, with one order idempotency key, payment ledger entry and order-created Outbox entry each. Independent totals for orders, payment attempts and payment ledgers agree. Inventory differences across all 32 SKUs are zero; STANDARD_PAYMENT causes zero inventory change. Owner/key, amount, currency, version and callback-binding errors are all zero, with no orders outside the fixture. Outbox rows are PENDING: this workload proves atomic persistence, not consumption. It does not measure whole-cart checkout, external real payment or refunds.
 
-结论：普通商城下单到模拟支付主链在20流程/s基线可重复完成且账务正确；未寻找该链路最大吞吐。该结果补齐主业务验证，不与秒杀售罄QPS或异步成单能力混写。
+Conclusion: the ordinary order-to-simulated-payment path repeatedly completes at the 20 flows/s baseline with correct accounting. Its maximum throughput was not sought. This validates a core business path separately from sold-out QPS and asynchronous order capacity.
 
-原件前缀（各有setup、before/after SQL、points、summary、console、cpu）：
+Raw prefixes (each includes setup, before/after SQL, points, summary, console and cpu):
+
 - `order_payment_normalr1_76c2931_20260907T160120Z_`
 - `order_payment_normalr2_76c2931_20260907T160434Z_`
 
-[原始输出无损归档](ordinary-payment-20260907.tar.gz)。包含该组原始k6、SQL及资源记录，未用重新计算的结果替代原件。
+[Lossless raw-output archive](ordinary-payment-20260907.tar.gz). It contains the original k6, SQL and resource records; recalculated results do not replace the originals.

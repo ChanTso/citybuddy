@@ -1,17 +1,19 @@
-# 交易工作点与最终成单对照
+<a id="交易工作点与最终成单对照"></a>
 
-基线及普通交易/售罄被测CityBuddy：`76c293178923bf78e747ab1ba9590e6348108ad8`。成单组合调整被测CityBuddy：`2093b1355397ea330e9e03f806454722db1a2246`。最终成单基线 `fe60d7c3c95eb09399a95562745e96ff5cc386c7`，最终优化被测 `9bb08c6087d9a73befb909b021debb30a9fb9aa1`；后来的结果文档提交不是被测业务版本。环境为本机M4、Docker8CPU/14GB、Commerce4CPU；每个场景独立夹具与窗口，登录造数不计入。
+# Transaction work points and final order-creation comparison
 
-| 业务问题 | 已验证结果 | 原始边界与报告 |
+CityBuddy baseline and ordinary-payment/sold-out revision: `76c293178923bf78e747ab1ba9590e6348108ad8`. Initial combined consumer adjustment: `2093b1355397ea330e9e03f806454722db1a2246`. Final order baseline: `fe60d7c3c95eb09399a95562745e96ff5cc386c7`; final optimized revision: `9bb08c6087d9a73befb909b021debb30a9fb9aa1`. Later result-document commits are not measured business revisions. Environment: local M4, Docker 8 CPUs / 14 GB, Commerce 4 CPUs. Each scenario has its own fixture and window; login and data preparation are excluded.
+
+| Business question | Verified result | Boundary and report |
 |---|---|---|
-| 售罄入口 | 6000/s、30秒180002次正确拒绝，p99 4.92ms、零丢弃 | [固定系列](soldout_fixed_series_20260907.md)：单次工作点，不是上限或长期稳态 |
-| 旧成单工作点 | 160/s×300秒两轮各48001单，200/s持续积压 | [160重复点](orders_a160r3_76c2931_20260907T141442Z_report.md)、[200基线](orders_a200r1_76c2931_20260907T145922Z_report.md) |
-| 最终成单对照 | 同200/s×300秒，60001笔全部成单、零丢弃，等待p99 9.26秒→1.70秒 | [最终8点报告](seckill_order_final_comparison_20260908.md)：共同1GiB缓存；复测59963笔全成单但有37次启动未发出，不称两轮零丢弃 |
-| 过载与派发恢复 | 最终400/s×300秒持续积压，120001笔最终完成；订单/派发停压后约3分钟清空 | [最终报告](seckill_order_final_comparison_20260908.md)：含一条负接收计时，不认证HTTP容量，不称稳定400/s |
-| 普通下单支付 | 20流程/s×120秒两轮4801笔，完整流程p99约84ms，SQL正确 | [普通交易基线](order_payment_baseline_20260907.md)：模拟支付，不是该路径最大吞吐 |
+| Sold-out entry | 6000/s, 180002 correct rejections in 30 seconds, p99 4.92 ms, zero drops | [Fixed series](soldout_fixed_series_20260907.md): one work point, not the limit or long-run steady state |
+| Earlier order work point | Two 160/s × 300-second runs each completed 48001 orders; 200/s accumulated backlog | [160 repeat](orders_a160r3_76c2931_20260907T141442Z_report.md), [200 baseline](orders_a200r1_76c2931_20260907T145922Z_report.md) |
+| Final order comparison | Same 200/s × 300 seconds, all 60001 orders completed with zero drops; wait p99 9.26 → 1.70 seconds | [Final eight-point report](seckill_order_final_comparison_20260908.md): common 1 GiB buffer pool; the repeat completed all 59963 orders but had 37 unissued startup iterations, so these are not two zero-drop passes |
+| Overload and dispatch recovery | Final 400/s × 300 seconds accumulated backlog; all 120001 orders eventually completed; order/dispatch backlog cleared about 3 minutes after input stopped | [Final report](seckill_order_final_comparison_20260908.md): one negative receiving-time sample; not certified HTTP capacity or stable 400/s |
+| Ordinary order/payment | Two 20 flows/s × 120-second runs completed 4801 flows, with full-flow p99 about 84 ms and correct SQL state | [Ordinary transaction baseline](order_payment_baseline_20260907.md): simulated payment, not maximum throughput for this path |
 
-售罄更高档与发生器校准保留[粗探](soldout_probe_20260907.md)、[固定14k](soldout_thousand_series_20260907.md)、[VU与输出校准](soldout_generator_calibration_20260907.md)及原始归档。它们记录测量限制，不能当成Commerce容量上限。各自不同被测SHA在报告中明确给出。
+Higher sold-out points and generator calibration remain in the [coarse probe](soldout_probe_20260907.md), [fixed 14k point](soldout_thousand_series_20260907.md), [VU/output calibration](soldout_generator_calibration_20260907.md) and raw archives. They describe measurement limits, not the Commerce capacity ceiling. Each report identifies its measured SHA.
 
-业务正确性来自权威SQL，计数和耗时来自k6原件与数据库时间。没有把拒绝QPS当成成单TPS，没有删除计时异常或失败观察，也没有以改变机器规格或持久化要求换取数字。
+Business correctness comes from authoritative SQL; counts and durations come from original k6 output and database timestamps. Rejection QPS is not reported as order TPS. Timing anomalies and failed observations remain recorded, and machine specifications or durability requirements were not relaxed to obtain the numbers.
 
-此前128MiB缓存的批量/节拍91.12秒→5.34秒对照作为[历史记录](seckill_order_consumer_comparison_20260908.md)保留，不与最终1GiB系列拼接。最终单热点最大容量未测定，售罄峰值探索已停止。
+The earlier batch/delay comparison with a 128 MiB buffer pool, 91.12 → 5.34 seconds, remains a [historical record](seckill_order_consumer_comparison_20260908.md) and is not spliced into the final 1 GiB series. The final single-hotspot maximum capacity remains undetermined; sold-out peak exploration has stopped.

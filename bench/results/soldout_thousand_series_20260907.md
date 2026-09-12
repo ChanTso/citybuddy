@@ -1,19 +1,21 @@
-# 售罄整千档固定负载确认
+<a id="售罄整千档固定负载确认"></a>
 
-CityBuddy完整SHA：`1ab85a460cea188c3f2f6770bdb1fa0c52e57922`。Java业务源码与`76c293178923bf78e747ab1ba9590e6348108ad8`相同；本轮make重新打包JAR，实际摘要见各setup原件，不宣称二进制摘要相同。M4、Docker8CPU/14,638,391,296 bytes、Commerce4CPU，k6与服务同VM网络。每个固定点独立32活动/320真实准备单/另16384买家，500固定VU，1000/s预热30秒、间隔5秒；正式30秒，各请求新幂等键。新点前保留自然取消和TTL恢复记录，不清理无关数据。
+# Fixed-load sold-out confirmation at thousand-request increments
 
-目标是把固定发生器配置下最后完整档和首次丢弃档收敛到相邻1000/s；HTTP预期409/EXHAUSTED/replay=false算正确。延迟边界单列，不把p99翻倍直接视为吞吐过载。不能将发生器边界等同于Commerce生产容量。
+Full CityBuddy SHA: `1ab85a460cea188c3f2f6770bdb1fa0c52e57922`. Java business source matches `76c293178923bf78e747ab1ba9590e6348108ad8`. make repackaged the JAR for this run; actual digests are in each setup artifact, with no claim of identical binary digests. M4, Docker 8 CPUs / 14,638,391,296 bytes, Commerce 4 CPUs; k6 and services share the VM network. Each fixed point uses 32 independent activities, 320 actual preparation orders, another 16384 buyers and 500 fixed VUs. Warm-up is 1000/s for 30 seconds, followed by a 5-second gap and a 30-second measured window; each request uses a new idempotency key. Natural cancellation and TTL-recovery records are retained before a new point; unrelated data is not cleared.
+
+The target was to narrow the last fully served point and first dropped-iteration point to adjacent 1000/s increments under a fixed generator configuration. Expected 409/EXHAUSTED/replay=false responses are correct business outcomes. Latency boundaries are separate; doubling p99 is not directly treated as throughput overload. A generator boundary is not Commerce production capacity.
 
 ## 14000/s
 
-label `b14000r1_1ab85a4_20260907T174705Z`。正式HTTP窗口17:49:39.032390970–17:50:09.030640178 UTC：415789次全部409/EXHAUSTED/replay=false，丢弃4218、HTTP失败0、中断0、负duration0；每计划30秒完成13859.6/s，线性p99 45.597811ms、最大113.013584ms。预热30000次另列，p99 6.368338ms。到达率调度边界多出的7个计划机会如实保留，不修正完成或丢弃数量。
+Label `b14000r1_1ab85a4_20260907T174705Z`. Measured HTTP interval: 17:49:39.032390970–17:50:09.030640178 UTC. All 415789 requests returned 409/EXHAUSTED/replay=false, with 4218 drops, zero HTTP failures, interruptions or negative durations. Completed throughput per planned 30 seconds was 13859.6/s; linear p99 45.597811 ms, maximum 113.013584 ms. Warm-up is separate: 30000 requests, p99 6.368338 ms. The seven extra scheduled opportunities at arrival-rate boundaries remain in the actual counts; completions and drops are not adjusted.
 
-丢弃原始时间分布为17:49:39=1431、:46=331、:49=305、:51=38、:55=741、:56=340、:57=21，17:50:01=11、:06=300、:07=519、:08=181，总4218；并非仅升档瞬间。k6提示500VU不足。正式6个资源样本峰Commerce273.62%、k6248.47%、Redis145.62%、MySQL3.01%、Broker110.76%，各峰未必同时。窗内首末Commerce throttle均10/550651微秒，没有四核持续打满证据。Redis容器CPU包含其后台工作；AOF rewrite累计17→18，不能将145.62%当成Redis主线程饱和证明。当前确定的是VU不足与分散丢弃，不能仅靠这些采样断定唯一底层限制侧。
+Raw drops were distributed as 17:49:39=1431, :46=331, :49=305, :51=38, :55=741, :56=340, :57=21, and 17:50:01=11, :06=300, :07=519, :08=181, totaling 4218. They were not limited to the step transition. k6 reported insufficient 500 VUs. The six measured resource samples peak at Commerce 273.62%, k6 248.47%, Redis 145.62%, MySQL 3.01% and Broker 110.76%; peaks need not be simultaneous. First/last in-window Commerce throttle counts are both 10/550651 microseconds, with no evidence of sustained four-CPU saturation. Redis container CPU includes background work; cumulative AOF rewrites increased 17 → 18, so 145.62% does not prove main-thread saturation. Insufficient VUs and distributed drops are established; these samples alone do not identify a unique underlying limit.
 
-前后SQL均320 ORDERED/ADMITTED、UNPAID/SENT，库存1999680、账本320、绑定错误0，没有新增成单。Redis used_memory75339968→817961768，增742621800 bytes，按445789次总HTTP约1665.86 bytes/次；expired_keys3505788未变，AOF两端rewrite0但期间累计有重写。完整SQL与资源原件包含实际时间；原始指标写出后的CPU不计入输入窗口。
+Before/after SQL both show 320 ORDERED/ADMITTED and UNPAID/SENT, inventory 1999680, 320 ledger entries, zero binding errors and no additional orders. Redis used_memory was 75339968 → 817961768, up 742621800 bytes, approximately 1665.86 bytes per HTTP request across 445789 total requests. expired_keys remained 3505788. AOF rewrite was zero at both endpoints, but cumulative counts show rewriting occurred in between. Full SQL and resource artifacts include actual timestamps; CPU after raw metric output is outside the input window.
 
-14k不是全量达标档，下一中间点12k。自然恢复及后续结果待补；此时还没有完成相邻整千档收敛。
+14k was not a fully served passing point. The next proposed midpoint was 12k; natural recovery and further results were pending at that time, and adjacent-thousand convergence was not complete.
 
-14k自然恢复：18:07:00已320 CANCELLED；18:07:50完整SQL确认库存2000000、各活动配额10、两个ledger各320、错误和未完成均0，两个MQ及handoff0。原件final_1788804470045257000及mq_1788804511703441000、cooldown_1788804420004805000。[原始输出无损归档](soldout-b14000r1-20260907.tar.gz)。
+14k natural recovery: 320 orders were CANCELLED by 18:07:00. Full SQL at 18:07:50 confirmed inventory 2000000, quota 10 per activity, 320 entries in each ledger, zero errors or incomplete work, and both MQ groups and handoff zero. Originals: final_1788804470045257000, mq_1788804511703441000 and cooldown_1788804420004805000. [Lossless raw archive](soldout-b14000r1-20260907.tar.gz).
 
-路线修订：暂停直接向12k二分，先在14k保持其他设置、把预分配VU从500改1000，校准发生器。500VU不足不能直接代表服务能力边界；新版结果单列，不声称业务性能优化。
+Route revision: binary search toward 12k was paused. The generator would first be calibrated at 14k with other settings unchanged, increasing preallocated VUs from 500 to 1000. Insufficient 500 VUs do not directly establish a service-capacity boundary. The new result is separate and is not claimed as a business-performance optimization.
