@@ -3,6 +3,7 @@
 [English](README.md) · **简体中文** · [参与贡献](CONTRIBUTING.md)
 
 [![CI](https://github.com/ChanTso/citybuddy/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/ChanTso/citybuddy/actions/workflows/ci.yml)
+[![Ask DeepWiki](https://deepwiki.com/badge.svg)](https://deepwiki.com/ChanTso/citybuddy)
 
 **零售交易与身份后端：从并发准入到订单落库，从受限委托到确认执行。**
 
