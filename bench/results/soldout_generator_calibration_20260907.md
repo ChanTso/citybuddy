@@ -1,31 +1,37 @@
-# 售罄发生器校准
+<a id="售罄发生器校准"></a>
 
-服务保持Commerce4CPU、Docker8CPU/14,638,391,296 bytes，M4同机VM网络、固定k6镜像、32活动/320真实准备单/另16384买家，1000/s预热30秒、5秒间隔、14000/s正式30秒、逐次新键；每点新夹具。改变发生器配置的结果不作为业务代码优化收益。
+# Sold-out load-generator calibration
 
-## 500→1000预分配VU
+Services retain Commerce 4 CPUs, Docker 8 CPUs / 14,638,391,296 bytes, the same M4 VM network, a fixed k6 image, 32 activities, 320 actual preparation orders and another 16384 buyers. Each point has a fresh fixture, a 1000/s warm-up for 30 seconds, a 5-second gap, 14000/s for 30 measured seconds and a new key per request. Generator-configuration changes are not business-code optimization gains.
 
-旧500VU点CityBuddy `1ab85a460cea188c3f2f6770bdb1fa0c52e57922`：415789次正确拒绝、4218丢弃、p99 45.597811ms，见[soldout_thousand_series](soldout_thousand_series_20260907.md)。
+<a id="5001000预分配vu"></a>
 
-1000VU点CityBuddy `c652870c545e87d82d832cd0fd4d2ad92582a51d`，label `bv1000_c652870_20260907T181205Z`。该提交只增加可记录的预分配/最大VU参数，Java业务源码不变。正式HTTP窗口18:14:31.217947925–18:15:01.217950925 UTC：415331次409/EXHAUSTED/replay=false、4685丢弃、HTTP失败/中断/负duration0；线性p99 85.869041ms、最大217.4ms。预热30000次另列，p99 6.618343ms。k6仍提示1000VU不足，不能认为单纯翻倍VU已解决发生器问题。
+## Preallocated VUs: 500 → 1000
 
-正式6个资源采样峰Commerce277.57%、k6259.72%、Redis122.61%、Broker110.01%、MySQL3.35%；首末窗内Commerce throttle均7/382333微秒，未见四核持续饱和。完整SQL仍320准备订单/成单账本，库存1999680、绑定错误0，没有拒绝请求产生新单。Redis used_memory75438528→817329568（增741891040 bytes），expired_keys4844115不变。AOF rewrite累计19→22，而旧500VU点17→18；虽然持久化配置相同，后台重写时序并不相同，不能把两点延迟差全部归因VU变化。
+Earlier 500-VU CityBuddy point `1ab85a460cea188c3f2f6770bdb1fa0c52e57922`: 415789 correct rejections, 4218 drops, p99 45.597811 ms; see [soldout_thousand_series](soldout_thousand_series_20260907.md).
 
-结论：本次增加VU没有消除丢弃，不继续无上限加VU。后续保持1000VU及相同14k业务负载，单独检验全量逐点输出的影响；原生汇总、业务结果与SQL依然保留。该诊断不是关闭正确性校验，也不是预先断定I/O为根因。自然恢复和输出诊断结果另补。
+1000-VU point: CityBuddy `c652870c545e87d82d832cd0fd4d2ad92582a51d`, label `bv1000_c652870_20260907T181205Z`. This commit only adds recorded preallocated/max-VU parameters; Java business source is unchanged. Measured HTTP interval: 18:14:31.217947925–18:15:01.217950925 UTC. There were 415331 responses of 409/EXHAUSTED/replay=false, 4685 drops, and zero HTTP failures, interruptions or negative durations. Linear p99 was 85.869041 ms, maximum 217.4 ms. Warm-up: 30000 requests separately, p99 6.618343 ms. k6 still reported insufficient 1000 VUs; doubling VUs did not resolve the generator problem.
 
-1000VU点恢复：18:29:35完整SQL确认320取消、库存2000000、各活动配额10、两ledger各320、错误0；MQ/handoff0。18:32:00 Redis used_memory108223768 bytes、expired_keys6177627、AOF rewrite/scheduled0，保留物理回收尾部而不声称逐字节回到起点。原件final_1788805775007157000、mq_1788805783600514000与cooldown_1788805920003388000。[原始输出无损归档](soldout-vu1000-20260907.tar.gz)。
+Six measured resource samples peak at Commerce 277.57%, k6 259.72%, Redis 122.61%, Broker 110.01% and MySQL 3.35%. First/last in-window Commerce throttle counts are both 7/382333 microseconds, without evidence of sustained four-CPU saturation. Full SQL still shows only 320 preparation orders and creation ledger entries, inventory 1999680, and zero binding errors; rejected requests created no orders. Redis used_memory was 75438528 → 817329568 bytes (up 741891040), with expired_keys unchanged at 4844115. Cumulative AOF rewrites were 19 → 22, versus 17 → 18 at the old 500-VU point. Equal durability settings do not imply identical background-rewrite timing; the full latency difference cannot be attributed to VUs.
 
-## 原生汇总输出对照
+Conclusion at this point: increasing VUs did not eliminate drops, so VUs would not be increased without bound. The next diagnostic retained 1000 VUs and the same 14k business load to isolate the effect of writing every metric point. Native summaries, business outcomes and SQL remained. This did not disable correctness checks or assume I/O was already the root cause. Natural recovery and the output diagnostic were recorded separately.
 
-CityBuddy `3ed99bc580ec7c72a557e72e1d8339a42cc3781a`，label `bsum_3ed99bc_20260907T183328Z`。保持1000VU、14000/s正式30秒和上述业务拓扑；改用k6原生分场景汇总，取消全量逐点JSON写出，HTTP请求与业务解析不变。提交新增的空threshold列表仅用于保留分场景原生聚合，不是通过条件。
+1000-VU recovery: full SQL at 18:29:35 confirmed 320 cancellations, inventory 2000000, quota 10 per activity, 320 entries in each ledger, zero errors and MQ/handoff zero. At 18:32:00 Redis used_memory was 108223768 bytes, expired_keys 6177627, AOF rewrite/scheduled zero. A physical-reclamation tail remained; byte-for-byte return to the initial state is not claimed. Originals: final_1788805775007157000, mq_1788805783600514000 and cooldown_1788805920003388000. [Lossless raw archive](soldout-vu1000-20260907.tar.gz).
 
-原生正式计数：418911请求、418911完整迭代、418911 EXHAUSTED/replay=false，HTTP失败0、dropped_iterations1111。整个运行448912完成、0中断（含30001预热）。原生console正式HTTP p99为64.54ms（工具显示精度），summary JSON仅提供p90/p95，不伪造更高精度。正式duration最小0.01625ms、最大155.034166ms。全局http_req_receiving最小-0.625473ms：存在计时分量异常；本模式没有逐点记录，不能确定异常数量、时间及所属阶段。该点不作为计时完全干净的容量成绩。
+<a id="原生汇总输出对照"></a>
 
-原生summary为12371 bytes；取消逐点写出后，丢弃4685→1111，但仍未实现零丢弃。单次对照和后台负载差异不足以断言文件输出是唯一根因，也不作为Java代码优化收益。k6仍提示1000VU不足。全运行资源采样峰（含预热，不冒作精确正式窗口）：Commerce268.53%、k6222.80%、Redis84.37%、Broker111.05%。SQL确认仍仅320准备订单，库存1999680、业务绑定错误0。Redis used_memory75539136→823160776 bytes，expired_keys6181068不变，AOF rewrite22→24。
+## Native-summary output comparison
 
-结论：VU翻倍和减少输出均未建立有效的14k零丢弃控制点，不能将14k写成Commerce容量上限。暂不在这个发生器边界上继续二分。下一项若执行，是宿主k6经本机端口的新拓扑控制，保留Commerce4CPU；新系列独立记录，不与VM内系列拼接。只有发生器余量与计时有效后才按相邻1000/s档收敛。需要云上物理隔离时另行说明，不自动启用。
+CityBuddy `3ed99bc580ec7c72a557e72e1d8339a42cc3781a`, label `bsum_3ed99bc_20260907T183328Z`. The point retains 1000 VUs, 14000/s for 30 measured seconds and the same business topology. It uses native k6 per-scenario summaries without writing the full point-by-point JSON; HTTP requests and business parsing are unchanged. Empty threshold lists added by the commit retain native per-scenario aggregates; they are not pass criteria.
 
-本点原件：`k6_bsum_3ed99bc_20260907T183328Z_{summary.json,console.txt,cpu.txt}`、同label的setup、before/after SQL及准备记录。自然取消恢复在测量后另记，不与正式输入窗口混写。
+Native measured counts: 418911 requests, 418911 complete iterations, 418911 EXHAUSTED/replay=false, zero HTTP failures and dropped_iterations 1111. The full run completed 448912 iterations with zero interruptions, including 30001 warm-up requests. Native console measured HTTP p99 is 64.54 ms at the tool's displayed precision; summary JSON only supplies p90/p95, so no finer precision is invented. Measured duration minimum is 0.01625 ms, maximum 155.034166 ms. Global http_req_receiving minimum is -0.625473 ms, confirming an anomalous timing component. Without point records, its count, time and stage cannot be determined. This is not a capacity result with entirely clean timing.
 
-本点自然恢复：20:11:28 UTC完整SQL确认320笔CANCELLED、库存2000000、32活动配额各10、成单与取消流水各320、错误与未结束状态均0；随后两MQ组Diff/Inflight0、handoff0。该时间是收尾核对时间，不是测得的最早清空时间。完整原件见[汇总模式原始归档](soldout-summary-20260907.tar.gz)。
+The native summary is 12371 bytes. Removing point output reduced drops from 4685 to 1111, but did not achieve zero drops. A single comparison with different background activity cannot prove file output was the only cause, nor is it a Java-code improvement. k6 still reported insufficient 1000 VUs. Whole-run resource peaks, including warm-up rather than an exact measured window, were Commerce 268.53%, k6 222.80%, Redis 84.37% and Broker 111.05%. SQL still confirmed only 320 preparation orders, inventory 1999680 and zero business-binding errors. Redis used_memory was 75539136 → 823160776 bytes, expired_keys remained 6181068 and AOF rewrites increased 22 → 24.
 
-最终路线已停止售罄上限探索，不执行宿主迁移。保留固定6000/s工作点，当前校准结果只解释测量限制，不作为服务容量上限。
+Conclusion at the time: neither doubling VUs nor reducing output established a valid 14k zero-drop control point, so 14k cannot be reported as Commerce's capacity ceiling. Binary search stopped at this generator boundary. If further work proceeded, the next step would be a new topology using host k6 through local published ports while retaining Commerce 4 CPUs, recorded separately from the VM series. Adjacent 1000/s points would only be pursued after generator headroom and timing were valid. Physical cloud isolation would require a separate explanation, not automatic deployment.
+
+Originals: `k6_bsum_3ed99bc_20260907T183328Z_{summary.json,console.txt,cpu.txt}`, and same-label setup, before/after SQL and preparation records. Natural cancellation recovery is recorded after measurement and is not part of the input window.
+
+Natural recovery: full SQL at 20:11:28 UTC confirmed 320 CANCELLED orders, inventory 2000000, quota 10 for each of 32 activities, 320 creation and 320 cancellation ledger entries, and zero errors or unfinished states. Both MQ groups then showed Diff/Inflight zero, and handoff was zero. This is the final verification time, not the earliest measured drain time. Full originals are in the [summary-mode raw archive](soldout-summary-20260907.tar.gz).
+
+The final route stopped sold-out limit exploration and did not move the generator to the host. The fixed 6000/s work point is retained; this calibration explains measurement limits, not a service-capacity ceiling.

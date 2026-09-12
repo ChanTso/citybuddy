@@ -471,6 +471,9 @@ direct-user downgrade.
 
 ### 4.5 Direct user JWT to support-session validation to JIT OBO
 
+**Historical support chain.** This sequence describes the retired support chat entry point;
+the current ShopMate buyer flow uses the retained authorization and action contracts.
+
 ```mermaid
 sequenceDiagram
     actor U as User or Web
@@ -665,6 +668,8 @@ sequenceDiagram
             opt Broker commit acknowledged
                 C->>R: Complete handoff without shortening user-marker lifetime
             end
+        C-->>U: ADMITTED reservation id; client polls durable status
+        Note over C,W: HTTP response does not await consumption; consumer scheduling is independent and completion may race the response
         Note over M,W: Only a committed half message can be delivered
         M-->>W: Deliver committed transaction message
         W->>D: Conditional order insert and reservation transition
@@ -681,7 +686,6 @@ sequenceDiagram
             D-->>W: Failure
             Note over W,M: No acknowledgement, bounded retry or dead-letter policy applies
         end
-        C-->>U: Reservation id, client polls durable status
         end
     else Lua result cannot be determined
         R-->>C: Indeterminate

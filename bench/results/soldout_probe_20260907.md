@@ -1,22 +1,24 @@
-# 售罄短阶梯粗探
+<a id="售罄短阶梯粗探"></a>
 
-CityBuddy完整SHA：`1ab85a460cea188c3f2f6770bdb1fa0c52e57922`。Java业务源码与`76c293178923bf78e747ab1ba9590e6348108ad8`相同。label `bprobe_1ab85a4_20260907T172543Z`。M4、Docker8CPU/14,638,391,296 bytes、Commerce4CPU，发生器与服务同VM网络；32活动/320真实准备单、另16384负载买家、逐次新键。固定1000/s预热30秒，5秒间隔；9000/18000/36000每段计划30秒、各500VU。多段共用状态，只用于找区间。
+# Coarse short-ladder sold-out probe
 
-| 阶段 | 实际HTTP/业务结果 | 丢弃 | 原始p99 | 边界 |
+Full CityBuddy SHA: `1ab85a460cea188c3f2f6770bdb1fa0c52e57922`. Java business source matches `76c293178923bf78e747ab1ba9590e6348108ad8`. Label `bprobe_1ab85a4_20260907T172543Z`. M4, Docker 8 CPUs / 14,638,391,296 bytes, Commerce 4 CPUs; generator and services share the VM network. There are 32 activities, 320 actual preparation orders, another 16384 load buyers and a new key per request. Fixed 1000/s warm-up for 30 seconds, a 5-second gap, then planned 30-second stages at 9000/18000/36000, each with 500 VUs. Stages share state and are only used to bracket a range.
+
+| Stage | Actual HTTP / business result | Drops | Raw p99 | Boundary |
 |---|---|---|---|---|
-| 预热1000/s | 30001次409/EXHAUSTED | 0 | 7.641083ms | 不计正式能力 |
-| 9000/s | 270001次409/EXHAUSTED/replay=false | 0 | 11.577875ms | 完整30秒 |
-| 18000/s | 99060次409，99058条EXHAUSTED/replay=false工具计数 | 8370 | 64.757515ms | 约6秒后阈值中止 |
-| 36000/s | 未执行 | — | — | 不能把空指标当零延迟成功 |
+| Warm-up 1000/s | 30001 responses of 409/EXHAUSTED | 0 | 7.641083 ms | Excluded from measured capacity |
+| 9000/s | 270001 responses of 409/EXHAUSTED/replay=false | 0 | 11.577875 ms | Full 30 seconds |
+| 18000/s | 99060 HTTP 409 responses; 99058 EXHAUSTED/replay=false tool-counter events | 8370 | 64.757515 ms | Threshold aborted the run after about 6 seconds |
+| 36000/s | Not executed | — | — | Empty metrics are not zero-latency success |
 
-两条HTTP与自定义业务计数差发生在中止边界，不补造缺失计数；控制台记录265个interrupted iterations。18000段原生drop阈值是5400（该段全名义540000的1%），实际8370触发整体退出99，不是p99超1秒；17:28:56提示500VU不足。两段负duration均0。原始`steps.txt`的achieved/s按完整计划30秒除，18000中止段显示3302.0，仅是计划窗口归一化值，不能称实际运行吞吐或系统容量。summary总体rate还含写出时间，同样不用于能力结论。
+The difference of two between HTTP and custom business counts occurs at the abort boundary; missing counts are not invented. The console records 265 interrupted iterations. The 18000-stage native drop threshold was 5400, or 1% of its nominal 540000 requests. Actual drops of 8370 triggered overall exit 99, not p99 exceeding 1 second. k6 reported insufficient 500 VUs at 17:28:56. Both stages had zero negative durations. The original `steps.txt` divides achieved/s by the full planned 30 seconds; its 3302.0 value for the aborted 18000 stage is only normalized to the planned window, not actual running throughput or system capacity. The summary's overall rate also includes output-writing time and is not used for capacity conclusions.
 
-9000 HTTP窗口17:28:20.917181587–17:28:50.913586128 UTC；18000为17:28:55.920048797–17:29:01.897160134 UTC。原始JSON写出到17:32:36、runner17:32:40结束，后处理CPU不混进输入窗口。9000窗内6采样Commerce185.08%、k6162.17%、Redis45.97%、Broker115.38%；18000仅一个完整窗内采样，Commerce127.35%、k6155.94%、Redis124.55%。边界旁17:28:55的k6为250.51%，但采样不覆盖整个阶段；这些点不能证明唯一根因。Commerce窗内throttle计数均8/243622微秒，未见四核持续饱和。明确观察是500VU开始不足及丢弃，不应据此称应用达峰。
+9000 HTTP window: 17:28:20.917181587–17:28:50.913586128 UTC. 18000 window: 17:28:55.920048797–17:29:01.897160134 UTC. Raw JSON writing continued to 17:32:36 and the runner ended at 17:32:40; post-processing CPU is outside the input window. Six samples inside the 9000 window show Commerce 185.08%, k6 162.17%, Redis 45.97% and Broker 115.38%. Only one complete sample is inside the 18000 window: Commerce 127.35%, k6 155.94%, Redis 124.55%. Near the boundary at 17:28:55, k6 was 250.51%, but sampling does not cover the whole stage; these points do not establish a unique cause. Commerce in-window throttle counts are all 8/243622 microseconds, without sustained four-CPU saturation. The clear observations are insufficient 500 VUs and drops, not an application peak.
 
-前后SQL均320 ORDERED/ADMITTED、UNPAID/SENT，库存1999680、账本320、绑定错误0，没有拒绝请求生成新单。Redis used_memory75238824→743496344，新增668257520 bytes（按399062次HTTP约1674.57 bytes/次）；两端AOF rewrite0，expired_keys2306904未变，不能由两个快照排除中间rewrite。自然取消及TTL恢复另补。
+Before/after SQL both show 320 ORDERED/ADMITTED and UNPAID/SENT, inventory 1999680, 320 ledger entries, zero binding errors and no orders created by rejected requests. Redis used_memory was 75238824 → 743496344, an increase of 668257520 bytes, approximately 1674.57 bytes/request across 399062 HTTP requests. AOF rewrite was zero at both endpoints and expired_keys remained 2306904; two snapshots cannot exclude an intervening rewrite. Natural cancellation and TTL recovery were recorded separately afterward.
 
-后续只做有界固定负载确认，使用独立新夹具，不把本次三段写成独立正式重复实验。
+Further work was limited to bounded fixed-load confirmation with independent fresh fixtures. These three stages are not presented as independent formal repeats.
 
-自然恢复：17:44:15 SQL确认320全CANCELLED，库存2000000、各活动配额10、两个ledger各320、错误0；两个MQ/handoff0。17:46:00 Redis used_memory75385832 bytes、expired_keys3504567、AOF rewrite/scheduled0。原件final_1788803055491476000、mq_1788803061426884000及cooldown_1788803160000310000。
+Natural recovery: SQL at 17:44:15 confirmed all 320 orders CANCELLED, inventory 2000000, quota 10 per activity, 320 entries in each ledger and zero errors; both MQ groups and handoff were zero. At 17:46:00 Redis used_memory was 75385832 bytes, expired_keys 3504567 and AOF rewrite/scheduled zero. Originals: final_1788803055491476000, mq_1788803061426884000 and cooldown_1788803160000310000.
 
-[原始输出无损归档](soldout-probe-20260907.tar.gz)。后续精度修订为整1000/s相邻档，先14k二分；不按20–25%差距提前停止。
+[Lossless raw archive](soldout-probe-20260907.tar.gz). The subsequent target precision became adjacent 1000/s points, beginning with a 14k midpoint; the plan would not stop early at a 20–25% gap.

@@ -1,0 +1,41 @@
+{
+  "repo_notes": [
+    {
+      "content": "Use current code, README.md, docs/PROJECT_GUIDE.md and docs/CONTRACTS.md as authority. CityBuddy is the transaction and identity backend for one retail brand's own store, not a multi-merchant or multi-tenant marketplace. Auth and Commerce are Java services. Current buyer/merchant/analysis agents and their React merchant workspace run from the separate ShopMate repository, not CityBuddy agent-service or CityBuddy web/. This repository retains historical support-evidence/knowledge infrastructure and an engineering catalog/flash-sale console; identify those scopes accurately. No active model conversation loop runs in CityBuddy agent-service. Label archived support chat/OBO diagrams and old experiments as historical; do not resurrect their retired routes as current. Merchant SQL analysis in ShopMate can read MySQL reporting views via a SELECT-only account, but its network-isolated Python sandbox receives tables from the host and cannot connect to MySQL. For flash sales, the HTTP reservation response does not wait for consumer ACK: durable ADMITTED persistence and the producer message-commit attempt precede returning; asynchronous consumption can race the response. Distinguish Redis admission, durable reservation, order creation, commit, ACK, timeout dispatch and cancellation. Preserve measured commits, workloads, hardware, dropped iterations, overloaded points and historical scope. Sold-out rejection throughput is not order throughput or whole-App/Agent production capacity. StateEval is an external independent SQL grader; diagnostic evaluation state APIs are not its oracle. Never infer tenant support from user ownership checks or evaluation sandboxes."
+    }
+  ],
+  "pages": [
+    {
+      "title": "Overview and service boundaries",
+      "purpose": "Explain one-store business scope, Auth/Commerce, external ShopMate apps/agents, authoritative data, retained support/knowledge modules and engineering console. Ground diagrams in current sources and distinguish historical paths."
+    },
+    {
+      "title": "Local setup and development",
+      "purpose": "Document active local runtime, service ports and dependencies, migrations/grants, contribution process and Makefile/Actions checks using the current project guide."
+    },
+    {
+      "title": "Identity and scoped authorization",
+      "purpose": "Trace login, RS256/JWKS, service credentials, token exchange, exact scopes, host-provided binding and resource ownership; separate authentication from host conversation ownership."
+    },
+    {
+      "title": "Commerce, payments and approvals",
+      "purpose": "Cover catalog, cart versions, atomic checkout, orders, simulated payments, refund preparation/confirmation, merchant proposals, PendingAction and receipts, idempotency and transaction lock ordering."
+    },
+    {
+      "title": "Flash-sale admission and asynchronous orders",
+      "purpose": "Trace Redis Lua, durable reservation and transaction messages, response/consumption concurrency, order/stock/ledger transaction, ACK/redelivery, bounded workers, timeout dispatch and idempotent cancellation."
+    },
+    {
+      "title": "Knowledge infrastructure and historical support",
+      "purpose": "Describe retained knowledge-indexer, Elasticsearch, FAQ cache, evidence readers and legacy support modules from actual source. Explicitly separate the retired support chat loop from current external ShopMate agents."
+    },
+    {
+      "title": "Evaluation sandboxes and integration tests",
+      "purpose": "Explain sandbox isolation, evaluation-only ablation controls, independent external grading versus diagnostic state/audit APIs, and actual boundary/integration checks. Evaluation isolation is not a multi-tenant marketplace feature."
+    },
+    {
+      "title": "Performance experiments and engineering tradeoffs",
+      "purpose": "Explain k6 workloads and raw archives from bench/README.md and result reports; retain full measured SHAs and workload/environment boundaries, final versus intermediate values, repeat drops, overload and recovery limitations. Describe current-read/locking/dispatch tradeoffs without claiming new measurements."
+    }
+  ]
+}

@@ -1,5 +1,3 @@
-![CityBuddy · Commerce & Identity](docs/assets/cover.png)
-
 # CityBuddy
 
 **English** · [简体中文](README.zh-CN.md) · [Contributing](CONTRIBUTING.md)
@@ -46,15 +44,15 @@ Payment providers are simulated; refund `REQUESTED` means the request was record
 ## Services and data boundaries
 
 ```mermaid
-flowchart LR
-    Client[ShopMate Android / iOS] --> Host[ShopMate API / Agents]
+flowchart TB
+    Client[ShopMate Android / iOS] --> Host[ShopMate API and agents]
     Web[ShopMate merchant Web] --> Host
-    Client -->|flash sales| Commerce[Commerce / Java]
-    Host -->|login and delegation| Auth[Auth / Java]
-    Host -->|scoped tools / user confirmation| Commerce
-    Host -->|read-only reporting views| DB[(MySQL)]
+    Client -->|Flash-sale reservations and status| Commerce[Commerce: Java]
+    Host -->|Login and scoped delegation| Auth[Auth: Java]
+    Host -->|Scoped tools and user actions| Commerce
+    Host -->|SELECT-only reporting views| DB[(MySQL)]
     Auth --> DB
-    Commerce --> DB
+    Commerce ---> DB
     Commerce --> Redis[(Redis)]
     Commerce --> MQ[RocketMQ]
 ```
@@ -81,7 +79,7 @@ uv run uvicorn shopmate.app:create_app --factory --host 127.0.0.1 --port 8101
 
 Open the merchant workspace at **http://127.0.0.1:8101/**. Buyers use the [Android](https://github.com/ChanTso/shopmate/blob/main/android/README.md)
 or [iOS](https://github.com/ChanTso/shopmate/blob/main/ios/README.md) app. Auth/Commerce use ports 9081/9082; the ShopMate API serves the Web client from the same origin.
-See the [ShopMate runtime guide](https://github.com/ChanTso/shopmate/blob/main/docs/RUNTIME.md#本地运行) for initial setup, model configuration, demo accounts and shutdown. When retail data already exists, `up` preserves business changes.
+See the [ShopMate runtime guide](https://github.com/ChanTso/shopmate/blob/main/docs/RUNTIME.md#run-locally) for initial setup, model configuration, demo accounts and shutdown. When retail data already exists, `up` preserves business changes.
 
 ## Verification and further reading
 

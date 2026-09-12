@@ -1,108 +1,128 @@
-# 单热点成单：最终组合优化与有界过载验证
+<a id="单热点成单最终组合优化与有界过载验证"></a>
 
-## 结论与版本
+# Single-hotspot order creation: final combined optimization and bounded overload validation
 
-最终版本在200新请求/秒、5分钟输入下完成60001笔订单，HTTP失败、丢弃及负计时均为0，预约至订单创建p99为1697.658ms；同环境基线为9256.534ms。重复点完成59963笔，37次k6迭代未发出，不能称“两轮均零丢弃”。400/s仍持续积压；不宣称稳定400单/秒或找到了最大容量。
+<a id="结论与版本"></a>
 
-- A：`fe60d7c3c95eb09399a95562745e96ff5cc386c7`。业务沿用main `5e80decdefe5b0ead3a0dafe74011b5a2fd856ce`，增加共同观察器调整；单路消费，批量32、批后10ms。
-- C1：`1d93cc35f2e79bf4d0c3c4fd7731081d1da8a20b`。活动共享锁、缩短库存临界区、四路有界消费。
-- C2（最终被测代码）：`9bb08c6087d9a73befb909b021debb30a9fb9aa1`。在C1上增加超时派发队列索引、批量回执事务及派发间隔10ms。
+## Conclusion and versions
 
-结果归档和文档提交不改变上述被测版本。旧128MiB系列的91.12秒→5.34秒属于[前一轮实验](seckill_order_consumer_comparison_20260908.md)，不能与本系列拼接对照。
+At 200 new requests/s for 5 minutes, the final version created 60001 orders with 0 HTTP failures, dropped iterations, or negative timings. Reservation-to-order-creation p99 was 1697.658ms, compared with 9256.534ms for the baseline under the same environment settings. The repeat created 59963 orders; 37 k6 iterations were never issued, so the two runs cannot be described as both having zero drops. Backlog continued growing at 400/s. This report claims neither stable 400 orders/s nor an established maximum capacity.
 
-## 共同条件与业务口径
+- A: `fe60d7c3c95eb09399a95562745e96ff5cc386c7`. Business code from main `5e80decdefe5b0ead3a0dafe74011b5a2fd856ce`, plus the common observer adjustment; one consumer, batch size 32, 10ms inter-batch delay.
+- C1: `1d93cc35f2e79bf4d0c3c4fd7731081d1da8a20b`. Shared activity lock, shorter inventory critical section, and four bounded consumer loops.
+- C2, final measured code: `9bb08c6087d9a73befb909b021debb30a9fb9aa1`. C1 plus a timeout-dispatch queue index, batched receipt transactions, and a 10ms dispatch interval.
 
-本机MacBook Pro M4；Docker Desktop 8CPU、14,638,391,296 bytes；Commerce限4CPU，Hikari64；MySQL8.4.10，buffer pool统一1GiB、innodb_flush_log_at_trx_commit=1、sync_binlog=1。k6与服务都在Docker VM网络内。没有上云、降低Commerce配额或放松持久化。HTTP使用k6固定到达率；原始点、资源、SQL均保留。
+Archive and documentation commits do not change these measured versions. The old 128MiB series' 91.12-second → 5.34-second result belongs to the [previous experiment](seckill_order_consumer_comparison_20260908.md) and cannot be spliced into this comparison.
 
-每点新活动、单SKU、新用户及幂等键、独立Topic和消费组；库存及配额比名义输入多50。60秒探测和300秒正式窗口分别标注。真实登录造数在窗口外；没有正向预热，保留启动阶段。A/C产物分别保存，测量时源码干净且已提交。输入和恢复期间不运行构建、测试或归档；共同观察器每10秒采样，完整关联与分位SQL在前后执行。
+<a id="共同条件与业务口径"></a>
 
-数据库历史继续累积，未逐点恢复同一物理快照；旧消费者停止，但旧延时消息仍会在共享Broker到期。独立Topic不是物理资源隔离。C2重复200输入期间与前点旧定时消息到期窗口重叠。这些是本机运行边界，不将单次前后结果当作严格隔离的生产容量或精确因果占比。
+## Common conditions and business definitions
 
-“成单等待”使用SQL的预约created_at至订单created_at，包含排队及库存条件更新前后的业务等待，但不等于最后COMMIT、ACK或超时派发完成时间。库存更新仍在订单INSERT前，没有移动时间戳来缩短指标。最终订单、库存、配额流水由提交后SQL核对。超时消息SENT表示可靠派发，不表示订单已取消。
+Local MacBook Pro M4; Docker Desktop with 8CPU and 14,638,391,296 bytes; Commerce limited to 4CPU, Hikari 64. MySQL 8.4.10 used a common 1GiB buffer pool, innodb_flush_log_at_trx_commit=1, and sync_binlog=1. Both k6 and services ran inside the Docker VM network. No cloud migration, Commerce CPU reduction, or relaxation of persistence was used. HTTP load used k6's constant-arrival-rate executor; raw points, resource samples, and SQL are retained.
 
-## 八个测点全部结果
+Each point used a new activity, one SKU, new users and idempotency keys, and separate Topic and consumer group. Stock and quota exceeded nominal input by 50. The 60-second probes and 300-second formal windows are labeled separately. Real login and fixture preparation occurred outside the window; there was no successful-admission warm-up, and startup remained included. A/C build artifacts were saved separately; measured source was clean and committed. Builds, tests, and archiving did not run during input or recovery. The common observer sampled every 10 seconds, with full join and percentile SQL before and after.
 
-| 点／版本 | 输入 | 获准并最终成单 | k6丢弃 | SQL等待p99 | 最大采样获准未成单／待派发 | 判定 |
+Database history accumulated; each point did not restore an identical physical snapshot. Old consumers were stopped, but old delayed messages could still expire on the shared Broker. Separate Topics do not provide physical resource isolation. The repeated C2 200/s input overlapped an earlier point's delayed-message expiry window. These are local execution boundaries: a single before/after result is not strictly isolated production capacity or a precise attribution of causal contributions.
+
+“Order-creation wait” uses SQL reservation created_at to order created_at. It includes queueing and business waiting around the conditional inventory update, but is not the final COMMIT, ACK, or timeout-dispatch completion time. The stock update remains before the order INSERT; timestamps were not moved to shorten the metric. Post-commit SQL checks final orders, inventory, quota, and ledger movements. Timeout-message SENT means reliable dispatch, not order cancellation.
+
+<a id="八个测点全部结果"></a>
+
+## Results for all eight points
+
+| Point / version | Input | Admitted and finally created | k6 drops | SQL wait p99 | Maximum sampled admitted-but-uncreated / pending dispatch | Assessment |
 |---|---|---:|---:|---:|---:|---|
-| A200 | 200/s×300s | 60001 | 0 | 9256.534ms | 1054／27 | 干净对照基线 |
-| C1-200 | 200/s×300s | 60001 | 0 | 307.509ms | 37／197 | 中间版本，不作为最终代码成绩 |
-| C1-400短探 | 400/s×60s | 24001 | 0 | 11644.703ms | 2525／11008 | 只能选档，不证明五分钟稳态 |
-| C1-800短探 | 800/s×60s | 47856 | 145 | 67065.203ms | 31964／25075 | 大量积压且一条负接收计时，诊断保留 |
-| C1-400正式 | 400/s×300s | 120000 | 0 | 225737.327ms | 46938／66423 | 持续积压，停压300秒未派发完 |
-| C2-200第一轮 | 200/s×300s | 60001 | 0 | 1697.658ms | 388／5 | 最终干净工作点 |
-| C2-400 | 400/s×300s | 120001 | 0 | 186047.859ms | 39356／45 | 过载恢复；一条负接收计时，不认证HTTP容量 |
-| C2-200重复 | 200/s×300s | 59963 | 37 | 1442.847ms | 390／5 | 获准请求均完成；未达到零丢弃重复条件 |
+| A200 | 200/s×300s | 60001 | 0 | 9256.534ms | 1054 / 27 | Clean comparison baseline |
+| C1-200 | 200/s×300s | 60001 | 0 | 307.509ms | 37 / 197 | Intermediate version, not a final-code result |
+| C1-400 probe | 400/s×60s | 24001 | 0 | 11644.703ms | 2525 / 11008 | Useful for load selection; does not establish five-minute steady state |
+| C1-800 probe | 800/s×60s | 47856 | 145 | 67065.203ms | 31964 / 25075 | Large backlog and one negative receive timing; retained for diagnosis |
+| C1-400 formal | 400/s×300s | 120000 | 0 | 225737.327ms | 46938 / 66423 | Continuing backlog; dispatch unfinished 300 seconds after input stopped |
+| C2-200 first | 200/s×300s | 60001 | 0 | 1697.658ms | 388 / 5 | Final clean operating point |
+| C2-400 | 400/s×300s | 120001 | 0 | 186047.859ms | 39356 / 45 | Overload recovery; one negative receive timing, not an HTTP-capacity certification |
+| C2-200 repeat | 200/s×300s | 59963 | 37 | 1442.847ms | 390 / 5 | All admitted requests completed; did not meet the zero-drop repeat condition |
 
-全部测点HTTP业务失败和中断为0；预期201/ADMITTED/replay=false。每点after SQL的缺单、重复用户/预约、绑定、成单流水、截止时间及负等待错误均0，库存与配额流水守恒。C1-800剩余库存194，其余每点在表内实际成单数与夹具初值相抵；C2重复200剩87，不能按60001虚填。
+HTTP business failures and interrupted iterations were 0 at every point; the expected response was 201 / ADMITTED / replay=false. Each point's after SQL reported 0 missing-order, duplicate-user/reservation, binding, order-ledger, deadline, and negative-wait errors, with stock and quota ledger conservation. C1-800 had 194 stock remaining; every other point reconciled its actual order count in the table with its initial fixture values. Repeated C2-200 had 87 remaining, not an assumed 60001 orders.
 
-C2重复的37次dropped_iterations全部在07:45:41.311341171–07:45:41.670507880 UTC，首个HTTP点为07:45:41.672790172。它们集中在发生器启动阶段；未独立证明是发生器CPU、动态VU准备还是服务启动延迟首先触发，不能归为服务错误或擅自删除。该点未出现负计时。
+All 37 dropped_iterations in the C2 repeat occurred at 07:45:41.311341171–07:45:41.670507880 UTC; the first HTTP point was 07:45:41.672790172. They were concentrated at generator startup. Whether generator CPU, dynamic VU preparation, or service startup latency triggered them first was not independently established. They cannot be reclassified as service errors or removed. This point had no negative timings.
 
-C1-800的http_req_receiving为-0.102764ms一次，C2-400为-0.850472ms一次；HTTP总时长未为负不等于所有分量干净。保留原件，SQL时间与业务终态可以独立判断，HTTP极限不据此下结论。
+C1-800 had one http_req_receiving value of -0.102764ms; C2-400 had one of -0.850472ms. Non-negative total HTTP duration does not make every timing component clean. Originals are retained. SQL timing and business terminal state can be assessed independently; these points do not establish an HTTP limit.
 
-## 两组能够解释的改进
+<a id="两组能够解释的改进"></a>
 
-### 1. 订单消费组合：A→C2
+## Two explainable improvements
 
-活动只读校验由FOR UPDATE改为FOR SHARE，重建/取消需要的排他边界保留。商品普通快照和订单查询不再提前持有商品X锁；库存更新检查stock_quantity、publication_version及可售状态。更新0行时当前读区分真实缺货与版本变更；后者回滚等待重投。每笔订单、库存、流水仍一个事务，提交后ACK。
+<a id="1-订单消费组合ac2"></a>
 
-通过四个实际注册的调度任务执行四路receive→订单事务→ACK，池大小4。单次接收仍最多32，批后10ms；不是一个批次的多单合并事务。同一预约由锁与唯一约束串行化，热点库存更新至提交仍串行，不能期望四线程必然四倍吞吐。
+### 1. Combined order-consumer changes: A→C2
 
-相同200/s完整窗口，A p50/p95/p99=27.654/4882.776/9256.534ms，C2第一轮=21.216/137.280/1697.658ms；两边60001单、零丢弃且SQL正确。C2重复p99=1442.847ms，但有37次未发出，不能作为第二个完全达标点。C1中间版本的307.509ms未替换最终值：主张组合改善，不主张每一步都单调改善尾延迟。
+Read-only activity validation changed from FOR UPDATE to FOR SHARE; exclusive boundaries required by rebuild and cancellation remain. Normal product snapshots and order queries no longer acquire the product X lock early. The inventory update checks stock_quantity, publication_version, and availability. On 0 updated rows, a current read distinguishes actual stock shortage from a version change; the latter rolls back and waits for redelivery. Each order, inventory change, and ledger entry still share one transaction, followed by ACK after commit.
 
-### 2. 超时派发：C1-400→C2-400
+Four registered scheduler tasks execute four receive → order transaction → ACK loops using a pool of 4. Each receive still takes at most 32 messages, with a 10ms inter-batch delay. Orders within a batch are not merged into one transaction. Locks and unique constraints serialize the same reservation, and the hot inventory update through commit remains serialized. Four threads do not imply four times the throughput.
 
-短探能排空并不保证长窗口可持续。C1长窗口发现待派发队列放大，原查询虽然LIMIT32，仍按状态筛选后扫描/排序积压。输入前至输入结束后两次原生采样的performance_schema差分（C1约319.65秒，C2约319.77秒，均含300秒发生器窗口前后的时间）：
+Across the same complete 200/s window, A p50/p95/p99 was 27.654/4882.776/9256.534ms, versus 21.216/137.280/1697.658ms for the first C2 run. Both created 60001 orders with zero drops and correct SQL. The C2 repeat had p99=1442.847ms but 37 unissued iterations, so it is not a second fully passing point. The intermediate C1 result of 307.509ms does not replace the final result: the claim is a combined improvement, not monotonically improving tail latency at every step.
 
-| 实测SQL | C1 | C2 |
+<a id="2-超时派发c1-400c2-400"></a>
+
+### 2. Timeout dispatch: C1-400→C2-400
+
+A short probe draining successfully does not establish sustainability over a longer window. C1's long window exposed a growing dispatch queue: despite LIMIT 32, the original query scanned/sorted the backlog after status filtering. Native performance_schema snapshots taken before input and after input ended produced the following differences. C1 spanned approximately 319.65 seconds and C2 approximately 319.77 seconds; both include time before and after the 300-second generator window.
+
+| Measured SQL | C1 | C2 |
 |---|---:|---:|
-| 选取待派发批次次数 | 1474 | 17909 |
-| 每次平均examined rows | 15004.49 | 4.61 |
-| 每次平均语句耗时 | 47.847ms | 0.191ms |
-| 派发回执UPDATE次数 | 41833 | 82528 |
-| 回执UPDATE平均语句耗时 | 3.414ms | 0.095ms |
+| Pending-dispatch batch selections | 1474 | 17909 |
+| Mean examined rows per selection | 15004.49 | 4.61 |
+| Mean statement duration per selection | 47.847ms | 0.191ms |
+| Dispatch-receipt UPDATE count | 41833 | 82528 |
+| Mean receipt UPDATE statement duration | 3.414ms | 0.095ms |
 
-C2用虚拟生成列timeout_dispatch_ready等价表达UNPAID且PENDING/FAILED，联合索引按ready、attempts、created_at、order_id提供原顺序。MQ发送仍在数据库事务外；一批发送后用独立事务提交该批成功/失败回执，减少逐笔自动提交。回执事务失败可重发一批消息，取消逻辑必须幂等；没有把多单成单合成一个事务。
+C2 uses the virtual generated column timeout_dispatch_ready to express UNPAID with PENDING/FAILED equivalently. A composite index on ready, attempts, created_at, and order_id preserves the original ordering. MQ sends remain outside database transactions. After sending a batch, a separate transaction commits that batch's success/failure receipts, reducing per-receipt autocommits. A failed receipt transaction may resend a batch, so cancellation must remain idempotent. Multiple orders are still not created in one transaction.
 
-两版完成工作量不同，查询次数也不同；表中是上述约320秒采样区间内的语句平均值，不是精确300秒输入窗口或单个事务的耗时分解。UPDATE耗时降低包含提交从逐笔移到批末的变化，不能当作每单总数据库时间减少同样数值，更不能把COMMIT或语句耗时直接称为纯fsync或纯锁等待。
+The versions completed different amounts of work and executed different query counts. Values in the table are statement averages over the approximately 320-second sample intervals, not exact 300-second input windows or a decomposition of one transaction. The UPDATE-duration reduction includes moving commits from individual receipts to the batch end. It is not the same reduction in total database time per order, and COMMIT or statement duration cannot be labeled pure fsync or pure lock wait.
 
-最大采样待派发从66423降到45。C2派发能跟随成单，但400/s订单本身仍增长到39356笔积压；剩余限制没有归因到某一个CPU、连接池、Redis或磁盘，停止继续调优。该改进解决了明确队列问题，不足以宣称稳定400/s。
+Maximum sampled pending dispatches fell from 66423 to 45. C2 dispatch tracked order creation, but the order backlog itself still grew to 39356 at 400/s. The remaining limit was not attributed to a particular CPU, connection pool, Redis, or disk; further tuning stopped. This change resolves a demonstrated queue problem but does not establish stable 400/s.
 
-## 排空、取消与观测边界
+<a id="排空取消与观测边界"></a>
 
-以原始最后HTTP点为参考，订单全成单且超时全SENT的周期SQL首次零积压区间如下。上下界含查询起止不确定性；这不是MQ ACK完成时刻，也不是订单自然取消时刻。
+## Drain, cancellation, and observation boundaries
 
-| 点 | 首次全ORDERED/SENT观测区间（停压后） |
+Relative to the last raw HTTP point, the following intervals contain the first periodic SQL observation with all orders created and all timeout messages SENT. Bounds include query start/end uncertainty. They are neither MQ ACK completion times nor natural order-cancellation times.
+
+| Point | First all-ORDERED/SENT observation interval after input stopped |
 |---|---:|
-| A200 | (0,3.61]秒 |
-| C1-200 | (0,3.75]秒 |
-| C1-400短探 | (44.07,54.35]秒 |
-| C1-800短探 | (173.71,183.94]秒 |
-| C1-400正式 | 300秒内未完成；后续仍保留未派发 |
-| C2-200第一轮 | (0,3.72]秒 |
-| C2-400 | (172.43,182.94]秒 |
-| C2-200重复 | (0,3.82]秒 |
+| A200 | (0,3.61] seconds |
+| C1-200 | (0,3.75] seconds |
+| C1-400 probe | (44.07,54.35] seconds |
+| C1-800 probe | (173.71,183.94] seconds |
+| C1-400 formal | Not complete within 300 seconds; undispatched messages remained afterward |
+| C2-200 first | (0,3.72] seconds |
+| C2-400 | (172.43,182.94] seconds |
+| C2-200 repeat | (0,3.82] seconds |
 
-随后逐点MQ核对订单Topic的Diff/Inflight=0，Redis handoff=0。没有用Broker LastTime字段伪造精确ACK完成时间。A观察器随父进程退出未写完成页脚，但输入期和首次全清空SQL已记录且无采样错误；后续父进程显式等观察器退出。C1-400观察器达到650秒上限，不意味着恢复成功；07:06:12仍60521 SENT/59479 PENDING，后来停止旧应用保存现场。
+Subsequent point-by-point MQ checks confirmed order-Topic Diff/Inflight=0 and Redis handoff=0. Broker LastTime was not treated as an exact ACK completion time. A's observer exited with its parent without writing a completion footer, but input-period and first fully drained SQL samples were recorded with no sampling errors. Later parent processes explicitly waited for the observer to exit. C1-400 reaching the observer's 650-second limit did not mean successful recovery: 60521 SENT / 59479 PENDING remained at 07:06:12. The old application was subsequently stopped, retaining that state.
 
-C2迁移与测试完成后，在原C1-400夹具上只恢复派发，将旧取消消费者初始等待设为一小时；未改变订单15分钟截止时间。07:22:53 SQL确认120000 UNPAID/SENT，再核对订单MQ/Redis为0并停止旧应用。该记录单独标C2，不冒充C1测量内恢复；后续新夹具恢复正常取消消费者配置。
+After C2 migration and tests, only dispatch was recovered on the original C1-400 fixture, with the old cancellation consumer's initial wait set to one hour. The 15-minute order deadline was unchanged. At 07:22:53, SQL confirmed 120000 UNPAID/SENT; order MQ/Redis were then checked at 0 before stopping the old application. This record is labeled separately as C2 and is not presented as recovery within the C1 measurement. Subsequent new fixtures restored normal cancellation-consumer configuration.
 
-取消正确性由受影响的真实MySQL/Redis/RocketMQ集成验证，新增两单批回执回滚、真实消息重发与重复取消场景。无需每个性能点逐笔自然取消几万订单。最终保留所有隔离性能夹具为UNPAID/SENT、保留原始消息与证据，停止旧消费者；五分钟成单结果不代表所有订单都不付款时的全生命周期稳态。
+Cancellation correctness was checked by the affected integration tests using real MySQL, Redis, and RocketMQ, including new cases for two-order batch-receipt rollback, real message resend, and duplicate cancellation. Each performance point did not require tens of thousands of orders to cancel naturally one by one. All isolated performance fixtures were ultimately retained as UNPAID/SENT, along with original messages and evidence, and old consumers were stopped. Five-minute order-creation results do not establish full-lifecycle steady state when every order remains unpaid.
 
-## 验证与收尾
+<a id="验证与收尾"></a>
 
-最终代码执行make java-ci python-ci web-ci repo-ci及make test-catalog-integration通过；后者207项、0失败/错误/跳过，包含17项秒杀事务测试。新增库存并发、发布版本变化重投、四个真实调度任务以及批回执失败/重复取消测试。独立只读代码评审无阻断问题；最终代码PR远端26项检查通过。
+## Validation and closeout
 
-本系列共8点，停止扩档及新修改。保留售罄6000/s的已有短窗口工作点、普通下单支付基线和已有事务证据，参见[交易结果入口](transaction_results_20260908.md)。本系列清理状态、原签名与MySQL缓存恢复见[环境记录](seckill_final_environment_20260908.txt)。
+Final code passed `make java-ci python-ci web-ci repo-ci` and `make test-catalog-integration`. The latter ran 207 tests with 0 failures, errors, or skips, including 17 seckill-transaction tests. New coverage includes inventory concurrency, redelivery after publication-version changes, four actual scheduler tasks, and batch-receipt failure / duplicate cancellation. Independent read-only code review found no blockers; the final-code PR passed 26 remote checks.
 
-## 原始归档
+This series comprises 8 points; further rate exploration and changes stopped. The existing sold-out 6000/s short-window operating point, ordinary order/payment baseline, and transaction evidence remain in the [transaction-results index](transaction_results_20260908.md). Cleanup state, original signing metadata, and MySQL buffer restoration for this series are in the [environment record](seckill_final_environment_20260908.txt).
 
-每个归档包含其label的setup、k6原始点/summary/console、观察器SQL及资源、原生数据库前后采样、独立后置核对。完整被测SHA在原件内。
+<a id="原始归档"></a>
+
+## Raw archives
+
+Each archive contains its label's setup, raw k6 points/summary/console, observer SQL/resources, native database snapshots before/after, and independent post-run checks. Full measured SHAs are recorded in the originals.
 
 - [A200](seckill-final-a200n_20260908T061729Z.tar.gz)
 - [C1-200](seckill-final-c200n_20260908T062708Z.tar.gz)
-- [C1-400短探](seckill-final-c400p_20260908T063510Z.tar.gz)
-- [C1-800短探](seckill-final-c800p_20260908T064255Z.tar.gz)
-- [C1-400正式及独立C2派发恢复](seckill-final-c400r1_20260908T065204Z.tar.gz)
-- [C2-200第一轮](seckill-final-c2_200r1_20260908T072339Z.tar.gz)
+- [C1-400 probe](seckill-final-c400p_20260908T063510Z.tar.gz)
+- [C1-800 probe](seckill-final-c800p_20260908T064255Z.tar.gz)
+- [C1-400 formal and separate C2 dispatch recovery](seckill-final-c400r1_20260908T065204Z.tar.gz)
+- [C2-200 first](seckill-final-c2_200r1_20260908T072339Z.tar.gz)
 - [C2-400](seckill-final-c2_400r1_20260908T073148Z.tar.gz)
-- [C2-200重复](seckill-final-c2_200r2_20260908T074349Z.tar.gz)
+- [C2-200 repeat](seckill-final-c2_200r2_20260908T074349Z.tar.gz)
